@@ -7,10 +7,11 @@
 //! cells on the box edge keep their full aggregates. The pushdown is `Inexact`: DataFusion
 //! re-applies the predicate to drop the extra cells.
 //!
-//! A cell's geometry is the `wkb` column or `h3_to_wkb(h3_index)` / `h3_to_wkb(h3_hex)`,
-//! which `raster_h3` encodes identically. The constant is a `geoarrow.wkb` literal in a
+//! A cell's geometry is the `wkb` column or, for a table on grid `g`, `{g}_to_wkb({g}_index)`
+//! / `{g}_to_wkb({g}_hex)` (`h3_to_wkb(h3_index)`, `s2_to_wkb(s2_hex)`, ...), which
+//! `raster_h3` encodes identically. The constant is a `geoarrow.wkb` literal in a
 //! lon/lat CRS with planar edges (what Sedona's `ST_GeomFromWKT` / `ST_SetSRID` fold to),
-//! or `h3_to_wkb(<cell literal>)`.
+//! or `{grid}_to_wkb(<cell literal>)` of any grid.
 //!
 //! Filters that cross SedonaDB's extension ABI are serialized with `datafusion-proto`,
 //! which drops literal field metadata, so a constant geometry arrives as a bare `Binary`
@@ -21,6 +22,8 @@
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::Expr;
+
+use raster_h3_core::grid::GridKind;
 
 use crate::convert::{GEOARROW_WKB_EXTENSION, WKB_COLUMN};
 
@@ -41,11 +44,18 @@ const BBOX_PREDICATES: &[&str] = &[
 /// `distance`, in CRS units (degrees for lon/lat).
 const DWITHIN: &str = "st_dwithin";
 
-/// Names (and aliases) of the `raster_h3` UDF that encodes a cell as its WKB polygon.
-const H3_TO_WKB: &[&str] = &["h3_to_wkb", "h3_to_geometry", "h3_cell_to_geometry"];
+/// Suffixes of the `raster_h3` UDF names (and aliases) that encode a cell as its WKB
+/// polygon: `{grid}_to_wkb`, `{grid}_to_geometry`, `{grid}_cell_to_geometry`.
+const TO_WKB_SUFFIXES: &[&str] = &["_to_wkb", "_to_geometry", "_cell_to_geometry"];
 
-/// Cell-index columns `h3_to_wkb` turns into the same polygon as the `wkb` column.
-const CELL_COLUMNS: &[&str] = &["h3_index", "h3_hex"];
+/// The grid whose cell-to-WKB function is called `name` (ASCII case-insensitive).
+fn to_wkb_grid(name: &str) -> Option<GridKind> {
+    let name = name.to_ascii_lowercase();
+    GridKind::ALL.into_iter().find(|grid| {
+        name.strip_prefix(grid.as_str())
+            .is_some_and(|suffix| TO_WKB_SUFFIXES.contains(&suffix))
+    })
+}
 
 /// How to read a `Binary` literal without `geoarrow.wkb` metadata in a spatial predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,7 +69,14 @@ pub(crate) enum Untagged {
 
 /// Translate a spatial predicate on a cell's geometry into a lon/lat box to push down, or
 /// `None` when it is not one (or the other geometry is not a constant lon/lat geometry).
-pub(crate) fn translate_spatial(expr: &Expr, untagged: Untagged) -> Option<[f64; 4]> {
+///
+/// `grid` is the grid of the table the predicate filters: only its own cell columns and
+/// cell-to-WKB function stand for a row's geometry.
+pub(crate) fn translate_spatial(
+    expr: &Expr,
+    grid: GridKind,
+    untagged: Untagged,
+) -> Option<[f64; 4]> {
     let Expr::ScalarFunction(ScalarFunction { func, args }) = expr else {
         return None;
     };
@@ -70,27 +87,28 @@ pub(crate) fn translate_spatial(expr: &Expr, untagged: Untagged) -> Option<[f64;
         _ => return None,
     };
     let geometry = match (a, b) {
-        (cell, g) | (g, cell) if is_cell_geometry(cell) => g,
+        (cell, g) | (g, cell) if is_cell_geometry(cell, grid) => g,
         _ => return None,
     };
     let envelope = constant_envelope(geometry, untagged)?;
     grow(envelope, distance)
 }
 
-/// The `wkb` column, or `h3_to_wkb` of a cell-index column.
-fn is_cell_geometry(expr: &Expr) -> bool {
+/// The `wkb` column, or `grid`'s cell-to-WKB function of one of its cell-index columns
+/// (which gives the same polygon as the `wkb` column).
+fn is_cell_geometry(expr: &Expr, grid: GridKind) -> bool {
     match expr {
         Expr::Column(c) => c.name == WKB_COLUMN,
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
-            is_h3_to_wkb(func.name())
-                && matches!(args.as_slice(), [Expr::Column(c)] if CELL_COLUMNS.contains(&c.name.as_str()))
+            to_wkb_grid(func.name()) == Some(grid)
+                && matches!(
+                    args.as_slice(),
+                    [Expr::Column(c)]
+                        if c.name == grid.index_column_name() || c.name == grid.hex_column_name()
+                )
         }
         _ => false,
     }
-}
-
-fn is_h3_to_wkb(name: &str) -> bool {
-    H3_TO_WKB.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
 /// A non-negative, finite numeric literal.
@@ -110,7 +128,7 @@ fn distance_literal(expr: &Expr) -> Option<f64> {
     }
 }
 
-/// Envelope of a constant lon/lat geometry: a `geoarrow.wkb` literal, or `h3_to_wkb` of a
+/// Envelope of a constant lon/lat geometry: a `geoarrow.wkb` literal, or `{grid}_to_wkb` of a
 /// cell literal (which DataFusion may not have folded).
 fn constant_envelope(expr: &Expr, untagged: Untagged) -> Option<[f64; 4]> {
     match expr {
@@ -135,19 +153,25 @@ fn constant_envelope(expr: &Expr, untagged: Untagged) -> Option<[f64; 4]> {
                 _ => None,
             }
         }
-        Expr::ScalarFunction(ScalarFunction { func, args }) if is_h3_to_wkb(func.name()) => {
+        Expr::ScalarFunction(ScalarFunction { func, args }) => {
+            let cell_grid = to_wkb_grid(func.name())?;
             let [Expr::Literal(cell, _)] = args.as_slice() else {
                 return None;
             };
             let wkb = match cell {
                 ScalarValue::Utf8(Some(s))
                 | ScalarValue::Utf8View(Some(s))
-                | ScalarValue::LargeUtf8(Some(s)) => raster_h3_core::scalar_ops::h3_to_wkb_str(s),
+                | ScalarValue::LargeUtf8(Some(s)) => {
+                    raster_h3_core::encoding::parse_hex_u64(s.trim())
+                        .and_then(|c| raster_h3_core::scalar_ops::grid_to_wkb_u64(cell_grid, c))
+                }
                 v if v.data_type().is_integer() => match v
                     .cast_to(&datafusion::arrow::datatypes::DataType::UInt64)
                     .ok()?
                 {
-                    ScalarValue::UInt64(Some(c)) => raster_h3_core::scalar_ops::h3_to_wkb_u64(c),
+                    ScalarValue::UInt64(Some(c)) => {
+                        raster_h3_core::scalar_ops::grid_to_wkb_u64(cell_grid, c)
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -336,6 +360,11 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`translate_spatial`] for a predicate on an H3 table.
+    fn spatial_h3(expr: &Expr, untagged: Untagged) -> Option<[f64; 4]> {
+        translate_spatial(expr, GridKind::H3, untagged)
+    }
     use h3o::CellIndex;
 
     fn point_wkb(x: f64, y: f64) -> Vec<u8> {
@@ -443,7 +472,7 @@ mod tests {
         let pt = || geometry(point_wkb(-122.4, 37.7), "OGC:CRS84");
         let point_box = Some([-122.4, 37.7, -122.4, 37.7]);
         assert_eq!(
-            translate_spatial(
+            spatial_h3(
                 &predicate("ST_Intersects", vec![col("wkb"), pt()]),
                 Untagged::Reject
             ),
@@ -451,7 +480,7 @@ mod tests {
         );
         // Either argument order; any envelope-implying predicate.
         assert_eq!(
-            translate_spatial(
+            spatial_h3(
                 &predicate("st_within", vec![pt(), col("wkb")]),
                 Untagged::Reject
             ),
@@ -461,7 +490,7 @@ mod tests {
         for (f, c) in [("h3_to_wkb", "h3_index"), ("h3_cell_to_geometry", "h3_hex")] {
             let cell = predicate(f, vec![col(c)]);
             assert_eq!(
-                translate_spatial(
+                spatial_h3(
                     &predicate("st_intersects", vec![cell, pt()]),
                     Untagged::Reject
                 ),
@@ -469,7 +498,7 @@ mod tests {
             );
         }
         // `ST_DWithin` grows the envelope by the distance (degrees).
-        let [lo_lon, lo_lat, hi_lon, hi_lat] = translate_spatial(
+        let [lo_lon, lo_lat, hi_lon, hi_lat] = spatial_h3(
             &predicate("st_dwithin", vec![col("wkb"), pt(), lit(0.25)]),
             Untagged::Reject,
         )
@@ -478,7 +507,7 @@ mod tests {
         assert!(close(lo_lon, -122.65) && close(hi_lon, -122.15));
         assert!(close(lo_lat, 37.45) && close(hi_lat, 37.95));
         assert_eq!(
-            translate_spatial(
+            spatial_h3(
                 &predicate("st_dwithin", vec![pt(), col("wkb"), lit(0)]),
                 Untagged::Reject
             ),
@@ -491,7 +520,7 @@ mod tests {
         for literal in [lit(u64::from(cell)), lit(cell.to_string())] {
             let g = predicate("h3_to_wkb", vec![literal]);
             assert_eq!(
-                translate_spatial(
+                spatial_h3(
                     &predicate("st_intersects", vec![col("wkb"), g]),
                     Untagged::Reject
                 ),
@@ -529,11 +558,7 @@ mod tests {
             predicate("st_dwithin", vec![col("wkb"), pt()]),
             predicate("st_intersects", vec![col("wkb"), pt(), lit(1.0)]),
         ] {
-            assert_eq!(
-                translate_spatial(&rejected, Untagged::Reject),
-                None,
-                "{rejected}"
-            );
+            assert_eq!(spatial_h3(&rejected, Untagged::Reject), None, "{rejected}");
         }
 
         // An untagged WKB literal (as filters arrive over SedonaDB's extension ABI) is
@@ -545,14 +570,14 @@ mod tests {
                 Expr::Literal(ScalarValue::Binary(Some(point_wkb(-122.4, 37.7))), None),
             ],
         );
-        assert_eq!(translate_spatial(&bare, Untagged::Reject), None);
-        assert_eq!(translate_spatial(&bare, Untagged::LngLat), point_box);
+        assert_eq!(spatial_h3(&bare, Untagged::Reject), None);
+        assert_eq!(spatial_h3(&bare, Untagged::LngLat), point_box);
         // A literal tagged with another CRS is still rejected.
         let other_crs = predicate(
             "st_intersects",
             vec![col("wkb"), geometry(point_wkb(0.0, 0.0), "EPSG:3857")],
         );
-        assert_eq!(translate_spatial(&other_crs, Untagged::LngLat), None);
+        assert_eq!(spatial_h3(&other_crs, Untagged::LngLat), None);
     }
 
     #[test]
@@ -568,5 +593,48 @@ mod tests {
         assert!(!is_planar_lnglat(r#"{"crs":"EPSG:3857"}"#));
         assert!(!is_planar_lnglat("{}"));
         assert!(!is_planar_lnglat(""));
+    }
+
+    #[test]
+    fn cell_geometry_functions_follow_the_tables_grid() {
+        use datafusion::prelude::{col, lit};
+        let pt = || geometry(point_wkb(-122.4, 37.7), "OGC:CRS84");
+        let point_box = Some([-122.4, 37.7, -122.4, 37.7]);
+        for grid in GridKind::ALL {
+            for suffix in TO_WKB_SUFFIXES {
+                let name = format!("{grid}{suffix}");
+                assert_eq!(to_wkb_grid(&name.to_ascii_uppercase()), Some(grid));
+                for column in [grid.index_column_name(), grid.hex_column_name()] {
+                    let cell = predicate(&name, vec![col(column)]);
+                    let expr = predicate("st_intersects", vec![cell, pt()]);
+                    assert_eq!(
+                        translate_spatial(&expr, grid, Untagged::Reject),
+                        point_box,
+                        "{name}({column})"
+                    );
+                    // Another grid's function or column is not this table's geometry.
+                    for other in GridKind::ALL.into_iter().filter(|g| *g != grid) {
+                        assert_eq!(translate_spatial(&expr, other, Untagged::Reject), None);
+                    }
+                }
+            }
+            // A constant cell of any grid contributes its envelope on any table.
+            let cell = grid.cell_at(37.7, -122.4, 6).unwrap();
+            let wkb = raster_h3_core::scalar_ops::grid_to_wkb_u64(grid, cell).unwrap();
+            for literal in [lit(cell), lit(format!("{cell:x}"))] {
+                let constant = predicate(&format!("{grid}_to_wkb"), vec![literal]);
+                assert_eq!(
+                    translate_spatial(
+                        &predicate("st_intersects", vec![col("wkb"), constant]),
+                        GridKind::H3,
+                        Untagged::Reject
+                    ),
+                    wkb_envelope(&wkb),
+                    "{grid}"
+                );
+            }
+        }
+        assert_eq!(to_wkb_grid("h3_to_string"), None);
+        assert_eq!(to_wkb_grid("s9_to_wkb"), None);
     }
 }

@@ -2,8 +2,12 @@
 //! `h3_raster_categorical_aggregate(source, resolution, ...)`.
 //!
 //! `source` is a path, glob or URL accepted by `raster-h3-core`. Every further integer
-//! argument is an H3 resolution (default 8), and one optional string argument overrides
-//! the raster's CRS (e.g. `'EPSG:4326'`). A string argument holding a partition spec (a JSON
+//! argument is a resolution (default 8), and one optional string argument overrides
+//! the raster's CRS (e.g. `'EPSG:4326'`). A grid name (`'h3'`, `'a5'`, `'s2'`, `'healpix'`)
+//! selects the grid, as DuckDB's `grid :=` does; `a5_raster_continuous_aggregate`,
+//! `s2_raster_categorical_aggregate`, ... are the same functions with that grid as the
+//! default. The grid names the cell columns (`{grid}_index`, `{grid}_hex`) and bounds the
+//! resolutions. A string argument holding a partition spec (a JSON
 //! object from `h3_raster_plan_partitions`) scans only that partition, adding a
 //! `partial_state` column (see [`crate::merge`]). Use [`RasterH3Table`] with a configured
 //! provider for the other options (nodata, quantiles, categorical format, ...).
@@ -25,6 +29,7 @@ use datafusion::logical_expr::Expr;
 
 use crate::convert::to_df_error;
 use crate::table::RasterH3Table;
+use raster_h3_core::grid::GridKind;
 
 /// `h3_raster_continuous_aggregate`
 #[derive(Debug, Default)]
@@ -32,16 +37,7 @@ pub struct ContinuousAggregateFunction;
 
 impl TableFunctionImpl for ContinuousAggregateFunction {
     fn call_with_args(&self, args: TableFunctionArgs<'_, '_>) -> Result<Arc<dyn TableProvider>> {
-        let args = parse_args("h3_raster_continuous_aggregate", args.exprs())?;
-        let mut provider = ContinuousRasterTableProvider::try_new(&args.source, args.resolutions)
-            .map_err(to_df_error)?;
-        if let Some(crs) = args.crs {
-            provider = provider.with_crs(crs);
-        }
-        if let Some(partition) = args.partition {
-            provider = provider.with_partition(partition);
-        }
-        Ok(Arc::new(RasterH3Table::continuous(provider)))
+        continuous_table("h3_raster_continuous_aggregate", GridKind::H3, args.exprs())
     }
 }
 
@@ -51,17 +47,73 @@ pub struct CategoricalAggregateFunction;
 
 impl TableFunctionImpl for CategoricalAggregateFunction {
     fn call_with_args(&self, args: TableFunctionArgs<'_, '_>) -> Result<Arc<dyn TableProvider>> {
-        let args = parse_args("h3_raster_categorical_aggregate", args.exprs())?;
-        let mut provider = CategoricalRasterTableProvider::try_new(&args.source, args.resolutions)
-            .map_err(to_df_error)?;
-        if let Some(crs) = args.crs {
-            provider = provider.with_crs(crs);
-        }
-        if let Some(partition) = args.partition {
-            provider = provider.with_partition(partition);
-        }
-        Ok(Arc::new(RasterH3Table::categorical(provider)))
+        categorical_table(
+            "h3_raster_categorical_aggregate",
+            GridKind::H3,
+            args.exprs(),
+        )
     }
+}
+
+/// `{grid}_raster_continuous_aggregate` for one grid (`a5_`, `s2_`, `healpix_`, and `h3_`,
+/// which is [`ContinuousAggregateFunction`]). The grid is the default; a grid-name
+/// argument still overrides it.
+#[derive(Debug)]
+pub struct GridContinuousAggregateFunction(pub GridKind);
+
+impl TableFunctionImpl for GridContinuousAggregateFunction {
+    fn call_with_args(&self, args: TableFunctionArgs<'_, '_>) -> Result<Arc<dyn TableProvider>> {
+        let name = format!("{}_raster_continuous_aggregate", self.0);
+        continuous_table(&name, self.0, args.exprs())
+    }
+}
+
+/// `{grid}_raster_categorical_aggregate` (wide format) for one grid; see
+/// [`GridContinuousAggregateFunction`].
+#[derive(Debug)]
+pub struct GridCategoricalAggregateFunction(pub GridKind);
+
+impl TableFunctionImpl for GridCategoricalAggregateFunction {
+    fn call_with_args(&self, args: TableFunctionArgs<'_, '_>) -> Result<Arc<dyn TableProvider>> {
+        let name = format!("{}_raster_categorical_aggregate", self.0);
+        categorical_table(&name, self.0, args.exprs())
+    }
+}
+
+fn continuous_table(
+    name: &str,
+    default_grid: GridKind,
+    exprs: &[Expr],
+) -> Result<Arc<dyn TableProvider>> {
+    let args = parse_args(name, default_grid, exprs)?;
+    let mut provider = ContinuousRasterTableProvider::try_new(&args.source, args.resolutions)
+        .map_err(to_df_error)?
+        .with_grid(args.grid);
+    if let Some(crs) = args.crs {
+        provider = provider.with_crs(crs);
+    }
+    if let Some(partition) = args.partition {
+        provider = provider.with_partition(partition);
+    }
+    Ok(Arc::new(RasterH3Table::continuous(provider)))
+}
+
+fn categorical_table(
+    name: &str,
+    default_grid: GridKind,
+    exprs: &[Expr],
+) -> Result<Arc<dyn TableProvider>> {
+    let args = parse_args(name, default_grid, exprs)?;
+    let mut provider = CategoricalRasterTableProvider::try_new(&args.source, args.resolutions)
+        .map_err(to_df_error)?
+        .with_grid(args.grid);
+    if let Some(crs) = args.crs {
+        provider = provider.with_crs(crs);
+    }
+    if let Some(partition) = args.partition {
+        provider = provider.with_partition(partition);
+    }
+    Ok(Arc::new(RasterH3Table::categorical(provider)))
 }
 
 /// `h3_raster_plan_partitions`
@@ -126,6 +178,7 @@ impl TableFunctionImpl for PlanPartitionsFunction {
 
 struct Args {
     source: String,
+    grid: GridKind,
     resolutions: Vec<u8>,
     crs: Option<String>,
     partition: Option<ScanPartition>,
@@ -143,8 +196,8 @@ fn string_literal(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn parse_args(name: &str, exprs: &[Expr]) -> Result<Args> {
-    let usage = "(source [, resolution ...] [, crs] [, partition spec])";
+fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args> {
+    let usage = "(source [, resolution ...] [, grid] [, crs] [, partition spec])";
     let Some((first, rest)) = exprs.split_first() else {
         return plan_err!("{name} expects {usage}");
     };
@@ -153,18 +206,19 @@ fn parse_args(name: &str, exprs: &[Expr]) -> Result<Args> {
     };
     let mut args = Args {
         source: source.to_string(),
+        grid: default_grid,
         resolutions: Vec::new(),
         crs: None,
         partition: None,
     };
+    let mut grid = None;
+    let mut resolutions: Vec<i64> = Vec::new();
     for e in rest {
         match e {
             Expr::Literal(v, _) if v.data_type().is_integer() => {
                 match v.cast_to(&arrow::datatypes::DataType::Int64)? {
-                    ScalarValue::Int64(Some(r)) if (0..=15).contains(&r) => {
-                        args.resolutions.push(r as u8)
-                    }
-                    _ => return plan_err!("{name}: resolution must be between 0 and 15, got {v}"),
+                    ScalarValue::Int64(Some(r)) => resolutions.push(r),
+                    _ => return plan_err!("{name}: resolution must be an integer, got {v}"),
                 }
             }
             e => match string_literal(e) {
@@ -172,9 +226,27 @@ fn parse_args(name: &str, exprs: &[Expr]) -> Result<Args> {
                 Some(spec) if spec.trim_start().starts_with('{') && args.partition.is_none() => {
                     args.partition = Some(ScanPartition::from_json(spec).map_err(to_df_error)?)
                 }
+                // A grid name (`'h3'`, `'a5'`, `'s2'`, `'healpix'`) is never a CRS.
+                Some(g) if grid.is_none() && GridKind::parse(g).is_some() => {
+                    grid = GridKind::parse(g)
+                }
                 Some(crs) if args.crs.is_none() => args.crs = Some(crs.to_string()),
                 _ => return plan_err!("{name} expects {usage}, got {e}"),
             },
+        }
+    }
+    args.grid = grid.unwrap_or(default_grid);
+    // The grid may follow the resolutions, so they are checked against it last.
+    let finest = args.grid.max_resolution();
+    for r in resolutions {
+        match u8::try_from(r) {
+            Ok(r) if r <= finest => args.resolutions.push(r),
+            _ => {
+                return plan_err!(
+                    "{name}: {} resolution must be between 0 and {finest}, got {r}",
+                    args.grid.label()
+                )
+            }
         }
     }
     Ok(args)

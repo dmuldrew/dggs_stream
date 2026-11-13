@@ -12,6 +12,7 @@ use datafusion::logical_expr::{Between, BinaryExpr, Expr, Operator, TableProvide
 
 use crate::spatial::{translate_spatial, Untagged};
 use crate::table::TableKind;
+use raster_h3_core::grid::GridKind;
 
 /// Predicates to push into the scan for one filter, and how exactly they implement it.
 pub(crate) struct Translated {
@@ -19,10 +20,15 @@ pub(crate) struct Translated {
     pub pushdown: TableProviderFilterPushDown,
 }
 
-pub(crate) fn translate(expr: &Expr, kind: TableKind, untagged: Untagged) -> Option<Translated> {
+pub(crate) fn translate(
+    expr: &Expr,
+    kind: TableKind,
+    grid: GridKind,
+    untagged: Untagged,
+) -> Option<Translated> {
     match expr {
         Expr::ScalarFunction(_) => {
-            let bbox = translate_spatial(expr, untagged)?;
+            let bbox = translate_spatial(expr, grid, untagged)?;
             single(
                 FilterPredicate::Bbox(bbox),
                 TableProviderFilterPushDown::Inexact,
@@ -164,7 +170,7 @@ mod tests {
         expr: Expr,
         kind: TableKind,
     ) -> Option<(Vec<FilterPredicate>, TableProviderFilterPushDown)> {
-        translate(&expr, kind, Untagged::Reject).map(|t| (t.predicates, t.pushdown))
+        translate(&expr, kind, GridKind::H3, Untagged::Reject).map(|t| (t.predicates, t.pushdown))
     }
 
     #[test]

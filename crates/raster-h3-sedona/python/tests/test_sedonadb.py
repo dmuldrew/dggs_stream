@@ -327,3 +327,55 @@ def test_write_pmtiles_errors(tmp_path):
     with pytest.raises(ValueError, match="memory_budget_mb"):
         raster_h3_sedona.write_pmtiles(pa.table({"h3_index": pa.array([42], pa.uint64())}), out, memory_budget_mb=0)
     assert not out.exists(), "a failed write must not leave an archive"
+
+
+GRID_RESOLUTIONS = {"h3": 8, "a5": 13, "s2": 14, "healpix": 13}
+
+
+@pytest.mark.parametrize("grid", sorted(GRID_RESOLUTIONS))
+def test_every_grid_scans_tiles_and_has_scalar_functions(raster, tmp_path, grid):
+    res = GRID_RESOLUTIONS[grid]
+    sd = sedonadb.connect()
+    sd.register(raster_h3_sedona.scalar_functions())
+    table = RasterH3Table.continuous(raster, res, grid=grid)
+    if grid != "h3":
+        assert f"grid='{grid}'" in repr(table) or f'grid="{grid}"' in repr(table)
+    sd.create_data_frame(table).to_view("cells")
+    index, hex_ = f"{grid}_index", f"{grid}_hex"
+
+    cells = sd.sql(f"SELECT {index}, {hex_}, count FROM cells").to_arrow_table()
+    assert cells.num_rows > 4
+    assert cells.column_names == [index, hex_, "count"]
+    assert sum(cells.column("count").to_pylist()) == 200 * 200
+    for cell, text in zip(cells.column(index).to_pylist(), cells.column(hex_).to_pylist()):
+        assert text == format(cell, "x")
+
+    consistent = sd.sql(
+        f"""
+        SELECT COUNT(*) AS n FROM cells
+        WHERE {grid}_to_string({index}) = {hex_}
+          AND {grid}_get_resolution({index}) = {res}
+          AND {grid}_is_valid({index})
+          AND {grid}_lonlat_to_cell({grid}_to_lng({index}), {grid}_to_lat({index}), {res}) = {index}
+        """
+    ).to_arrow_table()
+    assert consistent.column("n").to_pylist() == [cells.num_rows]
+
+    out = tmp_path / f"{grid}.pmtiles"
+    written = raster_h3_sedona.write_pmtiles(sd.sql(f"SELECT {index}, mean FROM cells"), out)
+    assert written == cells.num_rows
+    renamed = sd.sql(f"SELECT {index} AS id, mean FROM cells")
+    assert (
+        raster_h3_sedona.write_pmtiles(renamed, out, cell_column="id", grid=grid)
+        == cells.num_rows
+    )
+
+
+def test_grid_arguments_are_validated(raster, tmp_path):
+    with pytest.raises(ValueError, match="unknown grid"):
+        RasterH3Table.continuous(raster, 8, grid="hexagons")
+    with pytest.raises(ValueError, match="between 0 and 15"):
+        RasterH3Table.continuous(raster, 20)
+    RasterH3Table.continuous(raster, 20, grid="a5")
+    with pytest.raises(ValueError, match="between 0 and 29"):
+        RasterH3Table.categorical(raster, 30, grid="healpix")

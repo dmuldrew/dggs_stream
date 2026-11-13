@@ -21,6 +21,7 @@ use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
 use datafusion::physical_plan::ExecutionPlan;
 use raster_h3_core::columnar::ArrowArrayStream;
+use raster_h3_core::grid::GridKind;
 
 use crate::convert::{to_arrow_schema, to_df_error};
 use crate::filters::translate;
@@ -33,39 +34,48 @@ pub enum TableKind {
     Categorical,
 }
 
-/// A raster aggregated to H3 cells, exposed as a DataFusion table.
+/// A raster aggregated to the cells of a grid (H3 by default), exposed as a DataFusion table.
 ///
 /// Projection and `LIMIT` are pushed into the scanline aggregator, and so are filters on
 /// `count` / `total_count`, `mean`, `majority_fraction` and `resolution`, and spatial
 /// predicates (`ST_Intersects`-style and `ST_DWithin`) between `wkb` or
-/// `h3_to_wkb(h3_index)` and a constant lon/lat geometry (see the `filters` and `spatial`
+/// `{grid}_to_wkb({grid}_index)` and a constant lon/lat geometry (see the `filters` and `spatial`
 /// modules). `LIMIT` is deferred whenever a filter still needs caller-side evaluation.
 /// Aggregation runs on DataFusion's blocking thread pool and streams batches back through
 /// the Arrow C Stream Interface without copying.
 pub struct RasterH3Table {
     inner: Arc<dyn crate::scan::RasterScan>,
     kind: TableKind,
+    grid: GridKind,
     schema: arrow::datatypes::SchemaRef,
     untagged: Untagged,
 }
 
 impl RasterH3Table {
-    /// Wrap a configured continuous provider (CRS, nodata, quantiles, ...).
+    /// Wrap a configured continuous provider (grid, CRS, nodata, quantiles, ...).
     pub fn continuous(provider: ContinuousRasterTableProvider) -> Self {
-        Self::new(Arc::new(provider), TableKind::Continuous)
+        let grid = provider.grid();
+        Self::new(Arc::new(provider), TableKind::Continuous, grid)
     }
 
-    /// Wrap a configured categorical provider (format, remapper, ...).
+    /// Wrap a configured categorical provider (grid, format, remapper, ...).
     pub fn categorical(provider: CategoricalRasterTableProvider) -> Self {
-        Self::new(Arc::new(provider), TableKind::Categorical)
+        let grid = provider.grid();
+        Self::new(Arc::new(provider), TableKind::Categorical, grid)
     }
 
-    fn new(inner: Arc<dyn crate::scan::RasterScan>, kind: TableKind) -> Self {
+    /// The grid whose cells this table holds.
+    pub fn grid(&self) -> GridKind {
+        self.grid
+    }
+
+    fn new(inner: Arc<dyn crate::scan::RasterScan>, kind: TableKind, grid: GridKind) -> Self {
         let core_schema = inner.schema();
         let schema = to_arrow_schema(&core_schema);
         Self {
             inner,
             kind,
+            grid,
             schema,
             untagged: Untagged::Reject,
         }
@@ -97,7 +107,7 @@ impl RasterH3Table {
     /// such a filter as `Exact` would drop it from DataFusion's plan while the scan ignores
     /// it, so the filter is not pushed and DataFusion evaluates it on the completed rows.
     fn translate(&self, filter: &Expr) -> Option<crate::filters::Translated> {
-        let mut translated = translate(filter, self.kind, self.untagged)?;
+        let mut translated = translate(filter, self.kind, self.grid, self.untagged)?;
         let inner = self.inner.supports_filters_pushdown(&translated.predicates);
         if inner.contains(&FilterPushdownStatus::Unsupported) {
             return None;

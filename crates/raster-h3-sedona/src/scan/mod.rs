@@ -29,14 +29,16 @@ pub use raster_h3_core::columnar::{
     merge_partial_batches, ArrowArray, ArrowArrayStream, ArrowDataType, ArrowSchema,
     CategoricalFormat, ColumnArray, ColumnField, ColumnSchema, RecordBatch, PARTIAL_STATE_COLUMN,
 };
+pub use raster_h3_core::grid::GridKind;
 pub use scalar::{
-    H3CellToParentUdf, H3GetResolutionUdf, H3IsValidUdf, H3ScalarFn, H3ToLatUdf, H3ToLngUdf,
-    H3ToStringUdf, H3ToWkbUdf, StringToH3Udf,
+    GridScalarFn, GridScalarOp, H3CellToParentUdf, H3GetResolutionUdf, H3IsValidUdf, H3ScalarFn,
+    H3ToLatUdf, H3ToLngUdf, H3ToStringUdf, H3ToWkbUdf, StringToH3Udf,
 };
 
-/// Return all standard `raster_h3` vectorized scalar UDFs.
+/// Return all standard `raster_h3` vectorized scalar UDFs: the H3 functions, then the
+/// same set for A5, S2 and HEALPix (`a5_to_string`, `string_to_s2`, `healpix_to_wkb`, ...).
 pub fn default_scalar_udfs() -> Vec<Arc<dyn H3ScalarFn>> {
-    vec![
+    let mut udfs: Vec<Arc<dyn H3ScalarFn>> = vec![
         Arc::new(H3ToStringUdf),
         Arc::new(StringToH3Udf),
         Arc::new(H3ToLatUdf),
@@ -45,7 +47,13 @@ pub fn default_scalar_udfs() -> Vec<Arc<dyn H3ScalarFn>> {
         Arc::new(H3IsValidUdf),
         Arc::new(H3ToWkbUdf),
         Arc::new(H3CellToParentUdf),
-    ]
+    ];
+    for grid in GridKind::ALL {
+        for udf in GridScalarFn::all_for(grid) {
+            udfs.push(Arc::new(udf));
+        }
+    }
+    udfs
 }
 
 /// The default scalar function named `name` or having it as an alias, ignoring ASCII case.
