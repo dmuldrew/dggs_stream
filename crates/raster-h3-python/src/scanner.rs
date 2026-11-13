@@ -37,12 +37,13 @@ impl PyRasterScanner {
     }
 
     fn base_schema(&self) -> ColumnSchema {
+        let grid = self.config.grid;
         if !self.config.categorical {
-            ColumnSchema::continuous(&self.config.quantiles)
+            ColumnSchema::continuous_for(grid, &self.config.quantiles)
         } else {
             match self.config.format {
-                CategoricalFormat::Wide => ColumnSchema::categorical_wide(),
-                CategoricalFormat::Long => ColumnSchema::categorical_long(),
+                CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(grid),
+                CategoricalFormat::Long => ColumnSchema::categorical_long_for(grid),
             }
         }
     }
@@ -65,8 +66,8 @@ impl PyRasterScanner {
         {
             let idx = base.index_of(name).ok_or_else(|| {
                 RasterH3Error::InvalidParameter(format!(
-                    "Column '{}' not found in raster_h3 schema",
-                    name
+                    "Column '{}' not found in raster_h3 schema (grid '{}')",
+                    name, self.config.grid
                 ))
             })?;
             indices.push(idx);

@@ -144,7 +144,11 @@ fn main() {
             .and_then(|i| args.get(i + 1))
     };
     let h3_resolutions: Vec<u8> = value("--h3-res")
-        .map(|v| v.split(',').map(|r| r.parse().expect("H3 resolution")).collect())
+        .map(|v| {
+            v.split(',')
+                .map(|r| r.parse().expect("H3 resolution"))
+                .collect()
+        })
         .unwrap_or_else(|| vec![8, 10]);
     let runs: usize = value("--runs").map_or(3, |v| v.parse().expect("runs"));
 

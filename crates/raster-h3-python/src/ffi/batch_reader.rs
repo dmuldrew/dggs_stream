@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use raster_h3_core::columnar::ArrowArrayStream;
 use raster_h3_core::error::{catch_unwind_or, safe_panic_payload_to_string, Result};
+use raster_h3_core::grid::GridKind;
 
 use crate::ffi::args::build_py_scan_config;
 use crate::ffi::set_c_err;
@@ -81,6 +82,7 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_ex(
         let res =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<PyBatchReader> {
                 let mut cfg = build_py_scan_config(
+                    GridKind::H3,
                     path,
                     resolutions,
                     categorical,

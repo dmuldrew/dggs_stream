@@ -5,4 +5,7 @@
 
 pub mod parquet_tiler;
 
-pub use parquet_tiler::{process_parquet_to_pmtiles, scan_row_group_h3_extent, RowGroupExtent};
+pub use parquet_tiler::{
+    process_parquet_to_pmtiles, process_parquet_to_pmtiles_for, scan_row_group_h3_extent,
+    RowGroupExtent,
+};

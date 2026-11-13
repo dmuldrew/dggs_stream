@@ -173,6 +173,19 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
     pmtiles_path: P2,
     h3_column_name: Option<&str>,
 ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
+    process_parquet_to_pmtiles_for(parquet_path, pmtiles_path, h3_column_name, None)
+}
+
+/// [`process_parquet_to_pmtiles`] for a file whose cells belong to `grid`. `None` takes
+/// the grid from the cell column's name (`s2_index`, `healpix_hex`, ...), H3 if the name
+/// does not say; pass the grid when the column is named otherwise (`cell`, `id`, ...).
+pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
+    parquet_path: P1,
+    pmtiles_path: P2,
+    h3_column_name: Option<&str>,
+    grid: Option<GridKind>,
+) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
+    let grid_override = grid;
     let file = File::open(parquet_path)?;
     let reader = SerializedFileReader::new(file)?;
     let num_rgs = reader.num_row_groups();
@@ -194,25 +207,33 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
-                        "H3 column '{target}' not found in Parquet file; available columns: {available}"
+                        "Cell column '{target}' not found in Parquet file; available columns: {available}"
                     ),
                 )
             })?
     } else {
-        schema
-            .columns()
-            .iter()
-            .position(|field| {
+        // With a grid given, prefer its own columns over another grid's.
+        let own = grid_override.and_then(|g| {
+            schema
+                .columns()
+                .iter()
+                .position(|field| GridKind::from_cell_column_name(field.name()) == Some(g))
+        });
+        own.or_else(|| {
+            schema.columns().iter().position(|field| {
                 GridKind::from_cell_column_name(field.name()).is_some()
                     || matches!(field.name().to_ascii_lowercase().as_str(), "cell" | "hex")
             })
-            .unwrap_or(0)
+        })
+        .unwrap_or(0)
     };
-    let grid = schema
-        .columns()
-        .get(h3_idx)
-        .and_then(|f| GridKind::from_cell_column_name(f.name()))
-        .unwrap_or(GridKind::H3);
+    let grid = grid_override.unwrap_or_else(|| {
+        schema
+            .columns()
+            .get(h3_idx)
+            .and_then(|f| GridKind::from_cell_column_name(f.name()))
+            .unwrap_or(GridKind::H3)
+    });
 
     // Pre-scan row group extents to compute global bounds and row group horizons
     let mut rg_extents = Vec::with_capacity(num_rgs);

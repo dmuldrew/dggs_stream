@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use raster_h3_core::error::safe_panic_payload_to_string;
+use raster_h3_core::grid::GridKind;
 
 use crate::ffi::args::build_py_scan_config;
 use crate::ffi::set_c_err;
@@ -82,6 +83,7 @@ pub unsafe extern "C" fn raster_h3_py_scan_json_ex(
         let failures = Arc::new(AtomicU64::new(0));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cfg = build_py_scan_config(
+                GridKind::H3,
                 path,
                 resolutions,
                 categorical,

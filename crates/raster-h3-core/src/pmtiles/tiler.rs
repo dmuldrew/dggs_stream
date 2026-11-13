@@ -865,4 +865,21 @@ impl H3PmtilesTiler {
     ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
         crate::transcode::process_parquet_to_pmtiles(parquet_path, pmtiles_path, h3_column_name)
     }
+
+    /// [`Self::process_parquet_to_pmtiles`] with the cells' grid given rather than taken
+    /// from the cell column's name.
+    #[inline]
+    pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
+        parquet_path: P1,
+        pmtiles_path: P2,
+        cell_column_name: Option<&str>,
+        grid: Option<crate::grid::GridKind>,
+    ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
+        crate::transcode::process_parquet_to_pmtiles_for(
+            parquet_path,
+            pmtiles_path,
+            cell_column_name,
+            grid,
+        )
+    }
 }

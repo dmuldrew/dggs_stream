@@ -10,6 +10,12 @@ use raster_h3_core::scalar_ops::{
     parse_containment_mode, string_to_h3, ContainmentMode, PolygonToCellsError,
 };
 
+use raster_h3_core::grid::GridKind;
+use raster_h3_core::scalar_ops::{
+    grid_cell_to_parent_u64, grid_get_resolution, grid_lonlat_to_cell,
+    grid_polygon_to_cells_wkb_into, grid_to_lat, grid_to_lng, grid_to_wkb_u64,
+};
+
 use crate::ffi::opt_cstr;
 
 /// C-ABI scalar helper: `h3_to_string(cell) -> *mut c_char` (NULL if invalid/0).
@@ -209,6 +215,179 @@ pub unsafe extern "C" fn raster_h3_py_free_cells(cells: *mut u64, len: usize) {
     unsafe {
         if !cells.is_null() {
             drop(Box::from_raw(ptr::slice_from_raw_parts_mut(cells, len)));
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Grid-neutral scalar helpers. `grid` is a grid code: 0 = H3, 1 = A5, 2 = S2,
+// 3 = HEALPix (`GridKind as u8`); see `raster_h3_py_grid_code`.
+// -----------------------------------------------------------------------------
+
+/// The grid of a grid code, `None` if there is no such grid.
+fn grid_of_code(code: c_int) -> Option<GridKind> {
+    GridKind::ALL.into_iter().find(|g| *g as c_int == code)
+}
+
+/// C-ABI helper: the grid code of a grid name (`h3`, `a5`, `s2`, `healpix`,
+/// case-insensitive), or `-1` if the name is NULL or unknown.
+///
+/// # Safety
+/// `name` must be a valid NUL-terminated string or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn raster_h3_py_grid_code(name: *const c_char) -> c_int {
+    // SAFETY: `name` is null or NUL-terminated (caller contract), as `opt_cstr` requires.
+    unsafe {
+        catch_unwind_or(-1, || {
+            opt_cstr(name)
+                .and_then(|name| GridKind::parse(&name))
+                .map_or(-1, |grid| grid as c_int)
+        })
+    }
+}
+
+/// C-ABI helper: the finest resolution of grid `grid`, or `-1` for an unknown grid code.
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_max_resolution(grid: c_int) -> c_int {
+    grid_of_code(grid).map_or(-1, |g| c_int::from(g.max_resolution()))
+}
+
+/// C-ABI scalar helper: the cell of `grid` holding `(lon, lat)` degrees at `res`
+/// (`0` if the grid code, coordinate or resolution is invalid).
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_lonlat_to_cell(
+    grid: c_int,
+    lon: f64,
+    lat: f64,
+    res: i64,
+) -> u64 {
+    catch_unwind_or(0, || {
+        grid_of_code(grid)
+            .and_then(|g| grid_lonlat_to_cell(g, lon, lat, res))
+            .unwrap_or(0)
+    })
+}
+
+/// C-ABI scalar helper: whether `cell` is a valid cell of `grid`.
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_is_valid(grid: c_int, cell: u64) -> c_int {
+    catch_unwind_or(0, || {
+        c_int::from(grid_of_code(grid).is_some_and(|g| g.is_valid(cell)))
+    })
+}
+
+/// C-ABI scalar helper: centre latitude of `cell` in degrees (NaN if invalid).
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_to_lat(grid: c_int, cell: u64) -> f64 {
+    catch_unwind_or(f64::NAN, || {
+        grid_of_code(grid).map_or(f64::NAN, |g| grid_to_lat(g, cell))
+    })
+}
+
+/// C-ABI scalar helper: centre longitude of `cell` in degrees (NaN if invalid).
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_to_lng(grid: c_int, cell: u64) -> f64 {
+    catch_unwind_or(f64::NAN, || {
+        grid_of_code(grid).map_or(f64::NAN, |g| grid_to_lng(g, cell))
+    })
+}
+
+/// C-ABI scalar helper: resolution of `cell` (`-1` if invalid).
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_get_resolution(grid: c_int, cell: u64) -> i64 {
+    catch_unwind_or(-1, || {
+        grid_of_code(grid).map_or(-1, |g| grid_get_resolution(g, cell))
+    })
+}
+
+/// C-ABI scalar helper: ancestor of `cell` at `parent_res` (`0` if invalid or finer).
+#[no_mangle]
+pub extern "C" fn raster_h3_py_grid_cell_to_parent(grid: c_int, cell: u64, parent_res: i64) -> u64 {
+    catch_unwind_or(0, || {
+        grid_of_code(grid)
+            .and_then(|g| grid_cell_to_parent_u64(g, cell, parent_res))
+            .unwrap_or(0)
+    })
+}
+
+/// C-ABI helper: write the WKB polygon of `cell` into `out_buf`, as
+/// [`raster_h3_py_h3_to_wkb`] does for H3.
+///
+/// # Safety
+/// `out_buf` must point to at least `buf_cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn raster_h3_py_grid_to_wkb(
+    grid: c_int,
+    cell: u64,
+    out_buf: *mut u8,
+    buf_cap: usize,
+) -> usize {
+    // SAFETY: non-null `out_buf` has `buf_cap` writable bytes (caller contract) and
+    // `wkb.len() <= buf_cap` was checked, so the copy stays in bounds; `wkb` is a separate
+    // Rust allocation, so the regions cannot overlap.
+    unsafe {
+        if out_buf.is_null() {
+            return 0;
+        }
+        let Some(wkb) = catch_unwind_or(None, || {
+            grid_of_code(grid).and_then(|g| grid_to_wkb_u64(g, cell))
+        }) else {
+            return 0;
+        };
+        if wkb.len() > buf_cap {
+            return 0;
+        }
+        ptr::copy_nonoverlapping(wkb.as_ptr(), out_buf, wkb.len());
+        wkb.len()
+    }
+}
+
+/// C-ABI scalar helper: fill a WKB polygon with cells of `grid`, with the outputs and
+/// return codes of [`raster_h3_py_h3_polygon_to_cells`]; an unknown grid code returns `4`.
+///
+/// # Safety
+/// As for [`raster_h3_py_h3_polygon_to_cells`].
+#[no_mangle]
+pub unsafe extern "C" fn raster_h3_py_grid_polygon_to_cells(
+    grid: c_int,
+    wkb: *const u8,
+    wkb_len: usize,
+    res: i64,
+    containment: *const c_char,
+    out_cells: *mut *mut u64,
+    out_len: *mut usize,
+) -> c_int {
+    // SAFETY: as for `raster_h3_py_h3_polygon_to_cells`.
+    unsafe {
+        if wkb.is_null() || out_cells.is_null() || out_len.is_null() {
+            return -1;
+        }
+        let Some(grid) = grid_of_code(grid) else {
+            return 4;
+        };
+        let mode = match opt_cstr(containment) {
+            None => ContainmentMode::ContainsCentroid,
+            Some(name) => match parse_containment_mode(&name) {
+                Some(mode) => mode,
+                None => return 2,
+            },
+        };
+        let bytes = std::slice::from_raw_parts(wkb, wkb_len);
+        let Some(result) = catch_unwind_or(None, || {
+            let mut cells = Vec::new();
+            Some(grid_polygon_to_cells_wkb_into(grid, bytes, res, mode, &mut cells).map(|()| cells))
+        }) else {
+            return 1;
+        };
+        match result {
+            Ok(cells) => {
+                let cells = cells.into_boxed_slice();
+                *out_len = cells.len();
+                *out_cells = Box::into_raw(cells) as *mut u64;
+                0
+            }
+            Err(PolygonToCellsError::TooManyCells { .. }) => 3,
+            Err(_) => 1,
         }
     }
 }

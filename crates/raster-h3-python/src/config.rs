@@ -8,12 +8,16 @@ use raster_h3_core::aggregator::multi_horizon::{
 };
 use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
 use raster_h3_core::columnar::CategoricalFormat;
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::OverlapRule;
 
-/// Configuration for a Python / Polars H3 raster scan.
+/// Configuration for a Python / Polars raster scan onto a DGGS grid.
 #[derive(Debug, Clone)]
 pub struct PyScanConfig {
     pub path: String,
+    /// Grid the raster is aggregated onto (default H3). It names the cell columns
+    /// (`{grid}_index`, `{grid}_hex`) and bounds `resolutions`.
+    pub grid: GridKind,
     pub resolutions: Vec<u8>,
     pub categorical: bool,
     pub format: CategoricalFormat,
@@ -58,6 +62,7 @@ impl PyScanConfig {
     /// config. Scans and `merge_partials` both use it, so merged boundary cells get the same
     /// filters and quantile columns as the scans' interior cells.
     pub(crate) fn apply_cell_options(&self, mr_cfg: &mut MultiResolutionConfig) {
+        mr_cfg.grid = self.grid;
         mr_cfg.min_majority_fraction = self.min_majority_fraction;
         mr_cfg.quantiles = self.quantiles.clone();
         mr_cfg.min_count = self.min_count;
@@ -70,6 +75,7 @@ impl Default for PyScanConfig {
     fn default() -> Self {
         Self {
             path: String::new(),
+            grid: GridKind::H3,
             resolutions: vec![8],
             categorical: false,
             format: CategoricalFormat::Wide,

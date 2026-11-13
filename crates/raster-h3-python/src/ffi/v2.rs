@@ -10,6 +10,7 @@ use std::sync::Arc;
 use raster_h3_core::aggregator::multi_horizon::{plan_partitions, QuantileTarget};
 use raster_h3_core::columnar::{ArrowArrayStream, ArrowSchema};
 use raster_h3_core::error::RasterH3Error;
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader};
 
 use crate::ffi::args::{
@@ -206,6 +207,7 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
     unsafe {
         ffi_call("plan_partitions", out_err, || {
             let mut cfg = build_py_scan_config(
+                GridKind::H3,
                 path,
                 ptr::null(),
                 0,

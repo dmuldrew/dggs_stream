@@ -1,0 +1,345 @@
+//! The `grid` option of the `_v2` entry points and the grid-neutral scalar helpers, on
+//! every grid: the C-ABI scan equals the core reader configured for that grid.
+
+use std::ffi::{c_char, CStr, CString};
+use std::path::{Path, PathBuf};
+use std::ptr;
+
+use raster_h3_core::aggregator::multi_horizon::MultiResolutionConfig;
+use raster_h3_core::columnar::{ColumnArray, ContinuousBatchReader};
+use raster_h3_core::GridKind;
+use raster_h3_python::{
+    raster_h3_py_export_parquet_v2, raster_h3_py_export_pmtiles_v2, raster_h3_py_free_cells,
+    raster_h3_py_free_string, raster_h3_py_grid_cell_to_parent, raster_h3_py_grid_code,
+    raster_h3_py_grid_get_resolution, raster_h3_py_grid_is_valid, raster_h3_py_grid_lonlat_to_cell,
+    raster_h3_py_grid_max_resolution, raster_h3_py_grid_polygon_to_cells, raster_h3_py_grid_to_lat,
+    raster_h3_py_grid_to_lng, raster_h3_py_grid_to_wkb, raster_h3_py_parquet_to_pmtiles_v2,
+    raster_h3_py_scan_json_v2, raster_h3_py_wkb_buf_len,
+};
+
+use crate::c_abi::{gradient_tif, take_err};
+
+/// A resolution of each grid with several cells over the fixture raster.
+fn res_of(grid: GridKind) -> u8 {
+    match grid {
+        GridKind::H3 => 9,
+        GridKind::A5 | GridKind::Healpix => 14,
+        GridKind::S2 => 15,
+    }
+}
+
+fn options(grid: GridKind) -> CString {
+    CString::new(format!("{{\"grid\": \"{grid}\"}}")).unwrap()
+}
+
+/// `raster_h3_py_scan_json_v2` of `tif` at `res` with an `options` JSON object.
+fn scan_json(
+    tif: &Path,
+    res: &str,
+    options: &CStr,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let path = CString::new(tif.to_str().unwrap()).unwrap();
+    let res = CString::new(res).unwrap();
+    // SAFETY: the string arguments are live `CString`s owned by this frame (or null); the
+    // returned JSON string is copied and freed once, and `take_err` frees the error.
+    unsafe {
+        let mut err: *mut c_char = ptr::null_mut();
+        let out = raster_h3_py_scan_json_v2(
+            path.as_ptr(),
+            res.as_ptr(),
+            0,
+            ptr::null(),
+            ptr::null(),
+            0,
+            0.0,
+            ptr::null(),
+            ptr::null(),
+            -1,
+            0,
+            options.as_ptr(),
+            ptr::null_mut(),
+            &mut err,
+        );
+        if out.is_null() {
+            return Err(take_err(err).expect("NULL result must set out_err"));
+        }
+        let text = CStr::from_ptr(out).to_str().unwrap().to_string();
+        raster_h3_py_free_string(out);
+        match serde_json::from_str(&text).unwrap() {
+            serde_json::Value::Object(m) => Ok(m),
+            other => panic!("scan_json must return an object, got {other}"),
+        }
+    }
+}
+
+/// `(cell, count, sum)` of every cell the core reader emits, sorted by cell.
+fn core_cells(tif: &Path, grid: GridKind) -> Vec<(u64, f64, f64)> {
+    let cfg = MultiResolutionConfig::single(res_of(grid)).with_grid(grid);
+    let mut rows = Vec::new();
+    for batch in ContinuousBatchReader::open(&[PathBuf::from(tif)], &cfg, None, 2048, None).unwrap()
+    {
+        let batch = batch.unwrap();
+        let col = |name: &str| batch.column_by_name(name).unwrap().clone();
+        let (ColumnArray::UInt64 { values: cells, .. }, ColumnArray::Float64 { values: n, .. }) =
+            (col(grid.index_column_name()), col("count"))
+        else {
+            panic!("unexpected column types");
+        };
+        let ColumnArray::Float64 { values: sums, .. } = col("sum") else {
+            panic!("unexpected column type");
+        };
+        rows.extend((0..batch.num_rows).map(|i| (cells[i], n[i], sums[i])));
+    }
+    rows.sort_by_key(|r| r.0);
+    rows
+}
+
+#[test]
+fn v2_scans_take_the_grid_from_options() {
+    let (_tmp, tif) = gradient_tif();
+    for grid in GridKind::ALL {
+        let json = scan_json(&tif, &res_of(grid).to_string(), &options(grid)).unwrap();
+        let ids = json[grid.index_column_name()].as_array().unwrap();
+        let hexes = json[grid.hex_column_name()].as_array().unwrap();
+        let mut rows: Vec<(u64, f64, f64)> = (0..ids.len())
+            .map(|i| {
+                let cell = ids[i].as_u64().unwrap();
+                assert_eq!(hexes[i].as_str().unwrap(), format!("{cell:x}"));
+                assert_eq!(grid.resolution(cell), Some(res_of(grid)));
+                (
+                    cell,
+                    json["count"][i].as_f64().unwrap(),
+                    json["sum"][i].as_f64().unwrap(),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|r| r.0);
+        assert!(rows.len() > 4, "{grid}");
+        assert_eq!(rows, core_cells(&tif, grid), "{grid}");
+        // Only this grid's cell columns are present.
+        for other in GridKind::ALL.into_iter().filter(|g| *g != grid) {
+            assert!(!json.contains_key(other.index_column_name()));
+        }
+    }
+}
+
+#[test]
+fn resolutions_are_bounded_by_the_grid() {
+    let (_tmp, tif) = gradient_tif();
+    for grid in GridKind::ALL {
+        let finest = grid.max_resolution();
+        let err = scan_json(&tif, &(finest + 1).to_string(), &options(grid)).unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "{} resolutions between 0 and {finest}",
+                grid.label()
+            )),
+            "{err}"
+        );
+    }
+    // 20 is an A5 resolution but not an H3 one.
+    assert!(scan_json(&tif, "20", &options(GridKind::A5)).is_ok());
+    assert!(scan_json(&tif, "20", c"{}").is_err());
+    let err = scan_json(&tif, "9", c"{\"grid\": \"s9\"}").unwrap_err();
+    assert!(err.contains("Invalid grid 's9'"), "{err}");
+}
+
+#[test]
+fn exports_write_the_requested_grid() {
+    let (_tmp, tif) = gradient_tif();
+    let dir = tempfile::tempdir().unwrap();
+    let input = CString::new(tif.to_str().unwrap()).unwrap();
+    for grid in GridKind::ALL {
+        let expected = core_cells(&tif, grid).len() as i64;
+        let res = CString::new(res_of(grid).to_string()).unwrap();
+        let opts = options(grid);
+        let parquet = dir.path().join(format!("{grid}.parquet"));
+        let pmtiles = dir.path().join(format!("{grid}.pmtiles"));
+        let renamed = dir.path().join(format!("{grid}-tiles.pmtiles"));
+        let c_parquet = CString::new(parquet.to_str().unwrap()).unwrap();
+        let c_pmtiles = CString::new(pmtiles.to_str().unwrap()).unwrap();
+        let c_renamed = CString::new(renamed.to_str().unwrap()).unwrap();
+        let name = CString::new(grid.as_str()).unwrap();
+        // SAFETY: every string argument is a live `CString` of this frame (or null) and the
+        // out-pointers are writable locals.
+        unsafe {
+            let mut err: *mut c_char = ptr::null_mut();
+            let mut failures = u64::MAX;
+            let n = raster_h3_py_export_parquet_v2(
+                input.as_ptr(),
+                c_parquet.as_ptr(),
+                res.as_ptr(),
+                0,
+                ptr::null(),
+                1,
+                opts.as_ptr(),
+                &mut failures,
+                &mut err,
+            );
+            assert_eq!((n, failures), (expected, 0), "{grid}: {:?}", take_err(err));
+            let n = raster_h3_py_export_pmtiles_v2(
+                input.as_ptr(),
+                c_pmtiles.as_ptr(),
+                res.as_ptr(),
+                0,
+                ptr::null(),
+                opts.as_ptr(),
+                &mut failures,
+                &mut err,
+            );
+            assert_eq!(n, expected, "{grid}: {:?}", take_err(err));
+            // Auto-detected from the `{grid}_index` column, and with the grid named.
+            for grid_arg in [ptr::null(), name.as_ptr()] {
+                let n = raster_h3_py_parquet_to_pmtiles_v2(
+                    c_parquet.as_ptr(),
+                    c_renamed.as_ptr(),
+                    ptr::null(),
+                    grid_arg,
+                    &mut err,
+                );
+                assert_eq!(n, expected, "{grid}: {:?}", take_err(err));
+            }
+            let n = raster_h3_py_parquet_to_pmtiles_v2(
+                c_parquet.as_ptr(),
+                c_renamed.as_ptr(),
+                ptr::null(),
+                c"hexagons".as_ptr(),
+                &mut err,
+            );
+            assert_eq!(n, -1);
+            assert!(take_err(err).unwrap().contains("Invalid grid"));
+        }
+        assert!(std::fs::read(&pmtiles).unwrap().starts_with(b"PMTiles"));
+    }
+}
+
+#[test]
+fn grid_scalars_match_core() {
+    // SAFETY: `raster_h3_py_grid_code` takes NUL-terminated literals or null.
+    unsafe {
+        assert_eq!(raster_h3_py_grid_code(c"H3".as_ptr()), 0);
+        assert_eq!(raster_h3_py_grid_code(c"healpix".as_ptr()), 3);
+        assert_eq!(raster_h3_py_grid_code(c"s9".as_ptr()), -1);
+        assert_eq!(raster_h3_py_grid_code(ptr::null()), -1);
+    }
+    assert_eq!(raster_h3_py_grid_max_resolution(9), -1);
+    assert_eq!(raster_h3_py_grid_lonlat_to_cell(9, 0.0, 0.0, 3), 0);
+    let cap = raster_h3_py_wkb_buf_len();
+    for grid in GridKind::ALL {
+        let code = grid as i32;
+        assert_eq!(
+            raster_h3_py_grid_max_resolution(code),
+            i32::from(grid.max_resolution())
+        );
+        // South of -45° at lon 0 an S2 cell is on face 5, whose ids set bit 63.
+        for (lon, lat) in [(-122.4194, 37.7749), (179.99, -0.01), (0.0, -89.5)] {
+            for res in [0u8, 6, grid.max_resolution() - 1] {
+                let cell = raster_h3_py_grid_lonlat_to_cell(code, lon, lat, i64::from(res));
+                assert_eq!(Some(cell), grid.cell_at(lat, lon, res), "{grid}");
+                assert_eq!(raster_h3_py_grid_is_valid(code, cell), 1);
+                assert_eq!(raster_h3_py_grid_get_resolution(code, cell), i64::from(res));
+                let (c_lat, c_lng) = grid.center_lat_lng(cell).unwrap();
+                assert_eq!(raster_h3_py_grid_to_lat(code, cell), c_lat);
+                assert_eq!(raster_h3_py_grid_to_lng(code, cell), c_lng);
+                let parent = raster_h3_py_grid_cell_to_parent(code, cell, 0);
+                assert_eq!(Some(parent), grid.parent(cell, 0));
+                assert_eq!(
+                    raster_h3_py_grid_cell_to_parent(code, cell, i64::from(res) + 1),
+                    0
+                );
+                let mut buf = vec![0u8; cap];
+                // SAFETY: `buf` holds `cap` writable bytes.
+                let n = unsafe { raster_h3_py_grid_to_wkb(code, cell, buf.as_mut_ptr(), cap) };
+                let wkb = raster_h3_core::scalar_ops::grid_to_wkb_u64(grid, cell).unwrap();
+                assert_eq!(&buf[..n], &wkb[..]);
+                // SAFETY: a too-small or null buffer is reported as 0 bytes written.
+                unsafe {
+                    assert_eq!(raster_h3_py_grid_to_wkb(code, cell, buf.as_mut_ptr(), 8), 0);
+                    assert_eq!(
+                        raster_h3_py_grid_to_wkb(code, cell, ptr::null_mut(), cap),
+                        0
+                    );
+                }
+            }
+        }
+        assert_eq!(raster_h3_py_grid_is_valid(code, 0), 0);
+        assert!(raster_h3_py_grid_to_lat(code, 0).is_nan());
+        assert_eq!(raster_h3_py_grid_get_resolution(code, 0), -1);
+    }
+    let s2_south = raster_h3_py_grid_lonlat_to_cell(GridKind::S2 as i32, 0.0, -89.5, 10);
+    assert!(s2_south >> 63 == 1, "face 5 ids use the top bit");
+}
+
+#[test]
+fn grid_polygon_fill_matches_core() {
+    let ring = [
+        (-122.45, 37.75),
+        (-122.40, 37.75),
+        (-122.40, 37.80),
+        (-122.45, 37.80),
+        (-122.45, 37.75),
+    ];
+    let mut wkb = vec![1u8];
+    wkb.extend(3u32.to_le_bytes());
+    wkb.extend(1u32.to_le_bytes());
+    wkb.extend((ring.len() as u32).to_le_bytes());
+    for (x, y) in ring {
+        wkb.extend(f64::to_le_bytes(x));
+        wkb.extend(f64::to_le_bytes(y));
+    }
+    for grid in GridKind::ALL {
+        let res = i64::from(res_of(grid)) - 2;
+        let mut expected = Vec::new();
+        raster_h3_core::scalar_ops::grid_polygon_to_cells_wkb_into(
+            grid,
+            &wkb,
+            res,
+            raster_h3_core::scalar_ops::ContainmentMode::ContainsCentroid,
+            &mut expected,
+        )
+        .unwrap();
+        assert!(!expected.is_empty(), "{grid}");
+        let fill = |res: i64, mode: *const c_char| -> (i32, Vec<u64>) {
+            let mut cells: *mut u64 = ptr::null_mut();
+            let mut len = 0usize;
+            // SAFETY: `wkb` is readable for its length, `mode` is null or a literal, and
+            // the out-pointers are writable; a returned array is copied and freed once.
+            unsafe {
+                let status = raster_h3_py_grid_polygon_to_cells(
+                    grid as i32,
+                    wkb.as_ptr(),
+                    wkb.len(),
+                    res,
+                    mode,
+                    &mut cells,
+                    &mut len,
+                );
+                if status != 0 {
+                    assert!(cells.is_null());
+                    return (status, Vec::new());
+                }
+                let out = std::slice::from_raw_parts(cells, len).to_vec();
+                raster_h3_py_free_cells(cells, len);
+                (status, out)
+            }
+        };
+        assert_eq!(fill(res, ptr::null()), (0, expected));
+        assert_eq!(fill(i64::from(grid.max_resolution()) + 1, ptr::null()).0, 1);
+        assert_eq!(fill(res, c"sideways".as_ptr()).0, 2);
+    }
+    let mut cells: *mut u64 = ptr::null_mut();
+    let mut len = 0usize;
+    // SAFETY: as above; grid code 9 is rejected before the outputs are written.
+    let status = unsafe {
+        raster_h3_py_grid_polygon_to_cells(
+            9,
+            wkb.as_ptr(),
+            wkb.len(),
+            5,
+            ptr::null(),
+            &mut cells,
+            &mut len,
+        )
+    };
+    assert_eq!(status, 4);
+}

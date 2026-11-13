@@ -6,28 +6,64 @@ use raster_h3_core::aggregator::multi_horizon::{QuantileTarget, ScanPartition, S
 use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
 use raster_h3_core::columnar::CategoricalFormat;
 use raster_h3_core::error::{RasterH3Error, Result};
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::OverlapRule;
-use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str};
+use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
 
 use crate::config::PyScanConfig;
 use crate::ffi::opt_cstr;
 
-/// H3 resolutions from a C string; NULL means the default `[8]`. An empty string is
-/// rejected like any other list without a resolution.
+/// Resolutions of `grid` from a C string; NULL means the default `[8]`. An empty string
+/// is rejected like any other list without a resolution.
 ///
 /// # Safety
 /// `ptr` must be null or a valid NUL-terminated string.
-pub(crate) unsafe fn parse_c_resolutions(ptr: *const c_char) -> Result<Vec<u8>> {
+pub(crate) unsafe fn parse_c_resolutions(grid: GridKind, ptr: *const c_char) -> Result<Vec<u8>> {
     if ptr.is_null() {
         return Ok(vec![8]);
     }
     // SAFETY: `ptr` is non-null and NUL-terminated (caller contract).
     let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy();
-    try_parse_resolutions_str(&s).ok_or_else(|| {
+    try_parse_resolutions_str_for(grid, &s).ok_or_else(|| {
         RasterH3Error::InvalidParameter(format!(
-            "Invalid resolutions '{s}': expected H3 resolutions between 0 and 15, e.g. 7,8"
+            "Invalid resolutions '{s}': expected {} resolutions between 0 and {}, e.g. 7,8",
+            grid.label(),
+            grid.max_resolution()
         ))
     })
+}
+
+/// A grid name (`h3`, `a5`, `s2`, `healpix`, case-insensitive).
+pub(crate) fn parse_grid(name: &str) -> Result<GridKind> {
+    GridKind::parse(name).ok_or_else(|| {
+        RasterH3Error::InvalidParameter(format!(
+            "Invalid grid '{name}': expected {}",
+            GridKind::EXPECTED
+        ))
+    })
+}
+
+/// The grid named by a C string; NULL or empty means H3.
+///
+/// # Safety
+/// `ptr` must be null or a valid NUL-terminated string.
+pub(crate) unsafe fn parse_c_grid(ptr: *const c_char) -> Result<GridKind> {
+    // SAFETY: null or NUL-terminated (caller contract), as `opt_cstr` requires.
+    match unsafe { opt_cstr(ptr) } {
+        None => Ok(GridKind::H3),
+        Some(name) => parse_grid(&name),
+    }
+}
+
+/// The `grid` of an `options` JSON object (H3 when there is no object or no `grid`),
+/// read ahead of the other options because it bounds the resolutions.
+pub(crate) fn grid_of_options(options: Option<&str>) -> Result<GridKind> {
+    let Some(json) = options else {
+        return Ok(GridKind::H3);
+    };
+    let opts: PyScanOptions = serde_json::from_str(json)
+        .map_err(|e| RasterH3Error::InvalidParameter(format!("Invalid scan options: {e}")))?;
+    opts.grid.as_deref().map_or(Ok(GridKind::H3), parse_grid)
 }
 
 /// Categorical output format from a C string; NULL or empty means `wide`.
@@ -63,6 +99,7 @@ fn parse_bbox_strict(s: &str) -> Option<[f64; 4]> {
 /// Every C string argument must be null or a valid NUL-terminated string.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn build_py_scan_config(
+    grid: GridKind,
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -79,7 +116,7 @@ pub(crate) unsafe fn build_py_scan_config(
     unsafe {
         let path_str = opt_cstr(path)
             .ok_or_else(|| RasterH3Error::InvalidParameter("Missing input raster path".into()))?;
-        let res_vec = parse_c_resolutions(resolutions)?;
+        let res_vec = parse_c_resolutions(grid, resolutions)?;
         let fmt = parse_c_format(format)?;
         let crs_opt = opt_cstr(crs);
         let nodata_opt = if has_nodata != 0 { Some(nodata) } else { None };
@@ -106,6 +143,7 @@ pub(crate) unsafe fn build_py_scan_config(
 
         Ok(PyScanConfig {
             path: path_str,
+            grid,
             resolutions: res_vec,
             categorical: categorical != 0,
             format: fmt,
@@ -126,6 +164,8 @@ pub(crate) unsafe fn build_py_scan_config(
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PyScanOptions {
+    /// `h3` (default), `a5`, `s2` or `healpix`.
+    pub(crate) grid: Option<String>,
     band: Option<i64>,
     sampling: Option<String>,
     pub(crate) overlap_rule: Option<String>,
@@ -296,7 +336,9 @@ pub(crate) unsafe fn build_py_scan_config_v2(
 ) -> Result<PyScanConfig> {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract).
     unsafe {
+        let options = opt_cstr(options);
         let mut cfg = build_py_scan_config(
+            grid_of_options(options.as_deref())?,
             path,
             resolutions,
             categorical,
@@ -308,7 +350,7 @@ pub(crate) unsafe fn build_py_scan_config_v2(
             columns,
             limit,
         )?;
-        apply_scan_options(&mut cfg, opt_cstr(options).as_deref())?;
+        apply_scan_options(&mut cfg, options.as_deref())?;
         Ok(cfg)
     }
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use raster_h3_core::aggregator::multi_horizon::MultiResolutionConfig;
 use raster_h3_core::columnar::{merge_partial_batches, ArrowArrayStream, ArrowSchema};
+use raster_h3_core::grid::GridKind;
 
 use crate::config::PyScanConfig;
 use crate::ffi::args::{
@@ -54,6 +55,7 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_schema_partitioned(
     unsafe {
         ffi_call("create_arrow_schema_partitioned", out_err, || {
             let cfg = build_py_scan_config(
+                GridKind::H3,
                 c"schema".as_ptr(),
                 ptr::null(),
                 categorical,
@@ -104,6 +106,7 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_partitioned(
     unsafe {
         ffi_call("create_arrow_stream_partitioned", out_err, || {
             let mut cfg = build_py_scan_config(
+                GridKind::H3,
                 path,
                 resolutions,
                 categorical,
@@ -151,6 +154,7 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_partitioned(
     unsafe {
         ffi_call("open_batch_reader_partitioned", out_err, || {
             let mut cfg = build_py_scan_config(
+                GridKind::H3,
                 path,
                 resolutions,
                 categorical,
