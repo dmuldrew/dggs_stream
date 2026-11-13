@@ -25,12 +25,13 @@ use raster_h3_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiCategoricalRecord, MultiContinuousRecord,
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3_core::encoding::{fast_hex_u64, h3_index_to_wkb, WkbBuf, WKB_BUF_LEN};
+use raster_h3_core::encoding::{cell_index_to_wkb, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
 use raster_h3_core::error::{catch_unwind_or, safe_panic_payload_to_string, RasterH3Error, Result};
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use raster_h3_core::scalar_ops::{
-    h3_cell_to_parent_u64, h3_get_resolution, h3_is_valid_u64, h3_to_lat, h3_to_lng,
-    parse_bbox_str, parse_resolutions_str,
+    grid_cell_to_parent_u64, grid_lonlat_to_cell, h3_cell_to_parent_u64, h3_get_resolution,
+    h3_is_valid_u64, h3_to_lat, h3_to_lng, parse_bbox_str, parse_resolutions_str,
 };
 
 // =============================================================================
@@ -329,7 +330,195 @@ pub unsafe extern "C" fn pg_h3_cell_to_parent(fcinfo: pg_func_call_info) -> Datu
 }
 
 // =============================================================================
-// Set-Returning Functions (SRF) for PostgreSQL (`h3_raster_*_aggregate`)
+// The same scalar functions for the other grids (A5, S2, HEALPix)
+//
+// Cell ids are `bigint`, as for H3: the signed reading of the same 64 bits. A5 and S2
+// ids use all 64 (an S2 id on faces 4 and 5 has the top bit set, so it reads as a
+// negative `bigint`); the conversion is lossless both ways, ids compare equal exactly
+// when their cells are equal, and `{grid}_to_string` gives the unsigned hexadecimal form.
+// Ordering by the `bigint` is not the unsigned (Hilbert-curve) order.
+// =============================================================================
+
+impl ScalarCallInfo {
+    /// Argument `idx` as `float8`, or `None` if it is SQL NULL or absent.
+    fn arg_f64(&self, idx: usize) -> Option<f64> {
+        self.arg_i64(idx).map(|bits| f64::from_bits(bits as u64))
+    }
+}
+
+/// `{grid}_to_lat` / `{grid}_to_lng`: a centre coordinate, NULL for an invalid cell.
+fn grid_centre_datum(info: &mut ScalarCallInfo, grid: GridKind, lat: bool) -> Datum {
+    let centre = info
+        .arg_i64(0)
+        .and_then(|cell| grid.center_lat_lng(cell as u64));
+    match centre {
+        Some((c_lat, c_lng)) => float8_to_datum(if lat { c_lat } else { c_lng }),
+        None => {
+            info.set_null();
+            0
+        }
+    }
+}
+
+/// `{grid}_get_resolution`: the cell's resolution, NULL for an invalid cell.
+fn grid_resolution_datum(info: &mut ScalarCallInfo, grid: GridKind) -> Datum {
+    match info
+        .arg_i64(0)
+        .and_then(|cell| grid.resolution(cell as u64))
+    {
+        Some(res) => int64_to_datum(i64::from(res)),
+        None => {
+            info.set_null();
+            0
+        }
+    }
+}
+
+/// `{grid}_is_valid(bigint)`.
+fn grid_is_valid_datum(info: &mut ScalarCallInfo, grid: GridKind) -> Datum {
+    match info.arg_i64(0) {
+        Some(cell) => usize::from(grid.is_valid(cell as u64)),
+        None => {
+            info.set_null();
+            0
+        }
+    }
+}
+
+/// `{grid}_cell_to_parent(bigint, bigint)`: NULL for an invalid cell or a finer resolution.
+fn grid_parent_datum(info: &mut ScalarCallInfo, grid: GridKind) -> Datum {
+    let parent = match (info.arg_i64(0), info.arg_i64(1)) {
+        (Some(cell), Some(res)) => grid_cell_to_parent_u64(grid, cell as u64, res),
+        _ => None,
+    };
+    match parent {
+        Some(parent) => int64_to_datum(parent as i64),
+        None => {
+            info.set_null();
+            0
+        }
+    }
+}
+
+/// `{grid}_lonlat_to_cell(float8, float8, bigint)`: NULL for a latitude outside
+/// `-90..=90`, a non-finite coordinate or a resolution outside the grid's range.
+fn grid_lonlat_datum(info: &mut ScalarCallInfo, grid: GridKind) -> Datum {
+    let cell = match (info.arg_f64(0), info.arg_f64(1), info.arg_i64(2)) {
+        (Some(lon), Some(lat), Some(res)) => grid_lonlat_to_cell(grid, lon, lat, res),
+        _ => None,
+    };
+    match cell {
+        Some(cell) => int64_to_datum(cell as i64),
+        None => {
+            info.set_null();
+            0
+        }
+    }
+}
+
+/// Defines one V1 scalar entry point and its `pg_finfo_*` record.
+macro_rules! grid_scalar_v1 {
+    ($(#[$doc:meta])* $finfo:ident, $name:ident, |$info:ident| $body:expr) => {
+        #[no_mangle]
+        pub extern "C" fn $finfo() -> *const Pg_finfo_record {
+            &PG_FINFO_V1
+        }
+
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// `fcinfo` must point to a valid `FunctionCallInfoBaseData`.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(fcinfo: pg_func_call_info) -> Datum {
+            // SAFETY: the function manager passes a valid `fcinfo` (contract above), which
+            // is all `scalar_call` requires.
+            unsafe { scalar_call(fcinfo, |$info| $body) }
+        }
+    };
+}
+
+grid_scalar_v1!(
+    /// `h3_lonlat_to_cell(float8, float8, int8) -> int8`
+    pg_finfo_pg_h3_lonlat_to_cell, pg_h3_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::H3));
+
+grid_scalar_v1!(
+    /// `a5_to_lat(int8) -> float8`
+    pg_finfo_pg_a5_to_lat, pg_a5_to_lat,
+    |info| grid_centre_datum(info, GridKind::A5, true));
+grid_scalar_v1!(
+    /// `a5_to_lng(int8) -> float8`
+    pg_finfo_pg_a5_to_lng, pg_a5_to_lng,
+    |info| grid_centre_datum(info, GridKind::A5, false));
+grid_scalar_v1!(
+    /// `a5_get_resolution(int8) -> int8`
+    pg_finfo_pg_a5_get_resolution, pg_a5_get_resolution,
+    |info| grid_resolution_datum(info, GridKind::A5));
+grid_scalar_v1!(
+    /// `a5_is_valid(int8) -> bool`
+    pg_finfo_pg_a5_is_valid, pg_a5_is_valid,
+    |info| grid_is_valid_datum(info, GridKind::A5));
+grid_scalar_v1!(
+    /// `a5_cell_to_parent(int8, int8) -> int8`
+    pg_finfo_pg_a5_cell_to_parent, pg_a5_cell_to_parent,
+    |info| grid_parent_datum(info, GridKind::A5));
+grid_scalar_v1!(
+    /// `a5_lonlat_to_cell(float8, float8, int8) -> int8`
+    pg_finfo_pg_a5_lonlat_to_cell, pg_a5_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::A5));
+
+grid_scalar_v1!(
+    /// `s2_to_lat(int8) -> float8`
+    pg_finfo_pg_s2_to_lat, pg_s2_to_lat,
+    |info| grid_centre_datum(info, GridKind::S2, true));
+grid_scalar_v1!(
+    /// `s2_to_lng(int8) -> float8`
+    pg_finfo_pg_s2_to_lng, pg_s2_to_lng,
+    |info| grid_centre_datum(info, GridKind::S2, false));
+grid_scalar_v1!(
+    /// `s2_get_resolution(int8) -> int8`
+    pg_finfo_pg_s2_get_resolution, pg_s2_get_resolution,
+    |info| grid_resolution_datum(info, GridKind::S2));
+grid_scalar_v1!(
+    /// `s2_is_valid(int8) -> bool`
+    pg_finfo_pg_s2_is_valid, pg_s2_is_valid,
+    |info| grid_is_valid_datum(info, GridKind::S2));
+grid_scalar_v1!(
+    /// `s2_cell_to_parent(int8, int8) -> int8`
+    pg_finfo_pg_s2_cell_to_parent, pg_s2_cell_to_parent,
+    |info| grid_parent_datum(info, GridKind::S2));
+grid_scalar_v1!(
+    /// `s2_lonlat_to_cell(float8, float8, int8) -> int8`
+    pg_finfo_pg_s2_lonlat_to_cell, pg_s2_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::S2));
+
+grid_scalar_v1!(
+    /// `healpix_to_lat(int8) -> float8`
+    pg_finfo_pg_healpix_to_lat, pg_healpix_to_lat,
+    |info| grid_centre_datum(info, GridKind::Healpix, true));
+grid_scalar_v1!(
+    /// `healpix_to_lng(int8) -> float8`
+    pg_finfo_pg_healpix_to_lng, pg_healpix_to_lng,
+    |info| grid_centre_datum(info, GridKind::Healpix, false));
+grid_scalar_v1!(
+    /// `healpix_get_resolution(int8) -> int8`
+    pg_finfo_pg_healpix_get_resolution, pg_healpix_get_resolution,
+    |info| grid_resolution_datum(info, GridKind::Healpix));
+grid_scalar_v1!(
+    /// `healpix_is_valid(int8) -> bool`
+    pg_finfo_pg_healpix_is_valid, pg_healpix_is_valid,
+    |info| grid_is_valid_datum(info, GridKind::Healpix));
+grid_scalar_v1!(
+    /// `healpix_cell_to_parent(int8, int8) -> int8`
+    pg_finfo_pg_healpix_cell_to_parent, pg_healpix_cell_to_parent,
+    |info| grid_parent_datum(info, GridKind::Healpix));
+grid_scalar_v1!(
+    /// `healpix_lonlat_to_cell(float8, float8, int8) -> int8`
+    pg_finfo_pg_healpix_lonlat_to_cell, pg_healpix_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::Healpix));
+
+// =============================================================================
+// Set-Returning Functions (SRF) for PostgreSQL (`{grid}_raster_*_aggregate`)
 // =============================================================================
 
 /// A single output row of `h3_raster_continuous_aggregate` in PostgreSQL types.
@@ -376,6 +565,7 @@ pub struct PgCategoricalRow {
 /// Stateful Set-Returning Function (SRF) iterator for `h3_raster_continuous_aggregate`.
 pub struct PgContinuousSrf {
     streamer: MultiScanHorizonStreamer,
+    grid: GridKind,
     buffer: VecDeque<MultiContinuousRecord>,
     batch_size: usize,
     hex_buf: [u8; 16],
@@ -384,7 +574,28 @@ pub struct PgContinuousSrf {
 }
 
 impl PgContinuousSrf {
+    /// Open an H3 scan; see [`Self::open_for`].
     pub fn open(
+        raster_path: &str,
+        resolutions: Vec<u8>,
+        source_crs: Option<String>,
+        nodata: Option<f64>,
+        bbox: Option<[f64; 4]>,
+    ) -> Result<Self> {
+        Self::open_for(
+            GridKind::H3,
+            raster_path,
+            resolutions,
+            source_crs,
+            nodata,
+            bbox,
+        )
+    }
+
+    /// Open a scan onto `grid`. The rows' `h3_index` / `h3_hex` fields then hold that
+    /// grid's cell id (as the signed reading of its 64 bits) and its hexadecimal form.
+    pub fn open_for(
+        grid: GridKind,
         raster_path: &str,
         resolutions: Vec<u8>,
         source_crs: Option<String>,
@@ -397,7 +608,7 @@ impl PgContinuousSrf {
         } else {
             resolutions
         };
-        let mut config = MultiResolutionConfig::new(res);
+        let mut config = MultiResolutionConfig::new(res).with_grid(grid);
         config.custom_crs = source_crs.clone();
         config.custom_nodata = nodata;
         config.bbox = bbox;
@@ -412,6 +623,7 @@ impl PgContinuousSrf {
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)?;
         Ok(Self {
             streamer,
+            grid,
             buffer: VecDeque::with_capacity(2048),
             batch_size: 2048,
             hex_buf: [0u8; 16],
@@ -449,7 +661,7 @@ impl PgContinuousSrf {
         let h3_hex = std::str::from_utf8(hex_bytes)
             .unwrap_or_default()
             .to_owned();
-        let wkb = match h3_index_to_wkb(rec.h3_index, &mut self.wkb_buf) {
+        let wkb = match cell_index_to_wkb(self.grid, rec.h3_index, &mut self.wkb_buf) {
             Some(len) => self.wkb_buf[..len].to_vec(),
             None => Vec::new(),
         };
@@ -485,6 +697,7 @@ impl Iterator for PgContinuousSrf {
 /// Stateful Set-Returning Function (SRF) iterator for `h3_raster_categorical_aggregate`.
 pub struct PgCategoricalSrf {
     streamer: MultiCategoricalHorizonStreamer,
+    grid: GridKind,
     buffer: VecDeque<MultiCategoricalRecord>,
     batch_size: usize,
     hex_buf: [u8; 16],
@@ -493,7 +706,28 @@ pub struct PgCategoricalSrf {
 }
 
 impl PgCategoricalSrf {
+    /// Open an H3 scan; see [`Self::open_for`].
     pub fn open(
+        raster_path: &str,
+        resolutions: Vec<u8>,
+        source_crs: Option<String>,
+        nodata: Option<f64>,
+        bbox: Option<[f64; 4]>,
+    ) -> Result<Self> {
+        Self::open_for(
+            GridKind::H3,
+            raster_path,
+            resolutions,
+            source_crs,
+            nodata,
+            bbox,
+        )
+    }
+
+    /// Open a scan onto `grid`. The rows' `h3_index` / `h3_hex` fields then hold that
+    /// grid's cell id (as the signed reading of its 64 bits) and its hexadecimal form.
+    pub fn open_for(
+        grid: GridKind,
         raster_path: &str,
         resolutions: Vec<u8>,
         source_crs: Option<String>,
@@ -506,7 +740,7 @@ impl PgCategoricalSrf {
         } else {
             resolutions
         };
-        let mut config = MultiResolutionConfig::new(res);
+        let mut config = MultiResolutionConfig::new(res).with_grid(grid);
         config.custom_crs = source_crs.clone();
         config.custom_nodata = nodata;
         config.bbox = bbox;
@@ -521,6 +755,7 @@ impl PgCategoricalSrf {
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)?;
         Ok(Self {
             streamer,
+            grid,
             buffer: VecDeque::with_capacity(2048),
             batch_size: 2048,
             hex_buf: [0u8; 16],
@@ -559,7 +794,7 @@ impl PgCategoricalSrf {
             .unwrap_or_default()
             .to_owned();
         let (maj_class, maj_count, maj_frac) = rec.accumulator.majority();
-        let wkb = match h3_index_to_wkb(rec.h3_index, &mut self.wkb_buf) {
+        let wkb = match cell_index_to_wkb(self.grid, rec.h3_index, &mut self.wkb_buf) {
             Some(len) => self.wkb_buf[..len].to_vec(),
             None => Vec::new(),
         };
@@ -973,7 +1208,7 @@ mod tests {
         // Odd-resolution pentagons have 10 vertices: the largest H3 polygon (189 bytes).
         let pentagon = h3o::Resolution::One.pentagons().next().unwrap();
         let mut buf = [0u8; WKB_BUF_LEN];
-        let len = h3_index_to_wkb(u64::from(pentagon), &mut buf).unwrap();
+        let len = cell_index_to_wkb(GridKind::H3, u64::from(pentagon), &mut buf).unwrap();
         assert!(len > 128, "pentagon WKB is {len} bytes");
 
         // SAFETY: `PgCContinuousRow` holds only integers, floats and byte arrays, for which

@@ -8,4 +8,5 @@ mod helpers;
 
 #[cfg(feature = "pg-extension")]
 mod fmgr;
+mod grids;
 mod srf;
