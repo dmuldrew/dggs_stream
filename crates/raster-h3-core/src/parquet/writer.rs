@@ -11,6 +11,8 @@ use std::fs::File;
 use std::path::Path;
 
 use parquet::basic::Compression;
+use std::sync::OnceLock;
+
 use parquet::data_type::ByteArray;
 use parquet::file::writer::SerializedFileWriter;
 
@@ -20,6 +22,77 @@ use crate::aggregator::multi_horizon::{
 };
 use crate::encoding::{cell_index_to_wkb, extend_wkb_bounds, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
 use crate::grid::GridKind;
+
+/// The statistics columns of a continuous export, after the cell columns.
+const CONTINUOUS_VALUE_COLUMNS: &[&str] = &[
+    "DOUBLE min_value",
+    "DOUBLE max_value",
+    "DOUBLE sum_value",
+    "DOUBLE avg_value",
+    "DOUBLE pixel_count",
+];
+
+/// The statistics columns of a categorical export, after the cell columns.
+const CATEGORICAL_VALUE_COLUMNS: &[&str] = &[
+    "INT64 majority",
+    "DOUBLE majority_fraction",
+    "DOUBLE pixel_count",
+    "INT64 distinct_classes",
+    "DOUBLE entropy",
+];
+
+/// The Parquet message type of a cell export on `grid`: the cell index (annotated
+/// `UINT_64` where the grid's spec says so), then, unless `compact`, the
+/// hexadecimal id; the WKB `geometry` if `geoparquet`; `values`; and, unless `compact`,
+/// the centre `lat` / `lng`.
+fn cell_schema_message(grid: GridKind, values: &[&str], compact: bool, geoparquet: bool) -> String {
+    let spec = grid.spec();
+    let unsigned = if spec.parquet_index_unsigned {
+        " (UINT_64)"
+    } else {
+        ""
+    };
+    let mut schema = format!(
+        "message schema {{\n    REQUIRED INT64 {}{unsigned};\n",
+        spec.index_column
+    );
+    let mut column = |definition: &str| {
+        schema.push_str("    REQUIRED ");
+        schema.push_str(definition);
+        schema.push_str(";\n");
+    };
+    if !compact {
+        column(&format!("BYTE_ARRAY {} (UTF8)", spec.hex_column));
+    }
+    if geoparquet {
+        column("BYTE_ARRAY geometry");
+    }
+    for value in values {
+        column(value);
+    }
+    if !compact {
+        column("DOUBLE lat");
+        column("DOUBLE lng");
+    }
+    schema.push_str("}\n");
+    schema
+}
+
+/// The H3 schema for `(compact, geoparquet)`, built once per buffer type so the
+/// `&'static str` form of `ParquetBuffer::schema_message` keeps working.
+fn h3_schema(
+    cache: &'static OnceLock<[String; 4]>,
+    values: &[&str],
+    compact: bool,
+    geoparquet: bool,
+) -> &'static str {
+    let schemas = cache.get_or_init(|| {
+        [(false, false), (false, true), (true, false), (true, true)].map(|(compact, geoparquet)| {
+            cell_schema_message(GridKind::H3, values, compact, geoparquet)
+        })
+    });
+    &schemas[usize::from(compact) * 2 + usize::from(geoparquet)]
+}
 
 /// Bounds that any point extends (`min > max` until the first point).
 const EMPTY_BOUNDS: [f64; 4] = [
@@ -261,138 +334,20 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
     }
 
     fn schema_message(compact: bool, geoparquet: bool) -> &'static str {
-        match Self::schema_message_for(GridKind::H3, compact, geoparquet) {
-            Cow::Borrowed(schema) => schema,
-            Cow::Owned(_) => unreachable!("the H3 schema is static"),
-        }
+        static H3: OnceLock<[String; 4]> = OnceLock::new();
+        h3_schema(&H3, CONTINUOUS_VALUE_COLUMNS, compact, geoparquet)
     }
 
     fn schema_message_for(grid: GridKind, compact: bool, geoparquet: bool) -> Cow<'static, str> {
-        // S2 and HEALPix share the A5 layout (unsigned ids) under their own column names.
-        let layout = if grid == GridKind::H3 {
-            GridKind::H3
-        } else {
-            GridKind::A5
-        };
-        let template: &'static str = match (layout, compact, geoparquet) {
-            (GridKind::H3, true, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                }
-            "
-            }
-            (GridKind::H3, true, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                }
-            "
-            }
-            (GridKind::H3, false, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED BYTE_ARRAY h3_hex (UTF8);
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::H3, false, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED BYTE_ARRAY h3_hex (UTF8);
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::A5, true, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                }
-            "
-            }
-            (GridKind::A5, true, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                }
-            "
-            }
-            (GridKind::A5, false, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED BYTE_ARRAY a5_hex (UTF8);
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::A5, false, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED BYTE_ARRAY a5_hex (UTF8);
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED DOUBLE min_value;
-                    REQUIRED DOUBLE max_value;
-                    REQUIRED DOUBLE sum_value;
-                    REQUIRED DOUBLE avg_value;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::S2 | GridKind::Healpix, _, _) => unreachable!("layout is H3 or A5"),
-        };
-        match grid {
-            GridKind::H3 | GridKind::A5 => Cow::Borrowed(template),
-            _ => Cow::Owned(template.replace("a5_", &format!("{}_", grid.as_str()))),
+        if grid == GridKind::default() {
+            return Cow::Borrowed(Self::schema_message(compact, geoparquet));
         }
+        Cow::Owned(cell_schema_message(
+            grid,
+            CONTINUOUS_VALUE_COLUMNS,
+            compact,
+            geoparquet,
+        ))
     }
 }
 
@@ -579,138 +534,20 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
     }
 
     fn schema_message(compact: bool, geoparquet: bool) -> &'static str {
-        match Self::schema_message_for(GridKind::H3, compact, geoparquet) {
-            Cow::Borrowed(schema) => schema,
-            Cow::Owned(_) => unreachable!("the H3 schema is static"),
-        }
+        static H3: OnceLock<[String; 4]> = OnceLock::new();
+        h3_schema(&H3, CATEGORICAL_VALUE_COLUMNS, compact, geoparquet)
     }
 
     fn schema_message_for(grid: GridKind, compact: bool, geoparquet: bool) -> Cow<'static, str> {
-        // S2 and HEALPix share the A5 layout (unsigned ids) under their own column names.
-        let layout = if grid == GridKind::H3 {
-            GridKind::H3
-        } else {
-            GridKind::A5
-        };
-        let template: &'static str = match (layout, compact, geoparquet) {
-            (GridKind::H3, true, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                }
-            "
-            }
-            (GridKind::H3, true, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                }
-            "
-            }
-            (GridKind::H3, false, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED BYTE_ARRAY h3_hex (UTF8);
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::H3, false, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 h3_index;
-                    REQUIRED BYTE_ARRAY h3_hex (UTF8);
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::A5, true, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                }
-            "
-            }
-            (GridKind::A5, true, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                }
-            "
-            }
-            (GridKind::A5, false, false) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED BYTE_ARRAY a5_hex (UTF8);
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::A5, false, true) => {
-                "
-                message schema {
-                    REQUIRED INT64 a5_index (UINT_64);
-                    REQUIRED BYTE_ARRAY a5_hex (UTF8);
-                    REQUIRED BYTE_ARRAY geometry;
-                    REQUIRED INT64 majority;
-                    REQUIRED DOUBLE majority_fraction;
-                    REQUIRED DOUBLE pixel_count;
-                    REQUIRED INT64 distinct_classes;
-                    REQUIRED DOUBLE entropy;
-                    REQUIRED DOUBLE lat;
-                    REQUIRED DOUBLE lng;
-                }
-            "
-            }
-            (GridKind::S2 | GridKind::Healpix, _, _) => unreachable!("layout is H3 or A5"),
-        };
-        match grid {
-            GridKind::H3 | GridKind::A5 => Cow::Borrowed(template),
-            _ => Cow::Owned(template.replace("a5_", &format!("{}_", grid.as_str()))),
+        if grid == GridKind::default() {
+            return Cow::Borrowed(Self::schema_message(compact, geoparquet));
         }
+        Cow::Owned(cell_schema_message(
+            grid,
+            CATEGORICAL_VALUE_COLUMNS,
+            compact,
+            geoparquet,
+        ))
     }
 }
 

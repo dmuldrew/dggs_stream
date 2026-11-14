@@ -30,7 +30,7 @@ pub mod scalar_ops;
 pub mod transcode;
 
 pub use a5;
-pub use grid::{GridBackend, GridKind, MAX_GRID_RESOLUTIONS};
+pub use grid::{GridBackend, GridKind, GridSpec, MAX_GRID_RESOLUTIONS};
 pub use h3o;
 pub use h3o::{CellIndex, LatLng, Resolution};
 pub use healpix;

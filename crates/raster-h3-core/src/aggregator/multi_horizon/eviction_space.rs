@@ -121,13 +121,14 @@ impl EvictionSpace {
             .map_or(Self::Latitude, |rows| Self::Rows(Box::new(rows)))
     }
 
-    /// [`Self::for_mosaic`] parameterized by the active [`GridKind`].
-    /// Row-space cap certification assumes great-circle cell edges (H3); non-H3
-    /// grids use conservative latitude-bound eviction.
+    /// [`Self::for_mosaic`] parameterized by the active [`GridKind`]. Grids whose
+    /// [`GridSpec`](crate::grid::GridSpec) does not certify row-space caps
+    /// (`row_space_eviction`) use conservative latitude-bound eviction.
     pub fn for_mosaic_with_grid(mosaic: &MosaicReader, grid: GridKind) -> Self {
-        match grid {
-            GridKind::H3 => Self::for_mosaic(mosaic),
-            GridKind::A5 | GridKind::S2 | GridKind::Healpix => Self::Latitude,
+        if grid.spec().row_space_eviction {
+            Self::for_mosaic(mosaic)
+        } else {
+            Self::Latitude
         }
     }
 

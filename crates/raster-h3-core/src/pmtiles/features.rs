@@ -440,9 +440,16 @@ pub fn build_pmtiles_metadata(
 
 /// Standard fields map for H3 vector tiles containing h3_index, h3_hex, and resolution
 pub fn build_default_pmtiles_fields() -> serde_json::Value {
+    build_default_pmtiles_fields_for(crate::grid::GridKind::H3)
+}
+
+/// The `vector_layers` fields every cell feature of `grid` carries: its index, its
+/// hexadecimal id and its resolution.
+pub fn build_default_pmtiles_fields_for(grid: crate::grid::GridKind) -> serde_json::Value {
+    let spec = grid.spec();
     json!({
-        "h3_index": "Number",
-        "h3_hex": "String",
+        (spec.index_column): "Number",
+        (spec.hex_column): "String",
         "resolution": "Number"
     })
 }

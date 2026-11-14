@@ -11,7 +11,7 @@ use crate::encoding::{
     a5_index_to_wkb, fast_hex_u64, h3_index_to_wkb, parse_hex_u64, wkb_to_multipolygon, WkbBuf,
     WKB_BUF_LEN,
 };
-use crate::grid::{a5_is_valid_cell, GridKind};
+use crate::grid::{a5_is_valid_cell, GridKind, PolygonFill};
 use crate::raster::geotiff::GeoTiffStreamReader;
 
 /// Approximate H3 cell areas in m^2 by resolution (0 to 15) for query planner cardinality estimation.
@@ -377,10 +377,10 @@ pub fn grid_polygon_to_cells_wkb_into(
     mode: ContainmentMode,
     out: &mut Vec<u64>,
 ) -> Result<(), PolygonToCellsError> {
-    match grid {
-        GridKind::H3 => h3_polygon_to_cells_wkb_into(wkb, res, mode, out),
-        GridKind::A5 => a5_polygon_to_cells_wkb_into(wkb, res, mode, out),
-        GridKind::S2 | GridKind::Healpix => {
+    match grid.spec().polygon_fill {
+        PolygonFill::H3Tiler => h3_polygon_to_cells_wkb_into(wkb, res, mode, out),
+        PolygonFill::A5Native => a5_polygon_to_cells_wkb_into(wkb, res, mode, out),
+        PolygonFill::NestedDescent => {
             out.clear();
             let level = u8::try_from(res)
                 .ok()

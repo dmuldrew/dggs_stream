@@ -49,6 +49,7 @@ pub fn compute_cell_south_lat_for(grid: GridKind, cell_u64: u64) -> f64 {
     if grid.is_south_pole_cell(cell_u64) {
         return -90.0;
     }
+    let spec = grid.spec();
     let mut verts = [(0.0, 0.0); 10];
     let n = grid.boundary_lng_lat(cell_u64, &mut verts);
     if n == 0 {
@@ -58,16 +59,15 @@ pub fn compute_cell_south_lat_for(grid: GridKind, cell_u64: u64) -> f64 {
     for i in 0..n {
         let (p_lng, p_lat) = verts[i];
         let (q_lng, q_lat) = verts[(i + 1) % n];
-        if grid != GridKind::H3 && (p_lat <= -89.0 || q_lat <= -89.0) {
+        // A vertex on the pole has no longitude of its own, so the longitude spans
+        // below say nothing about an edge that ends there.
+        if spec.has_pole_vertices() && (p_lat <= -89.0 || q_lat <= -89.0) {
             return -90.0;
         }
         let mut edge_south = p_lat.min(q_lat).next_down();
-        // A HEALPix cell is a diamond in a projection whose y depends on latitude alone,
-        // so its south vertex is its southernmost point: no padding. A5 edges are not
-        // great-circle arcs and can dip below both endpoints in either hemisphere, so
-        // every A5 edge is padded.
-        if grid != GridKind::Healpix && (!grid.has_geodesic_edges() || p_lat <= 0.0 || q_lat <= 0.0)
-        {
+        // Whether the edge can pass south of both endpoints depends on the grid's edge
+        // model (see `GridSpec::edge_dips_south`).
+        if spec.edge_dips_south(p_lat, q_lat) {
             // Longitude differences are bounded above by both the direct and wrapped routes.
             let direct_lo = (p_lng - q_lng).abs();
             let direct_hi = direct_lo.next_up();

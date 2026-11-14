@@ -125,6 +125,19 @@ pub fn index_a5(spherical: a5::coordinate_systems::Spherical, res: u8) -> Option
     });
     result
 }
+/// Make the `a5` crate forget the cell it looked up last at `res`, before a point within
+/// [`crate::grid::A5_POLE_GUARD_DEG`] of a pole is indexed there.
+///
+/// `a5` keeps the last cell found per thread and first tests a new point against it. For
+/// a point that close to a pole the test accepts any cached polar cell, including one at
+/// the opposite pole, so the answer would depend on the previous sample. The cache only
+/// answers for the resolution it holds, so a lookup at another resolution displaces it.
+#[inline(never)]
+pub fn a5_forget_last_cell(spherical: a5::coordinate_systems::Spherical, res: u8) {
+    let other = if res == 0 { 1 } else { res - 1 };
+    let _ = a5::core::cell::spherical_to_cell(spherical, i32::from(other));
+}
+
 /// Index one spherical point across every requested A5 resolution, sharing the
 /// authalic projection computed once per sample.
 #[inline(always)]

@@ -370,6 +370,9 @@ pub fn a5_index_to_wkb(a5_index: u64, buf: &mut WkbBuf) -> Option<usize> {
 /// Returns `None` if the index is not a valid cell of `grid`.
 #[inline]
 pub fn cell_index_to_wkb(grid: GridKind, cell_index: u64, buf: &mut WkbBuf) -> Option<usize> {
+    // H3's encoder reads the boundary straight from `h3o` and caches the pole cells per
+    // resolution; it writes the same bytes as the path below, faster, and the default
+    // scan output calls it for every cell.
     if grid == GridKind::H3 {
         return h3_index_to_wkb(cell_index, buf);
     }

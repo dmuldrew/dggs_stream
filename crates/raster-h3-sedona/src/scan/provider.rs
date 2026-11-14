@@ -155,30 +155,15 @@ const KM_PER_DEG_LON_EQUATOR: f64 = 111.0;
 /// Beyond this latitude the widened box spans every longitude.
 const POLAR_LAT: f64 = 89.0;
 
-/// A distance larger than the diameter of any cell of `grid` at `resolution`, including
-/// the samples a cell owns along its geodesic edges.
+/// A distance larger than the diameter of any cell of `grid` at `resolution`
+/// ([`GridSpec::max_cell_diameter_km`]); `None` for a resolution the grid does not have.
 ///
-/// The largest H3 cells have edges about 1.4x the average and a diameter about 2x their
-/// edge, so roughly 2.8x the average edge; 4x leaves headroom. The other grids use four
-/// times core's bound on a cell's angular radius: twice it is the diameter only for a
-/// cell centred in its extent, and stretched HEALPix cells near 45 degrees are not.
+/// [`GridSpec::max_cell_diameter_km`]: raster_h3_core::grid::GridSpec::max_cell_diameter_km
 fn cell_margin_km(grid: GridKind, resolution: u8) -> Option<f64> {
-    if resolution > grid.max_resolution() {
-        return None;
-    }
-    match grid {
-        GridKind::H3 => h3o::Resolution::try_from(resolution)
-            .ok()
-            .map(|r| 4.0 * r.edge_length_km()),
-        _ => Some(
-            4.0 * raster_h3_core::pmtiles::max_cell_radius_deg(grid, resolution)
-                * KM_PER_DEG_GREAT_CIRCLE,
-        ),
-    }
+    let spec = grid.spec();
+    spec.has_resolution(resolution)
+        .then(|| spec.max_cell_diameter_km(resolution))
 }
-
-/// Kilometres per degree of great-circle arc, rounded up so margins come out larger.
-const KM_PER_DEG_GREAT_CIRCLE: f64 = 111.4;
 
 /// Widen a `[min_lon, min_lat, max_lon, max_lat]` box by `margin_km` on every side. The
 /// result crosses the antimeridian (`min_lon > max_lon`) when the margin wraps, and spans
@@ -292,7 +277,7 @@ mod bbox_tests {
 
     #[test]
     fn margin_exceeds_cell_diameters_on_every_grid() {
-        for grid in [GridKind::A5, GridKind::S2, GridKind::Healpix] {
+        for grid in GridKind::ALL {
             assert_eq!(cell_margin_km(grid, grid.max_resolution() + 1), None);
             for res in 0..=7u8 {
                 let margin = cell_margin_km(grid, res).unwrap();
