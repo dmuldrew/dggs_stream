@@ -14,6 +14,7 @@ use crate::aggregator::multi_horizon::{
     MultiCategoricalRecord, MultiContinuousRecord, MultiResolutionConfig, MultiScanHorizonStreamer,
     QuantilePlan, QuantileTarget,
 };
+use crate::aggregator::output_policy::{CategoricalStats, ContinuousStats, OutputPolicy};
 use crate::encoding::{cell_index_to_wkb, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
 use crate::error::{RasterH3Error, Result};
 use crate::grid::GridKind;
@@ -160,6 +161,24 @@ impl ColumnSchema {
                 ColumnField::new("wkb", ArrowDataType::Binary, false),
             ],
         }
+    }
+
+    /// This schema under `policy`: when all-NoData cells are output without a NoData
+    /// value, the statistics that are then NULL (`mean`, `min`, `max`, the majority
+    /// class or category) become nullable.
+    pub fn with_output_policy(mut self, policy: &OutputPolicy) -> Self {
+        if !policy.emits_nodata() {
+            return self;
+        }
+        for field in &mut self.fields {
+            let nullable = match field.name.as_str() {
+                "mean" | "min" | "max" => policy.nodata_stat().is_none(),
+                "majority_class" | "category" => policy.nodata_class().is_none(),
+                _ => false,
+            };
+            field.nullable |= nullable;
+        }
+        self
     }
 
     /// Project a subset of columns by index.
@@ -408,7 +427,36 @@ impl RecordBatch {
         quantiles: &[QuantileTarget],
         projection: Option<&[usize]>,
     ) -> Result<Self> {
-        let full_schema = ColumnSchema::continuous_for(grid, quantiles);
+        Self::from_continuous_records_with(
+            grid,
+            &OutputPolicy::default(),
+            records,
+            quantiles,
+            projection,
+        )
+    }
+
+    /// [`Self::from_continuous_records_for`] under an [`OutputPolicy`]: statistics are
+    /// rounded to its decimals, and a cell without samples takes its NoData value (NULL
+    /// without one).
+    pub fn from_continuous_records_with(
+        grid: GridKind,
+        policy: &OutputPolicy,
+        records: &[MultiContinuousRecord],
+        quantiles: &[QuantileTarget],
+        projection: Option<&[usize]>,
+    ) -> Result<Self> {
+        let full_schema = ColumnSchema::continuous_for(grid, quantiles).with_output_policy(policy);
+        let needs_stats =
+            projection.is_none_or(|p| p.iter().any(|i| matches!(i, 2 | 3 | 5 | 6 | 7)));
+        let stats: Vec<ContinuousStats> = if needs_stats {
+            records
+                .iter()
+                .map(|r| policy.continuous(&r.accumulator))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let active_indices: Vec<usize> = match projection {
             Some(indices) => indices.to_vec(),
             None => (0..full_schema.fields.len()).collect(),
@@ -462,44 +510,16 @@ impl RecordBatch {
                         validity: None,
                     }
                 }
-                2 => ColumnArray::Float64 {
-                    values: records.iter().map(|r| r.accumulator.mean()).collect(),
-                    validity: None,
-                },
-                3 => {
-                    let mut values = Vec::with_capacity(n);
-                    let mut validity = Vec::with_capacity(n);
-                    let mut has_null = false;
-                    for r in records {
-                        let sd = r.accumulator.stddev();
-                        if sd.is_finite() {
-                            values.push(sd);
-                            validity.push(true);
-                        } else {
-                            values.push(0.0);
-                            validity.push(false);
-                            has_null = true;
-                        }
-                    }
-                    ColumnArray::Float64 {
-                        values,
-                        validity: if has_null { Some(validity) } else { None },
-                    }
-                }
+                2 => optional_f64_column(stats.iter().map(|s| s.mean)),
+                3 => optional_f64_column(stats.iter().map(|s| s.stddev)),
                 4 => ColumnArray::Float64 {
                     values: records.iter().map(|r| r.accumulator.count).collect(),
                     validity: None,
                 },
-                5 => ColumnArray::Float64 {
-                    values: records.iter().map(|r| r.accumulator.min).collect(),
-                    validity: None,
-                },
-                6 => ColumnArray::Float64 {
-                    values: records.iter().map(|r| r.accumulator.max).collect(),
-                    validity: None,
-                },
+                5 => optional_f64_column(stats.iter().map(|s| s.min)),
+                6 => optional_f64_column(stats.iter().map(|s| s.max)),
                 7 => ColumnArray::Float64 {
-                    values: records.iter().map(|r| r.accumulator.sum).collect(),
+                    values: stats.iter().map(|s| s.sum).collect(),
                     validity: None,
                 },
                 8 => ColumnArray::UInt8 {
@@ -528,23 +548,12 @@ impl RecordBatch {
                             "Quantile column {q_col} is not configured"
                         ))
                     })?;
-                    let mut values = Vec::with_capacity(n);
-                    let mut validity = Vec::with_capacity(n);
-                    let mut has_null = false;
-                    for &val in &q_values[slot] {
-                        if val.is_finite() {
-                            values.push(val);
-                            validity.push(true);
-                        } else {
-                            values.push(0.0);
-                            validity.push(false);
-                            has_null = true;
-                        }
-                    }
-                    ColumnArray::Float64 {
-                        values,
-                        validity: if has_null { Some(validity) } else { None },
-                    }
+                    optional_f64_column(
+                        records
+                            .iter()
+                            .zip(&q_values[slot])
+                            .map(|(r, &val)| policy.derived(r.accumulator.count, val)),
+                    )
                 }
                 _ => unreachable!(),
             };
@@ -572,7 +581,24 @@ impl RecordBatch {
         records: &[MultiCategoricalRecord],
         projection: Option<&[usize]>,
     ) -> Result<Self> {
-        let full_schema = ColumnSchema::categorical_wide_for(grid);
+        Self::from_categorical_wide_records_with(
+            grid,
+            &OutputPolicy::default(),
+            records,
+            projection,
+        )
+    }
+
+    /// [`Self::from_categorical_wide_records_for`] under an [`OutputPolicy`]: fractions
+    /// and entropy are rounded to its decimals, and a cell without samples takes its
+    /// NoData value as class (NULL without an integral one).
+    pub fn from_categorical_wide_records_with(
+        grid: GridKind,
+        policy: &OutputPolicy,
+        records: &[MultiCategoricalRecord],
+        projection: Option<&[usize]>,
+    ) -> Result<Self> {
+        let full_schema = ColumnSchema::categorical_wide_for(grid).with_output_policy(policy);
         let active_indices: Vec<usize> = match projection {
             Some(indices) => indices.to_vec(),
             None => (0..full_schema.fields.len()).collect(),
@@ -583,19 +609,14 @@ impl RecordBatch {
         let mut hex_buf = [0u8; 16];
         let mut wkb_buf: WkbBuf = [0u8; WKB_BUF_LEN];
 
-        // Precompute majority stats if any majority column is projected
-        let needs_majority = active_indices.iter().any(|&i| (2..=4).contains(&i));
-        let majorities: Vec<(i64, f64, f64)> = if needs_majority {
-            records.iter().map(|r| r.accumulator.majority()).collect()
-        } else {
-            Vec::new()
-        };
-
-        let needs_entropy = active_indices.iter().any(|&i| i == 9 || i == 10);
-        let entropies: Vec<f64> = if needs_entropy {
+        // Majority and entropy are computed once per record, and only if projected.
+        let needs_stats = active_indices
+            .iter()
+            .any(|&i| (2..=4).contains(&i) || i == 9 || i == 10);
+        let stats: Vec<CategoricalStats> = if needs_stats {
             records
                 .iter()
-                .map(|r| r.accumulator.shannon_entropy())
+                .map(|r| policy.categorical(&r.accumulator))
                 .collect()
         } else {
             Vec::new()
@@ -619,16 +640,13 @@ impl RecordBatch {
                         validity: None,
                     }
                 }
-                2 => ColumnArray::Int64 {
-                    values: majorities.iter().map(|m| m.0).collect(),
-                    validity: None,
-                },
+                2 => optional_i64_column(stats.iter().map(|s| s.majority_class)),
                 3 => ColumnArray::Float64 {
-                    values: majorities.iter().map(|m| m.2).collect(),
+                    values: stats.iter().map(|s| s.majority_fraction).collect(),
                     validity: None,
                 },
                 4 => ColumnArray::Float64 {
-                    values: majorities.iter().map(|m| m.1).collect(),
+                    values: stats.iter().map(|s| s.majority_count).collect(),
                     validity: None,
                 },
                 5 | 11 => ColumnArray::Int64 {
@@ -654,7 +672,7 @@ impl RecordBatch {
                     validity: None,
                 },
                 9 | 10 => ColumnArray::Float64 {
-                    values: entropies.clone(),
+                    values: stats.iter().map(|s| s.shannon_entropy).collect(),
                     validity: None,
                 },
                 12 => {
@@ -681,6 +699,34 @@ impl RecordBatch {
             columns,
             num_rows: n,
         })
+    }
+}
+
+/// A `Float64` column from optional values, with a validity bitmap only if one is `None`.
+fn optional_f64_column(values: impl Iterator<Item = Option<f64>>) -> ColumnArray {
+    let (mut out, mut validity, mut has_null) = (Vec::new(), Vec::new(), false);
+    for value in values {
+        has_null |= value.is_none();
+        validity.push(value.is_some());
+        out.push(value.unwrap_or(0.0));
+    }
+    ColumnArray::Float64 {
+        values: out,
+        validity: has_null.then_some(validity),
+    }
+}
+
+/// An `Int64` column from optional values, with a validity bitmap only if one is `None`.
+fn optional_i64_column(values: impl Iterator<Item = Option<i64>>) -> ColumnArray {
+    let (mut out, mut validity, mut has_null) = (Vec::new(), Vec::new(), false);
+    for value in values {
+        has_null |= value.is_none();
+        validity.push(value.is_some());
+        out.push(value.unwrap_or(0));
+    }
+    ColumnArray::Int64 {
+        values: out,
+        validity: has_null.then_some(validity),
     }
 }
 
@@ -748,7 +794,8 @@ impl ContinuousBatchReader {
         batch_size: usize,
         limit: Option<usize>,
     ) -> Result<Self> {
-        let full_schema = ColumnSchema::continuous_for(streamer.grid(), &quantiles);
+        let full_schema = ColumnSchema::continuous_for(streamer.grid(), &quantiles)
+            .with_output_policy(&streamer.output_policy());
         let schema = match &projection {
             Some(indices) => Arc::new(full_schema.project(indices)?),
             None => Arc::new(full_schema),
@@ -809,8 +856,9 @@ impl Iterator for ContinuousBatchReader {
                 if let Some(rem) = &mut self.remaining_limit {
                     *rem = rem.saturating_sub(count);
                 }
-                Some(RecordBatch::from_continuous_records_for(
+                Some(RecordBatch::from_continuous_records_with(
                     self.streamer.grid(),
+                    &self.streamer.output_policy(),
                     &records,
                     &self.quantiles,
                     self.projection.as_deref(),
@@ -865,7 +913,8 @@ impl CategoricalBatchReader {
         let full_schema = match format {
             CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(streamer.grid()),
             CategoricalFormat::Long => ColumnSchema::categorical_long_for(streamer.grid()),
-        };
+        }
+        .with_output_policy(&streamer.output_policy());
         let schema = match &projection {
             Some(indices) => Arc::new(full_schema.project(indices)?),
             None => Arc::new(full_schema),
@@ -900,6 +949,7 @@ impl CategoricalBatchReader {
     fn next_long_batch(&mut self, target: usize) -> Option<Result<RecordBatch>> {
         // Expand one cell at a time and only as far as this batch needs, so a
         // high-cardinality cell never materializes more rows than requested.
+        let policy = self.streamer.output_policy();
         let mut rows: Vec<CategoricalLongRow> = Vec::with_capacity(target);
         while rows.len() < target {
             if self.long_cursor.remaining() > 0 {
@@ -911,10 +961,14 @@ impl CategoricalBatchReader {
                 break;
             }
             let cursor = &mut self.long_cursor;
+            let mut empty_cell = None;
             match self.streamer.drain_completed_into(1, |_, rec| {
-                // Cells without counted pixels produce no long rows.
                 if rec.accumulator.total_count > 0.0 {
                     cursor.load(&rec);
+                } else {
+                    // Only `NodataPolicy::Emit` streams hold such cells: one row with
+                    // no samples stands for the cell.
+                    empty_cell = Some((rec.h3_index, rec.resolution));
                 }
             }) {
                 Ok(0) => self.finished = true,
@@ -923,6 +977,18 @@ impl CategoricalBatchReader {
                     self.finished = true;
                     return Some(Err(e));
                 }
+            }
+            if let Some((cell_u64, resolution)) = empty_cell {
+                rows.push(CategoricalLongRow {
+                    cell_u64,
+                    resolution,
+                    category: policy.nodata_class().unwrap_or(0),
+                    count: 0.0,
+                    fraction: 0.0,
+                    total_count: 0.0,
+                    entropy: 0.0,
+                    distinct_classes: 0,
+                });
             }
         }
 
@@ -937,7 +1003,8 @@ impl CategoricalBatchReader {
         }
 
         let grid = self.streamer.grid();
-        let full_schema = ColumnSchema::categorical_long_for(grid);
+        let full_schema = ColumnSchema::categorical_long_for(grid).with_output_policy(&policy);
+        let null_class = policy.nodata_class().is_none();
         let active_indices: Vec<usize> = match &self.projection {
             Some(indices) => indices.clone(),
             None => (0..full_schema.fields.len()).collect(),
@@ -962,16 +1029,16 @@ impl CategoricalBatchReader {
                         .collect(),
                     validity: None,
                 },
-                2 => ColumnArray::Int64 {
-                    values: rows.iter().map(|r| r.category).collect(),
-                    validity: None,
-                },
+                2 => optional_i64_column(rows.iter().map(|r| {
+                    // A row without samples carries the NoData class, or NULL.
+                    (r.total_count > 0.0 || !null_class).then_some(r.category)
+                })),
                 3 => ColumnArray::Float64 {
                     values: rows.iter().map(|r| r.count).collect(),
                     validity: None,
                 },
                 4 => ColumnArray::Float64 {
-                    values: rows.iter().map(|r| r.fraction).collect(),
+                    values: rows.iter().map(|r| policy.round(r.fraction)).collect(),
                     validity: None,
                 },
                 5 => ColumnArray::Float64 {
@@ -983,7 +1050,7 @@ impl CategoricalBatchReader {
                     validity: None,
                 },
                 7 | 8 => ColumnArray::Float64 {
-                    values: rows.iter().map(|r| r.entropy).collect(),
+                    values: rows.iter().map(|r| policy.round(r.entropy)).collect(),
                     validity: None,
                 },
                 9 | 10 => ColumnArray::Int64 {
@@ -1046,8 +1113,9 @@ impl Iterator for CategoricalBatchReader {
                         if let Some(rem) = &mut self.remaining_limit {
                             *rem = rem.saturating_sub(count);
                         }
-                        Some(RecordBatch::from_categorical_wide_records_for(
+                        Some(RecordBatch::from_categorical_wide_records_with(
                             self.streamer.grid(),
+                            &self.streamer.output_policy(),
                             &records,
                             self.projection.as_deref(),
                         ))

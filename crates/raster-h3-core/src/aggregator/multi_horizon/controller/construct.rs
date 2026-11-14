@@ -218,6 +218,9 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             resolution_u8s,
             nodata: config.custom_nodata,
             apply_scale_offset: config.apply_scale_offset,
+            emit_nodata: config.nodata_policy
+                == crate::aggregator::output_policy::NodataPolicy::Emit,
+            output_policy: config.output_policy(),
             transform_failure_counter: config.transform_failure_counter.clone(),
             strict_transforms: config.strict_transforms,
             bbox: config.bbox,

@@ -8,10 +8,10 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use raster_h3_cli::{
-    export_raster_to_parquet_with_grid, export_raster_to_pmtiles_with_grid, merge_partition_files,
-    parse_merge_args, parse_parquet_to_pmtiles_args, parse_plan_args, parse_stream_args,
-    plan_raster_partitions, stream_raster_to_writer, transcode_parquet_to_pmtiles, write_plan,
-    StreamOutputFormat,
+    export_raster_to_parquet_with_policy, export_raster_to_pmtiles_with_policy,
+    merge_partition_files, parse_merge_args, parse_parquet_to_pmtiles_args, parse_plan_args,
+    parse_stream_args, plan_raster_partitions, stream_raster_to_writer,
+    transcode_parquet_to_pmtiles, write_plan, StreamOutputFormat,
 };
 use raster_h3_core::error::Result;
 
@@ -44,6 +44,12 @@ fn print_help() {
           --format <wide|long>       Categorical output format (default: wide)\n  \
           --crs <CRS>                Override source CRS (e.g. EPSG:4326)\n  \
           --nodata <FLOAT>           Override nodata value\n  \
+          --nodata-policy <omit|emit> omit (default): skip NoData and drop cells without\n                                     \
+                                     a valid sample; emit: output every cell a pixel\n                                     \
+                                     falls in (count 0 where all samples are NoData)\n  \
+          --emit-nodata-value <NUM>  Value of an all-NoData cell's statistics under\n                                     \
+                                     `--nodata-policy emit` (default: null)\n  \
+          --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
           --raw-values               Skip GDAL band scale/offset calibration\n  \
           --bbox <minx,miny,maxx,maxy> WGS84 bounding box filter\n  \
           --columns <col1,col2,...>  Column projection pushdown\n  \
@@ -112,7 +118,7 @@ fn main() {
                     "Missing -o / --output path for parquet export".into(),
                 )
             })?;
-            export_raster_to_parquet_with_grid(
+            export_raster_to_parquet_with_policy(
                 opts.grid,
                 &opts.input_path,
                 Path::new(&out_path),
@@ -123,6 +129,7 @@ fn main() {
                 opts.bbox,
                 true,
                 opts.apply_scale_offset,
+                &opts.output,
             )
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
@@ -132,7 +139,7 @@ fn main() {
                     "Missing -o / --output path for pmtiles export".into(),
                 )
             })?;
-            export_raster_to_pmtiles_with_grid(
+            export_raster_to_pmtiles_with_policy(
                 opts.grid,
                 &opts.input_path,
                 Path::new(&out_path),
@@ -142,6 +149,7 @@ fn main() {
                 opts.nodata,
                 opts.bbox,
                 opts.apply_scale_offset,
+                &opts.output,
             )
         }),
         "parquet-to-pmtiles" => parse_parquet_to_pmtiles_args(rest).and_then(|args| {

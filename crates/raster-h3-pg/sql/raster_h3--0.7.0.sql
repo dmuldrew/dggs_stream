@@ -52,6 +52,13 @@ LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- ============================================================================
 -- Set-Returning Functions (SRFs) for Raster Aggregation
+--
+-- nodata_policy: 'omit' (default) skips NoData samples and returns no row for
+-- a cell without a valid sample. 'emit' returns every cell a pixel falls in;
+-- a cell without a valid sample has count 0 and its mean / min / max (or
+-- majority_class) are emit_nodata_value, or NULL when that is NULL.
+-- decimals: round the floating-point statistics to this many decimals (0..15);
+-- NULL leaves them as computed.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION h3_raster_continuous_aggregate(
@@ -59,7 +66,10 @@ CREATE OR REPLACE FUNCTION h3_raster_continuous_aggregate(
     h3_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     h3_index bigint,
@@ -81,7 +91,10 @@ CREATE OR REPLACE FUNCTION h3_raster_categorical_aggregate(
     h3_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     h3_index bigint,
@@ -101,10 +114,10 @@ LANGUAGE C VOLATILE PARALLEL SAFE;
 
 -- The raster SRFs open server-side files with the server's OS privileges, so
 -- restrict them like COPY FROM a file: superusers and pg_read_server_files only.
-REVOKE EXECUTE ON FUNCTION h3_raster_continuous_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION h3_raster_categorical_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION h3_raster_continuous_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
-GRANT EXECUTE ON FUNCTION h3_raster_categorical_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
+REVOKE EXECUTE ON FUNCTION h3_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION h3_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION h3_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
+GRANT EXECUTE ON FUNCTION h3_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
 
 CREATE OR REPLACE FUNCTION h3_lonlat_to_cell(lon double precision, lat double precision, res bigint)
 RETURNS bigint
@@ -183,7 +196,10 @@ CREATE OR REPLACE FUNCTION a5_raster_continuous_aggregate(
     a5_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     a5_index bigint,
@@ -205,7 +221,10 @@ CREATE OR REPLACE FUNCTION a5_raster_categorical_aggregate(
     a5_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     a5_index bigint,
@@ -223,10 +242,10 @@ RETURNS TABLE (
 AS 'MODULE_PATHNAME', 'pg_a5_raster_categorical_aggregate'
 LANGUAGE C VOLATILE PARALLEL SAFE;
 
-REVOKE EXECUTE ON FUNCTION a5_raster_continuous_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION a5_raster_categorical_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION a5_raster_continuous_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
-GRANT EXECUTE ON FUNCTION a5_raster_categorical_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
+REVOKE EXECUTE ON FUNCTION a5_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION a5_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION a5_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
+GRANT EXECUTE ON FUNCTION a5_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
 
 -- ============================================================================
 -- S2 scalar helper functions and raster SRFs
@@ -287,7 +306,10 @@ CREATE OR REPLACE FUNCTION s2_raster_continuous_aggregate(
     s2_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     s2_index bigint,
@@ -309,7 +331,10 @@ CREATE OR REPLACE FUNCTION s2_raster_categorical_aggregate(
     s2_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     s2_index bigint,
@@ -327,10 +352,10 @@ RETURNS TABLE (
 AS 'MODULE_PATHNAME', 'pg_s2_raster_categorical_aggregate'
 LANGUAGE C VOLATILE PARALLEL SAFE;
 
-REVOKE EXECUTE ON FUNCTION s2_raster_continuous_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION s2_raster_categorical_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION s2_raster_continuous_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
-GRANT EXECUTE ON FUNCTION s2_raster_categorical_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
+REVOKE EXECUTE ON FUNCTION s2_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION s2_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION s2_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
+GRANT EXECUTE ON FUNCTION s2_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
 
 -- ============================================================================
 -- HEALPix scalar helper functions and raster SRFs
@@ -391,7 +416,10 @@ CREATE OR REPLACE FUNCTION healpix_raster_continuous_aggregate(
     healpix_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     healpix_index bigint,
@@ -413,7 +441,10 @@ CREATE OR REPLACE FUNCTION healpix_raster_categorical_aggregate(
     healpix_res integer DEFAULT 8,
     source_crs text DEFAULT NULL,
     nodata double precision DEFAULT NULL,
-    bbox text DEFAULT NULL
+    bbox text DEFAULT NULL,
+    nodata_policy text DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals integer DEFAULT NULL
 )
 RETURNS TABLE (
     healpix_index bigint,
@@ -431,10 +462,10 @@ RETURNS TABLE (
 AS 'MODULE_PATHNAME', 'pg_healpix_raster_categorical_aggregate'
 LANGUAGE C VOLATILE PARALLEL SAFE;
 
-REVOKE EXECUTE ON FUNCTION healpix_raster_continuous_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION healpix_raster_categorical_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION healpix_raster_continuous_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
-GRANT EXECUTE ON FUNCTION healpix_raster_categorical_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
+REVOKE EXECUTE ON FUNCTION healpix_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION healpix_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION healpix_raster_continuous_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
+GRANT EXECUTE ON FUNCTION healpix_raster_categorical_aggregate(text, integer, text, double precision, text, text, double precision, integer) TO pg_read_server_files;
 
 -- ============================================================================
 -- Automatic resolution

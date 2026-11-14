@@ -52,6 +52,7 @@ pub use pmtiles::{
     PmtilesWriteOptions,
 };
 pub use polyfill::H3PolygonToCells;
+pub use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 pub use raster_h3_core::grid::GridKind;
 pub use raster_h3_core::resolution::ResolutionSpec;
 pub use table::{RasterH3Table, TableKind};

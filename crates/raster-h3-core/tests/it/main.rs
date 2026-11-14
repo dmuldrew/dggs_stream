@@ -27,6 +27,7 @@ mod mosaic;
 mod multi_resolution;
 mod multiband_and_query_pushdown;
 mod mvt_geometry;
+mod nodata_policy;
 mod partitioned_scan;
 mod performance;
 mod pmtiles;

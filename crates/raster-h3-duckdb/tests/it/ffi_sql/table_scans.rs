@@ -767,3 +767,156 @@ fn test_auto_resolution_on_every_grid() {
     let missing = std::path::Path::new("/nonexistent/raster.tif");
     assert!(scan_resolutions(missing, GridKind::H3, "auto").is_err());
 }
+
+/// One row of a continuous scan: `(cell, mean or NULL, count, min or NULL)`.
+type StatRow = (u64, Option<f64>, f64, Option<f64>);
+
+/// Binds and scans `raster_h3_bind` with the given named parameters.
+fn scan_stats(path: &std::path::Path, extra: Vec<(&str, MockVal)>) -> Result<Vec<StatRow>, String> {
+    let mut named = HashMap::new();
+    named.insert("geom".to_string(), MockVal::Bool(true));
+    for (name, value) in extra {
+        named.insert(name.to_string(), value);
+    }
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: live `MockBindContext` for the installed mock C API.
+    unsafe {
+        raster_h3_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    if let Some(error) = bind_ctx.error.take() {
+        return Err(error);
+    }
+    let columns = bind_ctx.result_columns.len();
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, (0..columns).collect());
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying bind_data from `bind_ctx`.
+    unsafe {
+        raster_h3_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_init_local(&mut local_ctx as *mut MockInitContext as duckdb_init_info);
+    }
+    if let Some(error) = init_ctx.error.take() {
+        return Err(error);
+    }
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut rows = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live `MockFuncContext` and `MockDataChunk`.
+        unsafe {
+            raster_h3_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func_ctx.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        for i in 0..chunk.size {
+            // SAFETY: columns 0 (cell), 2 (mean), 4 (count) and 5 (min) hold `chunk.size`
+            // 8-byte values written by `raster_h3_scan`.
+            let f =
+                |col: usize| unsafe { *(chunk.vectors[col].data.as_ptr() as *const f64).add(i) };
+            let cell = chunk.vectors[0].data[i];
+            let mean = chunk.vectors[2].is_valid(i).then(|| f(2));
+            let min = chunk.vectors[5].is_valid(i).then(|| f(5));
+            rows.push((cell, mean, f(4), min));
+        }
+    }
+    rows.sort_by_key(|r| r.0);
+    Ok(rows)
+}
+
+#[test]
+fn test_nodata_policy_and_decimals() {
+    install_mock_api();
+    // NoData in the left third; values with fractional means elsewhere.
+    let (_tmp, path) = TestGeoTiffBuilder::new(48, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| {
+            if c < 16 {
+                -9999.0
+            } else {
+                ((c * 7 + r * 3) % 11) as f32 + 0.25
+            }
+        });
+    let base = || {
+        vec![
+            ("resolution", MockVal::Int(9)),
+            ("nodata", MockVal::Double(-9999.0)),
+        ]
+    };
+    let with = |extra: Vec<(&'static str, MockVal)>| {
+        let mut params = base();
+        params.extend(extra);
+        scan_stats(&path, params)
+    };
+
+    let omit = with(vec![]).unwrap();
+    assert!(omit.iter().all(|r| r.1.is_some() && r.2 > 0.0));
+    assert_eq!(
+        with(vec![("nodata_policy", MockVal::Str("omit".into()))]).unwrap(),
+        omit
+    );
+
+    // emit: the all-NoData cells appear with count 0 and NULL statistics.
+    let emit = with(vec![("nodata_policy", MockVal::Str("EMIT".into()))]).unwrap();
+    let empty: Vec<_> = emit.iter().filter(|r| r.2 == 0.0).collect();
+    assert!(!empty.is_empty() && emit.len() == omit.len() + empty.len());
+    assert!(empty.iter().all(|r| r.1.is_none() && r.3.is_none()));
+    let kept: Vec<_> = emit.iter().filter(|r| r.2 > 0.0).copied().collect();
+    assert_eq!(kept, omit);
+
+    // emit with a value: it replaces NULL.
+    let filled = with(vec![
+        ("nodata_policy", MockVal::Str("emit".into())),
+        ("emit_nodata_value", MockVal::Double(-1.5)),
+    ])
+    .unwrap();
+    assert_eq!(filled.len(), emit.len());
+    for row in filled.iter().filter(|r| r.2 == 0.0) {
+        assert_eq!((row.1, row.3), (Some(-1.5), Some(-1.5)));
+    }
+
+    // decimals: statistics are rounded, counts are not.
+    let rounded = with(vec![("decimals", MockVal::Int(1))]).unwrap();
+    assert_eq!(rounded.len(), omit.len());
+    assert!(omit.iter().any(|r| (r.1.unwrap() * 10.0).fract() != 0.0));
+    for (plain, round) in omit.iter().zip(&rounded) {
+        assert_eq!(round.0, plain.0);
+        assert_eq!(round.1, Some((plain.1.unwrap() * 10.0).round() / 10.0));
+        assert_eq!(round.2, plain.2);
+    }
+
+    for (bad, needle) in [
+        (
+            vec![("nodata_policy", MockVal::Str("drop".into()))],
+            "nodata_policy",
+        ),
+        (vec![("decimals", MockVal::Int(16))], "decimals"),
+        (vec![("decimals", MockVal::Int(-1))], "decimals"),
+        (
+            vec![("emit_nodata_value", MockVal::Double(0.0))],
+            "emit_nodata_value",
+        ),
+        (
+            vec![
+                ("nodata_policy", MockVal::Str("emit".into())),
+                ("min_count", MockVal::Double(2.0)),
+            ],
+            "min_count",
+        ),
+    ] {
+        let err = with(bad).unwrap_err();
+        assert!(err.contains(needle), "{err}");
+    }
+}

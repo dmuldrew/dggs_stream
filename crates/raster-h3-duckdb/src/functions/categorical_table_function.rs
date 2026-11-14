@@ -18,6 +18,7 @@ use crate::functions::partition_functions::{
 use crate::functions::raster_table::{self, add_geom_column, RasterTable, ScanContext};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
+use raster_h3_core::aggregator::output_policy::OutputPolicy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategoricalOutputFormat {
@@ -46,6 +47,8 @@ pub struct RasterH3CategoricalGlobalData {
     pub emit_geom: bool,
     /// Column index of `partial_state` for a partitioned scan.
     pub partial_state_column: Option<usize>,
+    /// NoData policy and value, and decimal rounding, of the values written.
+    pub policy: OutputPolicy,
 }
 
 pub type RasterH3CategoricalLocalData = TableFunctionLocalData;
@@ -178,6 +181,7 @@ impl RasterTable for CategoricalTable {
         config.min_majority_fraction = bind.min_majority_fraction;
         config.remapper = bind.remapper.clone();
         config.partition = bind.partition.clone();
+        let policy = config.output_policy();
 
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)
             .map_err(|e| format!("Failed to initialize categorical streamer: {}", e))?;
@@ -185,6 +189,7 @@ impl RasterTable for CategoricalTable {
         // Long-format columns 7/8 are the entropy aliases.
         let with_entropy = projected_columns.iter().any(|&c| c == 7 || c == 8);
         Ok(RasterH3CategoricalGlobalData {
+            policy,
             grid: bind.common.grid,
             streamer: Mutex::new(streamer),
             record_queue: ConcurrentRecordQueue::new(),
@@ -297,15 +302,22 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
 
         if out_maj_cls.is_some() || out_maj_frac.is_some() || out_maj_cnt.is_some() {
             for (i, rec) in batch.iter().enumerate() {
-                let (maj_cls, maj_cnt, maj_frac) = rec.accumulator.majority();
+                let stats = global.policy.categorical(&rec.accumulator);
                 if let Some(col) = out_maj_cls {
-                    writer.set_int64(col, i, maj_cls);
+                    // A cell without samples: the NoData class, or NULL.
+                    match stats.majority_class {
+                        Some(class) => writer.set_int64(col, i, class),
+                        None => {
+                            writer.set_int64(col, i, 0);
+                            writer.set_null(col, i);
+                        }
+                    }
                 }
                 if let Some(col) = out_maj_frac {
-                    writer.set_double(col, i, maj_frac);
+                    writer.set_double(col, i, stats.majority_fraction);
                 }
                 if let Some(col) = out_maj_cnt {
-                    writer.set_double(col, i, maj_cnt);
+                    writer.set_double(col, i, stats.majority_count);
                 }
             }
         }
@@ -324,7 +336,7 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
 
         if out_shannon.is_some() || out_entropy.is_some() {
             for (i, rec) in batch.iter().enumerate() {
-                let ent = rec.accumulator.shannon_entropy();
+                let ent = global.policy.round(rec.accumulator.shannon_entropy());
                 if let Some(col) = out_shannon {
                     writer.set_double(col, i, ent);
                 }

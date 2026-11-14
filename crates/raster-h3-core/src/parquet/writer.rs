@@ -20,6 +20,7 @@ use crate::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiCategoricalRecord, MultiContinuousRecord,
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
+use crate::aggregator::output_policy::OutputPolicy;
 use crate::encoding::{cell_index_to_wkb, extend_wkb_bounds, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
 use crate::grid::GridKind;
 
@@ -155,6 +156,7 @@ impl Default for ParquetExportConfig {
 /// Columnar buffer for continuous raster aggregation row groups
 pub struct ContinuousRowGroupBuffer {
     grid: GridKind,
+    policy: OutputPolicy,
     compact: bool,
     geoparquet: bool,
     h3_indices: Vec<i64>,
@@ -186,6 +188,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
     ) -> Self {
         Self {
             grid,
+            policy: OutputPolicy::default(),
             compact,
             geoparquet,
             h3_indices: Vec::with_capacity(capacity),
@@ -218,6 +221,10 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
         }
     }
 
+    fn set_output_policy(&mut self, policy: OutputPolicy) {
+        self.policy = policy;
+    }
+
     #[inline(always)]
     fn push_record(&mut self, record: Self::Record) {
         let cell_u64 = record.h3_index;
@@ -234,11 +241,13 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
             }
         }
 
-        self.min_values.push(acc.min);
-        self.max_values.push(acc.max);
-        self.sum_values.push(acc.sum);
-        self.avg_values.push(acc.mean());
-        self.pixel_counts.push(acc.count);
+        // The columns are REQUIRED: a statistic without a value is NaN.
+        let stats = self.policy.continuous(&acc);
+        self.min_values.push(stats.min.unwrap_or(f64::NAN));
+        self.max_values.push(stats.max.unwrap_or(f64::NAN));
+        self.sum_values.push(stats.sum);
+        self.avg_values.push(stats.mean.unwrap_or(f64::NAN));
+        self.pixel_counts.push(stats.count);
 
         if !self.compact {
             let mut hex_buf = [0u8; 16];
@@ -354,6 +363,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
 /// Columnar buffer for categorical raster aggregation row groups
 pub struct CategoricalRowGroupBuffer {
     grid: GridKind,
+    policy: OutputPolicy,
     compact: bool,
     geoparquet: bool,
     h3_indices: Vec<i64>,
@@ -385,6 +395,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
     ) -> Self {
         Self {
             grid,
+            policy: OutputPolicy::default(),
             compact,
             geoparquet,
             h3_indices: Vec::with_capacity(capacity),
@@ -417,11 +428,26 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
         }
     }
 
+    fn set_output_policy(&mut self, policy: OutputPolicy) {
+        self.policy = policy;
+    }
+
+    fn check_output_policy(policy: &OutputPolicy) -> Result<(), String> {
+        if policy.emits_nodata() && policy.nodata_class().is_none() {
+            return Err(
+                "a categorical Parquet export with nodata_policy 'emit' needs an integer \
+                 emit_nodata_value: its majority column cannot hold NULL"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     #[inline(always)]
     fn push_record(&mut self, record: Self::Record) {
         let cell_u64 = record.h3_index;
         let acc = record.accumulator;
-        let (maj_cat, _maj_cnt, maj_frac) = acc.majority();
+        let stats = self.policy.categorical(&acc);
         self.h3_indices.push(cell_u64 as i64);
 
         if self.geoparquet {
@@ -434,11 +460,12 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
             }
         }
 
-        self.majorities.push(maj_cat);
-        self.fractions.push(maj_frac);
-        self.pixel_counts.push(acc.total_count);
-        self.distinct_classes.push(acc.unique_classes() as i64);
-        self.entropies.push(acc.shannon_entropy());
+        // `check_output_policy` guarantees a class for cells without samples.
+        self.majorities.push(stats.majority_class.unwrap_or(0));
+        self.fractions.push(stats.majority_fraction);
+        self.pixel_counts.push(stats.total_count);
+        self.distinct_classes.push(stats.unique_classes);
+        self.entropies.push(stats.shannon_entropy);
 
         if !self.compact {
             let mut hex_buf = [0u8; 16];

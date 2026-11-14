@@ -4,6 +4,7 @@ use std::ffi::{c_char, c_int, CStr};
 
 use raster_h3_core::aggregator::multi_horizon::{QuantileTarget, ScanPartition, SpectralFormula};
 use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
+use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 use raster_h3_core::columnar::CategoricalFormat;
 use raster_h3_core::error::{RasterH3Error, Result};
 use raster_h3_core::grid::GridKind;
@@ -200,6 +201,46 @@ pub(crate) struct PyScanOptions {
     min_count: Option<f64>,
     min_mean: Option<f64>,
     max_mean: Option<f64>,
+    /// `omit` (default) or `emit`.
+    pub(crate) nodata_policy: Option<String>,
+    pub(crate) emit_nodata_value: Option<f64>,
+    pub(crate) decimals: Option<i64>,
+}
+
+/// The output policy of an options object: `nodata_policy`, `emit_nodata_value` and
+/// `decimals`, checked as the other engines check them.
+pub(crate) fn output_policy_of(
+    nodata_policy: Option<&str>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<i64>,
+) -> Result<OutputPolicy> {
+    let mut policy = OutputPolicy::default();
+    if let Some(name) = nodata_policy {
+        policy.nodata = NodataPolicy::parse(name).ok_or_else(|| {
+            RasterH3Error::InvalidParameter(format!(
+                "Invalid nodata_policy '{name}': expected {}",
+                NodataPolicy::EXPECTED
+            ))
+        })?;
+    }
+    if let Some(value) = emit_nodata_value {
+        if !policy.emits_nodata() {
+            return Err(RasterH3Error::InvalidParameter(
+                "emit_nodata_value needs nodata_policy 'emit'".into(),
+            ));
+        }
+        policy.nodata_value = Some(value);
+    }
+    if let Some(decimals) = decimals {
+        let max = i64::from(raster_h3_core::aggregator::output_policy::MAX_DECIMALS);
+        if !(0..=max).contains(&decimals) {
+            return Err(RasterH3Error::InvalidParameter(format!(
+                "decimals must be between 0 and {max}, got {decimals}"
+            )));
+        }
+        policy.decimals = Some(decimals as u8);
+    }
+    Ok(policy)
 }
 
 /// Names accepted for `overlap_rule`, as in DuckDB's `overlap_rule :=`.
@@ -282,6 +323,11 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         cfg.remapper = Some(CategoryRemapper::parse(spec)?.into_arc());
     }
     cfg.min_count = opts.min_count;
+    cfg.output = output_policy_of(
+        opts.nodata_policy.as_deref(),
+        opts.emit_nodata_value,
+        opts.decimals,
+    )?;
     for (name, value) in [("min_mean", opts.min_mean), ("max_mean", opts.max_mean)] {
         if value.is_some() && cfg.categorical {
             return Err(RasterH3Error::InvalidParameter(format!(

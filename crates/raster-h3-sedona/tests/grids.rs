@@ -673,3 +673,201 @@ async fn auto_resolution_matches_cells_to_pixels_on_every_grid() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nodata_policy_and_decimals_on_every_grid() {
+    use raster_h3_sedona::{NodataPolicy, OutputPolicy};
+    const NODATA: f32 = -9999.0;
+    // NoData in the left third; fractional values elsewhere. No GeoKeys: the CRS is given.
+    let pixel = |c: u32, r: u32| {
+        if c < SIZE / 3 {
+            NODATA
+        } else {
+            ((c * 7 + r * 3) % 11) as f32 + 0.375
+        }
+    };
+    let tif = common::write_tif_grid(SIZE, SIZE, (-122.45, 37.80), 0.001, pixel);
+    let src = source(&tif);
+    for grid in GridKind::ALL {
+        let res = res_of(grid);
+        let index = grid.index_column_name();
+        // `cell -> (valid count, valid sum)`, including cells with no valid sample.
+        let mut want: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
+        for r in 0..SIZE {
+            for c in 0..SIZE {
+                let lon = -122.45 + 0.001 * (f64::from(c) + 0.5);
+                let lat = 37.80 - 0.001 * (f64::from(r) + 0.5);
+                let e = want
+                    .entry(grid.cell_at(lat, lon, res).unwrap())
+                    .or_default();
+                if pixel(c, r) != NODATA {
+                    e.0 += 1.0;
+                    e.1 += f64::from(pixel(c, r));
+                }
+            }
+        }
+        let empty = want.values().filter(|v| v.0 == 0.0).count();
+        assert!(empty > 1 && empty < want.len(), "{grid}");
+
+        let table = |policy: OutputPolicy| {
+            let provider = ContinuousRasterTableProvider::try_new(&src, vec![res])
+                .unwrap()
+                .with_grid(grid)
+                .with_crs("EPSG:4326")
+                .with_nodata(f64::from(NODATA))
+                .with_output_policy(policy);
+            RasterH3Table::continuous(provider)
+        };
+        let query = |policy: OutputPolicy, sql: String| {
+            let ctx = context();
+            ctx.register_table("cells", Arc::new(table(policy)))
+                .unwrap();
+            async move { collect(&ctx, &sql).await }
+        };
+        let stats = format!("SELECT {index}, count, sum, mean, min FROM cells");
+
+        // omit: only cells with a valid sample; the columns are not nullable.
+        let omit = query(OutputPolicy::default(), stats.clone()).await;
+        assert_eq!(rows(&omit), want.len() - empty, "{grid}");
+        assert!(!omit[0]
+            .schema()
+            .field_with_name("mean")
+            .unwrap()
+            .is_nullable());
+
+        // emit: every cell; NULL mean and min where there is no valid sample.
+        let emit_policy = OutputPolicy {
+            nodata: NodataPolicy::Emit,
+            ..Default::default()
+        };
+        let emit = query(emit_policy, stats.clone()).await;
+        assert!(emit[0]
+            .schema()
+            .field_with_name("mean")
+            .unwrap()
+            .is_nullable());
+        let mut seen = 0;
+        for b in &emit {
+            let ids = b.column(0).as_primitive::<UInt64Type>();
+            let counts = b.column(1).as_primitive::<Float64Type>();
+            let sums = b.column(2).as_primitive::<Float64Type>();
+            for i in 0..b.num_rows() {
+                let (count, sum) = want[&ids.value(i)];
+                assert_eq!((counts.value(i), sums.value(i)), (count, sum), "{grid}");
+                assert_eq!(b.column(3).is_null(i), count == 0.0);
+                assert_eq!(b.column(4).is_null(i), count == 0.0);
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, want.len(), "{grid}");
+
+        // SQL sees the nulls, and a count filter is applied to the rows, not pushed.
+        let nulls = query(
+            emit_policy,
+            "SELECT COUNT(*) FROM cells WHERE mean IS NULL".into(),
+        )
+        .await;
+        assert_eq!(
+            nulls[0].column(0).as_primitive::<Int64Type>().value(0) as usize,
+            empty
+        );
+        let counted = query(emit_policy, "SELECT 1 FROM cells WHERE count >= 1".into()).await;
+        assert_eq!(rows(&counted), want.len() - empty, "{grid}");
+        let pushdown = table(emit_policy)
+            .supports_filters_pushdown(&[&col("count").gt_eq(lit(1.0))])
+            .unwrap();
+        assert_eq!(pushdown, vec![TableProviderFilterPushDown::Unsupported]);
+
+        // A NoData value and decimals.
+        let filled = query(
+            OutputPolicy {
+                nodata: NodataPolicy::Emit,
+                nodata_value: Some(-1.25),
+                decimals: Some(1),
+            },
+            stats.clone(),
+        )
+        .await;
+        assert!(!filled[0]
+            .schema()
+            .field_with_name("mean")
+            .unwrap()
+            .is_nullable());
+        for b in &filled {
+            let ids = b.column(0).as_primitive::<UInt64Type>();
+            let means = b.column(3).as_primitive::<Float64Type>();
+            for i in 0..b.num_rows() {
+                let (count, sum) = want[&ids.value(i)];
+                let expected = if count == 0.0 {
+                    -1.25
+                } else {
+                    (sum / count * 10.0).round() / 10.0
+                };
+                assert_eq!(means.value(i), expected, "{grid}");
+            }
+        }
+
+        // The table functions take the options as `key=value` strings.
+        let ctx = context();
+        let from = format!(
+            "{grid}_raster_continuous_aggregate('{src}', {res}, 'EPSG:4326', \
+             'nodata_policy=emit', 'decimals=0')"
+        );
+        // The function has no NoData override, so every cell has samples here.
+        let all = collect(&ctx, &format!("SELECT mean, count FROM {from}")).await;
+        assert_eq!(rows(&all), want.len(), "{grid}");
+        for b in &all {
+            let means = b.column(0).as_primitive::<Float64Type>();
+            assert!(means.values().iter().all(|m| m.fract() == 0.0));
+        }
+        for bad in [
+            "'nodata_policy=drop'",
+            "'decimals=16'",
+            "'emit_nodata_value=1'",
+            "'nodata_policy=emit', 'emit_nodata_value=nan'",
+        ] {
+            let sql = format!(
+                "SELECT * FROM {grid}_raster_continuous_aggregate('{src}', {res}, 'EPSG:4326', {bad})"
+            );
+            assert!(ctx.sql(&sql).await.is_err(), "{bad}");
+        }
+
+        // Categorical: empty cells carry NULL, or the NoData class.
+        for (value, nullable) in [(None, true), (Some(255.0), false)] {
+            let provider = CategoricalRasterTableProvider::try_new(&src, vec![res])
+                .unwrap()
+                .with_grid(grid)
+                .with_crs("EPSG:4326")
+                .with_nodata(f64::from(NODATA))
+                .with_output_policy(OutputPolicy {
+                    nodata: NodataPolicy::Emit,
+                    nodata_value: value,
+                    decimals: Some(2),
+                });
+            let ctx = context();
+            ctx.register_table("classes", Arc::new(RasterH3Table::categorical(provider)))
+                .unwrap();
+            let out = collect(&ctx, "SELECT majority_class, total_count FROM classes").await;
+            let field = out[0]
+                .schema()
+                .field_with_name("majority_class")
+                .unwrap()
+                .clone();
+            assert_eq!(field.is_nullable(), nullable);
+            let mut empties = 0;
+            for b in &out {
+                let totals = b.column(1).as_primitive::<Float64Type>();
+                for i in 0..b.num_rows() {
+                    if totals.value(i) == 0.0 {
+                        empties += 1;
+                        assert_eq!(b.column(0).is_null(i), nullable);
+                        if !nullable {
+                            assert_eq!(b.column(0).as_primitive::<Int64Type>().value(i), 255);
+                        }
+                    }
+                }
+            }
+            assert_eq!(empties, empty, "{grid}");
+        }
+    }
+}

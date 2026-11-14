@@ -9,7 +9,10 @@
 //! selects the grid, as DuckDB's `grid :=` does; `a5_raster_continuous_aggregate`,
 //! `s2_raster_categorical_aggregate`, ... are the same functions with that grid as the
 //! default. The grid names the cell columns (`{grid}_index`, `{grid}_hex`) and bounds the
-//! resolutions. A string argument holding a partition spec (a JSON
+//! resolutions. String arguments of the form `'nodata_policy=emit'`,
+//! `'emit_nodata_value=-9999'` and `'decimals=2'` set the output options: `emit` returns
+//! every cell a pixel falls in (zero count and NULL statistics, or the NoData value,
+//! where all its samples are NoData), and `decimals` rounds the statistics. A string argument holding a partition spec (a JSON
 //! object from `h3_raster_plan_partitions`) scans only that partition, adding a
 //! `partial_state` column (see [`crate::merge`]). Use [`RasterH3Table`] with a configured
 //! provider for the other options (nodata, quantiles, categorical format, ...).
@@ -31,6 +34,7 @@ use datafusion::logical_expr::Expr;
 
 use crate::convert::to_df_error;
 use crate::table::RasterH3Table;
+use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 use raster_h3_core::grid::GridKind;
 use raster_h3_core::resolution::ResolutionSpec;
 
@@ -95,7 +99,8 @@ fn continuous_table(
         &args.resolutions,
         args.crs.as_deref(),
     )
-    .map_err(to_df_error)?;
+    .map_err(to_df_error)?
+    .with_output_policy(args.output);
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
@@ -114,7 +119,8 @@ fn categorical_table(
         &args.resolutions,
         args.crs.as_deref(),
     )
-    .map_err(to_df_error)?;
+    .map_err(to_df_error)?
+    .with_output_policy(args.output);
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
@@ -187,6 +193,7 @@ struct Args {
     resolutions: ResolutionSpec,
     crs: Option<String>,
     partition: Option<ScanPartition>,
+    output: OutputPolicy,
 }
 
 fn string_literal(expr: &Expr) -> Option<&str> {
@@ -199,6 +206,46 @@ fn string_literal(expr: &Expr) -> Option<&str> {
         ) => Some(s),
         _ => None,
     }
+}
+
+/// `Some((key, value))` if `text` is `key=value` for one of the output options
+/// (`nodata_policy`, `emit_nodata_value`, `decimals`). PROJ strings also hold `=`, so
+/// only these keys count.
+fn output_option(text: &str) -> Option<(&str, &str)> {
+    let (key, value) = text.split_once('=')?;
+    let key = key.trim();
+    ["nodata_policy", "emit_nodata_value", "decimals"]
+        .contains(&key)
+        .then_some((key, value.trim()))
+}
+
+fn set_output_option(name: &str, policy: &mut OutputPolicy, key: &str, value: &str) -> Result<()> {
+    match key {
+        "nodata_policy" => match NodataPolicy::parse(value) {
+            Some(nodata) => policy.nodata = nodata,
+            None => {
+                return plan_err!(
+                    "{name}: nodata_policy must be {}, got '{value}'",
+                    NodataPolicy::EXPECTED
+                )
+            }
+        },
+        "emit_nodata_value" => match value.parse::<f64>() {
+            Ok(v) if v.is_finite() => policy.nodata_value = Some(v),
+            _ => {
+                return plan_err!(
+                    "{name}: emit_nodata_value must be a finite number, got '{value}'"
+                )
+            }
+        },
+        _ => match value.parse::<u8>() {
+            Ok(d) if d <= raster_h3_core::aggregator::output_policy::MAX_DECIMALS => {
+                policy.decimals = Some(d)
+            }
+            _ => return plan_err!("{name}: decimals must be between 0 and 15, got '{value}'"),
+        },
+    }
+    Ok(())
 }
 
 fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args> {
@@ -215,6 +262,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         resolutions: ResolutionSpec::Fixed(Vec::new()),
         crs: None,
         partition: None,
+        output: OutputPolicy::default(),
     };
     let mut grid = None;
     let mut auto = None;
@@ -232,6 +280,11 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                 Some(spec) if spec.trim_start().starts_with('{') && args.partition.is_none() => {
                     args.partition = Some(ScanPartition::from_json(spec).map_err(to_df_error)?)
                 }
+                // `'nodata_policy=emit'`, `'emit_nodata_value=-1'`, `'decimals=2'`.
+                Some(option) if output_option(option).is_some() => {
+                    let (key, value) = output_option(option).unwrap_or_default();
+                    set_output_option(name, &mut args.output, key, value)?;
+                }
                 // `'auto'`, `'auto+1'`, ...: the resolution matched to the pixel size.
                 Some(text) if auto.is_none() && ResolutionSpec::parse_auto(text).is_some() => {
                     auto = ResolutionSpec::parse_auto(text)
@@ -246,6 +299,9 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                 _ => return plan_err!("{name} expects {usage}, got {e}"),
             },
         }
+    }
+    if args.output.nodata_value.is_some() && !args.output.emits_nodata() {
+        return plan_err!("{name}: emit_nodata_value needs nodata_policy=emit");
     }
     args.grid = grid.unwrap_or(default_grid);
     if let Some(auto) = auto {

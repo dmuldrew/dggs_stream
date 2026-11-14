@@ -10,6 +10,7 @@ use raster_h3_core::aggregator::multi_horizon::{
 };
 use raster_h3_core::aggregator::remap::CategoryRemapper;
 use raster_h3_core::aggregator::sampling::SamplingPattern;
+use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 use raster_h3_core::columnar::{
     with_partial_state_field, ArrowArrayStream, CategoricalBatchReader, CategoricalFormat,
     ColumnSchema, ContinuousBatchReader, PartitionedBatchReader, RecordBatch,
@@ -86,6 +87,12 @@ pub trait RasterScan: Send + Sync {
     ) -> Result<Box<dyn RasterScanExec>>;
 }
 
+/// Whether the scan outputs all-NoData cells. Their count is 0, so a count bound cannot
+/// be pushed into the scan (core refuses the combination); the caller filters the rows.
+fn emits_nodata(config: &MultiResolutionConfig) -> bool {
+    config.nodata_policy == NodataPolicy::Emit
+}
+
 /// Compaction changes both row identity and aggregate values. Scan predicates must
 /// remain residual predicates over the completed table, not filter its children.
 fn compacts(config: &MultiResolutionConfig) -> bool {
@@ -107,7 +114,10 @@ fn compacts(config: &MultiResolutionConfig) -> bool {
 fn apply_shared_filter(config: &mut MultiResolutionConfig, filter: &FilterPredicate) -> bool {
     match *filter {
         FilterPredicate::MinCount(v) => {
-            config.min_count = Some(config.min_count.map_or(v, |c| c.max(v)));
+            // Not pushed under `emit` (see `emits_nodata`): the caller re-applies it.
+            if !emits_nodata(config) {
+                config.min_count = Some(config.min_count.map_or(v, |c| c.max(v)));
+            }
             true
         }
         FilterPredicate::Resolution(r) => {
@@ -604,6 +614,16 @@ impl ContinuousRasterTableProvider {
         self
     }
 
+    /// What happens to cells whose samples are all NoData, to their values, and to the
+    /// precision of the statistics (see [`OutputPolicy`]). Under `NodataPolicy::Emit`
+    /// count filters are not pushed into the scan.
+    pub fn with_output_policy(mut self, policy: OutputPolicy) -> Self {
+        self.config.nodata_policy = policy.nodata;
+        self.config.emit_nodata_value = policy.nodata_value;
+        self.config.decimals = policy.decimals;
+        self
+    }
+
     /// The grid this table aggregates onto.
     pub fn grid(&self) -> GridKind {
         self.config.grid
@@ -712,7 +732,8 @@ impl ContinuousRasterTableProvider {
 
 impl RasterScan for ContinuousRasterTableProvider {
     fn schema(&self) -> Arc<ColumnSchema> {
-        let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles);
+        let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles)
+            .with_output_policy(&self.config.output_policy());
         match self.config.partition {
             Some(_) => Arc::new(with_partial_state_field(&base)),
             None => Arc::new(base),
@@ -741,6 +762,9 @@ impl RasterScan for ContinuousRasterTableProvider {
         filters
             .iter()
             .map(|f| match f {
+                FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
+                    FilterPushdownStatus::Unsupported
+                }
                 FilterPredicate::MinCount(_)
                 | FilterPredicate::MinMean(_)
                 | FilterPredicate::MaxMean(_)
@@ -758,7 +782,8 @@ impl RasterScan for ContinuousRasterTableProvider {
         limit: Option<usize>,
     ) -> Result<Box<dyn RasterScanExec>> {
         if self.config.partition.is_some() {
-            let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles);
+            let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles)
+                .with_output_policy(&self.config.output_policy());
             return partitioned_scan(
                 &self.paths,
                 &self.config,
@@ -897,6 +922,16 @@ impl CategoricalRasterTableProvider {
         self
     }
 
+    /// What happens to cells whose samples are all NoData, to their values, and to the
+    /// precision of the statistics (see [`OutputPolicy`]). Under `NodataPolicy::Emit`
+    /// count filters are not pushed into the scan.
+    pub fn with_output_policy(mut self, policy: OutputPolicy) -> Self {
+        self.config.nodata_policy = policy.nodata;
+        self.config.emit_nodata_value = policy.nodata_value;
+        self.config.decimals = policy.decimals;
+        self
+    }
+
     /// The grid this table aggregates onto.
     pub fn grid(&self) -> GridKind {
         self.config.grid
@@ -974,7 +1009,8 @@ impl RasterScan for CategoricalRasterTableProvider {
         let base = match self.format {
             CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(self.config.grid),
             CategoricalFormat::Long => ColumnSchema::categorical_long_for(self.config.grid),
-        };
+        }
+        .with_output_policy(&self.config.output_policy());
         match self.config.partition {
             Some(_) => Arc::new(with_partial_state_field(&base)),
             None => Arc::new(base),
@@ -1003,6 +1039,9 @@ impl RasterScan for CategoricalRasterTableProvider {
         filters
             .iter()
             .map(|f| match f {
+                FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
+                    FilterPushdownStatus::Unsupported
+                }
                 FilterPredicate::MinCount(_)
                 | FilterPredicate::MinMajorityFraction(_)
                 | FilterPredicate::Resolution(_) => FilterPushdownStatus::Exact,
@@ -1028,7 +1067,8 @@ impl RasterScan for CategoricalRasterTableProvider {
                 &self.paths,
                 &self.config,
                 true,
-                &ColumnSchema::categorical_wide_for(self.config.grid),
+                &ColumnSchema::categorical_wide_for(self.config.grid)
+                    .with_output_policy(&self.config.output_policy()),
                 self.schema(),
                 projection,
                 filters,

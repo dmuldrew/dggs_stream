@@ -16,7 +16,7 @@ use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, Overl
 
 use raster_h3_core::grid::GridKind;
 
-use crate::ffi::args::{parse_c_grid, parse_c_resolutions, parse_grid};
+use crate::ffi::args::{output_policy_of, parse_c_grid, parse_c_resolutions, parse_grid};
 use crate::ffi::{ffi_call, opt_cstr, set_c_err};
 
 /// C-ABI direct Parquet exporter (`h3_raster_to_parquet`). Returns number of hexagons written, or `-1` on error.
@@ -92,6 +92,10 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_with_stats(
 struct PyExportOptions {
     /// `h3` (default), `a5`, `s2` or `healpix`.
     grid: Option<String>,
+    /// `omit` (default) or `emit`.
+    nodata_policy: Option<String>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<i64>,
 }
 
 impl PyExportOptions {
@@ -105,6 +109,19 @@ impl PyExportOptions {
 
     fn grid(&self) -> Result<GridKind> {
         self.grid.as_deref().map_or(Ok(GridKind::H3), parse_grid)
+    }
+
+    /// Copy the NoData policy, NoData value and decimals onto an export's configuration.
+    fn apply_output_policy(&self, config: &mut MultiResolutionConfig) -> Result<()> {
+        let policy = output_policy_of(
+            self.nodata_policy.as_deref(),
+            self.emit_nodata_value,
+            self.decimals,
+        )?;
+        config.nodata_policy = policy.nodata;
+        config.emit_nodata_value = policy.nodata_value;
+        config.decimals = policy.decimals;
+        Ok(())
     }
 }
 
@@ -182,6 +199,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
                 crs_opt.as_deref(),
             )?;
             let mut config = MultiResolutionConfig::new(res_vec).with_grid(grid);
+            opts.apply_output_policy(&mut config)?;
             config.custom_crs = crs_opt.clone();
             config.transform_failure_counter = Some(Arc::clone(&failures));
 
@@ -325,6 +343,7 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
                 crs_opt.as_deref(),
             )?;
             let mut config = MultiResolutionConfig::new(res_vec).with_grid(grid);
+            opts.apply_output_policy(&mut config)?;
             config.custom_crs = crs_opt;
             config.transform_failure_counter = Some(Arc::clone(&failures));
 

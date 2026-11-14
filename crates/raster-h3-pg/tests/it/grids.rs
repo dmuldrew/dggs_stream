@@ -286,3 +286,125 @@ fn auto_resolution_matches_core_on_every_grid() {
         assert!(pg_auto_resolution(grid, "/nonexistent.tif", 0, None).is_err());
     }
 }
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads a memory-mapped raster, which Miri cannot follow"
+)]
+fn nodata_policy_and_decimals_on_every_grid() {
+    use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
+    const NODATA: f32 = -9999.0;
+    // NoData in the left third; values with fractional means elsewhere.
+    let pixel = |c: u32, r: u32| {
+        if c < SIZE / 3 {
+            NODATA
+        } else {
+            ((c * 7 + r * 3) % 11) as f32 + 0.25
+        }
+    };
+    let (_tmp, path) = TestGeoTiffBuilder::new(SIZE, SIZE)
+        .pixel_size(0.001)
+        .create_f32_tempfile(pixel);
+    let path = path.to_str().unwrap();
+    for grid in GridKind::ALL {
+        let res = res_of(grid);
+        let open = |policy: OutputPolicy| -> Vec<raster_h3_pg::PgContinuousRow> {
+            let mut rows: Vec<_> = PgContinuousSrf::open_with(
+                grid,
+                path,
+                vec![res],
+                None,
+                Some(f64::from(NODATA)),
+                None,
+                policy,
+            )
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+            rows.sort_by_key(|r| r.h3_index);
+            rows
+        };
+        let omit = open(OutputPolicy::default());
+        assert!(omit.iter().all(|r| r.count > 0.0 && !r.mean.is_nan()));
+
+        let emit = open(OutputPolicy {
+            nodata: NodataPolicy::Emit,
+            ..Default::default()
+        });
+        let empty: Vec<_> = emit.iter().filter(|r| r.count == 0.0).collect();
+        assert!(!empty.is_empty(), "{grid}");
+        assert_eq!(emit.len(), omit.len() + empty.len(), "{grid}");
+        for row in &empty {
+            assert!(row.mean.is_nan() && row.min.is_nan() && row.max.is_nan());
+            assert_eq!((row.sum, row.stddev), (0.0, None));
+            assert!(!row.wkb.is_empty());
+        }
+        // The other cells are unchanged (to rounding: the two scans sum in another order).
+        let kept: Vec<_> = emit.iter().filter(|r| r.count > 0.0).collect();
+        assert_eq!(kept.len(), omit.len(), "{grid}");
+        for (a, b) in kept.iter().zip(&omit) {
+            assert_eq!(
+                (a.h3_index, a.count, a.min, a.max),
+                (b.h3_index, b.count, b.min, b.max)
+            );
+            assert!((a.mean - b.mean).abs() <= 1e-12 * b.mean.abs(), "{grid}");
+            assert_eq!(a.stddev.is_some(), b.stddev.is_some());
+        }
+
+        let filled = open(OutputPolicy {
+            nodata: NodataPolicy::Emit,
+            nodata_value: Some(-1.0),
+            decimals: Some(1),
+        });
+        assert_eq!(filled.len(), emit.len());
+        for (plain, row) in emit.iter().zip(&filled) {
+            if plain.count == 0.0 {
+                assert_eq!((row.mean, row.min, row.max), (-1.0, -1.0, -1.0));
+            } else {
+                assert_eq!(row.mean, (plain.mean * 10.0).round() / 10.0, "{grid}");
+                assert_eq!(row.count, plain.count);
+            }
+        }
+
+        // Categorical: a class for empty cells only with an integral NoData value.
+        let (_c, classes) = TestGeoTiffBuilder::new(SIZE, SIZE)
+            .pixel_size(0.001)
+            .gdal_nodata("0")
+            .create_tempfile(|c, r| {
+                if c < SIZE / 3 {
+                    0u8
+                } else {
+                    ((c + r) % 3 + 1) as u8
+                }
+            });
+        for value in [None, Some(255.0)] {
+            let rows: Vec<_> = PgCategoricalSrf::open_with(
+                grid,
+                classes.to_str().unwrap(),
+                vec![res],
+                None,
+                None,
+                None,
+                OutputPolicy {
+                    nodata: NodataPolicy::Emit,
+                    nodata_value: value,
+                    decimals: Some(2),
+                },
+            )
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+            let empties: Vec<_> = rows.iter().filter(|r| r.total_count == 0.0).collect();
+            assert_eq!(empties.len(), empty.len(), "{grid}");
+            for row in &empties {
+                assert_eq!(row.majority_is_null, value.is_none());
+                assert_eq!(row.majority_class, if value.is_some() { 255 } else { 0 });
+            }
+            assert!(rows
+                .iter()
+                .filter(|r| r.total_count > 0.0)
+                .all(|r| !r.majority_is_null && (1..=3).contains(&r.majority_class)));
+        }
+    }
+}

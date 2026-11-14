@@ -139,6 +139,12 @@ pub trait RecordStreamer {
     fn grid(&self) -> GridKind {
         GridKind::H3
     }
+
+    /// How serializers turn this stream's cells into output values (NoData policy and
+    /// value, decimal rounding).
+    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        crate::aggregator::output_policy::OutputPolicy::default()
+    }
 }
 
 /// Generic single-pass streaming aggregator across multiple grid resolutions
@@ -151,6 +157,10 @@ pub struct MultiHorizonStreamer<K: HorizonStreamKernel> {
     resolution_u8s: Vec<u8>,
     nodata: Option<f64>,
     apply_scale_offset: bool,
+    /// `NodataPolicy::Emit`: the kernels also walk NoData pixels.
+    emit_nodata: bool,
+    /// NoData policy, NoData value and rounding for serializers of this stream.
+    output_policy: crate::aggregator::output_policy::OutputPolicy,
     /// Shared total that transform failures are also added to.
     transform_failure_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// Fail on the first wave that drops a sample to a transform failure.
@@ -229,6 +239,11 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
     /// Spatial grid system used by this streamer
     pub fn grid(&self) -> GridKind {
         self.grid
+    }
+
+    /// How serializers turn this stream's cells into output values.
+    pub fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.output_policy
     }
 
     /// Target resolution integer levels
@@ -417,6 +432,11 @@ impl<K: HorizonStreamKernel> RecordStreamer for MultiHorizonStreamer<K> {
     #[inline(always)]
     fn grid(&self) -> GridKind {
         self.grid
+    }
+
+    #[inline(always)]
+    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.output_policy
     }
 }
 

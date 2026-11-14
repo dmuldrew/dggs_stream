@@ -20,6 +20,7 @@ use raster_h3_core::aggregator::multi_horizon::{
     plan_partitions, ChunkBlock, MultiCategoricalHorizonStreamer, MultiResolutionConfig,
     MultiScanHorizonStreamer, ScanPartition,
 };
+use raster_h3_core::aggregator::output_policy::{NodataPolicy, OutputPolicy, MAX_DECIMALS};
 use raster_h3_core::columnar::ipc::{write_ipc_stream, write_jsonl_stream, IpcStreamReader};
 use raster_h3_core::columnar::partitioned::{
     merge_partial_batches, PartitionedBatchReader, PARTIAL_STATE_COLUMN,
@@ -65,6 +66,9 @@ pub struct CliStreamOptions {
     /// Scan only this partition (from [`plan_raster_partitions`]). The output gains a
     /// nullable `partial_state` column; combine the partitions with [`merge_partition_files`].
     pub partition: Option<ScanPartition>,
+    /// `--nodata-policy`, `--emit-nodata-value` and `--decimals`: whether all-NoData
+    /// cells are output and with what value, and the decimal rounding of statistics.
+    pub output: OutputPolicy,
 }
 
 impl Default for CliStreamOptions {
@@ -84,6 +88,7 @@ impl Default for CliStreamOptions {
             limit: None,
             output_format: StreamOutputFormat::Ipc,
             partition: None,
+            output: OutputPolicy::default(),
         }
     }
 }
@@ -111,6 +116,13 @@ fn resolve_projection_indices(
     Ok(Some(indices))
 }
 
+/// Copy the NoData policy, NoData value and decimals onto a scan configuration.
+fn apply_output_policy(config: &mut MultiResolutionConfig, policy: &OutputPolicy) {
+    config.nodata_policy = policy.nodata;
+    config.emit_nodata_value = policy.nodata_value;
+    config.decimals = policy.decimals;
+}
+
 /// Report valid samples the coordinate transform could not place, on stderr
 /// so streamed output stays clean.
 fn warn_transform_failures(failures: u64) {
@@ -132,6 +144,7 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
     config.apply_scale_offset = opts.apply_scale_offset;
     config.bbox = opts.bbox;
     config.overlap_rule = OverlapRule::Cutline;
+    apply_output_policy(&mut config, &opts.output);
 
     if let Some(partition) = &opts.partition {
         config.partition = Some(partition.clone());
@@ -771,12 +784,45 @@ pub fn export_raster_to_parquet_with_grid(
     geoparquet: bool,
     apply_scale_offset: bool,
 ) -> Result<usize> {
+    export_raster_to_parquet_with_policy(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        geoparquet,
+        apply_scale_offset,
+        &OutputPolicy::default(),
+    )
+}
+
+/// [`export_raster_to_parquet_with_grid`] under an [`OutputPolicy`] (NoData policy and
+/// value, decimal rounding). Parquet statistics columns are `REQUIRED`, so a statistic
+/// without a value is written as NaN.
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_parquet_with_policy(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    geoparquet: bool,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+) -> Result<usize> {
     let paths = resolve_raster_sources(input_path)?;
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.custom_crs = source_crs.clone();
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
+    apply_output_policy(&mut config, policy);
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
@@ -843,11 +889,41 @@ pub fn export_raster_to_pmtiles_with_grid(
     bbox: Option<[f64; 4]>,
     apply_scale_offset: bool,
 ) -> Result<usize> {
+    export_raster_to_pmtiles_with_policy(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        apply_scale_offset,
+        &OutputPolicy::default(),
+    )
+}
+
+/// [`export_raster_to_pmtiles_with_grid`] under an [`OutputPolicy`]. Vector tile
+/// properties have no NULL, so a statistic without a value is written as NaN.
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_pmtiles_with_policy(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+) -> Result<usize> {
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.custom_crs = source_crs;
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
+    apply_output_policy(&mut config, policy);
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
@@ -1025,6 +1101,29 @@ pub fn parse_stream_args(
                 }
                 opts.columns = Some(cols);
             }
+            "--nodata-policy" => {
+                let v = value()?;
+                opts.output.nodata = NodataPolicy::parse(v)
+                    .ok_or_else(|| invalid(flag, v, NodataPolicy::EXPECTED))?;
+            }
+            "--emit-nodata-value" => {
+                let v = value()?;
+                opts.output.nodata_value = Some(
+                    v.parse::<f64>()
+                        .ok()
+                        .filter(|x| x.is_finite())
+                        .ok_or_else(|| invalid(flag, v, "a finite number"))?,
+                );
+            }
+            "--decimals" => {
+                let v = value()?;
+                opts.output.decimals = Some(
+                    v.parse::<u8>()
+                        .ok()
+                        .filter(|d| *d <= MAX_DECIMALS)
+                        .ok_or_else(|| invalid(flag, v, "an integer between 0 and 15"))?,
+                );
+            }
             "--limit" => {
                 let v = value()?;
                 opts.limit = Some(
@@ -1071,6 +1170,11 @@ pub fn parse_stream_args(
         }
     }
 
+    if opts.output.nodata_value.is_some() && !opts.output.emits_nodata() {
+        return Err(RasterH3Error::InvalidParameter(
+            "--emit-nodata-value needs --nodata-policy emit".into(),
+        ));
+    }
     if opts.input_path.is_empty() {
         return Err(RasterH3Error::InvalidParameter(
             "Missing required input raster path".into(),
@@ -1437,6 +1541,72 @@ mod tests {
             assert_eq!(schema.fields[0].name, format!("{name}_index"));
             let total: usize = batches.iter().map(|b| b.num_rows).sum();
             assert_eq!(total, whole.len(), "{grid}");
+        }
+    }
+
+    #[test]
+    fn test_cli_nodata_policy_and_decimals() {
+        let tif = write_test_tif(24, 24, 1.23456);
+        let input = tif.path().to_str().unwrap();
+        let run = |extra: &[&str]| -> Result<Vec<serde_json::Value>> {
+            // Fine enough for several cells on every grid; a later `-r` wins.
+            let mut args: Vec<String> = [input, "--crs", "EPSG:4326"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl)?;
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out)?;
+            Ok(String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect())
+        };
+        for grid in GridKind::ALL {
+            let res = if grid == GridKind::H3 { "9" } else { "14" };
+            let g = ["--grid", grid.as_str(), "-r", res];
+            let plain = run(&g).unwrap();
+            assert!(plain.len() > 1);
+            assert!(plain[0]["mean"].as_f64().unwrap() != 1.23);
+
+            // Rounded statistics; counts untouched.
+            let rounded = run(&[g[0], g[1], g[2], g[3], "--decimals", "2"]).unwrap();
+            assert_eq!(rounded.len(), plain.len());
+            for row in &rounded {
+                assert_eq!(row["mean"], 1.23, "{grid}");
+                assert_eq!(row["min"], 1.23);
+                assert!(row["count"].as_f64().unwrap() >= 1.0);
+            }
+
+            // Every pixel is NoData: `omit` has no rows, `emit` has them all, empty.
+            let nodata = ["--grid", grid.as_str(), "-r", res, "--nodata", "1.23456"];
+            assert!(run(&nodata).unwrap().is_empty(), "{grid}");
+            let mut emit = nodata.to_vec();
+            emit.extend(["--nodata-policy", "emit"]);
+            let rows = run(&emit).unwrap();
+            assert_eq!(rows.len(), plain.len(), "{grid}");
+            for row in &rows {
+                assert_eq!(row["count"], 0.0);
+                assert!(row["mean"].is_null() && row["min"].is_null() && row["max"].is_null());
+            }
+            emit.extend(["--emit-nodata-value", "-9999"]);
+            for row in run(&emit).unwrap() {
+                assert_eq!(
+                    (&row["mean"], &row["max"]),
+                    (&serde_json::json!(-9999.0), &serde_json::json!(-9999.0))
+                );
+            }
+        }
+        for bad in [
+            &["--nodata-policy", "drop"][..],
+            &["--decimals", "16"],
+            &["--decimals", "-1"],
+            &["--emit-nodata-value", "nan"],
+            &["--emit-nodata-value", "0"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
         }
     }
 

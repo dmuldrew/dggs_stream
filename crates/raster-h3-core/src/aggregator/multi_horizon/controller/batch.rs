@@ -99,6 +99,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             sampling,
             bbox,
             apply_scale_offset,
+            emit_nodata,
             nodata,
             eviction_space,
             resolution_shards,
@@ -151,6 +152,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                     &[]
                 },
                 alpha_sample: tile.reader.metadata.alpha_sample,
+                emit_nodata: *emit_nodata,
             };
             kernel.process_window(
                 &window,

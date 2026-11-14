@@ -72,16 +72,18 @@ fn process_continuous_slice_into_maps_impl<T: SimdSpanAccumulate + Default>(
     options: ContinuousOptions,
     chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
 ) {
+    let emit = ctx.emit_nodata;
     let engine = ContinuousEngine {
         native_nodata,
         track_quantiles: options.track_quantiles,
         scaling: ctx.scaling(1),
+        emit_nodata: emit,
     };
     if ctx.samples_per_pixel <= 1 && options.spectral_formula.is_none() {
         walk_direct(
             ctx,
             slice,
-            |s| is_slice_all_native_nodata(s, native_nodata),
+            |s| !emit && is_slice_all_native_nodata(s, native_nodata),
             &engine,
             chunk_maps,
         );
@@ -90,13 +92,19 @@ fn process_continuous_slice_into_maps_impl<T: SimdSpanAccumulate + Default>(
             ctx,
             slice,
             |px| {
-                pixel_value(
+                let value = pixel_value(
                     ctx,
                     px,
                     native_nodata,
                     options.band,
                     options.spectral_formula,
-                )
+                );
+                // Under `emit` a pixel without a value still marks its cell.
+                if emit {
+                    value.or(Some(f64::NAN))
+                } else {
+                    value
+                }
             },
             &engine,
             chunk_maps,
@@ -110,9 +118,23 @@ struct ContinuousEngine<T> {
     /// Calibration of single-band samples; interleaved pixels are
     /// calibrated per band by [`pixel_value`].
     scaling: BandScaling,
+    /// `NodataPolicy::Emit`: NoData pixels are reported as NaN samples, which add
+    /// nothing to a cell but make it exist. Valid samples are always finite.
+    emit_nodata: bool,
 }
 
 impl<T: SimdSpanAccumulate> ContinuousEngine<T> {
+    /// The calibrated value of a pixel, `None` if it is NoData or not finite.
+    #[inline(always)]
+    fn valid_sample(&self, pixel: T) -> Option<f64> {
+        if pixel.is_valid(self.native_nodata) {
+            let value = self.scaling.apply(pixel.to_f64_val());
+            value.is_finite().then_some(value)
+        } else {
+            None
+        }
+    }
+
     /// Accumulate a span of stored values as calibrated values. The SIMD
     /// kernel sums stored values; use its affine image when representable.
     /// Otherwise calibrate individually so overflow cannot poison valid pixels.
@@ -129,7 +151,7 @@ impl<T: SimdSpanAccumulate> ContinuousEngine<T> {
             {
                 span_acc = H3Accumulator::default();
                 for &v in slice {
-                    if let Some(value) = self.get_sample(v) {
+                    if let Some(value) = self.valid_sample(v) {
                         span_acc.update(value);
                     }
                 }
@@ -166,7 +188,8 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
 
     #[inline(always)]
     fn has_samples(&self, acc: &H3Accumulator) -> bool {
-        acc.count > 0.0
+        // Under `emit` an empty run is kept: its cell was seen.
+        acc.count > 0.0 || self.emit_nodata
     }
 
     #[inline(always)]
@@ -182,7 +205,7 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
             if self.track_quantiles {
                 if let Some(ref mut q) = acc.quantiles {
                     for &v in slice {
-                        if let Some(value) = self.get_sample(v) {
+                        if let Some(value) = self.valid_sample(v) {
                             q.update(value, 1.0);
                         }
                     }
@@ -200,7 +223,7 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
             }
             if self.track_quantiles {
                 for &v in slice {
-                    if let Some(fv) = self.get_sample(v) {
+                    if let Some(fv) = self.valid_sample(v) {
                         for q in run_accs.iter_mut().filter_map(|a| a.quantiles.as_mut()) {
                             q.update(fv, 1.0);
                         }
@@ -212,16 +235,19 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
 
     #[inline(always)]
     fn get_sample(&self, pixel: T) -> Option<f64> {
-        if pixel.is_valid(self.native_nodata) {
-            let value = self.scaling.apply(pixel.to_f64_val());
-            value.is_finite().then_some(value)
+        let value = self.valid_sample(pixel);
+        if self.emit_nodata {
+            value.or(Some(f64::NAN))
         } else {
-            None
+            value
         }
     }
 
     #[inline(always)]
     fn update_sample(&self, acc: &mut H3Accumulator, sample: f64, weight: f64) {
+        if self.emit_nodata && sample.is_nan() {
+            return;
+        }
         if weight == 1.0 {
             acc.update(sample);
         } else {
@@ -314,7 +340,8 @@ pub fn process_continuous_borrowed_into(
     options: ContinuousOptions,
     chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
 ) -> bool {
-    if window.samples_per_pixel <= 1
+    if !window.emit_nodata
+        && window.samples_per_pixel <= 1
         && options.spectral_formula.is_none()
         && samples.all_nodata(nodata)
     {
@@ -417,6 +444,7 @@ mod tests {
                 native_nodata: None,
                 track_quantiles: true,
                 scaling,
+                emit_nodata: false,
             };
             let mut scalar = engine.new_acc();
             for value in values {

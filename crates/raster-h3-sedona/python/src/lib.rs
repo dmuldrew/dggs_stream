@@ -38,7 +38,7 @@ use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use raster_h3_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
-use raster_h3_sedona::{GridKind, ResolutionSpec};
+use raster_h3_sedona::{GridKind, NodataPolicy, OutputPolicy, ResolutionSpec};
 use sedona_extension::extension::SedonaCTableProvider;
 use sedona_extension::runtime::RuntimeHandle;
 use sedona_extension::table_provider::ExportedTableProvider;
@@ -104,6 +104,36 @@ fn grid_of(name: Option<&str>) -> PyResult<GridKind> {
 
 /// Filters reach these tables only through SedonaDB's extension ABI, which strips the
 /// `geoarrow.wkb` tag from geometry literals after SedonaDB has checked their CRS.
+/// `nodata_policy`, `emit_nodata_value` and `decimals` as an [`OutputPolicy`].
+fn output_policy(
+    nodata_policy: Option<&str>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<u8>,
+) -> PyResult<OutputPolicy> {
+    let mut policy = OutputPolicy::default();
+    if let Some(name) = nodata_policy {
+        policy.nodata = NodataPolicy::parse(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "nodata_policy must be {}, got {name:?}",
+                NodataPolicy::EXPECTED
+            ))
+        })?;
+    }
+    if let Some(value) = emit_nodata_value {
+        if !value.is_finite() || !policy.emits_nodata() {
+            return Err(PyValueError::new_err(
+                "emit_nodata_value must be finite and needs nodata_policy='emit'",
+            ));
+        }
+        policy.nodata_value = Some(value);
+    }
+    if decimals.is_some_and(|d| d > 15) {
+        return Err(PyValueError::new_err("decimals must be between 0 and 15"));
+    }
+    policy.decimals = decimals;
+    Ok(policy)
+}
+
 fn sedona_table(table: raster_h3_sedona::RasterH3Table) -> raster_h3_sedona::RasterH3Table {
     table.with_untagged_wkb_as_lnglat(true)
 }
@@ -131,7 +161,8 @@ impl PyRasterH3Table {
     /// selects a 1-based band, and `bbox` (`[min_lon, min_lat, max_lon, max_lat]`) clips
     /// the samples aggregated.
     #[staticmethod]
-    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, band=None, bbox=None, grid=None))]
+    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, band=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None))]
+    #[allow(clippy::too_many_arguments)]
     fn continuous(
         source: &str,
         resolutions: Option<Resolutions>,
@@ -140,15 +171,20 @@ impl PyRasterH3Table {
         band: Option<usize>,
         bbox: Option<[f64; 4]>,
         grid: Option<&str>,
+        nodata_policy: Option<&str>,
+        emit_nodata_value: Option<f64>,
+        decimals: Option<u8>,
     ) -> PyResult<Self> {
         let grid = grid_of(grid)?;
+        let output = output_policy(nodata_policy, emit_nodata_value, decimals)?;
         let mut provider = ContinuousRasterTableProvider::try_new_with(
             source,
             grid,
             &self::resolutions(resolutions, grid)?,
             crs.as_deref(),
         )
-        .map_err(value_error)?;
+        .map_err(value_error)?
+        .with_output_policy(output);
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }
@@ -175,7 +211,8 @@ impl PyRasterH3Table {
     /// Categorical statistics (`majority_class`, `majority_fraction`, `histogram`, ...) per
     /// cell, in wide format. Arguments as for `continuous`.
     #[staticmethod]
-    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, bbox=None, grid=None))]
+    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None))]
+    #[allow(clippy::too_many_arguments)]
     fn categorical(
         source: &str,
         resolutions: Option<Resolutions>,
@@ -183,15 +220,20 @@ impl PyRasterH3Table {
         nodata: Option<f64>,
         bbox: Option<[f64; 4]>,
         grid: Option<&str>,
+        nodata_policy: Option<&str>,
+        emit_nodata_value: Option<f64>,
+        decimals: Option<u8>,
     ) -> PyResult<Self> {
         let grid = grid_of(grid)?;
+        let output = output_policy(nodata_policy, emit_nodata_value, decimals)?;
         let mut provider = CategoricalRasterTableProvider::try_new_with(
             source,
             grid,
             &self::resolutions(resolutions, grid)?,
             crs.as_deref(),
         )
-        .map_err(value_error)?;
+        .map_err(value_error)?
+        .with_output_policy(output);
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }

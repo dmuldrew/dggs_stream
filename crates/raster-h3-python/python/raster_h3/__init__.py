@@ -528,11 +528,28 @@ _SCAN_OPTIONS = (
     "min_mean",
     "max_mean",
     "min_majority_fraction",
+    "nodata_policy",
+    "emit_nodata_value",
+    "decimals",
 )
 
-_INT_OPTIONS = ("band", "nir_band", "red_band", "green_band", "blue_band", "swir_band")
-_STR_OPTIONS = ("sampling", "overlap_rule", "spectral_formula")
-_FLOAT_OPTIONS = ("min_count", "min_mean", "max_mean", "min_majority_fraction")
+_INT_OPTIONS = (
+    "band",
+    "nir_band",
+    "red_band",
+    "green_band",
+    "blue_band",
+    "swir_band",
+    "decimals",
+)
+_STR_OPTIONS = ("sampling", "overlap_rule", "spectral_formula", "nodata_policy")
+_FLOAT_OPTIONS = (
+    "min_count",
+    "min_mean",
+    "max_mean",
+    "min_majority_fraction",
+    "emit_nodata_value",
+)
 
 #: The supported grids and their finest resolution.
 GRIDS: Dict[str, int] = {"h3": 15, "a5": 30, "s2": 30, "healpix": 29}
@@ -725,6 +742,9 @@ class RasterH3ArrowStream:
         min_mean: Optional[float] = None,
         max_mean: Optional[float] = None,
         min_majority_fraction: Optional[float] = None,
+        nodata_policy: Optional[str] = None,
+        emit_nodata_value: Optional[float] = None,
+        decimals: Optional[int] = None,
     ) -> None:
         self.path = str(path)
         #: The grid scanned onto (`h3`, `a5`, `s2` or `healpix`); it names the cell
@@ -1021,6 +1041,9 @@ def scan_raster_h3(
     min_mean: Optional[float] = None,
     max_mean: Optional[float] = None,
     min_majority_fraction: Optional[float] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
 ) -> Any:
     """
     Scan a GeoTIFF / COG into the cells of a discrete global grid (H3 by default).
@@ -1066,6 +1089,14 @@ def scan_raster_h3(
       (`None` drops the class).
     - `min_count`, `min_mean` / `max_mean` (continuous) and `min_majority_fraction`
       (categorical): drop cells outside these bounds inside the engine.
+    - `nodata_policy`: `"omit"` (default) skips NoData samples and returns no row for a
+      cell without a valid sample. `"emit"` returns every cell a pixel falls in: NoData
+      still adds nothing to the statistics, and a cell without a valid sample has `count`
+      0 (`total_count` for categorical scans) and null `mean` / `min` / `max` (or
+      `majority_class` / `category`), or `emit_nodata_value` when that is given (an
+      integer for categorical scans). Not combinable with `min_count`.
+    - `decimals`: round the floating-point statistics (not counts or class codes) to
+      this many decimals, 0 to 15.
 
     A Polars `filter` on `count` (`total_count` for categorical scans), `mean`,
     `majority_fraction` or `resolution`, combined with `&`, is also pushed into the scan
@@ -1185,6 +1216,10 @@ def scan_raster_h3(
             if predicate is not None:
                 pushed = _pushdown_bounds(predicate, categorical, format)
                 if _native_has_scan_options():
+                    if str(options.get("nodata_policy") or "").strip().lower() == "emit":
+                        # `emit` scans cannot take a count bound (their all-NoData cells
+                        # have count 0); Polars applies the filter to the rows instead.
+                        pushed = {k: v for k, v in pushed.items() if k != "min_count"}
                     options = _narrow_options(options, pushed)
                 allowed = pushed.get("resolutions")
                 if allowed is not None:
@@ -1536,6 +1571,9 @@ def merge_partials(
     max_mean: Optional[float] = None,
     min_majority_fraction: Optional[float] = None,
     grid: Optional[str] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
 ) -> Any:
     """
     Merge the partial rows of every partition of a partitioned scan into final rows.
@@ -1573,6 +1611,9 @@ def merge_partials(
             min_mean=min_mean,
             max_mean=max_mean,
             min_majority_fraction=min_majority_fraction,
+            nodata_policy=nodata_policy,
+            emit_nodata_value=emit_nodata_value,
+            decimals=decimals,
         )
     )
     if options is not None and not hasattr(lib, "raster_h3_py_merge_partials_v2"):
@@ -1731,22 +1772,31 @@ def h3_polygon_to_cells(
     return None
 
 
-def _run_export(name: str, args: Tuple[Any, ...], grid: Optional[str] = None) -> int:
+def _run_export(
+    name: str,
+    args: Tuple[Any, ...],
+    grid: Optional[str] = None,
+    output: Optional[Mapping[str, Any]] = None,
+) -> int:
     """Call a native exporter, preferring its newest variant available. A grid other than
-    H3 needs the `_v2` variant, which takes it in an options JSON object."""
+    H3 and the output options (`nodata_policy`, `emit_nodata_value`, `decimals`) need the
+    `_v2` variant, which takes them in an options JSON object."""
     lib = _get_lib()
     err = ctypes.c_void_p(0)
     grid = _normalize_grid(grid)
+    options = _encode_scan_options({"grid": grid, **(output or {})})
     if hasattr(lib, name + "_v2"):
-        options = None if grid == "h3" else json.dumps({"grid": grid}).encode("utf-8")
         failures = ctypes.c_uint64(0)
         count = getattr(lib, name + "_v2")(
             *args, options, ctypes.byref(failures), ctypes.byref(err)
         )
         _raise_if_err(err)
         _warn_transform_failures(failures.value)
-    elif grid != "h3":
-        raise RuntimeError(f"grid={grid!r} requires a newer raster_h3 native library")
+    elif options is not None:
+        raise RuntimeError(
+            "grid, nodata_policy, emit_nodata_value and decimals require a newer raster_h3 "
+            "native library"
+        )
     elif hasattr(lib, name + "_with_stats"):
         failures = ctypes.c_uint64(0)
         count = getattr(lib, name + "_with_stats")(
@@ -1781,9 +1831,20 @@ def raster_to_parquet(
     crs: Optional[str] = None,
     geoparquet: bool = True,
     grid: Optional[str] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a Parquet
-    file (GeoParquet with a `wkb` geometry column by default). Returns the cells written."""
+    file (GeoParquet with a `wkb` geometry column by default). Returns the cells written.
+
+    `nodata_policy`, `emit_nodata_value` and `decimals` are as in `scan_raster_h3`. The
+    file's statistics columns are not nullable, so under `nodata_policy="emit"` a
+    statistic without a value is NaN, and a categorical export needs an integer
+    `emit_nodata_value`."""
+    output = dict(
+        nodata_policy=nodata_policy, emit_nodata_value=emit_nodata_value, decimals=decimals
+    )
     args = (
         str(input_path).encode("utf-8"),
         str(output_path).encode("utf-8"),
@@ -1792,7 +1853,7 @@ def raster_to_parquet(
         crs.encode("utf-8") if crs else None,
         1 if geoparquet else 0,
     )
-    return _run_export("raster_h3_py_export_parquet", args, grid)
+    return _run_export("raster_h3_py_export_parquet", args, grid, output)
 
 
 def raster_to_pmtiles(
@@ -1803,9 +1864,16 @@ def raster_to_pmtiles(
     categorical: bool = False,
     crs: Optional[str] = None,
     grid: Optional[str] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a PMTiles v3
-    vector archive. Returns the cells written."""
+    vector archive. Returns the cells written. `nodata_policy`, `emit_nodata_value` and
+    `decimals` are as in `scan_raster_h3`."""
+    output = dict(
+        nodata_policy=nodata_policy, emit_nodata_value=emit_nodata_value, decimals=decimals
+    )
     args = (
         str(input_path).encode("utf-8"),
         str(output_path).encode("utf-8"),
@@ -1813,7 +1881,7 @@ def raster_to_pmtiles(
         1 if categorical else 0,
         crs.encode("utf-8") if crs else None,
     )
-    return _run_export("raster_h3_py_export_pmtiles", args, grid)
+    return _run_export("raster_h3_py_export_pmtiles", args, grid, output)
 
 
 def parquet_to_pmtiles(

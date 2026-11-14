@@ -14,6 +14,7 @@ use std::ffi::{c_char, c_int, c_short, c_void};
 use std::mem::size_of;
 use std::ptr;
 
+use raster_h3_core::aggregator::output_policy::OutputPolicy;
 use raster_h3_core::encoding::{
     cell_index_to_wkb, h3_index_to_wkb, parse_hex_u64, WkbBuf, WKB_BUF_LEN,
 };
@@ -24,7 +25,7 @@ use raster_h3_core::scalar_ops::{
 };
 
 use crate::{
-    pg_func_call_info, Datum, NullableDatum, Oid, PgCategoricalRow, PgCategoricalSrf,
+    pg_func_call_info, Datum, NodataPolicy, NullableDatum, Oid, PgCategoricalRow, PgCategoricalSrf,
     PgContinuousRow, PgContinuousSrf, Pg_finfo_record, PG_FINFO_V1,
 };
 
@@ -736,12 +737,16 @@ struct SrfArgs<'a> {
     source_crs: Option<&'a [u8]>,
     nodata: Option<f64>,
     bbox: Option<&'a [u8]>,
+    nodata_policy: Option<&'a [u8]>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<i32>,
 }
 
 impl SrfArgs<'_> {
     /// # Safety
     /// `fcinfo` must be the valid call info of an aggregate SRF call with arguments `(text,
-    /// int4, text, float8, text)`.
+    /// int4, text, float8, text)`, optionally followed by `(text, float8, int4)`: functions
+    /// created by install scripts before those options existed pass only the first five.
     unsafe fn read(fcinfo: pg_func_call_info) -> Self {
         // SAFETY: `fcinfo` is valid and its arguments are `(text, int4, text, float8,
         // text)` (caller contract), matching each accessor used; the borrowed slices live
@@ -753,8 +758,44 @@ impl SrfArgs<'_> {
                 source_crs: arg_str(fcinfo, 2),
                 nodata: arg(fcinfo, 3).map(|d| f64::from_bits(d as u64)),
                 bbox: arg_str(fcinfo, 4),
+                nodata_policy: arg_str(fcinfo, 5),
+                emit_nodata_value: arg(fcinfo, 6).map(|d| f64::from_bits(d as u64)),
+                decimals: arg(fcinfo, 7).map(|d| d as i32),
             }
         }
+    }
+
+    /// The NoData policy, NoData value and decimals of the call.
+    fn output_policy(&self) -> Result<OutputPolicy, String> {
+        let mut policy = OutputPolicy::default();
+        if let Some(name) = self.nodata_policy {
+            let name = String::from_utf8_lossy(name);
+            policy.nodata = NodataPolicy::parse(&name).ok_or_else(|| {
+                format!(
+                    "nodata_policy must be {}, got '{name}'",
+                    NodataPolicy::EXPECTED
+                )
+            })?;
+        }
+        if let Some(value) = self.emit_nodata_value {
+            if !value.is_finite() {
+                return Err("emit_nodata_value must be finite; leave it NULL for NULL".into());
+            }
+            if !policy.emits_nodata() {
+                return Err("emit_nodata_value needs nodata_policy 'emit'".into());
+            }
+            policy.nodata_value = Some(value);
+        }
+        if let Some(decimals) = self.decimals {
+            let max = i32::from(raster_h3_core::aggregator::output_policy::MAX_DECIMALS);
+            if !(0..=max).contains(&decimals) {
+                return Err(format!(
+                    "decimals must be between 0 and {max}, got {decimals}"
+                ));
+            }
+            policy.decimals = Some(decimals as u8);
+        }
+        Ok(policy)
     }
 
     /// The arguments of an H3 scan.
@@ -843,11 +884,12 @@ fn continuous_values(r: PgContinuousRow) -> RowText {
     vec![
         Some(r.h3_index.to_string()),
         Some(r.h3_hex),
-        Some(float_text(r.mean)),
+        // NaN marks a cell without samples and without a NoData value: SQL NULL.
+        (!r.mean.is_nan()).then(|| float_text(r.mean)),
         r.stddev.map(float_text),
         Some(float_text(r.count)),
-        Some(float_text(r.min)),
-        Some(float_text(r.max)),
+        (!r.min.is_nan()).then(|| float_text(r.min)),
+        (!r.max.is_nan()).then(|| float_text(r.max)),
         Some(float_text(r.sum)),
         Some(r.resolution.to_string()),
         Some(bytea_text(&r.wkb)),
@@ -858,7 +900,7 @@ fn categorical_values(r: PgCategoricalRow) -> RowText {
     vec![
         Some(r.h3_index.to_string()),
         Some(r.h3_hex),
-        Some(r.majority_class.to_string()),
+        (!r.majority_is_null).then(|| r.majority_class.to_string()),
         Some(float_text(r.majority_fraction)),
         Some(float_text(r.majority_count)),
         Some(r.unique_classes.to_string()),
@@ -1018,7 +1060,8 @@ fn open_continuous(args: &SrfArgs<'_>) -> Result<PgContinuousSrf, String> {
 
 fn open_continuous_for(grid: GridKind, args: &SrfArgs<'_>) -> Result<PgContinuousSrf, String> {
     let (path, res, crs, nodata, bbox) = args.parse_for(grid)?;
-    PgContinuousSrf::open_for(grid, &path, res, crs, nodata, bbox).map_err(|e| e.to_string())
+    PgContinuousSrf::open_with(grid, &path, res, crs, nodata, bbox, args.output_policy()?)
+        .map_err(|e| e.to_string())
 }
 
 fn next_continuous(srf: &mut PgContinuousSrf) -> Result<Option<RowText>, String> {
@@ -1033,7 +1076,8 @@ fn open_categorical(args: &SrfArgs<'_>) -> Result<PgCategoricalSrf, String> {
 
 fn open_categorical_for(grid: GridKind, args: &SrfArgs<'_>) -> Result<PgCategoricalSrf, String> {
     let (path, res, crs, nodata, bbox) = args.parse_for(grid)?;
-    PgCategoricalSrf::open_for(grid, &path, res, crs, nodata, bbox).map_err(|e| e.to_string())
+    PgCategoricalSrf::open_with(grid, &path, res, crs, nodata, bbox, args.output_policy()?)
+        .map_err(|e| e.to_string())
 }
 
 fn next_categorical(srf: &mut PgCategoricalSrf) -> Result<Option<RowText>, String> {
@@ -1197,6 +1241,9 @@ mod tests {
             source_crs: None,
             nodata: None,
             bbox: None,
+            nodata_policy: None,
+            emit_nodata_value: None,
+            decimals: None,
         };
         let (path, res, ..) = base.parse().unwrap();
         assert_eq!((path.as_str(), res), ("a.tif", vec![8]));
@@ -1228,6 +1275,9 @@ mod tests {
             source_crs: a.source_crs,
             nodata: a.nodata,
             bbox: a.bbox,
+            nodata_policy: a.nodata_policy,
+            emit_nodata_value: a.emit_nodata_value,
+            decimals: a.decimals,
         }
     }
 

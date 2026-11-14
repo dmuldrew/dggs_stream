@@ -6,6 +6,7 @@ use std::sync::Arc;
 use raster_h3_core::aggregator::multi_horizon::{
     MultiResolutionConfig, QuantileTarget, ScanPartition, SpectralFormula,
 };
+use raster_h3_core::aggregator::OutputPolicy;
 use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
 use raster_h3_core::columnar::CategoricalFormat;
 use raster_h3_core::grid::GridKind;
@@ -55,6 +56,9 @@ pub struct PyScanConfig {
     pub min_mean: Option<f64>,
     /// Continuous only: drop cells whose mean is above this value.
     pub max_mean: Option<f64>,
+    /// Whether all-NoData cells are output and with what value, and the decimal
+    /// rounding of statistics.
+    pub output: OutputPolicy,
 }
 
 impl PyScanConfig {
@@ -68,6 +72,9 @@ impl PyScanConfig {
         mr_cfg.min_count = self.min_count;
         mr_cfg.min_mean = self.min_mean;
         mr_cfg.max_mean = self.max_mean;
+        mr_cfg.nodata_policy = self.output.nodata;
+        mr_cfg.emit_nodata_value = self.output.nodata_value;
+        mr_cfg.decimals = self.output.decimals;
     }
 }
 
@@ -98,6 +105,7 @@ impl Default for PyScanConfig {
             min_count: None,
             min_mean: None,
             max_mean: None,
+            output: OutputPolicy::default(),
         }
     }
 }

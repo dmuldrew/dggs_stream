@@ -322,3 +322,167 @@ def test_auto_resolution_is_comparable_across_grids(raster_h3, gradient_tif):
         for grid in GRIDS
     }
     assert max(counts.values()) / min(counts.values()) < 6.0, counts
+
+
+NODATA = -9999.0
+
+
+def _holes(c, r):
+    """NoData in the left third and along a diagonal; fractional values elsewhere."""
+    if c < 20 or (c + r) % 9 == 0:
+        return NODATA
+    return float((c * 7 + r * 3) % 11) + 0.375
+
+
+@pytest.fixture(scope="module")
+def holes_tif(tmp_path_factory):
+    from conftest import write_geotiff
+
+    path = tmp_path_factory.mktemp("rasters") / "holes.tif"
+    write_geotiff(path, 60, 40, _holes)
+    return path
+
+
+def _expected_holes(raster_h3, grid):
+    acc = expected(raster_h3, grid, 60, 40, _holes)
+    return {cell: [v for v in values if v != NODATA] for cell, values in acc.items()}
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_nodata_policy_emit_and_decimals(raster_h3, holes_tif, tmp_path, grid):
+    index = f"{grid}_index"
+    want = _expected_holes(raster_h3, grid)
+    empty = {cell for cell, values in want.items() if not values}
+    assert 2 < len(empty) < len(want)
+    scan = lambda **kw: (  # noqa: E731
+        raster_h3.scan_raster(holes_tif, RES[grid], grid=grid, nodata=NODATA, **kw)
+        .collect()
+        .sort(index)
+    )
+
+    omit = scan()
+    assert set(omit[index]) == set(want) - empty
+    assert scan(nodata_policy="omit").equals(omit)
+
+    # emit: every cell a pixel falls in; nulls where there is no valid sample.
+    emit = scan(nodata_policy="emit")
+    assert set(emit[index]) == set(want)
+    for row in emit.iter_rows(named=True):
+        values = want[row[index]]
+        assert row["count"] == len(values)
+        if values:
+            assert row["mean"] == pytest.approx(sum(values) / len(values))
+            assert (row["min"], row["max"]) == (min(values), max(values))
+        else:
+            assert row["mean"] is None and row["min"] is None and row["max"] is None
+            assert row["stddev"] is None and row["sum"] == 0.0
+            assert row["wkb"] is not None
+    assert emit.filter(pl.col("count") > 0).select(index, "count", "min", "max").equals(
+        omit.select(index, "count", "min", "max")
+    )
+
+    # emit with a value, rounded to one decimal: the value is written as given.
+    filled = scan(nodata_policy="emit", emit_nodata_value=-1.25, decimals=1)
+    assert filled.height == emit.height
+    for row in filled.iter_rows(named=True):
+        values = want[row[index]]
+        if values:
+            assert row["mean"] == round(sum(values) / len(values) + 1e-12, 1)
+            assert row["count"] == len(values)
+        else:
+            assert (row["mean"], row["min"], row["max"]) == (-1.25, -1.25, -1.25)
+
+    # decimals alone: same cells, rounded statistics.
+    rounded = scan(decimals=0)
+    assert rounded[index].to_list() == omit[index].to_list()
+    assert rounded["count"].to_list() == omit["count"].to_list()
+    assert all(v == int(v) for v in rounded["mean"])
+    assert any(v != int(v) for v in omit["mean"])
+
+    # Filters still hold under emit (a count filter is applied by Polars, not pushed).
+    lazy = raster_h3.scan_raster(
+        holes_tif, RES[grid], grid=grid, nodata=NODATA, nodata_policy="emit"
+    )
+    assert lazy.filter(pl.col("count") >= 1).collect().height == omit.height
+    assert lazy.filter(pl.col("count") == 0).collect().height == len(empty)
+    assert lazy.filter(pl.col("mean").is_null()).select(pl.len()).collect().item() == len(empty)
+
+    # The arrow stream carries the nulls too.
+    table = pa.table(
+        raster_h3.RasterH3ArrowStream(
+            holes_tif, RES[grid], grid=grid, nodata=NODATA, nodata_policy="emit"
+        )
+    )
+    assert table.column("mean").null_count == len(empty)
+
+    # Exporters: Parquet writes NaN for a missing statistic.
+    out = tmp_path / "emit.parquet"
+    written = raster_h3.raster_to_parquet(
+        holes_tif, out, RES[grid], grid=grid, nodata_policy="emit", decimals=1
+    )
+    # The exporter has no `nodata=` override; the fixture declares none, so nothing is
+    # NoData there and every cell has samples.
+    assert written == len(want)
+    assert raster_h3.raster_to_pmtiles(
+        holes_tif, tmp_path / "emit.pmtiles", RES[grid], grid=grid, nodata_policy="emit"
+    ) == len(want)
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+@pytest.mark.parametrize("format", ["wide", "long"])
+def test_nodata_policy_emit_categorical(raster_h3, tmp_path, grid, format):
+    from conftest import write_geotiff
+
+    tif = tmp_path / "classes_holes.tif"
+    write_geotiff(tif, 60, 40, lambda c, r: 0 if c < 20 else (c // 5 + r // 5) % 3 + 1, dtype="u8")
+    index = f"{grid}_index"
+    total = "total_count"
+    key = "majority_class" if format == "wide" else "category"
+    scan = lambda **kw: raster_h3.scan_raster(  # noqa: E731
+        tif, RES[grid], grid=grid, categorical=True, format=format, nodata=0, **kw
+    ).collect()
+    omit = scan()
+    assert omit.filter(pl.col(total) == 0).height == 0
+    emit = scan(nodata_policy="emit")
+    empties = emit.filter(pl.col(total) == 0)
+    assert empties.height > 2
+    assert emit[index].n_unique() == omit[index].n_unique() + empties.height
+    assert empties[key].null_count() == empties.height
+    assert emit.filter(pl.col(total) > 0)[key].null_count() == 0
+
+    filled = scan(nodata_policy="emit", emit_nodata_value=255)
+    assert filled.filter(pl.col(total) == 0)[key].unique().to_list() == [255]
+    assert filled[key].null_count() == 0
+
+
+def test_output_option_errors(raster_h3, gradient_tif, tmp_path):
+    def scan(**kw):
+        return pa.table(raster_h3.RasterH3ArrowStream(gradient_tif, 9, **kw))
+
+    with pytest.raises(RuntimeError, match="nodata_policy"):
+        scan(nodata_policy="drop")
+    with pytest.raises(RuntimeError, match="decimals"):
+        scan(decimals=16)
+    with pytest.raises(RuntimeError, match="emit_nodata_value"):
+        scan(emit_nodata_value=1.0)
+    with pytest.raises(RuntimeError, match="min_count"):
+        scan(nodata_policy="emit", min_count=2)
+    with pytest.raises(TypeError):
+        scan(decimals=1.5)
+    with pytest.raises(ValueError):
+        scan(nodata_policy="emit", emit_nodata_value=float("nan"))
+    with pytest.raises(RuntimeError, match="emit_nodata_value"):
+        raster_h3.raster_to_parquet(
+            gradient_tif, tmp_path / "c.parquet", 9, categorical=True, nodata_policy="emit"
+        )
+    assert (
+        raster_h3.raster_to_parquet(
+            gradient_tif,
+            tmp_path / "c.parquet",
+            9,
+            categorical=True,
+            nodata_policy="emit",
+            emit_nodata_value=0,
+        )
+        > 0
+    )

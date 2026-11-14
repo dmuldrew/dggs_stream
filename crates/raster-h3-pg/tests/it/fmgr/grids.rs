@@ -237,3 +237,74 @@ fn auto_resolution_entry_points() {
         assert_eq!(call(f, &args), Some(usize::from(want)));
     }
 }
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads a memory-mapped raster, which Miri cannot follow"
+)]
+fn srfs_take_nodata_policy_and_decimals() {
+    use raster_h3_pg::fmgr::pg_h3_raster_continuous_aggregate;
+    let (_tmp, path) = TestGeoTiffBuilder::new(32, 32)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| {
+            if c < 10 {
+                -9999.0
+            } else {
+                ((c * 7 + r * 3) % 11) as f32 + 0.25
+            }
+        });
+    let scan = |f: V1, res: u8, extra: [raster_h3_pg::NullableDatum; 3]| {
+        let mut args = srf_args(&path, Some(i32::from(res)), None, Some(-9999.0), None);
+        args.extend(extra);
+        let mut rows = run_srf(f, 10, &args, None);
+        rows.sort();
+        rows
+    };
+    let float = |v: f64| super::val(v.to_bits() as raster_h3_pg::Datum);
+    for (grid, f) in [
+        (GridKind::H3, pg_h3_raster_continuous_aggregate as V1),
+        (GridKind::A5, pg_a5_raster_continuous_aggregate),
+        (GridKind::S2, pg_s2_raster_continuous_aggregate),
+        (GridKind::Healpix, pg_healpix_raster_continuous_aggregate),
+    ] {
+        let res = res_of(grid);
+        // The five-argument form (older install scripts) is `omit`, unrounded.
+        let args = srf_args(&path, Some(i32::from(res)), None, Some(-9999.0), None);
+        let mut legacy = run_srf(f, 10, &args, None);
+        legacy.sort();
+        let omit = scan(f, res, [varlena(b"omit"), super::NULL, super::NULL]);
+        assert_eq!(omit, legacy, "{grid}");
+        assert!(omit.iter().all(|r| r[2].is_some()));
+
+        // emit: all-NoData cells are rows with count 0 and NULL mean / min / max.
+        let emit = scan(f, res, [short_varlena(b"emit"), super::NULL, super::NULL]);
+        let empty: Vec<_> = emit
+            .iter()
+            .filter(|r| r[4].as_deref() == Some("0"))
+            .collect();
+        assert!(
+            !empty.is_empty() && emit.len() == omit.len() + empty.len(),
+            "{grid}"
+        );
+        for row in &empty {
+            assert_eq!(
+                (&row[2], &row[3], &row[5], &row[6]),
+                (&None, &None, &None, &None)
+            );
+            assert_eq!(row[7].as_deref(), Some("0"));
+        }
+
+        // emit with a value and decimals.
+        let filled = scan(f, res, [varlena(b"emit"), float(-1.5), super::val(1usize)]);
+        assert_eq!(filled.len(), emit.len());
+        for row in &filled {
+            let mean: f64 = row[2].as_ref().unwrap().parse().unwrap();
+            if row[4].as_deref() == Some("0") {
+                assert_eq!(mean, -1.5);
+            } else {
+                assert_eq!(mean, (mean * 10.0).round() / 10.0, "{grid}");
+            }
+        }
+    }
+}

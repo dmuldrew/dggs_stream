@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use crate::aggregator::remap::CategoryRemapper;
 use crate::aggregator::sampling::SamplingPattern;
 use crate::error::{RasterH3Error, Result};
@@ -322,6 +323,14 @@ pub struct MultiResolutionConfig {
     /// system (e.g. a database file-system layer). None uses mmap for local
     /// files and the built-in HTTP range client for remote URLs.
     pub remote_source_factory: Option<crate::raster::http_range::RemoteSourceFactory>,
+    /// Whether cells that received only NoData samples are output (default: omitted).
+    pub nodata_policy: NodataPolicy,
+    /// Under [`NodataPolicy::Emit`], the value the statistics of an all-NoData cell
+    /// take; `None` leaves them NULL.
+    pub emit_nodata_value: Option<f64>,
+    /// Round floating-point output statistics to this many decimals (at most
+    /// [`crate::aggregator::output_policy::MAX_DECIMALS`]); `None` leaves them as computed.
+    pub decimals: Option<u8>,
     /// Stream only this part of the mosaic (see [`super::partition`]). Cells that other
     /// partitions may also hold samples for are emitted as unfiltered partial states for a
     /// later merge, so the stream must be drained with `drain_partitioned_into`.
@@ -363,6 +372,9 @@ impl MultiResolutionConfig {
             transform_failure_counter: None,
             strict_transforms: false,
             remote_source_factory: None,
+            nodata_policy: NodataPolicy::Omit,
+            emit_nodata_value: None,
+            decimals: None,
             partition: None,
         }
     }
@@ -376,6 +388,16 @@ impl MultiResolutionConfig {
     pub fn with_grid(mut self, grid: GridKind) -> Self {
         self.grid = grid;
         self
+    }
+
+    /// How finished cells are turned into output values: the NoData policy and value,
+    /// and the decimal rounding.
+    pub fn output_policy(&self) -> OutputPolicy {
+        OutputPolicy {
+            nodata: self.nodata_policy,
+            nodata_value: self.emit_nodata_value,
+            decimals: self.decimals,
+        }
     }
 
     /// Whether hierarchical 7-cell compaction is enabled (checking both new and legacy fields)
@@ -436,6 +458,35 @@ impl MultiResolutionConfig {
             return Err(RasterH3Error::InvalidParameter(
                 "Resolutions list cannot be empty".to_string(),
             ));
+        }
+        if let Some(decimals) = self.decimals {
+            let max = crate::aggregator::output_policy::MAX_DECIMALS;
+            if decimals > max {
+                return Err(RasterH3Error::InvalidParameter(format!(
+                    "decimals must be between 0 and {max}, got {decimals}"
+                )));
+            }
+        }
+        if self.emit_nodata_value.is_some_and(|v| !v.is_finite()) {
+            return Err(RasterH3Error::InvalidParameter(
+                "emit_nodata_value must be finite; leave it unset for NULL".into(),
+            ));
+        }
+        if self.nodata_policy == NodataPolicy::Emit {
+            if self.should_compact_h3_children() {
+                return Err(RasterH3Error::InvalidParameter(
+                    "nodata_policy 'emit' cannot be combined with compaction: a parent of \
+                     empty and non-empty children has no single NoData state"
+                        .into(),
+                ));
+            }
+            if self.min_count.is_some_and(|c| c > 0.0) {
+                return Err(RasterH3Error::InvalidParameter(
+                    "nodata_policy 'emit' cannot be combined with min_count: all-NoData \
+                     cells have count 0"
+                        .into(),
+                ));
+            }
         }
         let max_res = self.grid.max_resolution();
         let grid_label = self.grid.label();

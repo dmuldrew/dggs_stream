@@ -268,6 +268,12 @@ impl MultiScanHorizonStreamer {
         self.inner.transform_failures()
     }
 
+    /// How serializers turn this stream's cells into output values: the NoData policy
+    /// and value, and the decimal rounding.
+    pub fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.inner.output_policy()
+    }
+
     /// Peak active-map allocation estimate (not whole-process memory).
     pub fn peak_active_bytes(&self) -> usize {
         self.inner.peak_active_bytes()
@@ -341,5 +347,10 @@ impl RecordStreamer for MultiScanHorizonStreamer {
     #[inline(always)]
     fn grid(&self) -> crate::grid::GridKind {
         self.inner.grid()
+    }
+
+    #[inline(always)]
+    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.inner.output_policy()
     }
 }

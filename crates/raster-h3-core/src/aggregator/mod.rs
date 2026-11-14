@@ -34,6 +34,8 @@ pub mod horizon_streamer;
 pub mod multi_horizon;
 /// NoData value detection, type casting, and chunk skipping utilities.
 pub mod nodata;
+/// NoData policy and decimal rounding applied when cells are serialized.
+pub mod output_policy;
 /// Streaming quantile and percentile sketches.
 pub mod quantiles;
 /// Category remapping rules and value reclassification.
@@ -56,6 +58,7 @@ pub use multi_horizon::{
 };
 /// NoData detection, chunk skipping checks, and sentinel value casting.
 pub use nodata::{is_chunk_all_nodata, is_decoding_result_all_nodata, NodataCast};
+pub use output_policy::{NodataPolicy, OutputPolicy};
 /// Memory-efficient streaming sketch for calculating approximate percentiles.
 pub use quantiles::QuantileSketch;
 /// Category remapping engine, rules, and unmapped value handling policies.

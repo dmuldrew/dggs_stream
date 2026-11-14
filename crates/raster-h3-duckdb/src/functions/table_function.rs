@@ -16,6 +16,7 @@ use crate::functions::partition_functions::{
 use crate::functions::raster_table::{self, add_geom_column, RasterTable, ScanContext};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
+use raster_h3_core::aggregator::output_policy::{ContinuousStats, OutputPolicy};
 
 /// User-data bound during table function query compilation
 pub struct RasterH3BindData {
@@ -39,10 +40,39 @@ pub struct RasterH3GlobalData {
     pub emit_geom: bool,
     /// Column index of `partial_state` for a partitioned scan.
     pub partial_state_column: Option<usize>,
+    /// NoData policy and value, and decimal rounding, of the values written.
+    pub policy: OutputPolicy,
 }
 
 /// Thread-local state for parallel DuckDB execution threads (scratch buffers for hex string and WKB encoding)
 pub type RasterH3LocalData = TableFunctionLocalData;
+
+/// Write one statistic of every row; a cell without samples and without a NoData value
+/// is NULL.
+///
+/// # Safety
+/// `writer` wraps a live output chunk whose column `out_idx` is DOUBLE, with room for
+/// `stats.len()` rows, and nothing else accesses that vector meanwhile.
+unsafe fn fill_optional(
+    writer: &mut crate::functions::ChunkWriter,
+    out_idx: usize,
+    stats: &[ContinuousStats],
+    value: impl Fn(&ContinuousStats) -> Option<f64>,
+) {
+    // SAFETY: forwards this function's contract to `fill_column` and `set_null`.
+    unsafe {
+        writer.fill_column(
+            out_idx,
+            stats.len(),
+            stats.iter().map(|s| value(s).unwrap_or(0.0)),
+        );
+        for (row, s) in stats.iter().enumerate() {
+            if value(s).is_none() {
+                writer.set_null(out_idx, row);
+            }
+        }
+    }
+}
 
 /// First quantile column: right after `wkb`, or after `geom` when emitted.
 fn quantile_start_column(emit_geom: bool) -> usize {
@@ -198,11 +228,13 @@ impl RasterTable for ContinuousTable {
             config.quantiles = bind.quantiles.clone();
         }
         config.partition = bind.partition.clone();
+        let policy = config.output_policy();
 
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)
             .map_err(|e| format!("Failed to initialize multi-streamer: {}", e))?;
 
         Ok(RasterH3GlobalData {
+            policy,
             grid: bind.common.grid,
             streamer: Mutex::new(streamer),
             record_queue: ConcurrentRecordQueue::new(),
@@ -277,6 +309,11 @@ impl RasterTable for ContinuousTable {
             // 10: geom GEOMETRY (if emit_geom)
             // 10/11+: quantiles DOUBLE
             // then partial_state BLOB (partitioned scans)
+            let policy = global.policy;
+            let stats: Vec<ContinuousStats> = batch
+                .iter()
+                .map(|r| policy.continuous(&r.accumulator))
+                .collect();
             for (out_idx, &orig_col) in proj_cols.iter().enumerate() {
                 match orig_col {
                     0 => writer.fill_column(out_idx, batch_len, batch.iter().map(|r| r.h3_index)),
@@ -285,43 +322,35 @@ impl RasterTable for ContinuousTable {
                         batch.iter().map(|r| &r.h3_index),
                         ctx.hex_buf,
                     ),
-                    2 => writer.fill_column(
-                        out_idx,
-                        batch_len,
-                        batch.iter().map(|r| r.accumulator.mean()),
-                    ),
+                    2 => fill_optional(&mut writer, out_idx, &stats, |s| s.mean),
+                    // As before this policy existed: no standard deviation is NaN.
                     3 => writer.fill_column(
                         out_idx,
                         batch_len,
-                        batch.iter().map(|r| r.accumulator.stddev()),
+                        stats.iter().map(|s| s.stddev.unwrap_or(f64::NAN)),
                     ),
                     4 => writer.fill_column(
                         out_idx,
                         batch_len,
                         batch.iter().map(|r| r.accumulator.count),
                     ),
-                    5 => writer.fill_column(
-                        out_idx,
-                        batch_len,
-                        batch.iter().map(|r| r.accumulator.min),
-                    ),
-                    6 => writer.fill_column(
-                        out_idx,
-                        batch_len,
-                        batch.iter().map(|r| r.accumulator.max),
-                    ),
-                    7 => writer.fill_column(
-                        out_idx,
-                        batch_len,
-                        batch.iter().map(|r| r.accumulator.sum),
-                    ),
+                    5 => fill_optional(&mut writer, out_idx, &stats, |s| s.min),
+                    6 => fill_optional(&mut writer, out_idx, &stats, |s| s.max),
+                    7 => writer.fill_column(out_idx, batch_len, stats.iter().map(|s| s.sum)),
                     8 => writer.fill_column(out_idx, batch_len, batch.iter().map(|r| r.resolution)),
                     9 => out_idx_wkb = Some(out_idx),
                     10 if global.emit_geom => out_idx_geom = Some(out_idx),
                     c if Some(c) == global.partial_state_column => out_idx_state = Some(out_idx),
                     c if c >= q_start_col => {
                         if let Ok(slot) = q_targets.binary_search(&(c - q_start_col)) {
-                            writer.fill_column(out_idx, batch_len, q_values[slot].iter().copied());
+                            // A quantile without a value stays NaN, as before.
+                            writer.fill_column(
+                                out_idx,
+                                batch_len,
+                                batch.iter().zip(&q_values[slot]).map(|(r, &q)| {
+                                    policy.derived(r.accumulator.count, q).unwrap_or(f64::NAN)
+                                }),
+                            );
                         }
                     }
                     _ => {}

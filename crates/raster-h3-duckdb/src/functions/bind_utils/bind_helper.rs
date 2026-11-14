@@ -1,3 +1,4 @@
+use raster_h3_core::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use std::ffi::CString;
 use std::path::PathBuf;
 
@@ -419,6 +420,46 @@ impl BindHelper {
         self.get_named_bool("scale_offset").unwrap_or(true)
     }
 
+    /// Parse the output options: `nodata_policy` (`'omit'` or `'emit'`),
+    /// `emit_nodata_value` and `decimals`. Invalid values are binding errors.
+    pub fn parse_output_policy(&self) -> Option<OutputPolicy> {
+        let mut policy = OutputPolicy::default();
+        if let Some(name) = self.get_named_string("nodata_policy") {
+            match NodataPolicy::parse(&name) {
+                Some(nodata) => policy.nodata = nodata,
+                None => {
+                    self.set_error(&format!(
+                        "nodata_policy must be {}, got '{name}'",
+                        NodataPolicy::EXPECTED
+                    ));
+                    return None;
+                }
+            }
+        }
+        if let Some(value) = self.get_named_double("emit_nodata_value") {
+            if !value.is_finite() {
+                self.set_error("emit_nodata_value must be finite; leave it unset for NULL");
+                return None;
+            }
+            if !policy.emits_nodata() {
+                self.set_error("emit_nodata_value needs nodata_policy := 'emit'");
+                return None;
+            }
+            policy.nodata_value = Some(value);
+        }
+        if let Some(decimals) = self.get_named_int("decimals") {
+            let max = i64::from(raster_h3_core::aggregator::output_policy::MAX_DECIMALS);
+            if !(0..=max).contains(&decimals) {
+                self.set_error(&format!(
+                    "decimals must be between 0 and {max}, got {decimals}"
+                ));
+                return None;
+            }
+            policy.decimals = Some(decimals as u8);
+        }
+        Some(policy)
+    }
+
     /// Parse execution limits: `workers`/`threads` (aggregation),
     /// `decode_workers`, `fetch_workers`, `decode_budget_mb` and
     /// `compaction_budget_mb`, plus `strict_transforms`.
@@ -436,7 +477,9 @@ impl BindHelper {
             }
             Ok(None)
         };
+        let output = self.parse_output_policy()?;
         let mut execution = ExecutionParams {
+            output,
             aggregation_workers: positive(&["workers", "threads"]).ok()?,
             decode_workers: positive(&["decode_workers"]).ok()?,
             fetch_workers: positive(&["fetch_workers"]).ok()?,
@@ -560,8 +603,11 @@ pub struct CommonRasterParams {
 }
 
 /// SQL execution limits and options. Each `None` keeps the streamer default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ExecutionParams {
+    /// `nodata_policy`, `emit_nodata_value` and `decimals`: what all-NoData cells and
+    /// output precision look like.
+    pub output: OutputPolicy,
     /// `workers` / `threads`: dedicated aggregation pool size.
     pub aggregation_workers: Option<usize>,
     /// `decode_workers`: chunk decoding threads.
@@ -596,6 +642,9 @@ impl ExecutionParams {
             config.compaction_budget_bytes = Some(mb.saturating_mul(1024 * 1024));
         }
         config.strict_transforms = self.strict_transforms;
+        config.nodata_policy = self.output.nodata;
+        config.emit_nodata_value = self.output.nodata_value;
+        config.decimals = self.output.decimals;
     }
 }
 
@@ -648,6 +697,7 @@ mod tests {
             decode_budget_mb: Some(32),
             compaction_budget_mb: Some(8),
             strict_transforms: true,
+            ..Default::default()
         }
         .apply(&mut config);
         assert_eq!(config.aggregation_workers, Some(3));

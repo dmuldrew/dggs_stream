@@ -25,6 +25,8 @@ use raster_h3_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiCategoricalRecord, MultiContinuousRecord,
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
+pub use raster_h3_core::aggregator::output_policy::NodataPolicy;
+use raster_h3_core::aggregator::output_policy::OutputPolicy;
 use raster_h3_core::encoding::{cell_index_to_wkb, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
 use raster_h3_core::error::{catch_unwind_or, safe_panic_payload_to_string, RasterH3Error, Result};
 use raster_h3_core::grid::GridKind;
@@ -528,7 +530,8 @@ pub struct PgContinuousRow {
     pub h3_index: i64,
     /// `text`
     pub h3_hex: String,
-    /// `double precision`
+    /// `double precision`. NaN (SQL NULL) for a cell without samples and without a
+    /// NoData value, which only `NodataPolicy::Emit` returns; likewise `min` and `max`.
     pub mean: f64,
     /// `double precision` (nullable when sample count < 2)
     pub stddev: Option<f64>,
@@ -552,6 +555,9 @@ pub struct PgCategoricalRow {
     pub h3_index: i64,
     pub h3_hex: String,
     pub majority_class: i64,
+    /// SQL NULL `majority_class`: a cell without samples under `NodataPolicy::Emit` and
+    /// no integral NoData value (`majority_class` is then 0).
+    pub majority_is_null: bool,
     pub majority_fraction: f64,
     pub majority_count: f64,
     pub unique_classes: i64,
@@ -566,6 +572,7 @@ pub struct PgCategoricalRow {
 pub struct PgContinuousSrf {
     streamer: MultiScanHorizonStreamer,
     grid: GridKind,
+    policy: OutputPolicy,
     buffer: VecDeque<MultiContinuousRecord>,
     batch_size: usize,
     hex_buf: [u8; 16],
@@ -602,6 +609,30 @@ impl PgContinuousSrf {
         nodata: Option<f64>,
         bbox: Option<[f64; 4]>,
     ) -> Result<Self> {
+        Self::open_with(
+            grid,
+            raster_path,
+            resolutions,
+            source_crs,
+            nodata,
+            bbox,
+            OutputPolicy::default(),
+        )
+    }
+
+    /// [`Self::open_for`] under an [`OutputPolicy`]: with `NodataPolicy::Emit`, cells
+    /// whose samples are all NoData are returned too (with zero count and the policy's
+    /// NoData value, or no value), and statistics are rounded to its decimals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with(
+        grid: GridKind,
+        raster_path: &str,
+        resolutions: Vec<u8>,
+        source_crs: Option<String>,
+        nodata: Option<f64>,
+        bbox: Option<[f64; 4]>,
+        policy: OutputPolicy,
+    ) -> Result<Self> {
         let paths = resolve_raster_sources(raster_path)?;
         let res = if resolutions.is_empty() {
             vec![8]
@@ -613,6 +644,9 @@ impl PgContinuousSrf {
         config.custom_nodata = nodata;
         config.bbox = bbox;
         config.overlap_rule = OverlapRule::Cutline;
+        config.nodata_policy = policy.nodata;
+        config.emit_nodata_value = policy.nodata_value;
+        config.decimals = policy.decimals;
 
         let mosaic = Arc::new(MosaicReader::open(
             &paths,
@@ -624,6 +658,7 @@ impl PgContinuousSrf {
         Ok(Self {
             streamer,
             grid,
+            policy,
             buffer: VecDeque::with_capacity(2048),
             batch_size: 2048,
             hex_buf: [0u8; 16],
@@ -665,17 +700,17 @@ impl PgContinuousSrf {
             Some(len) => self.wkb_buf[..len].to_vec(),
             None => Vec::new(),
         };
-        let sd = rec.accumulator.stddev();
+        let stats = self.policy.continuous(&rec.accumulator);
 
         Ok(Some(PgContinuousRow {
             h3_index: rec.h3_index as i64,
             h3_hex,
-            mean: rec.accumulator.mean(),
-            stddev: if sd.is_finite() { Some(sd) } else { None },
-            count: rec.accumulator.count,
-            min: rec.accumulator.min,
-            max: rec.accumulator.max,
-            sum: rec.accumulator.sum,
+            mean: stats.mean.unwrap_or(f64::NAN),
+            stddev: stats.stddev,
+            count: stats.count,
+            min: stats.min.unwrap_or(f64::NAN),
+            max: stats.max.unwrap_or(f64::NAN),
+            sum: stats.sum,
             resolution: rec.resolution as i16,
             wkb,
         }))
@@ -698,6 +733,7 @@ impl Iterator for PgContinuousSrf {
 pub struct PgCategoricalSrf {
     streamer: MultiCategoricalHorizonStreamer,
     grid: GridKind,
+    policy: OutputPolicy,
     buffer: VecDeque<MultiCategoricalRecord>,
     batch_size: usize,
     hex_buf: [u8; 16],
@@ -734,6 +770,30 @@ impl PgCategoricalSrf {
         nodata: Option<f64>,
         bbox: Option<[f64; 4]>,
     ) -> Result<Self> {
+        Self::open_with(
+            grid,
+            raster_path,
+            resolutions,
+            source_crs,
+            nodata,
+            bbox,
+            OutputPolicy::default(),
+        )
+    }
+
+    /// [`Self::open_for`] under an [`OutputPolicy`]: with `NodataPolicy::Emit`, cells
+    /// whose samples are all NoData are returned too (with zero count and the policy's
+    /// NoData value, or no value), and statistics are rounded to its decimals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with(
+        grid: GridKind,
+        raster_path: &str,
+        resolutions: Vec<u8>,
+        source_crs: Option<String>,
+        nodata: Option<f64>,
+        bbox: Option<[f64; 4]>,
+        policy: OutputPolicy,
+    ) -> Result<Self> {
         let paths = resolve_raster_sources(raster_path)?;
         let res = if resolutions.is_empty() {
             vec![8]
@@ -745,6 +805,9 @@ impl PgCategoricalSrf {
         config.custom_nodata = nodata;
         config.bbox = bbox;
         config.overlap_rule = OverlapRule::Cutline;
+        config.nodata_policy = policy.nodata;
+        config.emit_nodata_value = policy.nodata_value;
+        config.decimals = policy.decimals;
 
         let mosaic = Arc::new(MosaicReader::open(
             &paths,
@@ -756,6 +819,7 @@ impl PgCategoricalSrf {
         Ok(Self {
             streamer,
             grid,
+            policy,
             buffer: VecDeque::with_capacity(2048),
             batch_size: 2048,
             hex_buf: [0u8; 16],
@@ -793,7 +857,7 @@ impl PgCategoricalSrf {
         let h3_hex = std::str::from_utf8(hex_bytes)
             .unwrap_or_default()
             .to_owned();
-        let (maj_class, maj_count, maj_frac) = rec.accumulator.majority();
+        let stats = self.policy.categorical(&rec.accumulator);
         let wkb = match cell_index_to_wkb(self.grid, rec.h3_index, &mut self.wkb_buf) {
             Some(len) => self.wkb_buf[..len].to_vec(),
             None => Vec::new(),
@@ -802,14 +866,15 @@ impl PgCategoricalSrf {
         Ok(Some(PgCategoricalRow {
             h3_index: rec.h3_index as i64,
             h3_hex,
-            majority_class: maj_class,
-            majority_fraction: maj_frac,
-            majority_count: maj_count,
-            unique_classes: rec.accumulator.unique_classes() as i64,
-            total_count: rec.accumulator.total_count,
+            majority_class: stats.majority_class.unwrap_or(0),
+            majority_is_null: stats.majority_class.is_none(),
+            majority_fraction: stats.majority_fraction,
+            majority_count: stats.majority_count,
+            unique_classes: stats.unique_classes,
+            total_count: stats.total_count,
             histogram: rec.accumulator.histogram_json(),
             resolution: rec.resolution as i16,
-            shannon_entropy: rec.accumulator.shannon_entropy(),
+            shannon_entropy: stats.shannon_entropy,
             wkb,
         }))
     }

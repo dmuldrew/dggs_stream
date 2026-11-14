@@ -38,14 +38,15 @@ impl PyRasterScanner {
 
     fn base_schema(&self) -> ColumnSchema {
         let grid = self.config.grid;
-        if !self.config.categorical {
+        let schema = if !self.config.categorical {
             ColumnSchema::continuous_for(grid, &self.config.quantiles)
         } else {
             match self.config.format {
                 CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(grid),
                 CategoricalFormat::Long => ColumnSchema::categorical_long_for(grid),
             }
-        }
+        };
+        schema.with_output_policy(&self.config.output)
     }
 
     pub(crate) fn resolve_projection(&self) -> Result<Option<Vec<usize>>> {

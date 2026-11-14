@@ -99,7 +99,8 @@ impl PartitionedBatchReader {
         projection: Option<Vec<usize>>,
         batch_size: usize,
     ) -> Result<Self> {
-        let full = ColumnSchema::continuous_for(config.grid, &config.quantiles);
+        let full = ColumnSchema::continuous_for(config.grid, &config.quantiles)
+            .with_output_policy(&config.output_policy());
         let schema = partitioned_output_schema(full, projection.as_deref())?;
         // Sketches are only built when a quantile column is output, exactly as the
         // unpartitioned reader does, so merged results match it.
@@ -127,7 +128,8 @@ impl PartitionedBatchReader {
         batch_size: usize,
     ) -> Result<Self> {
         let schema = partitioned_output_schema(
-            ColumnSchema::categorical_wide_for(config.grid),
+            ColumnSchema::categorical_wide_for(config.grid)
+                .with_output_policy(&config.output_policy()),
             projection.as_deref(),
         )?;
         let streamer =
@@ -204,17 +206,18 @@ impl PartitionedBatchReader {
                     return Ok(());
                 }
                 let grid = streamer.grid();
+                let policy = streamer.output_policy();
                 let finals = (!records.is_empty())
                     .then(|| {
-                        RecordBatch::from_continuous_records_for(
-                            grid, &records, quantiles, projection,
+                        RecordBatch::from_continuous_records_with(
+                            grid, &policy, &records, quantiles, projection,
                         )
                     })
                     .transpose()?;
                 let partials = (!partials.is_empty())
                     .then(|| {
-                        RecordBatch::from_continuous_records_for(
-                            grid, &partials, quantiles, projection,
+                        RecordBatch::from_continuous_records_with(
+                            grid, &policy, &partials, quantiles, projection,
                         )
                         .map(|b| (b, states))
                     })
@@ -240,15 +243,20 @@ impl PartitionedBatchReader {
                     return Ok(());
                 }
                 let grid = streamer.grid();
+                let policy = streamer.output_policy();
                 let finals = (!records.is_empty())
                     .then(|| {
-                        RecordBatch::from_categorical_wide_records_for(grid, &records, projection)
+                        RecordBatch::from_categorical_wide_records_with(
+                            grid, &policy, &records, projection,
+                        )
                     })
                     .transpose()?;
                 let partials = (!partials.is_empty())
                     .then(|| {
-                        RecordBatch::from_categorical_wide_records_for(grid, &partials, projection)
-                            .map(|b| (b, states))
+                        RecordBatch::from_categorical_wide_records_with(
+                            grid, &policy, &partials, projection,
+                        )
+                        .map(|b| (b, states))
                     })
                     .transpose()?;
                 (finals, partials)
@@ -406,7 +414,8 @@ pub fn merge_partial_batches(
         }};
     }
     if categorical {
-        let full = ColumnSchema::categorical_wide_for(config.grid);
+        let full = ColumnSchema::categorical_wide_for(config.grid)
+            .with_output_policy(&config.output_policy());
         let schema = Arc::new(match projection {
             Some(p) => full.project(p)?,
             None => full,
@@ -415,12 +424,18 @@ pub fn merge_partial_batches(
         let out = records
             .chunks(batch_size)
             .map(|chunk| {
-                RecordBatch::from_categorical_wide_records_for(config.grid, chunk, projection)
+                RecordBatch::from_categorical_wide_records_with(
+                    config.grid,
+                    &config.output_policy(),
+                    chunk,
+                    projection,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         Ok((schema, out))
     } else {
-        let full = ColumnSchema::continuous_for(config.grid, &config.quantiles);
+        let full = ColumnSchema::continuous_for(config.grid, &config.quantiles)
+            .with_output_policy(&config.output_policy());
         let schema = Arc::new(match projection {
             Some(p) => full.project(p)?,
             None => full,
@@ -433,8 +448,9 @@ pub fn merge_partial_batches(
         let out = records
             .chunks(batch_size)
             .map(|chunk| {
-                RecordBatch::from_continuous_records_for(
+                RecordBatch::from_continuous_records_with(
                     config.grid,
+                    &config.output_policy(),
                     chunk,
                     &config.quantiles,
                     projection,

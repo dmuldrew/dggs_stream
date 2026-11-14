@@ -156,13 +156,15 @@ fn process_categorical_slice_into_maps_impl<T: CategoricalUniformity + Default>(
     remapper: Option<&CategoryRemapper>,
     chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
 ) {
-    let engine = CategoricalEngine::new(native_nodata, remapper);
+    let emit = ctx.emit_nodata;
+    let mut engine = CategoricalEngine::new(native_nodata, remapper);
+    engine.emit_nodata = emit;
     let samples_per_pixel = ctx.samples_per_pixel as usize;
     if samples_per_pixel <= 1 {
         walk_direct(
             ctx,
             slice,
-            |s| is_slice_all_native_nodata(s, native_nodata),
+            |s| !emit && is_slice_all_native_nodata(s, native_nodata),
             &engine,
             chunk_maps,
         );
@@ -173,7 +175,8 @@ fn process_categorical_slice_into_maps_impl<T: CategoricalUniformity + Default>(
             slice,
             |px| {
                 if is_transparent(ctx, px) {
-                    None
+                    // Under `emit` a pixel without a class still marks its cell.
+                    emit.then_some(NODATA_CLASS)
                 } else {
                     engine.get_sample(px[b])
                 }
@@ -187,14 +190,23 @@ fn process_categorical_slice_into_maps_impl<T: CategoricalUniformity + Default>(
 struct CategoricalEngine<'a, T> {
     native_nodata: Option<T>,
     remapper: Option<&'a CategoryRemapper>,
+    /// `NodataPolicy::Emit`: NoData pixels are reported as [`NODATA_CLASS`], which adds
+    /// nothing to a cell but makes it exist.
+    emit_nodata: bool,
     _marker: std::marker::PhantomData<T>,
 }
+
+/// The sample standing for a NoData pixel under `NodataPolicy::Emit`. No raster class
+/// reaches it: classes come from pixel values of at most 64 bits through `to_category`,
+/// and this is the one value a remap target or stored class is never expected to be.
+const NODATA_CLASS: i64 = i64::MIN;
 
 impl<'a, T: CategoricalUniformity> CategoricalEngine<'a, T> {
     fn new(native_nodata: Option<T>, remapper: Option<&'a CategoryRemapper>) -> Self {
         Self {
             native_nodata,
             remapper,
+            emit_nodata: false,
             _marker: std::marker::PhantomData,
         }
     }
@@ -235,7 +247,8 @@ impl<'a, T: CategoricalUniformity> ScanlineEngine<T, CategoricalAccumulator>
 
     #[inline(always)]
     fn has_samples(&self, acc: &CategoricalAccumulator) -> bool {
-        acc.total_count > 0.0
+        // Under `emit` an empty run is kept: its cell was seen.
+        acc.total_count > 0.0 || self.emit_nodata
     }
 
     #[inline(always)]
@@ -331,11 +344,19 @@ impl<'a, T: CategoricalUniformity> ScanlineEngine<T, CategoricalAccumulator>
 
     #[inline(always)]
     fn get_sample(&self, pixel: T) -> Option<i64> {
-        self.resolve_category(pixel)
+        let class = self.resolve_category(pixel);
+        if self.emit_nodata {
+            class.or(Some(NODATA_CLASS))
+        } else {
+            class
+        }
     }
 
     #[inline(always)]
     fn update_sample(&self, acc: &mut CategoricalAccumulator, sample: i64, weight: f64) {
+        if self.emit_nodata && sample == NODATA_CLASS {
+            return;
+        }
         acc.update_weighted(sample, weight);
     }
 }
@@ -369,7 +390,7 @@ pub fn process_categorical_borrowed_into(
     remapper: Option<&CategoryRemapper>,
     chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
 ) -> bool {
-    if window.samples_per_pixel <= 1 && samples.all_nodata(nodata) {
+    if !window.emit_nodata && window.samples_per_pixel <= 1 && samples.all_nodata(nodata) {
         return false;
     }
     crate::dispatch_samples!(samples, nodata, |slice, nd| {
