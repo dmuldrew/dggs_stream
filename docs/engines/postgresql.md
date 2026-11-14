@@ -146,6 +146,18 @@ FROM healpix_raster_continuous_aggregate('/data/dem.tif', 13)
 GROUP BY 1;
 ```
 
+`{grid}_auto_resolution(raster_path [, res_offset [, source_crs]])` returns the
+resolution whose cells are closest in area to the raster's ground pixels (`-r auto` in
+the CLI, `resolutions := 'auto'` in DuckDB), moved `res_offset` steps finer (positive) or
+coarser and clamped to the grid's range. Since the grids number their resolutions on
+unrelated scales, it is the way to get comparable cells on each:
+
+```sql
+SELECT * FROM s2_raster_continuous_aggregate(
+    '/data/dem.tif', s2_auto_resolution('/data/dem.tif'));
+SELECT h3_auto_resolution('/data/dem.tif', 1);   -- one step finer than the match
+```
+
 **Cell ids are `bigint`, the signed reading of the id's 64 bits**, as for H3. PostgreSQL
 has no unsigned 64-bit type, and A5 and S2 ids use all 64 bits: an S2 id on cube faces 4
 and 5 (roughly longitudes 90°W to 180° at the equator, and the south polar face) has

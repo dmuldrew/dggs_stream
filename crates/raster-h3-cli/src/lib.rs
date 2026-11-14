@@ -33,6 +33,7 @@ use raster_h3_core::grid::GridKind;
 use raster_h3_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use raster_h3_core::pmtiles::{H3PmtilesTiler, PmtilesExportSummary};
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
+use raster_h3_core::resolution::ResolutionSpec;
 use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
 
 /// Output wire format for streaming CLI queries.
@@ -1054,20 +1055,36 @@ pub fn parse_stream_args(
         }
     }
 
+    let mut auto = None;
     if let Some((flag, v)) = raw_resolutions {
         let expected = format!(
-            "{} resolutions between 0 and {}, e.g. 7,8",
+            "'auto', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
             opts.grid.label(),
             opts.grid.max_resolution()
         );
-        opts.resolutions = try_parse_resolutions_str_for(opts.grid, &v)
-            .ok_or_else(|| invalid(&flag, &v, &expected))?;
+        match ResolutionSpec::parse_auto(&v) {
+            Some(spec) => auto = Some(spec.map_err(|_| invalid(&flag, &v, &expected))?),
+            None => {
+                opts.resolutions = try_parse_resolutions_str_for(opts.grid, &v)
+                    .ok_or_else(|| invalid(&flag, &v, &expected))?
+            }
+        }
     }
 
     if opts.input_path.is_empty() {
         return Err(RasterH3Error::InvalidParameter(
             "Missing required input raster path".into(),
         ));
+    }
+    // `auto` is measured on the raster, so it is resolved once the path and CRS are known.
+    if let Some(spec) = auto {
+        let paths = resolve_raster_sources(&opts.input_path)?;
+        opts.resolutions = spec.resolve_paths(opts.grid, &paths, opts.source_crs.as_deref())?;
+        eprintln!(
+            "raster-h3: -r {spec} selected {} resolution {}",
+            opts.grid.label(),
+            opts.resolutions[0]
+        );
     }
     match (partition_spec, partition_index) {
         (Some(spec), index) => opts.partition = Some(read_partition_spec(&spec, index)?),
@@ -1421,6 +1438,76 @@ mod tests {
             let total: usize = batches.iter().map(|b| b.num_rows).sum();
             assert_eq!(total, whole.len(), "{grid}");
         }
+    }
+
+    #[test]
+    fn test_cli_auto_resolution_on_every_grid() {
+        use raster_h3_core::raster::mosaic::{MosaicReader, OverlapRule};
+        use raster_h3_core::resolution::{auto_resolution, offset_resolution};
+        let tif = write_test_tif(32, 32, 5.0);
+        let input = tif.path().to_str().unwrap();
+        let mosaic = MosaicReader::open(
+            &[tif.path().to_path_buf()],
+            None,
+            Some("EPSG:4326"),
+            OverlapRule::default(),
+        )
+        .unwrap();
+        for grid in GridKind::ALL {
+            let matched = auto_resolution(grid, &mosaic, 0).unwrap();
+            for (arg, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2), ("auto+64", 64)] {
+                let args: Vec<String> = [
+                    input,
+                    "--crs",
+                    "EPSG:4326",
+                    "--grid",
+                    grid.as_str(),
+                    "-r",
+                    arg,
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+                let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+                assert_eq!(
+                    opts.resolutions,
+                    vec![offset_resolution(grid, matched, offset)],
+                    "{grid} {arg}"
+                );
+            }
+            // The scan runs at the selected resolution.
+            let args: Vec<String> = [
+                input,
+                "--crs",
+                "EPSG:4326",
+                "--grid",
+                grid.as_str(),
+                "-r",
+                "auto",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+            let mut out = Vec::new();
+            let rows = stream_raster_to_writer(&opts, &mut out).unwrap();
+            assert!(rows > 0);
+            let first: serde_json::Value =
+                serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap())
+                    .unwrap();
+            assert_eq!(first["resolution"], u64::from(matched), "{grid}");
+        }
+        for bad in ["auto+", "auto1", "auto+1.5", "automatic"] {
+            let args: Vec<String> = [input, "-r", bad].iter().map(|s| s.to_string()).collect();
+            let err = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap_err();
+            assert!(err.to_string().contains("auto"), "{bad}: {err}");
+        }
+        // `auto` needs a raster to measure.
+        let args: Vec<String> = ["/nonexistent.tif", "-r", "auto"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_stream_args(&args, StreamOutputFormat::Jsonl).is_err());
     }
 
     #[test]

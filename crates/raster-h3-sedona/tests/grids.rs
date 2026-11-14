@@ -602,3 +602,74 @@ async fn mixed_grid_columns_prefer_the_named_grid() {
     let s2_zoom = u64::from(grid_res_to_zoom(GridKind::S2, res));
     assert_eq!(meta["vector_layers"][0]["minzoom"], s2_zoom);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_resolution_matches_cells_to_pixels_on_every_grid() {
+    use raster_h3_core::raster::mosaic::{MosaicReader, OverlapRule};
+    use raster_h3_core::resolution::{auto_resolution, offset_resolution};
+    use raster_h3_sedona::ResolutionSpec;
+    let tif = gradient_tif(SIZE, SIZE);
+    let src = source(&tif);
+    let ctx = context();
+    let mosaic = MosaicReader::open(
+        &[tif.path().to_path_buf()],
+        None,
+        None,
+        OverlapRule::default(),
+    )
+    .unwrap();
+    let resolutions = |batches: &[RecordBatch]| -> Vec<u8> {
+        let mut seen: Vec<u8> = batches
+            .iter()
+            .flat_map(|b| b.column(0).as_primitive::<UInt8Type>().values().to_vec())
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    };
+    for grid in GridKind::ALL {
+        let matched = auto_resolution(grid, &mosaic, 0).unwrap();
+        for (text, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2)] {
+            let want = offset_resolution(grid, matched, offset);
+            for from in [
+                format!("{grid}_raster_continuous_aggregate('{src}', '{text}')"),
+                format!("h3_raster_continuous_aggregate('{src}', '{grid}', '{text}')"),
+                format!("{grid}_raster_categorical_aggregate('{src}', '{text}')"),
+            ] {
+                let got = collect(&ctx, &format!("SELECT resolution FROM {from}")).await;
+                assert_eq!(resolutions(&got), vec![want], "{from}");
+            }
+            let spec = ResolutionSpec::parse(grid, text).unwrap();
+            let provider =
+                ContinuousRasterTableProvider::try_new_with(&src, grid, &spec, None).unwrap();
+            assert_eq!(provider.config.resolutions, vec![want]);
+            assert_eq!(provider.grid(), grid);
+        }
+        // The resolution is fixed at planning, so a filter on it pushes down exactly.
+        let from = format!("{grid}_raster_continuous_aggregate('{src}', 'auto')");
+        let all = rows(&collect(&ctx, &format!("SELECT 1 FROM {from}")).await);
+        let same = collect(
+            &ctx,
+            &format!("SELECT 1 FROM {from} WHERE resolution = {matched}"),
+        )
+        .await;
+        assert_eq!(rows(&same), all);
+        let other = collect(
+            &ctx,
+            &format!("SELECT 1 FROM {from} WHERE resolution = {}", matched + 1),
+        )
+        .await;
+        assert_eq!(rows(&other), 0);
+
+        for bad in [
+            format!("{grid}_raster_continuous_aggregate('{src}', 'auto', 9)"),
+            format!("{grid}_raster_continuous_aggregate('{src}', 'auto+x')"),
+            format!("{grid}_raster_continuous_aggregate('/nonexistent.tif', 'auto')"),
+        ] {
+            assert!(
+                ctx.sql(&format!("SELECT * FROM {bad}")).await.is_err(),
+                "{bad}"
+            );
+        }
+    }
+}

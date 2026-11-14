@@ -379,3 +379,18 @@ def test_grid_arguments_are_validated(raster, tmp_path):
     RasterH3Table.continuous(raster, 20, grid="a5")
     with pytest.raises(ValueError, match="between 0 and 29"):
         RasterH3Table.categorical(raster, 30, grid="healpix")
+
+
+@pytest.mark.parametrize("grid", sorted(GRID_RESOLUTIONS))
+def test_auto_resolution(raster, grid):
+    sd = sedonadb.connect()
+    sd.create_data_frame(RasterH3Table.continuous(raster, "auto", grid=grid)).to_view("cells")
+    auto = sd.sql("SELECT resolution, count FROM cells").to_arrow_table()
+    [res] = set(auto.column("resolution").to_pylist())
+    # About one 0.001 degree pixel per cell.
+    assert 0.3 < 200 * 200 / auto.num_rows < 4.0
+    sd.create_data_frame(RasterH3Table.continuous(raster, "auto-1", grid=grid)).to_view("coarse")
+    coarse = sd.sql("SELECT resolution FROM coarse").to_arrow_table()
+    assert set(coarse.column("resolution").to_pylist()) == {res - 1}
+    with pytest.raises(ValueError, match="auto"):
+        RasterH3Table.continuous(raster, "auto+x", grid=grid)

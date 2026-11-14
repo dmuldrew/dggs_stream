@@ -250,6 +250,40 @@ impl BindHelper {
         self.parse_resolutions_for(GridKind::H3, default_res, positional_idx)
     }
 
+    /// [`Self::parse_resolutions_for`], also accepting `resolutions := 'auto'` (or
+    /// `'auto+1'`, `'auto-2'`, ...): the resolution of `grid` whose cells are closest in
+    /// area to the pixels of the raster at `file_path`. Reports a malformed `auto` or an
+    /// unreadable raster as a binding error and returns `None`.
+    pub fn resolve_resolutions_for(
+        &self,
+        grid: GridKind,
+        default_res: u8,
+        positional_idx: Option<usize>,
+        file_path: &str,
+        source_crs: Option<&str>,
+    ) -> Option<Vec<u8>> {
+        let auto = self
+            .get_named_string("resolutions")
+            .and_then(|s| raster_h3_core::resolution::ResolutionSpec::parse_auto(&s));
+        let Some(spec) = auto else {
+            return Some(self.parse_resolutions_for(grid, default_res, positional_idx));
+        };
+        // SAFETY: `self.info` is the live bind handle (struct invariant).
+        let factory =
+            unsafe { crate::functions::config::raster_source_factory_for_bind(self.info) };
+        let resolved = spec.and_then(|spec| {
+            let paths = crate::raster::mosaic::resolve_raster_sources(file_path)?;
+            spec.resolve_paths_with(grid, &paths, source_crs, factory.as_ref())
+        });
+        match resolved {
+            Ok(resolutions) => Some(resolutions),
+            Err(e) => {
+                self.set_error(&format!("resolutions: {e}"));
+                None
+            }
+        }
+    }
+
     /// Parse target resolutions for `grid` across all supported conventions.
     pub fn parse_resolutions_for(
         &self,
@@ -446,8 +480,9 @@ impl BindHelper {
         };
 
         let grid = self.parse_grid(default_grid)?;
-        let resolutions = self.parse_resolutions_for(grid, 8, Some(1));
         let source_crs = self.parse_source_crs();
+        let resolutions =
+            self.resolve_resolutions_for(grid, 8, Some(1), &file_path, source_crs.as_deref())?;
         let nodata = self.get_named_double("nodata");
         let scale_offset = self.parse_scale_offset();
         let chunk_size = self

@@ -665,3 +665,105 @@ fn test_s2_and_healpix_continuous_table_scans_and_cell_filters() {
         }
     }
 }
+
+/// Binds and scans `raster_h3_bind` with `grid :=` and `resolutions :=`, returning the
+/// distinct resolutions of the cells it emits, or the bind error.
+fn scan_resolutions(
+    path: &std::path::Path,
+    grid: raster_h3_duckdb::grid::GridKind,
+    resolutions: &str,
+) -> Result<Vec<u8>, String> {
+    let mut named = HashMap::new();
+    named.insert("grid".to_string(), MockVal::Str(grid.to_string()));
+    named.insert(
+        "resolutions".to_string(),
+        MockVal::Str(resolutions.to_string()),
+    );
+    named.insert("geom".to_string(), MockVal::Bool(true));
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: live `MockBindContext` for the installed mock C API.
+    unsafe {
+        raster_h3_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    if let Some(error) = bind_ctx.error.take() {
+        return Err(error);
+    }
+    let columns = bind_ctx.result_columns.len();
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, (0..columns).collect());
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying bind_data from `bind_ctx`.
+    unsafe {
+        raster_h3_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_init_local(&mut local_ctx as *mut MockInitContext as duckdb_init_info);
+    }
+    assert!(init_ctx.error.is_none());
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut seen = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live `MockFuncContext` and `MockDataChunk`.
+        unsafe {
+            raster_h3_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func_ctx.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        // SAFETY: column 0 holds `chunk.size` 64-bit cell ids written by `raster_h3_scan`.
+        let cells =
+            unsafe { std::slice::from_raw_parts(chunk.vectors[0].data.as_ptr(), chunk.size) };
+        for &cell in cells {
+            let res = grid.resolution(cell).expect("a valid cell");
+            if !seen.contains(&res) {
+                seen.push(res);
+            }
+        }
+    }
+    Ok(seen)
+}
+
+#[test]
+fn test_auto_resolution_on_every_grid() {
+    use raster_h3_core::raster::mosaic::{MosaicReader, OverlapRule};
+    use raster_h3_core::resolution::{auto_resolution, offset_resolution};
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    let (_tmp, path) = TestGeoTiffBuilder::new(32, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| (c + r + 10) as f32);
+    let mosaic = MosaicReader::open(
+        std::slice::from_ref(&path),
+        None,
+        None,
+        OverlapRule::default(),
+    )
+    .unwrap();
+    for grid in GridKind::ALL {
+        let matched = auto_resolution(grid, &mosaic, 0).unwrap();
+        for (text, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2)] {
+            assert_eq!(
+                scan_resolutions(&path, grid, text).unwrap(),
+                vec![offset_resolution(grid, matched, offset)],
+                "{grid} {text}"
+            );
+        }
+        // Explicit lists still work, and a malformed `auto` is a bind error.
+        assert_eq!(scan_resolutions(&path, grid, "5").unwrap(), vec![5]);
+        let err = scan_resolutions(&path, grid, "auto+x").unwrap_err();
+        assert!(err.contains("auto"), "{err}");
+    }
+    let missing = std::path::Path::new("/nonexistent/raster.tif");
+    assert!(scan_resolutions(missing, GridKind::H3, "auto").is_err());
+}

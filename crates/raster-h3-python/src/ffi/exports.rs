@@ -174,9 +174,13 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
                 .ok_or_else(|| RasterH3Error::InvalidParameter("Missing output_path".into()))?;
             let opts = PyExportOptions::parse(opt_cstr(options).as_deref())?;
             let grid = opts.grid()?;
-            let res_vec = parse_c_resolutions(grid, resolutions)?;
             let crs_opt = opt_cstr(crs);
             let paths = resolve_raster_sources(&in_str)?;
+            let res_vec = parse_c_resolutions(grid, resolutions)?.resolve_paths(
+                grid,
+                &paths,
+                crs_opt.as_deref(),
+            )?;
             let mut config = MultiResolutionConfig::new(res_vec).with_grid(grid);
             config.custom_crs = crs_opt.clone();
             config.transform_failure_counter = Some(Arc::clone(&failures));
@@ -314,9 +318,14 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
                 .ok_or_else(|| RasterH3Error::InvalidParameter("Missing output_path".into()))?;
             let opts = PyExportOptions::parse(opt_cstr(options).as_deref())?;
             let grid = opts.grid()?;
-            let res_vec = parse_c_resolutions(grid, resolutions)?;
+            let crs_opt = opt_cstr(crs);
+            let res_vec = parse_c_resolutions(grid, resolutions)?.resolve_paths(
+                grid,
+                &resolve_raster_sources(&in_str)?,
+                crs_opt.as_deref(),
+            )?;
             let mut config = MultiResolutionConfig::new(res_vec).with_grid(grid);
-            config.custom_crs = opt_cstr(crs);
+            config.custom_crs = crs_opt;
             config.transform_failure_counter = Some(Arc::clone(&failures));
 
             if categorical == 0 {

@@ -126,8 +126,12 @@ unsafe fn parquet_bind_for<const GRID: u8>(info: duckdb_bind_info) {
             let Some(grid) = bind.parse_grid(default_grid) else {
                 return;
             };
-            let resolutions = bind.parse_resolutions_for(grid, 8, None);
             let source_crs = bind.parse_source_crs();
+            let Some(resolutions) =
+                bind.resolve_resolutions_for(grid, 8, None, &file_path, source_crs.as_deref())
+            else {
+                return;
+            };
             let Some(sampling) = bind.parse_sampling() else {
                 return;
             };

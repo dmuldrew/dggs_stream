@@ -53,6 +53,7 @@ pub use pmtiles::{
 };
 pub use polyfill::H3PolygonToCells;
 pub use raster_h3_core::grid::GridKind;
+pub use raster_h3_core::resolution::ResolutionSpec;
 pub use table::{RasterH3Table, TableKind};
 pub use udf::{scalar_udfs, LonLatToCell, RasterH3ScalarUdf};
 pub use udtf::{

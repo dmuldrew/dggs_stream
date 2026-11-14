@@ -435,3 +435,67 @@ REVOKE EXECUTE ON FUNCTION healpix_raster_continuous_aggregate(text, integer, te
 REVOKE EXECUTE ON FUNCTION healpix_raster_categorical_aggregate(text, integer, text, double precision, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION healpix_raster_continuous_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
 GRANT EXECUTE ON FUNCTION healpix_raster_categorical_aggregate(text, integer, text, double precision, text) TO pg_read_server_files;
+
+-- ============================================================================
+-- Automatic resolution
+--
+-- {grid}_auto_resolution(raster_path [, res_offset [, source_crs]]) returns the
+-- resolution whose cells are closest in area to the raster's ground pixels,
+-- moved res_offset resolution steps (positive is finer) and clamped to the
+-- grid's range. The grids number their resolutions on unrelated scales, so
+-- this is how to ask for comparable cells on each:
+--
+--   SELECT * FROM s2_raster_continuous_aggregate(
+--       '/data/dem.tif', s2_auto_resolution('/data/dem.tif'));
+--
+-- It reads the raster's header from the server's file system, so it is
+-- restricted like the SRFs.
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION h3_auto_resolution(
+    raster_path text,
+    res_offset integer DEFAULT 0,
+    source_crs text DEFAULT NULL
+)
+RETURNS integer
+AS 'MODULE_PATHNAME', 'pg_h3_auto_resolution'
+LANGUAGE C STABLE PARALLEL SAFE;
+
+REVOKE EXECUTE ON FUNCTION h3_auto_resolution(text, integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION h3_auto_resolution(text, integer, text) TO pg_read_server_files;
+
+CREATE OR REPLACE FUNCTION a5_auto_resolution(
+    raster_path text,
+    res_offset integer DEFAULT 0,
+    source_crs text DEFAULT NULL
+)
+RETURNS integer
+AS 'MODULE_PATHNAME', 'pg_a5_auto_resolution'
+LANGUAGE C STABLE PARALLEL SAFE;
+
+REVOKE EXECUTE ON FUNCTION a5_auto_resolution(text, integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION a5_auto_resolution(text, integer, text) TO pg_read_server_files;
+
+CREATE OR REPLACE FUNCTION s2_auto_resolution(
+    raster_path text,
+    res_offset integer DEFAULT 0,
+    source_crs text DEFAULT NULL
+)
+RETURNS integer
+AS 'MODULE_PATHNAME', 'pg_s2_auto_resolution'
+LANGUAGE C STABLE PARALLEL SAFE;
+
+REVOKE EXECUTE ON FUNCTION s2_auto_resolution(text, integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION s2_auto_resolution(text, integer, text) TO pg_read_server_files;
+
+CREATE OR REPLACE FUNCTION healpix_auto_resolution(
+    raster_path text,
+    res_offset integer DEFAULT 0,
+    source_crs text DEFAULT NULL
+)
+RETURNS integer
+AS 'MODULE_PATHNAME', 'pg_healpix_auto_resolution'
+LANGUAGE C STABLE PARALLEL SAFE;
+
+REVOKE EXECUTE ON FUNCTION healpix_auto_resolution(text, integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION healpix_auto_resolution(text, integer, text) TO pg_read_server_files;

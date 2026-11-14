@@ -1082,6 +1082,53 @@ pub unsafe extern "C" fn pg_h3_raster_categorical_aggregate(fcinfo: pg_func_call
     }
 }
 
+/// `{grid}_auto_resolution(raster_path text, res_offset int4, source_crs text) -> int4`:
+/// the resolution whose cells match the raster's pixel size. Raises an error for a NULL
+/// or unreadable raster; a NULL offset is 0 and a NULL CRS uses the raster's own.
+///
+/// # Safety
+/// `fcinfo` must be the valid call info of a function declared `(text, int4, text) -> int4`.
+unsafe fn grid_auto_resolution(fcinfo: pg_func_call_info, grid: GridKind) -> Datum {
+    // SAFETY: `fcinfo` is valid with arguments `(text, int4, text)` (caller contract).
+    // The borrowed argument slices live for the call, and `resolved` is consumed by the
+    // match before `raise_error` can longjmp, so no Rust value with a destructor is live.
+    unsafe {
+        let (path, offset, crs) = (arg_str(fcinfo, 0), arg(fcinfo, 1), arg_str(fcinfo, 2));
+        let resolved = guarded(|| {
+            let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+            let path = path
+                .map(text)
+                .filter(|s| !s.is_empty())
+                .ok_or("raster_path must not be NULL or empty")?;
+            let offset = offset.map_or(0, |d| (d as i32).clamp(-1000, 1000));
+            let crs = crs.map(text).filter(|s| !s.is_empty());
+            crate::pg_auto_resolution(grid, &path, offset, crs.as_deref())
+                .map_err(|e| e.to_string())
+        });
+        match resolved {
+            Ok(res) => usize::from(res),
+            Err(msg) => raise_error(msg),
+        }
+    }
+}
+
+grid_text_v1!(
+    /// `h3_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_h3_auto_resolution, pg_h3_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::H3));
+grid_text_v1!(
+    /// `a5_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_a5_auto_resolution, pg_a5_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::A5));
+grid_text_v1!(
+    /// `s2_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_s2_auto_resolution, pg_s2_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::S2));
+grid_text_v1!(
+    /// `healpix_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_healpix_auto_resolution, pg_healpix_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::Healpix));
+
 /// Defines one aggregate SRF entry point (and its `pg_finfo_*` record).
 macro_rules! grid_srf_v1 {
     ($(#[$doc:meta])* $finfo:ident, $name:ident, |$args:ident| $open:expr, $next:expr) => {

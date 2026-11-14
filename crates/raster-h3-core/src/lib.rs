@@ -24,6 +24,8 @@ pub mod pmtiles;
 mod polygon_fill;
 /// GeoTIFF file decoding, metadata extraction, and chunked raster I/O.
 pub mod raster;
+/// Resolution selection, including `auto` (cells matched to the pixel size).
+pub mod resolution;
 /// Engine-neutral grid scalar and utility operations (H3, A5, S2, HEALPix).
 pub mod scalar_ops;
 /// Cross-format dataset transcoding pipelines (e.g. Parquet to PMTiles).
@@ -34,4 +36,5 @@ pub use grid::{GridBackend, GridKind, GridSpec, MAX_GRID_RESOLUTIONS};
 pub use h3o;
 pub use h3o::{CellIndex, LatLng, Resolution};
 pub use healpix;
+pub use resolution::ResolutionSpec;
 pub use s2;

@@ -38,7 +38,7 @@ use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use raster_h3_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
-use raster_h3_sedona::GridKind;
+use raster_h3_sedona::{GridKind, ResolutionSpec};
 use sedona_extension::extension::SedonaCTableProvider;
 use sedona_extension::runtime::RuntimeHandle;
 use sedona_extension::table_provider::ExportedTableProvider;
@@ -64,13 +64,16 @@ fn runtime() -> PyResult<Arc<RuntimeHandle>> {
 enum Resolutions {
     One(u8),
     Many(Vec<u8>),
+    /// `"auto"`, `"auto+1"`, `"auto-2"`, ...
+    Text(String),
 }
 
 impl Resolutions {
-    fn into_vec(self, grid: GridKind) -> PyResult<Vec<u8>> {
+    fn into_spec(self, grid: GridKind) -> PyResult<ResolutionSpec> {
         let resolutions = match self {
             Self::One(r) => vec![r],
             Self::Many(rs) => rs,
+            Self::Text(text) => return ResolutionSpec::parse(grid, &text).map_err(value_error),
         };
         let finest = grid.max_resolution();
         match resolutions.iter().find(|&&r| r > finest) {
@@ -78,13 +81,13 @@ impl Resolutions {
                 "{} resolution must be between 0 and {finest}, got {r}",
                 grid.label()
             ))),
-            None => Ok(resolutions),
+            None => Ok(ResolutionSpec::Fixed(resolutions)),
         }
     }
 }
 
-fn resolutions(resolutions: Option<Resolutions>, grid: GridKind) -> PyResult<Vec<u8>> {
-    resolutions.map_or(Ok(Vec::new()), |r| r.into_vec(grid))
+fn resolutions(resolutions: Option<Resolutions>, grid: GridKind) -> PyResult<ResolutionSpec> {
+    resolutions.map_or(Ok(ResolutionSpec::Fixed(Vec::new())), |r| r.into_spec(grid))
 }
 
 /// A grid name (`h3`, `a5`, `s2`, `healpix`, case-insensitive); `None` is H3.
@@ -139,13 +142,13 @@ impl PyRasterH3Table {
         grid: Option<&str>,
     ) -> PyResult<Self> {
         let grid = grid_of(grid)?;
-        let mut provider =
-            ContinuousRasterTableProvider::try_new(source, self::resolutions(resolutions, grid)?)
-                .map_err(value_error)?
-                .with_grid(grid);
-        if let Some(crs) = crs {
-            provider = provider.with_crs(crs);
-        }
+        let mut provider = ContinuousRasterTableProvider::try_new_with(
+            source,
+            grid,
+            &self::resolutions(resolutions, grid)?,
+            crs.as_deref(),
+        )
+        .map_err(value_error)?;
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }
@@ -182,13 +185,13 @@ impl PyRasterH3Table {
         grid: Option<&str>,
     ) -> PyResult<Self> {
         let grid = grid_of(grid)?;
-        let mut provider =
-            CategoricalRasterTableProvider::try_new(source, self::resolutions(resolutions, grid)?)
-                .map_err(value_error)?
-                .with_grid(grid);
-        if let Some(crs) = crs {
-            provider = provider.with_crs(crs);
-        }
+        let mut provider = CategoricalRasterTableProvider::try_new_with(
+            source,
+            grid,
+            &self::resolutions(resolutions, grid)?,
+            crs.as_deref(),
+        )
+        .map_err(value_error)?;
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }

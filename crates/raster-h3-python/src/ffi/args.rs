@@ -7,30 +7,42 @@ use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
 use raster_h3_core::columnar::CategoricalFormat;
 use raster_h3_core::error::{RasterH3Error, Result};
 use raster_h3_core::grid::GridKind;
-use raster_h3_core::raster::mosaic::OverlapRule;
+use raster_h3_core::raster::mosaic::{resolve_raster_sources, OverlapRule};
+use raster_h3_core::resolution::ResolutionSpec;
 use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
 
 use crate::config::PyScanConfig;
 use crate::ffi::opt_cstr;
 
-/// Resolutions of `grid` from a C string; NULL means the default `[8]`. An empty string
-/// is rejected like any other list without a resolution.
+/// Resolutions of `grid` from a C string: a list, or `auto` / `auto+N` / `auto-N` (the
+/// resolution whose cells match the raster's pixel size, see
+/// [`raster_h3_core::resolution`]). NULL means the default `[8]`. An empty string is
+/// rejected like any other list without a resolution.
 ///
 /// # Safety
 /// `ptr` must be null or a valid NUL-terminated string.
-pub(crate) unsafe fn parse_c_resolutions(grid: GridKind, ptr: *const c_char) -> Result<Vec<u8>> {
+pub(crate) unsafe fn parse_c_resolutions(
+    grid: GridKind,
+    ptr: *const c_char,
+) -> Result<ResolutionSpec> {
     if ptr.is_null() {
-        return Ok(vec![8]);
+        return Ok(ResolutionSpec::Fixed(vec![8]));
     }
     // SAFETY: `ptr` is non-null and NUL-terminated (caller contract).
     let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy();
-    try_parse_resolutions_str_for(grid, &s).ok_or_else(|| {
-        RasterH3Error::InvalidParameter(format!(
-            "Invalid resolutions '{s}': expected {} resolutions between 0 and {}, e.g. 7,8",
-            grid.label(),
-            grid.max_resolution()
-        ))
-    })
+    if let Some(auto) = ResolutionSpec::parse_auto(&s) {
+        return auto;
+    }
+    try_parse_resolutions_str_for(grid, &s)
+        .map(ResolutionSpec::Fixed)
+        .ok_or_else(|| {
+            RasterH3Error::InvalidParameter(format!(
+                "Invalid resolutions '{s}': expected 'auto', 'auto+N', 'auto-N' or {} \
+                 resolutions between 0 and {}, e.g. 7,8",
+                grid.label(),
+                grid.max_resolution()
+            ))
+        })
 }
 
 /// A grid name (`h3`, `a5`, `s2`, `healpix`, case-insensitive).
@@ -116,9 +128,16 @@ pub(crate) unsafe fn build_py_scan_config(
     unsafe {
         let path_str = opt_cstr(path)
             .ok_or_else(|| RasterH3Error::InvalidParameter("Missing input raster path".into()))?;
-        let res_vec = parse_c_resolutions(grid, resolutions)?;
         let fmt = parse_c_format(format)?;
         let crs_opt = opt_cstr(crs);
+        // `auto` is measured on the raster, opened (headers only) as the scan will.
+        let res_vec = match parse_c_resolutions(grid, resolutions)? {
+            ResolutionSpec::Fixed(resolutions) => resolutions,
+            auto => {
+                let paths = resolve_raster_sources(&path_str)?;
+                auto.resolve_paths(grid, &paths, crs_opt.as_deref())?
+            }
+        };
         let nodata_opt = if has_nodata != 0 { Some(nodata) } else { None };
         let bbox_opt = opt_cstr(bbox)
             .map(|s| {

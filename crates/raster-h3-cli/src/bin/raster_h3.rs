@@ -37,7 +37,9 @@ fn print_help() {
         Options:\n  \
           --grid <h3|a5|s2|healpix>  Discrete global grid system (default: h3)\n  \
           -r, --resolutions <LIST>   Grid resolutions (H3: 0..=15, A5 and S2: 0..=30,\n                                     \
-                                     HEALPix: 0..=29; default: 8)\n  \
+                                     HEALPix: 0..=29; default: 8), or `auto` for the\n                                     \
+                                     resolution whose cells match the pixel size\n                                     \
+                                     (`auto+1` one step finer, `auto-1` coarser)\n  \
           -c, --categorical          Enable categorical aggregation\n  \
           --format <wide|long>       Categorical output format (default: wide)\n  \
           --crs <CRS>                Override source CRS (e.g. EPSG:4326)\n  \

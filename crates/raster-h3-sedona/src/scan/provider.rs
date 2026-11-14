@@ -19,6 +19,7 @@ use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::{
     resolve_raster_sources, MosaicReader, OverlapRule, NO_TILES_IN_BBOX,
 };
+use raster_h3_core::resolution::ResolutionSpec;
 use raster_h3_core::scalar_ops::estimate_raster_cardinality_for;
 
 /// Cardinality statistics exposed to query planners.
@@ -578,6 +579,24 @@ impl ContinuousRasterTableProvider {
         })
     }
 
+    /// A scan onto `grid` at the resolutions `spec` asks for. `auto` forms are measured
+    /// on the raster (opened with `crs`, headers only), so the table's resolution is fixed
+    /// from here on, as filter pushdown and partition planning need.
+    pub fn try_new_with(
+        source: &str,
+        grid: GridKind,
+        spec: &ResolutionSpec,
+        crs: Option<&str>,
+    ) -> Result<Self> {
+        let paths = resolve_raster_sources(source)?;
+        let resolutions = spec.resolve_paths(grid, &paths, crs)?;
+        let mut provider = Self::try_new(source, resolutions)?.with_grid(grid);
+        if let Some(crs) = crs {
+            provider = provider.with_crs(crs);
+        }
+        Ok(provider)
+    }
+
     /// Aggregate onto `grid` instead of H3. The cell columns are then named for it
     /// (`a5_index`, `s2_hex`, ...), and the resolutions must be within its range.
     pub fn with_grid(mut self, grid: GridKind) -> Self {
@@ -851,6 +870,24 @@ impl CategoricalRasterTableProvider {
             format: CategoricalFormat::Wide,
             batch_size: 2048,
         })
+    }
+
+    /// A scan onto `grid` at the resolutions `spec` asks for. `auto` forms are measured
+    /// on the raster (opened with `crs`, headers only), so the table's resolution is fixed
+    /// from here on, as filter pushdown and partition planning need.
+    pub fn try_new_with(
+        source: &str,
+        grid: GridKind,
+        spec: &ResolutionSpec,
+        crs: Option<&str>,
+    ) -> Result<Self> {
+        let paths = resolve_raster_sources(source)?;
+        let resolutions = spec.resolve_paths(grid, &paths, crs)?;
+        let mut provider = Self::try_new(source, resolutions)?.with_grid(grid);
+        if let Some(crs) = crs {
+            provider = provider.with_crs(crs);
+        }
+        Ok(provider)
     }
 
     /// Aggregate onto `grid` instead of H3. The cell columns are then named for it

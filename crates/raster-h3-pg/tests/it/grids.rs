@@ -247,3 +247,42 @@ fn bigint_scalars_match_core_on_every_grid() {
     let south = GridKind::S2.cell_at(-60.0, 0.5, 12).unwrap();
     assert!((south as i64) < 0, "S2 face 5 ids are negative bigints");
 }
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads a memory-mapped raster, which Miri cannot follow"
+)]
+fn auto_resolution_matches_core_on_every_grid() {
+    use raster_h3_core::raster::mosaic::{MosaicReader, OverlapRule};
+    use raster_h3_core::resolution::{auto_resolution, offset_resolution};
+    use raster_h3_pg::pg_auto_resolution;
+    let (_tmp, path) = TestGeoTiffBuilder::new(SIZE, SIZE)
+        .pixel_size(0.001)
+        .create_f32_tempfile(value);
+    let mosaic = MosaicReader::open(
+        std::slice::from_ref(&path),
+        None,
+        None,
+        OverlapRule::default(),
+    )
+    .unwrap();
+    let path = path.to_str().unwrap();
+    for grid in GridKind::ALL {
+        let matched = auto_resolution(grid, &mosaic, 0).unwrap();
+        for offset in [0, 1, -2, 100, -100] {
+            assert_eq!(
+                pg_auto_resolution(grid, path, offset, None).unwrap(),
+                offset_resolution(grid, matched, offset),
+                "{grid} {offset}"
+            );
+        }
+        // A scan at that resolution has about one pixel per cell.
+        let cells = PgContinuousSrf::open_for(grid, path, vec![matched], None, None, None)
+            .unwrap()
+            .count();
+        let per_cell = f64::from(SIZE * SIZE) / cells as f64;
+        assert!((0.3..4.0).contains(&per_cell), "{grid}: {per_cell}");
+        assert!(pg_auto_resolution(grid, "/nonexistent.tif", 0, None).is_err());
+    }
+}

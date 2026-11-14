@@ -5,6 +5,7 @@ mod helpers;
 mod accumulators;
 mod analytic_south_lat;
 mod antimeridian_bbox;
+mod auto_resolution;
 mod band_calibration;
 mod categorical_long_streaming;
 mod categorical_remap;

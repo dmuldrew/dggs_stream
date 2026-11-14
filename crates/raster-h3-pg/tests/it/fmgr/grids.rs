@@ -200,3 +200,40 @@ fn srf_resolutions_follow_the_grid() {
     let rows = run_srf(pg_a5_raster_continuous_aggregate, 10, &args, Some(1));
     assert_eq!(rows.len(), 1);
 }
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads a memory-mapped raster, which Miri cannot follow"
+)]
+fn auto_resolution_entry_points() {
+    use raster_h3_pg::fmgr::{
+        pg_a5_auto_resolution, pg_h3_auto_resolution, pg_healpix_auto_resolution,
+        pg_s2_auto_resolution,
+    };
+    use raster_h3_pg::pg_auto_resolution;
+    let (_tmp, path) = TestGeoTiffBuilder::new(32, 32)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|_, _| 1.0);
+    let text = path.to_str().unwrap();
+    for (grid, f) in [
+        (GridKind::H3, pg_h3_auto_resolution as V1),
+        (GridKind::A5, pg_a5_auto_resolution),
+        (GridKind::S2, pg_s2_auto_resolution),
+        (GridKind::Healpix, pg_healpix_auto_resolution),
+    ] {
+        for (offset, crs) in [(0i32, None), (1, None), (-2, Some("EPSG:4326"))] {
+            let want = pg_auto_resolution(grid, text, offset, crs).unwrap();
+            let args = [
+                varlena(text.as_bytes()),
+                super::val(offset as u32 as raster_h3_pg::Datum),
+                crs.map_or(super::NULL, |c| short_varlena(c.as_bytes())),
+            ];
+            assert_eq!(call(f, &args), Some(usize::from(want)), "{grid} {offset}");
+        }
+        // NULL offset is 0.
+        let args = [varlena(text.as_bytes()), super::NULL, super::NULL];
+        let want = pg_auto_resolution(grid, text, 0, None).unwrap();
+        assert_eq!(call(f, &args), Some(usize::from(want)));
+    }
+}

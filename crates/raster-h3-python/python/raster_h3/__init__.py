@@ -293,6 +293,14 @@ def _get_lib() -> ctypes.CDLL:
             ctypes.POINTER(ctypes.c_size_t),
         ]
         lib.raster_h3_py_grid_polygon_to_cells.restype = ctypes.c_int
+    if hasattr(lib, "raster_h3_py_auto_resolution"):
+        lib.raster_h3_py_auto_resolution.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_char_p,
+        ] + err_ptr
+        lib.raster_h3_py_auto_resolution.restype = ctypes.c_int
 
     # Scalar C-ABI
     lib.raster_h3_py_h3_to_string.argtypes = [ctypes.c_uint64]
@@ -1023,6 +1031,13 @@ def scan_raster_h3(
     (`UInt64`) and `{grid}_hex` (lowercase hexadecimal string). Every other option,
     column and pushdown works the same on each grid. `scan_raster` is the same function
     under a grid-neutral name.
+
+    `resolutions` is an int, a list of ints, or `"auto"`: the resolution whose cells are
+    closest in area to the raster's ground pixels (measured at the raster's centre through
+    its geotransform and CRS). `"auto+1"` is one resolution step finer, `"auto-2"` two
+    coarser; the result is clamped to the grid's range. Since the grids number their
+    resolutions on unrelated scales, `"auto"` is the way to ask for comparable cells on
+    each. `auto_resolution(path, grid)` returns the resolution it picks.
 
     If `polars` is installed with `register_io_source`, returns a Polars `LazyFrame`
     with column projection (`with_columns`) and row-slice (`n_rows`) pushdown.
@@ -1865,6 +1880,32 @@ def _as_cell(cell_or_hex: Union[int, str]) -> int:
     return cell if 0 < cell < 1 << 64 else 0
 
 
+def auto_resolution(
+    path: Union[str, Path], grid: str = "h3", *, offset: int = 0, crs: Optional[str] = None
+) -> int:
+    """The resolution `resolutions="auto"` picks for a raster on `grid`: the one whose
+    cells are closest in area to the raster's ground pixels, moved `offset` steps
+    (positive is finer) and clamped to the grid's range. `crs` overrides the raster's CRS.
+    """
+    lib, code = _grid_code(grid)
+    if not hasattr(lib, "raster_h3_py_auto_resolution"):
+        raise RuntimeError("auto_resolution requires a newer raster_h3 native library")
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        raise TypeError(f"offset must be an int, got {type(offset).__name__}")
+    err = ctypes.c_void_p(0)
+    res = lib.raster_h3_py_auto_resolution(
+        str(path).encode("utf-8"),
+        code,
+        max(-1000, min(1000, offset)),
+        crs.encode("utf-8") if crs else None,
+        ctypes.byref(err),
+    )
+    _raise_if_err(err)
+    if res < 0:
+        raise RuntimeError("Failed to determine the auto resolution")
+    return int(res)
+
+
 def lonlat_to_cell(lon: float, lat: float, resolution: int, grid: str = "h3") -> Optional[int]:
     """The cell of `grid` holding a WGS84 point (degrees) at `resolution`, or `None` if
     the latitude is outside -90..90 or the resolution outside the grid's range."""
@@ -1978,6 +2019,7 @@ __all__ = [
     "scan_raster",
     "read_raster",
     "GRIDS",
+    "auto_resolution",
     "lonlat_to_cell",
     "cell_to_string",
     "string_to_cell",

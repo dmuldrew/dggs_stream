@@ -1010,6 +1010,21 @@ pub unsafe extern "C" fn pg_srf_continuous_close(srf: *mut PgContinuousSrf) {
     }
 }
 
+/// The resolution of `grid` whose cells are closest in area to the ground pixels of the
+/// raster at `raster_path` (`{grid}_auto_resolution` in SQL), moved `offset` resolution
+/// steps (positive is finer) and clamped to the grid's range.
+pub fn pg_auto_resolution(
+    grid: GridKind,
+    raster_path: &str,
+    offset: i32,
+    source_crs: Option<&str>,
+) -> Result<u8> {
+    let paths = resolve_raster_sources(raster_path)?;
+    let resolutions = raster_h3_core::resolution::ResolutionSpec::Auto { offset }
+        .resolve_paths(grid, &paths, source_crs)?;
+    Ok(resolutions[0])
+}
+
 // Re-export core scalar helpers for Rust callers of `raster_h3_pg`
 pub use raster_h3_core::scalar_ops::{
     h3_cell_to_parent_str as pg_scalar_h3_cell_to_parent_str,

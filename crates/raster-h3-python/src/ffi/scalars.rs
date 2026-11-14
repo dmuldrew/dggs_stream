@@ -391,3 +391,43 @@ pub unsafe extern "C" fn raster_h3_py_grid_polygon_to_cells(
         }
     }
 }
+
+/// C-ABI helper: the `auto` resolution of the raster at `path` on grid `grid` (a grid
+/// code), moved `offset` resolution steps (positive is finer) and clamped to the grid's
+/// range: the resolution whose cells are closest in area to the raster's ground pixels.
+/// `crs` overrides the raster's CRS (NULL to use its own). Returns `-1` with `out_err`
+/// set if the grid code is unknown or the raster cannot be opened or located.
+///
+/// # Safety
+/// `path` and `crs` must be valid NUL-terminated strings or NULL; `out_err` must be NULL
+/// or a writable `char **`.
+#[no_mangle]
+pub unsafe extern "C" fn raster_h3_py_auto_resolution(
+    path: *const c_char,
+    grid: c_int,
+    offset: c_int,
+    crs: *const c_char,
+    out_err: *mut *mut c_char,
+) -> c_int {
+    use raster_h3_core::error::RasterH3Error;
+    use raster_h3_core::raster::mosaic::resolve_raster_sources;
+    use raster_h3_core::resolution::ResolutionSpec;
+    // SAFETY: the C string arguments are null or NUL-terminated and `out_err` is null or
+    // a writable `char **` (caller contract), as `opt_cstr` and `ffi_call` require.
+    unsafe {
+        crate::ffi::ffi_call("auto_resolution", out_err, || {
+            let grid = grid_of_code(grid)
+                .ok_or_else(|| RasterH3Error::InvalidParameter("unknown grid code".into()))?;
+            let path = opt_cstr(path)
+                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing raster path".into()))?;
+            let paths = resolve_raster_sources(&path)?;
+            let resolutions = ResolutionSpec::Auto { offset }.resolve_paths(
+                grid,
+                &paths,
+                opt_cstr(crs).as_deref(),
+            )?;
+            Ok(c_int::from(resolutions[0]))
+        })
+        .unwrap_or(-1)
+    }
+}

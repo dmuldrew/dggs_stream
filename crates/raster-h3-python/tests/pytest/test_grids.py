@@ -272,3 +272,53 @@ def test_polygon_to_cells(raster_h3, grid):
     assert raster_h3.polygon_to_cells(b"junk", res, grid=grid) is None
     with pytest.raises(ValueError, match="containment"):
         raster_h3.polygon_to_cells(wkb, res, "sideways", grid=grid)
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_auto_resolution(raster_h3, gradient_tif, classes_tif, tmp_path, grid):
+    matched = raster_h3.auto_resolution(gradient_tif, grid)
+    finest = raster_h3.GRIDS[grid]
+    assert 0 < matched < finest
+    # 0.0005 degree pixels: the matched cells hold about one pixel each.
+    df = raster_h3.scan_raster(gradient_tif, "auto", grid=grid).collect()
+    assert df["resolution"].unique().to_list() == [matched]
+    assert df["count"].sum() == 64 * 48
+    assert 0.3 < 64 * 48 / df.height < 4.0
+
+    for text, offset in [("auto+1", 1), ("AUTO-2", -2), ("auto + 1", 1), ("auto+60", 60)]:
+        want = max(0, min(finest, matched + offset))
+        assert raster_h3.auto_resolution(gradient_tif, grid, offset=offset) == want
+        stream = raster_h3.RasterH3ArrowStream(gradient_tif, text, grid=grid, limit=1)
+        assert frame(pa.table(stream))["resolution"].to_list() == [want]
+
+    # Categorical scans and the exporters take it too.
+    cat = raster_h3.read_raster(classes_tif, "auto", grid=grid, categorical=True)
+    assert cat["resolution"].unique().to_list() == [raster_h3.auto_resolution(classes_tif, grid)]
+    out = tmp_path / "auto.parquet"
+    written = raster_h3.raster_to_parquet(gradient_tif, out, "auto", grid=grid)
+    assert written == df.height
+    index = f"{grid}_index"
+    assert set(pl.read_parquet(out)[index]) == set(df[index])
+    assert raster_h3.raster_to_pmtiles(gradient_tif, tmp_path / "auto.pmtiles", "auto-1", grid=grid) > 0
+
+    # A filter on `resolution` still gives the right rows.
+    lazy = raster_h3.scan_raster(gradient_tif, "auto", grid=grid)
+    assert lazy.filter(pl.col("resolution") == matched).collect().height == df.height
+    assert lazy.filter(pl.col("resolution") == matched + 1).collect().height == 0
+
+    for bad in ["auto+", "auto1", "automatic", "auto+1.5"]:
+        with pytest.raises(RuntimeError, match="auto"):
+            pa.table(raster_h3.RasterH3ArrowStream(gradient_tif, bad, grid=grid))
+    with pytest.raises(RuntimeError):
+        raster_h3.auto_resolution(tmp_path / "missing.tif", grid)
+    with pytest.raises(TypeError):
+        raster_h3.auto_resolution(gradient_tif, grid, offset=1.5)
+
+
+def test_auto_resolution_is_comparable_across_grids(raster_h3, gradient_tif):
+    # Cells per raster agree within the grids' aperture steps, unlike a fixed number.
+    counts = {
+        grid: raster_h3.scan_raster(gradient_tif, "auto", grid=grid).collect().height
+        for grid in GRIDS
+    }
+    assert max(counts.values()) / min(counts.values()) < 6.0, counts
