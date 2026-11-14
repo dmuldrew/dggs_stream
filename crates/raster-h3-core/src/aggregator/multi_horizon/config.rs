@@ -331,6 +331,10 @@ pub struct MultiResolutionConfig {
     /// Round floating-point output statistics to this many decimals (at most
     /// [`crate::aggregator::output_policy::MAX_DECIMALS`]); `None` leaves them as computed.
     pub decimals: Option<u8>,
+    /// How pixels are transferred onto cells: centre assignment (the default, the
+    /// single-pass horizon kernel), interpolation at cell centres, or an area-weighted
+    /// overlay. See [`crate::transfer`].
+    pub transfer: crate::transfer::TransferMode,
     /// Stream only this part of the mosaic (see [`super::partition`]). Cells that other
     /// partitions may also hold samples for are emitted as unfiltered partial states for a
     /// later merge, so the stream must be drained with `drain_partitioned_into`.
@@ -375,6 +379,7 @@ impl MultiResolutionConfig {
             nodata_policy: NodataPolicy::Omit,
             emit_nodata_value: None,
             decimals: None,
+            transfer: crate::transfer::TransferMode::AssignCenters,
             partition: None,
         }
     }

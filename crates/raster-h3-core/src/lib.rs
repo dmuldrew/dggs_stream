@@ -30,6 +30,8 @@ pub mod resolution;
 pub mod scalar_ops;
 /// Cross-format dataset transcoding pipelines (e.g. Parquet to PMTiles).
 pub mod transcode;
+/// Transfer modes: how pixels map onto cells (`assign_centers`, `sample`, `overlay`).
+pub mod transfer;
 
 pub use a5;
 pub use grid::{GridBackend, GridKind, GridSpec, MAX_GRID_RESOLUTIONS};
