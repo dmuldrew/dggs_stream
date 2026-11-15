@@ -414,6 +414,47 @@ pub fn zooms_for_h3_res(res: u8, min_res: u8) -> Vec<u8> {
     }
 }
 
+/// Gap-free zoom bands for the H3 resolutions present in a pre-indexed table.
+///
+/// Bit `r` of `resolutions` marks resolution `r` as present (bits above 15 are
+/// ignored). Each present resolution covers the zooms from the start of its
+/// standard band in [`zooms_for_h3_res`] up to the zoom before the next finer
+/// present resolution starts; the finest present resolution covers its whole
+/// standard band. With every resolution from 0 to 5 present this reproduces the
+/// raster tilers' bands (z0-1, z2-3, z4, z5, z6-7, z8-9); with gaps such as
+/// resolutions 2 and 4 only, resolution 2 stretches to z4-5 so z5 is not empty.
+///
+/// Zooms coarser than the coarsest present resolution's band stay empty: a
+/// table carries arbitrary properties, so unlike the raster tilers there is
+/// nothing to aggregate into parent cells, and pushing fine cells into
+/// low-zoom tiles would make those tiles enormous.
+pub fn zoom_bands_for_resolutions(resolutions: u16) -> [Option<(u8, u8)>; 16] {
+    let standard = |res: u8| zooms_for_h3_res(res, u8::MAX);
+    let mut bands = [None; 16];
+    let present: Vec<u8> = (0..16u8).filter(|r| resolutions & (1 << r) != 0).collect();
+    for (i, &res) in present.iter().enumerate() {
+        let zooms = standard(res);
+        let start = zooms[0];
+        let end = match present.get(i + 1) {
+            Some(&finer) => standard(finer)[0] - 1,
+            None => *zooms.last().unwrap_or(&start),
+        };
+        bands[usize::from(res)] = Some((start, end.max(start)));
+    }
+    bands
+}
+
+/// Overall `(min_zoom, max_zoom)` of [`zoom_bands_for_resolutions`], or `None`
+/// when no resolution is present.
+pub fn zoom_extent_for_resolutions(resolutions: u16) -> Option<(u8, u8)> {
+    let bands = zoom_bands_for_resolutions(resolutions);
+    let mut it = bands.iter().flatten();
+    let &(first_lo, first_hi) = it.next()?;
+    Some(it.fold((first_lo, first_hi), |(lo, hi), &(a, b)| {
+        (lo.min(a), hi.max(b))
+    }))
+}
+
 /// Estimate maximum radius (in WGS84 degrees) of an H3 hexagon at resolution res.
 /// Provides >= 8% headroom over empirical max(center_lat - true_south_lat) for h3o.
 pub fn max_hex_radius_deg(res: u8) -> f64 {
@@ -457,6 +498,47 @@ mod tests {
         assert_eq!(bbox[2], 180.0);
         assert!((bbox[1] - (-85.05112878)).abs() < 1e-4);
         assert!((bbox[3] - 85.05112878).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_bands_match_raster_bands_for_contiguous_resolutions() {
+        let bands = zoom_bands_for_resolutions(0b11_1111); // res 0..=5
+        assert_eq!(
+            bands[..6],
+            [
+                Some((0, 1)),
+                Some((2, 3)),
+                Some((4, 4)),
+                Some((5, 5)),
+                Some((6, 7)),
+                Some((8, 9))
+            ]
+        );
+        assert!(bands[6..].iter().all(Option::is_none));
+        // Every zoom in the extent belongs to exactly one band, and each band
+        // agrees with the raster tilers' `h3_res_for_zoom`.
+        for z in 0..=9u8 {
+            let owners: Vec<usize> = (0..16)
+                .filter(|&r| bands[r].is_some_and(|(lo, hi)| (lo..=hi).contains(&z)))
+                .collect();
+            assert_eq!(owners, vec![usize::from(h3_res_for_zoom(z))], "zoom {z}");
+        }
+        assert_eq!(zoom_extent_for_resolutions(0b11_1111), Some((0, 9)));
+    }
+
+    #[test]
+    fn zoom_bands_fill_gaps_between_sparse_resolutions() {
+        let bands = zoom_bands_for_resolutions((1 << 2) | (1 << 4) | (1 << 8));
+        assert_eq!(bands[2], Some((4, 5)));
+        assert_eq!(bands[4], Some((6, 12)));
+        assert_eq!(bands[8], Some((13, 13)));
+        // Nothing below the coarsest resolution's own band.
+        assert_eq!(
+            zoom_extent_for_resolutions((1 << 2) | (1 << 4) | (1 << 8)),
+            Some((4, 13))
+        );
+        assert_eq!(zoom_bands_for_resolutions(1 << 15)[15], Some((23, 24)));
+        assert_eq!(zoom_extent_for_resolutions(0), None);
     }
 
     #[test]

@@ -314,6 +314,24 @@ impl TilePyramidAccumulator {
         }
     }
 
+    /// Add an H3 hexagon to every zoom in `zooms` (inclusive `(min, max)`), as
+    /// [`Self::add_hexagon_mercator`] does for one zoom. The last zoom takes
+    /// ownership of `properties`, so a single-zoom band does not clone them.
+    pub fn add_hexagon_mercator_zooms(
+        &mut self,
+        h3_u64: u64,
+        center_merc: MercatorPoint,
+        vertices_merc: &[MercatorPoint],
+        zooms: (u8, u8),
+        properties: Vec<(Cow<'static, str>, MvtValue)>,
+    ) {
+        let (lo, hi) = zooms;
+        for zoom in lo..hi {
+            self.add_hexagon_mercator(h3_u64, center_merc, vertices_merc, zoom, properties.clone());
+        }
+        self.add_hexagon_mercator(h3_u64, center_merc, vertices_merc, hi.max(lo), properties);
+    }
+
     /// Add a prepared MVT feature operation directly into a target tile layer
     #[inline]
     pub fn add_prepared_op(&mut self, tile_key: (u8, u32, u32), feature: MvtFeature) {

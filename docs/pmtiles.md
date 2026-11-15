@@ -142,6 +142,25 @@ has passed it. Memory therefore stays near the budget plus one latitude band of 
 whatever the input size. The sort order is fixed (latitude, then H3 index), so the archive is
 byte-for-byte the same whether or not it spilled.
 
+### Zoom bands for H3 tables
+
+A table can hold any mix of resolutions, so its exports give each resolution present a band of
+zooms instead of one zoom (`pyramid::zoom_bands_for_resolutions`). A band starts where the
+resolution's band in the raster tilers starts (`zooms_for_h3_res`) and runs to the zoom before
+the next finer resolution present starts; the finest resolution fills its whole band. Every zoom
+between the coarsest and finest band therefore has tiles:
+
+| Resolutions present | Bands |
+| :--- | :--- |
+| 0–5 | res 0: z0–1, res 1: z2–3, res 2: z4, res 3: z5, res 4: z6–7, res 5: z8–9 (the raster tilers' bands) |
+| 2, 4, 8 | res 2: z4–5, res 4: z6–12, res 8: z13 |
+| 8 | res 8: z13 |
+
+Zooms below the coarsest resolution's band are left empty: a table's properties are arbitrary,
+so there is nothing to aggregate into parent cells the way the raster tilers do. A cell is
+written once per zoom in its band, so archives grow with the band widths. `COPY`'s `min_zoom` and
+`max_zoom` clip the bands as well as filtering rows.
+
 ## Cell Geometry in Vector Tiles
 
 Each feature's exterior ring has positive area in tile coordinates, as MVT 2.1 requires.

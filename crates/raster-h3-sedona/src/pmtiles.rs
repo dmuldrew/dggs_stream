@@ -492,6 +492,7 @@ where
 fn new_exporter(encoder: &FeatureEncoder) -> ExternalFeatureExport {
     ExternalFeatureExport::new(encoder.options.memory_budget_bytes, None)
         .with_layer_fields(encoder.layer_fields())
+        .with_zoom_limits(encoder.options.min_zoom, encoder.options.max_zoom)
 }
 
 /// Write a [`DataFrame`] to a PMTiles file through the same sink as `COPY ... TO`

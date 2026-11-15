@@ -17,7 +17,8 @@ use crate::pmtiles::features::{
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
 use crate::pmtiles::pyramid::{
-    cell_boundary_mercator, h3_res_to_zoom, max_hex_radius_deg, Wgs84BoundsAccumulator,
+    cell_boundary_mercator, max_hex_radius_deg, zoom_bands_for_resolutions,
+    zoom_extent_for_resolutions, Wgs84BoundsAccumulator,
 };
 use crate::pmtiles::writer::PmtilesWriter;
 
@@ -32,6 +33,8 @@ pub struct RowGroupExtent {
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub min_res: u8,
+    /// Bit `r` set when the row group holds cells at H3 resolution `r`.
+    pub resolutions: u16,
     pub bounds: Wgs84BoundsAccumulator,
 }
 
@@ -47,9 +50,8 @@ pub fn scan_row_group_h3_extent(
     };
 
     let mut bounds = Wgs84BoundsAccumulator::new();
-    let mut min_zoom = 255u8;
-    let mut max_zoom = 0u8;
     let mut min_res = 255u8;
+    let mut resolutions = 0u16;
 
     let mut process_h3 = |h3: u64| {
         if let Ok(cell) = CellIndex::try_from(h3) {
@@ -58,13 +60,7 @@ pub fn scan_row_group_h3_extent(
             if res < min_res {
                 min_res = res;
             }
-            let zoom = h3_res_to_zoom(res);
-            if zoom < min_zoom {
-                min_zoom = zoom;
-            }
-            if zoom > max_zoom {
-                max_zoom = zoom;
-            }
+            resolutions |= 1 << res;
         }
     };
 
@@ -144,6 +140,7 @@ pub fn scan_row_group_h3_extent(
         Ok(None)
     } else {
         let resolved = bounds.finish([-180.0, -85.0, 180.0, 85.0]);
+        let (min_zoom, max_zoom) = zoom_extent_for_resolutions(resolutions).unwrap_or((0, 0));
         Ok(Some(RowGroupExtent {
             rg_idx,
             min_lat: resolved[1],
@@ -153,6 +150,7 @@ pub fn scan_row_group_h3_extent(
             min_zoom,
             max_zoom,
             min_res,
+            resolutions,
             bounds,
         }))
     }
@@ -241,8 +239,11 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
         global_bounds.merge(&ext.bounds);
     }
     let global_bbox = global_bounds.finish([-180.0, -85.0, 180.0, 85.0]);
-    let min_zoom = rg_extents.iter().map(|e| e.min_zoom).min().unwrap_or(0);
-    let max_zoom = rg_extents.iter().map(|e| e.max_zoom).max().unwrap_or(0);
+    // Zoom bands come from the resolutions present in the whole file, so every
+    // zoom between the coarsest and finest band has tiles.
+    let all_resolutions = rg_extents.iter().fold(0u16, |m, e| m | e.resolutions);
+    let zoom_bands = zoom_bands_for_resolutions(all_resolutions);
+    let (min_zoom, max_zoom) = zoom_extent_for_resolutions(all_resolutions).unwrap_or((0, 0));
     let min_res = rg_extents.iter().map(|e| e.min_res).min().unwrap_or(0);
     let max_cell_radius = max_hex_radius_deg(min_res);
     let safety_margin = 2.5 * max_cell_radius;
@@ -365,7 +366,10 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
             let vertices_merc = &v_merc[..v_count];
 
             let res_u8: u8 = cell.resolution().into();
-            let zoom = h3_res_to_zoom(res_u8);
+            // Present in the prescan, so the band exists.
+            let Some(zooms) = zoom_bands[usize::from(res_u8)] else {
+                continue;
+            };
 
             let mut properties = Vec::with_capacity(col_names.len().saturating_sub(1) + 3);
             for (col_i, (_, field_val)) in row.get_column_iter().enumerate() {
@@ -402,7 +406,13 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
                 properties.push((Cow::Borrowed("resolution"), MvtValue::UInt(res_u8 as u64)));
             }
 
-            accumulator.add_hexagon_mercator(h3_u64, center_merc, vertices_merc, zoom, properties);
+            accumulator.add_hexagon_mercator_zooms(
+                h3_u64,
+                center_merc,
+                vertices_merc,
+                zooms,
+                properties,
+            );
         }
 
         // Streaming Horizon Eviction: Evict and compress all tiles completed prior to the remaining horizon
