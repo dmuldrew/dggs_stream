@@ -1162,7 +1162,7 @@ impl GridBackend for S2Backend {
 pub struct HealpixBackend;
 
 impl GridBackend for HealpixBackend {
-    /// Nested pixel at [`HEALPIX_MAX_DEPTH`].
+    /// Nested pixel at the maximum HEALPix depth.
     type Point = u64;
     type Indexer = ();
 
