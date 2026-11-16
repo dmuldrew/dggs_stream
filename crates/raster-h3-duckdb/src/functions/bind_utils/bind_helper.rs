@@ -1,4 +1,5 @@
 use raster_h3_core::aggregator::output_policy::{NodataPolicy, OutputPolicy};
+use raster_h3_core::transfer::TransferMode;
 use std::ffi::CString;
 use std::path::PathBuf;
 
@@ -478,8 +479,21 @@ impl BindHelper {
             Ok(None)
         };
         let output = self.parse_output_policy()?;
+        let transfer = match TransferMode::from_options(
+            self.get_named_string("transfer").as_deref(),
+            self.get_named_string("sample_method").as_deref(),
+            self.get_named_bool("overlay_weighted"),
+            self.get_named_bool("mass_preserve"),
+        ) {
+            Ok(transfer) => transfer,
+            Err(e) => {
+                self.set_error(&e.to_string());
+                return None;
+            }
+        };
         let mut execution = ExecutionParams {
             output,
+            transfer,
             aggregation_workers: positive(&["workers", "threads"]).ok()?,
             decode_workers: positive(&["decode_workers"]).ok()?,
             fetch_workers: positive(&["fetch_workers"]).ok()?,
@@ -608,6 +622,9 @@ pub struct ExecutionParams {
     /// `nodata_policy`, `emit_nodata_value` and `decimals`: what all-NoData cells and
     /// output precision look like.
     pub output: OutputPolicy,
+    /// `transfer`, `sample_method`, `overlay_weighted` and `mass_preserve`: how pixels
+    /// map onto cells.
+    pub transfer: TransferMode,
     /// `workers` / `threads`: dedicated aggregation pool size.
     pub aggregation_workers: Option<usize>,
     /// `decode_workers`: chunk decoding threads.
@@ -645,6 +662,7 @@ impl ExecutionParams {
         config.nodata_policy = self.output.nodata;
         config.emit_nodata_value = self.output.nodata_value;
         config.decimals = self.output.decimals;
+        config.transfer = self.transfer;
     }
 }
 

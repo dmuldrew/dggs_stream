@@ -871,3 +871,147 @@ async fn nodata_policy_and_decimals_on_every_grid() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transfer_modes_on_every_grid() {
+    use raster_h3_core::resolution::area_matched_resolution;
+    use raster_h3_sedona::{SampleMethod, TransferMode};
+    let value = |c: u32, r: u32| ((c * 7 + r * 13) % 23 + 1) as f32;
+    let tif = common::write_tif_grid(SIZE, SIZE, (-122.45, 37.80), 0.001, value);
+    let src = source(&tif);
+    let pixels = f64::from(SIZE * SIZE);
+    let total: f64 = (0..SIZE)
+        .flat_map(|r| (0..SIZE).map(move |c| f64::from(value(c, r))))
+        .sum();
+    let pixel_m2 = 111_320.0f64.powi(2) * 1e-6 * 37.8f64.to_radians().cos();
+    let ctx = context();
+    // `(rows, sum of count, sum of sum)` of a query.
+    let totals = |batches: Vec<RecordBatch>| {
+        let mut out = (0usize, 0.0, 0.0);
+        for b in &batches {
+            out.0 += b.num_rows();
+            out.1 += b
+                .column(0)
+                .as_primitive::<Float64Type>()
+                .values()
+                .iter()
+                .sum::<f64>();
+            out.2 += b
+                .column(1)
+                .as_primitive::<Float64Type>()
+                .values()
+                .iter()
+                .sum::<f64>();
+        }
+        out
+    };
+    for grid in GridKind::ALL {
+        let matched = area_matched_resolution(grid, pixel_m2);
+        let coarse = matched - 1;
+        let from = |res: u8, options: &str| {
+            format!("{grid}_raster_continuous_aggregate('{src}', {res}, 'EPSG:4326'{options})")
+        };
+        let query = |from: String| {
+            let ctx = &ctx;
+            async move { totals(collect(ctx, &format!("SELECT count, sum FROM {from}")).await) }
+        };
+
+        let centres = query(from(coarse, "")).await;
+        assert_eq!((centres.1, centres.2), (pixels, total), "{grid}");
+        let overlay = query(from(coarse, ", 'transfer=overlay'")).await;
+        assert!(overlay.0 >= centres.0);
+        assert!(
+            (overlay.1 / pixels - 1.0).abs() < 1e-6,
+            "{grid}: {}",
+            overlay.1
+        );
+        assert!(
+            (overlay.2 / total - 1.0).abs() < 1e-6,
+            "{grid}: {}",
+            overlay.2
+        );
+        let preserved = query(from(coarse, ", 'transfer=overlay', 'mass_preserve=true'")).await;
+        assert!((preserved.2 - total).abs() < 1e-7 * total, "{grid}");
+        let touched = query(from(
+            coarse,
+            ", 'transfer=overlay', 'overlay_weighted=false'",
+        ))
+        .await;
+        assert!(touched.1 > pixels && touched.0 == overlay.0, "{grid}");
+
+        // Sampling finer than the pixels; pushdown still applies to the sampled table.
+        let fine = matched + 2;
+        let fine_centres = query(from(fine, "")).await;
+        for method in ["nearest", "bilinear", "bicubic", "lanczos"] {
+            let options = format!(", 'transfer=sample', 'sample_method={method}'");
+            let sampled = query(from(fine, &options)).await;
+            assert!(sampled.0 > 3 * fine_centres.0, "{grid} {method}");
+            assert_eq!(sampled.1, sampled.0 as f64, "one sample per cell");
+        }
+        let limited = collect(
+            &ctx,
+            &format!(
+                "SELECT {} FROM {} WHERE mean >= 12 LIMIT 5",
+                grid.hex_column_name(),
+                from(fine, ", 'transfer=sample'")
+            ),
+        )
+        .await;
+        assert_eq!(rows(&limited), 5);
+
+        // The provider API takes the same modes.
+        let provider = ContinuousRasterTableProvider::try_new(&src, vec![fine])
+            .unwrap()
+            .with_grid(grid)
+            .with_crs("EPSG:4326")
+            .with_transfer(TransferMode::Sample(SampleMethod::Nearest));
+        let table_ctx = context();
+        table_ctx
+            .register_table("sampled", Arc::new(RasterH3Table::continuous(provider)))
+            .unwrap();
+        let nearest = collect(
+            &table_ctx,
+            &format!("SELECT {}, mean FROM sampled", grid.index_column_name()),
+        )
+        .await;
+        for b in &nearest {
+            let ids = b.column(0).as_primitive::<UInt64Type>();
+            let means = b.column(1).as_primitive::<Float64Type>();
+            for i in 0..b.num_rows() {
+                let (lat, lng) = grid.center_lat_lng(ids.value(i)).unwrap();
+                let c = ((lng + 122.45) / 0.001).floor() as u32;
+                let r = ((37.80 - lat) / 0.001).floor() as u32;
+                assert_eq!(means.value(i), f64::from(value(c, r)), "{grid}");
+            }
+        }
+
+        // Categorical: nearest sampling and overlay.
+        let classes = collect(
+            &ctx,
+            &format!(
+                "SELECT total_count FROM {grid}_raster_categorical_aggregate('{src}', {coarse}, \
+                 'EPSG:4326', 'transfer=overlay')"
+            ),
+        )
+        .await;
+        let area: f64 = classes
+            .iter()
+            .flat_map(|b| b.column(0).as_primitive::<Float64Type>().values().to_vec())
+            .sum();
+        assert!((area / pixels - 1.0).abs() < 1e-6, "{grid}");
+
+        for bad in [
+            ", 'transfer=smear'",
+            ", 'sample_method=bilinear'",
+            ", 'mass_preserve=true'",
+            ", 'transfer=overlay', 'mass_preserve=perhaps'",
+        ] {
+            let sql = format!("SELECT * FROM {}", from(coarse, bad));
+            let failed = match ctx.sql(&sql).await {
+                Err(_) => true,
+                Ok(df) => df.collect().await.is_err(),
+            };
+            assert!(failed, "{bad}");
+        }
+    }
+}

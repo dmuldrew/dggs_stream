@@ -96,6 +96,11 @@ struct PyExportOptions {
     nodata_policy: Option<String>,
     emit_nodata_value: Option<f64>,
     decimals: Option<i64>,
+    /// `assign_centers` (default), `sample` or `overlay`.
+    transfer: Option<String>,
+    sample_method: Option<String>,
+    overlay_weighted: Option<bool>,
+    mass_preserve: Option<bool>,
 }
 
 impl PyExportOptions {
@@ -121,6 +126,12 @@ impl PyExportOptions {
         config.nodata_policy = policy.nodata;
         config.emit_nodata_value = policy.nodata_value;
         config.decimals = policy.decimals;
+        config.transfer = raster_h3_core::transfer::TransferMode::from_options(
+            self.transfer.as_deref(),
+            self.sample_method.as_deref(),
+            self.overlay_weighted,
+            self.mass_preserve,
+        )?;
         Ok(())
     }
 }

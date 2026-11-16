@@ -8,7 +8,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use raster_h3_cli::{
-    export_raster_to_parquet_with_policy, export_raster_to_pmtiles_with_policy,
+    export_raster_to_parquet_with_transfer, export_raster_to_pmtiles_with_transfer,
     merge_partition_files, parse_merge_args, parse_parquet_to_pmtiles_args, parse_plan_args,
     parse_stream_args, plan_raster_partitions, stream_raster_to_writer,
     transcode_parquet_to_pmtiles, write_plan, StreamOutputFormat,
@@ -50,6 +50,16 @@ fn print_help() {
           --emit-nodata-value <NUM>  Value of an all-NoData cell's statistics under\n                                     \
                                      `--nodata-policy emit` (default: null)\n  \
           --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
+          --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
+                                     each pixel into the cell holding its centre),\n                                     \
+                                     sample (each cell takes the value interpolated at\n                                     \
+                                     its centre; for cells finer than pixels) or overlay\n                                     \
+                                     (each cell aggregates the pixels it overlaps,\n                                     \
+                                     weighted by overlap area)\n  \
+          --sample-method <M>        nearest, bilinear (default), bicubic or lanczos\n  \
+          --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
+          --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \
+                                     conserved exactly\n  \
           --raw-values               Skip GDAL band scale/offset calibration\n  \
           --bbox <minx,miny,maxx,maxy> WGS84 bounding box filter\n  \
           --columns <col1,col2,...>  Column projection pushdown\n  \
@@ -118,7 +128,7 @@ fn main() {
                     "Missing -o / --output path for parquet export".into(),
                 )
             })?;
-            export_raster_to_parquet_with_policy(
+            export_raster_to_parquet_with_transfer(
                 opts.grid,
                 &opts.input_path,
                 Path::new(&out_path),
@@ -130,6 +140,7 @@ fn main() {
                 true,
                 opts.apply_scale_offset,
                 &opts.output,
+                opts.transfer,
             )
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
@@ -139,7 +150,7 @@ fn main() {
                     "Missing -o / --output path for pmtiles export".into(),
                 )
             })?;
-            export_raster_to_pmtiles_with_policy(
+            export_raster_to_pmtiles_with_transfer(
                 opts.grid,
                 &opts.input_path,
                 Path::new(&out_path),
@@ -150,6 +161,7 @@ fn main() {
                 opts.bbox,
                 opts.apply_scale_offset,
                 &opts.output,
+                opts.transfer,
             )
         }),
         "parquet-to-pmtiles" => parse_parquet_to_pmtiles_args(rest).and_then(|args| {

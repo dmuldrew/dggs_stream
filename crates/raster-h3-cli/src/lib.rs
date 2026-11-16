@@ -36,6 +36,7 @@ use raster_h3_core::pmtiles::{H3PmtilesTiler, PmtilesExportSummary};
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use raster_h3_core::resolution::ResolutionSpec;
 use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
+use raster_h3_core::transfer::TransferMode;
 
 /// Output wire format for streaming CLI queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +70,9 @@ pub struct CliStreamOptions {
     /// `--nodata-policy`, `--emit-nodata-value` and `--decimals`: whether all-NoData
     /// cells are output and with what value, and the decimal rounding of statistics.
     pub output: OutputPolicy,
+    /// `--transfer`, `--sample-method`, `--overlay-weighted` and `--mass-preserve`: how
+    /// pixels map onto cells (default: each pixel into the cell holding its centre).
+    pub transfer: TransferMode,
 }
 
 impl Default for CliStreamOptions {
@@ -89,6 +93,7 @@ impl Default for CliStreamOptions {
             output_format: StreamOutputFormat::Ipc,
             partition: None,
             output: OutputPolicy::default(),
+            transfer: TransferMode::AssignCenters,
         }
     }
 }
@@ -145,6 +150,7 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
     config.bbox = opts.bbox;
     config.overlap_rule = OverlapRule::Cutline;
     apply_output_policy(&mut config, &opts.output);
+    config.transfer = opts.transfer;
 
     if let Some(partition) = &opts.partition {
         config.partition = Some(partition.clone());
@@ -816,12 +822,46 @@ pub fn export_raster_to_parquet_with_policy(
     apply_scale_offset: bool,
     policy: &OutputPolicy,
 ) -> Result<usize> {
+    export_raster_to_parquet_with_transfer(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        geoparquet,
+        apply_scale_offset,
+        policy,
+        TransferMode::AssignCenters,
+    )
+}
+
+/// [`export_raster_to_parquet_with_policy`] with a [`TransferMode`] (`sample` or
+/// `overlay` instead of pixel-centre assignment).
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_parquet_with_transfer(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    geoparquet: bool,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+    transfer: TransferMode,
+) -> Result<usize> {
     let paths = resolve_raster_sources(input_path)?;
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.custom_crs = source_crs.clone();
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
+    config.transfer = transfer;
     apply_output_policy(&mut config, policy);
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
@@ -918,7 +958,38 @@ pub fn export_raster_to_pmtiles_with_policy(
     apply_scale_offset: bool,
     policy: &OutputPolicy,
 ) -> Result<usize> {
+    export_raster_to_pmtiles_with_transfer(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        apply_scale_offset,
+        policy,
+        TransferMode::AssignCenters,
+    )
+}
+
+/// [`export_raster_to_pmtiles_with_policy`] with a [`TransferMode`].
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_pmtiles_with_transfer(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+    transfer: TransferMode,
+) -> Result<usize> {
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
+    config.transfer = transfer;
     config.custom_crs = source_crs;
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
@@ -1035,6 +1106,8 @@ pub fn parse_stream_args(
     let mut partition_spec: Option<String> = None;
     let mut partition_index: Option<usize> = None;
     let mut raw_resolutions: Option<(String, String)> = None;
+    let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
+    let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
 
     let invalid = |flag: &str, value: &str, expected: &str| {
         RasterH3Error::InvalidParameter(format!(
@@ -1101,6 +1174,17 @@ pub fn parse_stream_args(
                 }
                 opts.columns = Some(cols);
             }
+            "--transfer" => transfer = Some(value()?.to_string()),
+            "--sample-method" => sample_method = Some(value()?.to_string()),
+            "--overlay-weighted" => {
+                let v = value()?;
+                overlay_weighted = Some(match v.to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" => true,
+                    "false" | "0" | "no" => false,
+                    _ => return Err(invalid(flag, v, "true or false")),
+                });
+            }
+            "--mass-preserve" => mass_preserve = Some(true),
             "--nodata-policy" => {
                 let v = value()?;
                 opts.output.nodata = NodataPolicy::parse(v)
@@ -1170,6 +1254,12 @@ pub fn parse_stream_args(
         }
     }
 
+    opts.transfer = TransferMode::from_options(
+        transfer.as_deref(),
+        sample_method.as_deref(),
+        overlay_weighted,
+        mass_preserve,
+    )?;
     if opts.output.nodata_value.is_some() && !opts.output.emits_nodata() {
         return Err(RasterH3Error::InvalidParameter(
             "--emit-nodata-value needs --nodata-policy emit".into(),
@@ -1605,6 +1695,98 @@ mod tests {
             &["--decimals", "-1"],
             &["--emit-nodata-value", "nan"],
             &["--emit-nodata-value", "0"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_cli_transfer_modes() {
+        let tif = write_test_tif(24, 24, 2.5);
+        let input = tif.path().to_str().unwrap();
+        let run = |extra: &[&str]| -> Result<Vec<serde_json::Value>> {
+            let mut args: Vec<String> = [input, "--crs", "EPSG:4326"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl)?;
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out)?;
+            Ok(String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect())
+        };
+        let sum = |rows: &[serde_json::Value], column: &str| -> f64 {
+            rows.iter().map(|r| r[column].as_f64().unwrap()).sum()
+        };
+        for grid in GridKind::ALL {
+            let g = grid.as_str();
+            let centres = run(&["--grid", g, "-r", "auto"]).unwrap();
+            assert_eq!(sum(&centres, "count"), 576.0);
+
+            let overlay = run(&["--grid", g, "-r", "auto-1", "--transfer", "overlay"]).unwrap();
+            assert!(
+                (sum(&overlay, "count") / 576.0 - 1.0).abs() < 1e-6,
+                "{grid}"
+            );
+            assert!((sum(&overlay, "sum") / 1440.0 - 1.0).abs() < 1e-6, "{grid}");
+            let preserved = run(&[
+                "--grid",
+                g,
+                "-r",
+                "auto-1",
+                "--transfer",
+                "overlay",
+                "--mass-preserve",
+            ])
+            .unwrap();
+            assert!((sum(&preserved, "sum") - 1440.0).abs() < 1e-6, "{grid}");
+            let touched = run(&[
+                "--grid",
+                g,
+                "-r",
+                "auto-1",
+                "--transfer",
+                "overlay",
+                "--overlay-weighted",
+                "false",
+            ])
+            .unwrap();
+            assert!(sum(&touched, "count") > 576.0, "{grid}");
+
+            // Sampling finer than the pixels returns one value per cell on the raster.
+            let fine = run(&["--grid", g, "-r", "auto+2"]).unwrap();
+            for method in ["nearest", "bilinear", "bicubic", "lanczos"] {
+                let sampled = run(&[
+                    "--grid",
+                    g,
+                    "-r",
+                    "auto+2",
+                    "--transfer",
+                    "sample",
+                    "--sample-method",
+                    method,
+                ])
+                .unwrap();
+                assert!(sampled.len() > 3 * fine.len(), "{grid} {method}");
+                for row in &sampled {
+                    assert_eq!(row["count"], 1.0);
+                    assert!(
+                        (row["mean"].as_f64().unwrap() - 2.5).abs() < 1e-9,
+                        "{grid} {method}"
+                    );
+                }
+            }
+        }
+        for bad in [
+            &["--transfer", "smear"][..],
+            &["--sample-method", "bilinear"],
+            &["--mass-preserve"],
+            &["--transfer", "overlay", "--overlay-weighted", "maybe"],
+            &["--transfer", "sample", "--sample-method", "cubic9"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }

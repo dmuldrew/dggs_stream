@@ -11,6 +11,7 @@ use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
 use raster_h3_core::columnar::CategoricalFormat;
 use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::OverlapRule;
+use raster_h3_core::transfer::TransferMode;
 
 /// Configuration for a Python / Polars raster scan onto a DGGS grid.
 #[derive(Debug, Clone)]
@@ -59,6 +60,8 @@ pub struct PyScanConfig {
     /// Whether all-NoData cells are output and with what value, and the decimal
     /// rounding of statistics.
     pub output: OutputPolicy,
+    /// How pixels map onto cells (default: each pixel into the cell holding its centre).
+    pub transfer: TransferMode,
 }
 
 impl PyScanConfig {
@@ -106,6 +109,7 @@ impl Default for PyScanConfig {
             min_mean: None,
             max_mean: None,
             output: OutputPolicy::default(),
+            transfer: TransferMode::AssignCenters,
         }
     }
 }

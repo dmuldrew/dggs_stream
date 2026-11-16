@@ -531,6 +531,10 @@ _SCAN_OPTIONS = (
     "nodata_policy",
     "emit_nodata_value",
     "decimals",
+    "transfer",
+    "sample_method",
+    "overlay_weighted",
+    "mass_preserve",
 )
 
 _INT_OPTIONS = (
@@ -542,7 +546,15 @@ _INT_OPTIONS = (
     "swir_band",
     "decimals",
 )
-_STR_OPTIONS = ("sampling", "overlap_rule", "spectral_formula", "nodata_policy")
+_STR_OPTIONS = (
+    "sampling",
+    "overlap_rule",
+    "spectral_formula",
+    "nodata_policy",
+    "transfer",
+    "sample_method",
+)
+_BOOL_OPTIONS = ("overlay_weighted", "mass_preserve")
 _FLOAT_OPTIONS = (
     "min_count",
     "min_mean",
@@ -650,6 +662,10 @@ def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
             if key == "min_majority_fraction" and not 0.0 <= number <= 1.0:
                 raise ValueError(f"min_majority_fraction must be between 0 and 1, got {number}")
             opts[key] = number
+        elif key in _BOOL_OPTIONS:
+            if not isinstance(value, bool):
+                raise TypeError(f"{key} must be a bool, got {type(value).__name__}")
+            opts[key] = value
         elif key == "quantiles":
             opts[key] = _encode_quantiles(value)
         elif key == "remap":
@@ -745,6 +761,10 @@ class RasterH3ArrowStream:
         nodata_policy: Optional[str] = None,
         emit_nodata_value: Optional[float] = None,
         decimals: Optional[int] = None,
+        transfer: Optional[str] = None,
+        sample_method: Optional[str] = None,
+        overlay_weighted: Optional[bool] = None,
+        mass_preserve: Optional[bool] = None,
     ) -> None:
         self.path = str(path)
         #: The grid scanned onto (`h3`, `a5`, `s2` or `healpix`); it names the cell
@@ -1044,6 +1064,10 @@ def scan_raster_h3(
     nodata_policy: Optional[str] = None,
     emit_nodata_value: Optional[float] = None,
     decimals: Optional[int] = None,
+    transfer: Optional[str] = None,
+    sample_method: Optional[str] = None,
+    overlay_weighted: Optional[bool] = None,
+    mass_preserve: Optional[bool] = None,
 ) -> Any:
     """
     Scan a GeoTIFF / COG into the cells of a discrete global grid (H3 by default).
@@ -1097,6 +1121,18 @@ def scan_raster_h3(
       integer for categorical scans). Not combinable with `min_count`.
     - `decimals`: round the floating-point statistics (not counts or class codes) to
       this many decimals, 0 to 15.
+    - `transfer`: how pixels map onto cells. `"assign_centers"` (default) aggregates
+      each pixel into the cell holding its centre. `"sample"` gives each cell whose
+      centre lies on the raster the value interpolated there with `sample_method`
+      (`"nearest"`, `"bilinear"` (default), `"bicubic"`, `"lanczos"`); use it when the
+      cells are finer than the pixels, where centre assignment leaves most cells empty.
+      `"overlay"` aggregates, for each cell, the pixels it overlaps, weighted by the
+      overlapped fraction of each pixel (`overlay_weighted=False` counts every touched
+      pixel once); `count` is then the overlapped area in pixels. With
+      `mass_preserve=True` each pixel's weights are normalised to sum to one, so the
+      `sum` column adds up to the raster's total. Categorical scans take `"overlay"`
+      and `"sample"` with `sample_method="nearest"`. Not combinable with `sampling`,
+      `spectral_formula` or partitions.
 
     A Polars `filter` on `count` (`total_count` for categorical scans), `mean`,
     `majority_fraction` or `resolution`, combined with `&`, is also pushed into the scan
@@ -1834,16 +1870,26 @@ def raster_to_parquet(
     nodata_policy: Optional[str] = None,
     emit_nodata_value: Optional[float] = None,
     decimals: Optional[int] = None,
+    transfer: Optional[str] = None,
+    sample_method: Optional[str] = None,
+    overlay_weighted: Optional[bool] = None,
+    mass_preserve: Optional[bool] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a Parquet
     file (GeoParquet with a `wkb` geometry column by default). Returns the cells written.
 
-    `nodata_policy`, `emit_nodata_value` and `decimals` are as in `scan_raster_h3`. The
-    file's statistics columns are not nullable, so under `nodata_policy="emit"` a
+    `nodata_policy`, `emit_nodata_value`, `decimals` and the `transfer` options are as
+    in `scan_raster_h3`. The file's statistics columns are not nullable, so under `nodata_policy="emit"` a
     statistic without a value is NaN, and a categorical export needs an integer
     `emit_nodata_value`."""
     output = dict(
-        nodata_policy=nodata_policy, emit_nodata_value=emit_nodata_value, decimals=decimals
+        nodata_policy=nodata_policy,
+        emit_nodata_value=emit_nodata_value,
+        decimals=decimals,
+        transfer=transfer,
+        sample_method=sample_method,
+        overlay_weighted=overlay_weighted,
+        mass_preserve=mass_preserve,
     )
     args = (
         str(input_path).encode("utf-8"),
@@ -1867,12 +1913,22 @@ def raster_to_pmtiles(
     nodata_policy: Optional[str] = None,
     emit_nodata_value: Optional[float] = None,
     decimals: Optional[int] = None,
+    transfer: Optional[str] = None,
+    sample_method: Optional[str] = None,
+    overlay_weighted: Optional[bool] = None,
+    mass_preserve: Optional[bool] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a PMTiles v3
     vector archive. Returns the cells written. `nodata_policy`, `emit_nodata_value` and
     `decimals` are as in `scan_raster_h3`."""
     output = dict(
-        nodata_policy=nodata_policy, emit_nodata_value=emit_nodata_value, decimals=decimals
+        nodata_policy=nodata_policy,
+        emit_nodata_value=emit_nodata_value,
+        decimals=decimals,
+        transfer=transfer,
+        sample_method=sample_method,
+        overlay_weighted=overlay_weighted,
+        mass_preserve=mass_preserve,
     )
     args = (
         str(input_path).encode("utf-8"),

@@ -38,7 +38,7 @@ use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use raster_h3_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
-use raster_h3_sedona::{GridKind, NodataPolicy, OutputPolicy, ResolutionSpec};
+use raster_h3_sedona::{GridKind, NodataPolicy, OutputPolicy, ResolutionSpec, TransferMode};
 use sedona_extension::extension::SedonaCTableProvider;
 use sedona_extension::runtime::RuntimeHandle;
 use sedona_extension::table_provider::ExportedTableProvider;
@@ -161,7 +161,7 @@ impl PyRasterH3Table {
     /// selects a 1-based band, and `bbox` (`[min_lon, min_lat, max_lon, max_lat]`) clips
     /// the samples aggregated.
     #[staticmethod]
-    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, band=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None))]
+    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, band=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None, transfer=None, sample_method=None, overlay_weighted=None, mass_preserve=None))]
     #[allow(clippy::too_many_arguments)]
     fn continuous(
         source: &str,
@@ -174,8 +174,15 @@ impl PyRasterH3Table {
         nodata_policy: Option<&str>,
         emit_nodata_value: Option<f64>,
         decimals: Option<u8>,
+        transfer: Option<&str>,
+        sample_method: Option<&str>,
+        overlay_weighted: Option<bool>,
+        mass_preserve: Option<bool>,
     ) -> PyResult<Self> {
         let grid = grid_of(grid)?;
+        let transfer =
+            TransferMode::from_options(transfer, sample_method, overlay_weighted, mass_preserve)
+                .map_err(value_error)?;
         let output = output_policy(nodata_policy, emit_nodata_value, decimals)?;
         let mut provider = ContinuousRasterTableProvider::try_new_with(
             source,
@@ -184,7 +191,8 @@ impl PyRasterH3Table {
             crs.as_deref(),
         )
         .map_err(value_error)?
-        .with_output_policy(output);
+        .with_output_policy(output)
+        .with_transfer(transfer);
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }
@@ -211,7 +219,7 @@ impl PyRasterH3Table {
     /// Categorical statistics (`majority_class`, `majority_fraction`, `histogram`, ...) per
     /// cell, in wide format. Arguments as for `continuous`.
     #[staticmethod]
-    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None))]
+    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None, transfer=None, sample_method=None, overlay_weighted=None, mass_preserve=None))]
     #[allow(clippy::too_many_arguments)]
     fn categorical(
         source: &str,
@@ -223,8 +231,15 @@ impl PyRasterH3Table {
         nodata_policy: Option<&str>,
         emit_nodata_value: Option<f64>,
         decimals: Option<u8>,
+        transfer: Option<&str>,
+        sample_method: Option<&str>,
+        overlay_weighted: Option<bool>,
+        mass_preserve: Option<bool>,
     ) -> PyResult<Self> {
         let grid = grid_of(grid)?;
+        let transfer =
+            TransferMode::from_options(transfer, sample_method, overlay_weighted, mass_preserve)
+                .map_err(value_error)?;
         let output = output_policy(nodata_policy, emit_nodata_value, decimals)?;
         let mut provider = CategoricalRasterTableProvider::try_new_with(
             source,
@@ -233,7 +248,8 @@ impl PyRasterH3Table {
             crs.as_deref(),
         )
         .map_err(value_error)?
-        .with_output_policy(output);
+        .with_output_policy(output)
+        .with_transfer(transfer);
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }

@@ -11,6 +11,7 @@ use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, OverlapRule};
 use raster_h3_core::resolution::ResolutionSpec;
 use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
+use raster_h3_core::transfer::TransferMode;
 
 use crate::config::PyScanConfig;
 use crate::ffi::opt_cstr;
@@ -205,6 +206,11 @@ pub(crate) struct PyScanOptions {
     pub(crate) nodata_policy: Option<String>,
     pub(crate) emit_nodata_value: Option<f64>,
     pub(crate) decimals: Option<i64>,
+    /// `assign_centers` (default), `sample` or `overlay`.
+    pub(crate) transfer: Option<String>,
+    pub(crate) sample_method: Option<String>,
+    pub(crate) overlay_weighted: Option<bool>,
+    pub(crate) mass_preserve: Option<bool>,
 }
 
 /// The output policy of an options object: `nodata_policy`, `emit_nodata_value` and
@@ -323,6 +329,12 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         cfg.remapper = Some(CategoryRemapper::parse(spec)?.into_arc());
     }
     cfg.min_count = opts.min_count;
+    cfg.transfer = TransferMode::from_options(
+        opts.transfer.as_deref(),
+        opts.sample_method.as_deref(),
+        opts.overlay_weighted,
+        opts.mass_preserve,
+    )?;
     cfg.output = output_policy_of(
         opts.nodata_policy.as_deref(),
         opts.emit_nodata_value,

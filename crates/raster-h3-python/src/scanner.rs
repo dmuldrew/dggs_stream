@@ -135,6 +135,7 @@ impl PyRasterScanner {
         mr_cfg.sampling = self.config.sampling.clone();
         mr_cfg.spectral_formula = self.config.spectral_formula;
         mr_cfg.remapper = self.config.remapper.clone();
+        mr_cfg.transfer = self.config.transfer;
         self.config.apply_cell_options(&mut mr_cfg);
         mr_cfg.strict_transforms = self.config.strict_transforms;
         mr_cfg.transform_failure_counter = self.config.transform_failure_counter.clone();

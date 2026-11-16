@@ -22,6 +22,7 @@ use raster_h3_core::raster::mosaic::{
 };
 use raster_h3_core::resolution::ResolutionSpec;
 use raster_h3_core::scalar_ops::estimate_raster_cardinality_for;
+use raster_h3_core::transfer::TransferMode;
 
 /// Cardinality statistics exposed to query planners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,6 +625,13 @@ impl ContinuousRasterTableProvider {
         self
     }
 
+    /// How pixels map onto cells: centre assignment (the default), interpolation at
+    /// cell centres, or an area-weighted overlay (see [`TransferMode`]).
+    pub fn with_transfer(mut self, transfer: TransferMode) -> Self {
+        self.config.transfer = transfer;
+        self
+    }
+
     /// The grid this table aggregates onto.
     pub fn grid(&self) -> GridKind {
         self.config.grid
@@ -929,6 +937,13 @@ impl CategoricalRasterTableProvider {
         self.config.nodata_policy = policy.nodata;
         self.config.emit_nodata_value = policy.nodata_value;
         self.config.decimals = policy.decimals;
+        self
+    }
+
+    /// How pixels map onto cells: centre assignment (the default), interpolation at
+    /// cell centres, or an area-weighted overlay (see [`TransferMode`]).
+    pub fn with_transfer(mut self, transfer: TransferMode) -> Self {
+        self.config.transfer = transfer;
         self
     }
 

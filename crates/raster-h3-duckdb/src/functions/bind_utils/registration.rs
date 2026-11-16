@@ -89,5 +89,10 @@ pub unsafe fn register_common_raster_named_parameters(func: duckdb_table_functio
         add_named_parameter(func, "nodata_policy", DuckDBType::Varchar);
         add_named_parameter(func, "emit_nodata_value", DuckDBType::Double);
         add_named_parameter(func, "decimals", DuckDBType::BigInt);
+        // How pixels map onto cells.
+        add_named_parameter(func, "transfer", DuckDBType::Varchar);
+        add_named_parameter(func, "sample_method", DuckDBType::Varchar);
+        add_named_parameter(func, "overlay_weighted", DuckDBType::Boolean);
+        add_named_parameter(func, "mass_preserve", DuckDBType::Boolean);
     }
 }

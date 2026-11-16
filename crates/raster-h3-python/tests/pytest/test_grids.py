@@ -486,3 +486,125 @@ def test_output_option_errors(raster_h3, gradient_tif, tmp_path):
         )
         > 0
     )
+
+
+def _plane(lng, lat):
+    return 1000.0 + 4000.0 * (lng - ORIGIN[0]) - 2500.0 * (lat - ORIGIN[1])
+
+
+@pytest.fixture(scope="module")
+def plane_tif(tmp_path_factory):
+    from conftest import write_geotiff
+
+    path = tmp_path_factory.mktemp("rasters") / "plane.tif"
+    write_geotiff(
+        path,
+        64,
+        48,
+        lambda c, r: _plane(ORIGIN[0] + PIXEL * (c + 0.5), ORIGIN[1] - PIXEL * (r + 0.5)),
+    )
+    return path
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_transfer_sample(raster_h3, plane_tif, grid):
+    index = f"{grid}_index"
+    res = raster_h3.auto_resolution(plane_tif, grid, offset=2)
+    centres = raster_h3.scan_raster(plane_tif, res, grid=grid).collect()
+    assert raster_h3.scan_raster(plane_tif, res, grid=grid, transfer="assign_centers").collect().height == centres.height
+    for method, tolerance in [("nearest", 2.1), ("bilinear", 2e-3), ("bicubic", 2e-3), ("lanczos", 0.2)]:
+        df = raster_h3.scan_raster(
+            plane_tif, res, grid=grid, transfer="sample", sample_method=method
+        ).collect()
+        # Cells two steps finer than the pixels: sampling fills what centres leave empty.
+        assert df.height > 3 * centres.height
+        assert df[index].n_unique() == df.height
+        assert df["count"].unique().to_list() == [1.0]
+        worst = 0.0
+        for cell, mean in zip(df[index], df["mean"]):
+            lng, lat = raster_h3.cell_to_lng(cell, grid), raster_h3.cell_to_lat(cell, grid)
+            col, row = (lng - ORIGIN[0]) / PIXEL, (ORIGIN[1] - lat) / PIXEL
+            assert 0 <= col < 64 and 0 <= row < 48
+            if 3.5 < col < 60.5 and 3.5 < row < 44.5:
+                worst = max(worst, abs(mean - _plane(lng, lat)))
+        assert worst < tolerance, (grid, method, worst)
+    # The method name alone selects sampling; pushdown still works.
+    lazy = raster_h3.scan_raster(plane_tif, res, grid=grid, transfer="bicubic")
+    assert lazy.select(pl.len()).collect().item() == df.height
+    assert lazy.select(index, "mean").head(5).collect().shape == (5, 2)
+    table = pa.table(raster_h3.RasterH3ArrowStream(plane_tif, res, grid=grid, transfer="sample", limit=7))
+    assert table.num_rows == 7
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_transfer_overlay_conserves_mass(raster_h3, gradient_tif, tmp_path, grid):
+    index = f"{grid}_index"
+    total = sum(gradient_value(c, r) for r in range(48) for c in range(64))
+    for offset in (-2, 0):
+        res = raster_h3.auto_resolution(gradient_tif, grid, offset=offset)
+        overlay = raster_h3.scan_raster(gradient_tif, res, grid=grid, transfer="overlay").collect()
+        assert overlay["count"].sum() == pytest.approx(64 * 48, rel=1e-6)
+        assert overlay["sum"].sum() == pytest.approx(total, rel=1e-6)
+        assert (overlay["mean"] >= overlay["min"] - 1e-9).all()
+        preserved = raster_h3.scan_raster(
+            gradient_tif, res, grid=grid, transfer="overlay", mass_preserve=True
+        ).collect()
+        assert preserved["sum"].sum() == pytest.approx(total, rel=1e-9)
+        assert preserved["count"].sum() == pytest.approx(64 * 48, rel=1e-9)
+        touched = raster_h3.scan_raster(
+            gradient_tif, res, grid=grid, transfer="overlay", overlay_weighted=False
+        ).collect()
+        assert touched.height == overlay.height
+        assert (touched["count"] == touched["count"].round()).all()
+        centres = raster_h3.scan_raster(gradient_tif, res, grid=grid).collect()
+        assert set(centres[index]) <= set(overlay[index])
+
+    # Exporters take the same options; the Parquet file holds the overlay cells.
+    out = tmp_path / "overlay.parquet"
+    written = raster_h3.raster_to_parquet(
+        gradient_tif, out, res, grid=grid, transfer="overlay", mass_preserve=True
+    )
+    assert written == preserved.height
+    assert pl.read_parquet(out)["sum_value"].sum() == pytest.approx(total, rel=1e-9)
+    assert raster_h3.raster_to_pmtiles(
+        gradient_tif, tmp_path / "sample.pmtiles", res, grid=grid, transfer="sample"
+    ) > 0
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_transfer_categorical(raster_h3, classes_tif, grid):
+    res = raster_h3.auto_resolution(classes_tif, grid, offset=2)
+    nearest = raster_h3.scan_raster(
+        classes_tif, res, grid=grid, categorical=True, transfer="sample", sample_method="nearest"
+    ).collect()
+    assert nearest.height > 3 * 48 * 48
+    for cell, cls in zip(nearest[f"{grid}_index"], nearest["majority_class"]):
+        lng, lat = raster_h3.cell_to_lng(cell, grid), raster_h3.cell_to_lat(cell, grid)
+        c, r = int((lng - ORIGIN[0]) / PIXEL), int((ORIGIN[1] - lat) / PIXEL)
+        assert cls == class_value(c, r)
+    # Polars wraps the scan's error in its own exception type.
+    with pytest.raises(Exception, match="nearest"):
+        raster_h3.scan_raster(classes_tif, res, grid=grid, categorical=True, transfer="sample").collect()
+    overlay = raster_h3.scan_raster(
+        classes_tif, raster_h3.auto_resolution(classes_tif, grid, offset=-2), grid=grid,
+        categorical=True, transfer="overlay",
+    ).collect()
+    assert overlay["total_count"].sum() == pytest.approx(48 * 48, rel=1e-6)
+
+
+def test_transfer_option_errors(raster_h3, gradient_tif):
+    def scan(**kw):
+        return pa.table(raster_h3.RasterH3ArrowStream(gradient_tif, 9, **kw))
+
+    for kw, needle in [
+        (dict(transfer="smear"), "transfer"),
+        (dict(sample_method="bilinear"), "sample_method"),
+        (dict(transfer="overlay", sample_method="bilinear"), "sample_method"),
+        (dict(mass_preserve=True), "mass_preserve"),
+        (dict(transfer="overlay", overlay_weighted=False, mass_preserve=True), "mass_preserve"),
+        (dict(transfer="overlay", sampling="5point"), "sampling"),
+    ]:
+        with pytest.raises(RuntimeError, match=needle):
+            scan(**kw)
+    with pytest.raises(TypeError):
+        scan(transfer="overlay", mass_preserve=1)

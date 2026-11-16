@@ -12,7 +12,11 @@
 //! resolutions. String arguments of the form `'nodata_policy=emit'`,
 //! `'emit_nodata_value=-9999'` and `'decimals=2'` set the output options: `emit` returns
 //! every cell a pixel falls in (zero count and NULL statistics, or the NoData value,
-//! where all its samples are NoData), and `decimals` rounds the statistics. A string argument holding a partition spec (a JSON
+//! where all its samples are NoData), and `decimals` rounds the statistics.
+//! `'transfer=sample'` (with `'sample_method=nearest|bilinear|bicubic|lanczos'`) gives
+//! each cell the value interpolated at its centre, and `'transfer=overlay'` (with
+//! `'overlay_weighted=false'` or `'mass_preserve=true'`) aggregates the pixels each cell
+//! overlaps by overlap area, instead of assigning each pixel to the cell at its centre. A string argument holding a partition spec (a JSON
 //! object from `h3_raster_plan_partitions`) scans only that partition, adding a
 //! `partial_state` column (see [`crate::merge`]). Use [`RasterH3Table`] with a configured
 //! provider for the other options (nodata, quantiles, categorical format, ...).
@@ -37,6 +41,7 @@ use crate::table::RasterH3Table;
 use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 use raster_h3_core::grid::GridKind;
 use raster_h3_core::resolution::ResolutionSpec;
+use raster_h3_core::transfer::TransferMode;
 
 /// `h3_raster_continuous_aggregate`
 #[derive(Debug, Default)]
@@ -100,7 +105,8 @@ fn continuous_table(
         args.crs.as_deref(),
     )
     .map_err(to_df_error)?
-    .with_output_policy(args.output);
+    .with_output_policy(args.output)
+    .with_transfer(args.transfer);
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
@@ -120,7 +126,8 @@ fn categorical_table(
         args.crs.as_deref(),
     )
     .map_err(to_df_error)?
-    .with_output_policy(args.output);
+    .with_output_policy(args.output)
+    .with_transfer(args.transfer);
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
@@ -194,6 +201,7 @@ struct Args {
     crs: Option<String>,
     partition: Option<ScanPartition>,
     output: OutputPolicy,
+    transfer: TransferMode,
 }
 
 fn string_literal(expr: &Expr) -> Option<&str> {
@@ -217,6 +225,21 @@ fn output_option(text: &str) -> Option<(&str, &str)> {
     ["nodata_policy", "emit_nodata_value", "decimals"]
         .contains(&key)
         .then_some((key, value.trim()))
+}
+
+/// `Some((key, value))` if `text` is `key=value` for one of the transfer options
+/// (`transfer`, `sample_method`, `overlay_weighted`, `mass_preserve`).
+fn transfer_option(text: &str) -> Option<(&str, &str)> {
+    let (key, value) = text.split_once('=')?;
+    let key = key.trim();
+    [
+        "transfer",
+        "sample_method",
+        "overlay_weighted",
+        "mass_preserve",
+    ]
+    .contains(&key)
+    .then_some((key, value.trim()))
 }
 
 fn set_output_option(name: &str, policy: &mut OutputPolicy, key: &str, value: &str) -> Result<()> {
@@ -263,7 +286,10 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         crs: None,
         partition: None,
         output: OutputPolicy::default(),
+        transfer: TransferMode::AssignCenters,
     };
+    let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
+    let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
     let mut grid = None;
     let mut auto = None;
     let mut resolutions: Vec<i64> = Vec::new();
@@ -279,6 +305,21 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                 // Partition specs are JSON objects; CRS strings never start with `{`.
                 Some(spec) if spec.trim_start().starts_with('{') && args.partition.is_none() => {
                     args.partition = Some(ScanPartition::from_json(spec).map_err(to_df_error)?)
+                }
+                // `'transfer=overlay'`, `'sample_method=bicubic'`, `'mass_preserve=true'`.
+                Some(option) if transfer_option(option).is_some() => {
+                    let (key, value) = transfer_option(option).unwrap_or_default();
+                    let flag = || match value.to_ascii_lowercase().as_str() {
+                        "true" | "1" | "yes" => Ok(true),
+                        "false" | "0" | "no" => Ok(false),
+                        _ => plan_err!("{name}: {key} must be true or false, got '{value}'"),
+                    };
+                    match key {
+                        "transfer" => transfer = Some(value.to_string()),
+                        "sample_method" => sample_method = Some(value.to_string()),
+                        "overlay_weighted" => overlay_weighted = Some(flag()?),
+                        _ => mass_preserve = Some(flag()?),
+                    }
                 }
                 // `'nodata_policy=emit'`, `'emit_nodata_value=-1'`, `'decimals=2'`.
                 Some(option) if output_option(option).is_some() => {
@@ -300,6 +341,13 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
             },
         }
     }
+    args.transfer = TransferMode::from_options(
+        transfer.as_deref(),
+        sample_method.as_deref(),
+        overlay_weighted,
+        mass_preserve,
+    )
+    .map_err(to_df_error)?;
     if args.output.nodata_value.is_some() && !args.output.emits_nodata() {
         return plan_err!("{name}: emit_nodata_value needs nodata_policy=emit");
     }

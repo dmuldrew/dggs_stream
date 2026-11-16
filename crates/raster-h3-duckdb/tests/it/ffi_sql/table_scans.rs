@@ -920,3 +920,93 @@ fn test_nodata_policy_and_decimals() {
         assert!(err.contains(needle), "{err}");
     }
 }
+
+#[test]
+fn test_transfer_modes() {
+    use raster_h3_core::resolution::area_matched_resolution;
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    let value = |c: u32, r: u32| ((c * 7 + r * 13) % 23 + 1) as f32;
+    let (_tmp, path) = TestGeoTiffBuilder::new(40, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(value);
+    let total: f64 = (0..32)
+        .flat_map(|r| (0..40).map(move |c| f64::from(value(c, r))))
+        .sum();
+    let pixel_m2 = 111_320.0f64.powi(2) * 1e-6 * 37.8f64.to_radians().cos();
+    for grid in GridKind::ALL {
+        let matched = i64::from(area_matched_resolution(grid, pixel_m2));
+        let scan = |res: i64, extra: Vec<(&'static str, MockVal)>| {
+            let mut params = vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolution", MockVal::Int(res)),
+            ];
+            params.extend(extra);
+            scan_stats(&path, params)
+        };
+        // `(count, mean)` totals of a scan: overlapped area and mass.
+        let totals = |rows: &[StatRow]| {
+            rows.iter().fold((0.0, 0.0), |(area, mass), r| {
+                (area + r.2, mass + r.2 * r.1.unwrap())
+            })
+        };
+        let centres = scan(matched - 1, vec![]).unwrap();
+        let overlay = scan(
+            matched - 1,
+            vec![("transfer", MockVal::Str("overlay".into()))],
+        )
+        .unwrap();
+        assert!(overlay.len() >= centres.len(), "{grid}");
+        let (area, mass) = totals(&overlay);
+        assert!((area / 1280.0 - 1.0).abs() < 1e-6, "{grid}: {area}");
+        assert!((mass / total - 1.0).abs() < 1e-6, "{grid}: {mass}");
+        let preserved = scan(
+            matched - 1,
+            vec![
+                ("transfer", MockVal::Str("overlay".into())),
+                ("mass_preserve", MockVal::Bool(true)),
+            ],
+        )
+        .unwrap();
+        let (area, mass) = totals(&preserved);
+        assert!(
+            (area - 1280.0).abs() < 1e-6 && (mass - total).abs() < 1e-6 * total,
+            "{grid}"
+        );
+
+        // Sampling two steps finer than the pixels fills every cell on the raster.
+        let fine_centres = scan(matched + 2, vec![]).unwrap();
+        let sampled = scan(
+            matched + 2,
+            vec![
+                ("transfer", MockVal::Str("sample".into())),
+                ("sample_method", MockVal::Str("nearest".into())),
+            ],
+        )
+        .unwrap();
+        assert!(sampled.len() > 3 * fine_centres.len(), "{grid}");
+        for row in &sampled {
+            let (lat, lng) = grid.center_lat_lng(row.0).unwrap();
+            let c = ((lng + 122.45) / 0.001).floor() as u32;
+            let r = ((37.80 - lat) / 0.001).floor() as u32;
+            assert_eq!(row.1, Some(f64::from(value(c, r))), "{grid}");
+            assert_eq!(row.2, 1.0);
+        }
+
+        for (bad, needle) in [
+            (vec![("transfer", MockVal::Str("smear".into()))], "transfer"),
+            (
+                vec![("sample_method", MockVal::Str("bilinear".into()))],
+                "sample_method",
+            ),
+            (
+                vec![("mass_preserve", MockVal::Bool(true))],
+                "mass_preserve",
+            ),
+        ] {
+            let err = scan(matched, bad).unwrap_err();
+            assert!(err.contains(needle), "{err}");
+        }
+    }
+}
