@@ -279,6 +279,17 @@ impl<A: TransferAccumulator> TransferStream<A> {
         self.transform_failures
     }
 
+    /// Process blocks until at least `min_rows` finished cells wait to be drained, or
+    /// every block is processed.
+    pub fn advance_until_completed(&mut self, min_rows: usize) -> Result<()> {
+        while self.output.len() < min_rows && self.next_block < self.blocks.len() {
+            let block = self.blocks[self.next_block].clone();
+            self.next_block += 1;
+            self.process(&block)?;
+        }
+        Ok(())
+    }
+
     /// Hand up to `max_rows` finished cells to `consumer`; `0` means the end.
     pub fn drain_into(
         &mut self,
@@ -527,7 +538,6 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 last_tile,
             });
             pending.end_row = end_row;
-            pending.touched |= overlaps.len() > before;
         }
 
         // A bbox selects pixels by their centres, as the centre kernel does; a cell
@@ -562,10 +572,16 @@ impl<A: TransferAccumulator> TransferStream<A> {
         }
         for (slot, pixel, weight) in overlaps {
             let (c, r) = (pixel as usize % band_width, pixel as usize / band_width);
-            let Some(value) = window
+            let value = window
                 .get(c as i64, r as i64 + rows.0)
-                .and_then(|v| self.mapped(v))
-            else {
+                .and_then(|v| self.mapped(v));
+            let Some(pending) = self.pending.get_mut(&slots[slot as usize]) else {
+                continue;
+            };
+            // Only pixels that passed the bbox and ownership filters above make a cell
+            // `touched`, so `emit` lists no cell outside the selection.
+            pending.touched = true;
+            let Some(value) = value else {
                 continue;
             };
             let weight = if mass_preserve {
@@ -573,9 +589,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             } else {
                 weight
             };
-            if let Some(pending) = self.pending.get_mut(&slots[slot as usize]) {
-                pending.acc.add(value, weight);
-            }
+            pending.acc.add(value, weight);
         }
         self.record_failures(failures)
     }

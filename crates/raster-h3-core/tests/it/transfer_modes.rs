@@ -439,3 +439,137 @@ fn overlay_keeps_cells_larger_than_the_raster_or_the_bbox() {
         }
     }
 }
+
+#[test]
+fn transfer_streamers_advance_explicitly() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| {
+            let (lon, lat) = pixel_centre(c, r);
+            plane(lon, lat) as f32
+        });
+    let res = matched(GridKind::H3, 0);
+    for mode in [
+        TransferMode::Sample(SampleMethod::Nearest),
+        TransferMode::OVERLAY,
+    ] {
+        let config = config(GridKind::H3, res, mode);
+        let want = scan(&path, &config);
+        let reader = GeoTiffStreamReader::open(&path).unwrap();
+        let mut streamer = MultiScanHorizonStreamer::new(reader, &config).unwrap();
+        let mut got = BTreeMap::new();
+        loop {
+            streamer.advance_until_completed(1).unwrap();
+            let drained = streamer
+                .drain_completed_into(1, |_, rec| {
+                    got.insert(rec.h3_index, rec.accumulator.count);
+                })
+                .unwrap();
+            if drained == 0 {
+                break;
+            }
+        }
+        assert_eq!(got.len(), want.len(), "{mode:?}");
+
+        let reader = GeoTiffStreamReader::open(&path).unwrap();
+        let mut categorical = MultiCategoricalHorizonStreamer::new(reader, &config).unwrap();
+        categorical.advance_until_completed(1).unwrap();
+        assert!(categorical.drain_completed_into(1, |_, _| {}).unwrap() > 0);
+    }
+}
+
+#[test]
+fn overlay_emit_lists_only_cells_with_selected_pixels() {
+    // No NoData anywhere: under `emit` every listed cell must hold a selected pixel.
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| {
+            let (lon, lat) = pixel_centre(c, r);
+            plane(lon, lat) as f32
+        });
+    let bbox = [
+        ORIGIN.0 + 0.0153,
+        ORIGIN.1 - 0.0317,
+        ORIGIN.0 + 0.0411,
+        ORIGIN.1 - 0.0089,
+    ];
+    for grid in GridKind::ALL {
+        let mut config = config(grid, matched(grid, -1), TransferMode::OVERLAY);
+        config.bbox = Some(bbox);
+        let omit = scan(&path, &config);
+        config.nodata_policy = raster_h3_core::aggregator::NodataPolicy::Emit;
+        let emit = scan(&path, &config);
+        assert!(!emit.is_empty(), "{grid}");
+        assert!(emit.values().all(|a| a.count > 0.0), "{grid}");
+        assert_eq!(
+            emit.keys().collect::<Vec<_>>(),
+            omit.keys().collect::<Vec<_>>(),
+            "{grid}"
+        );
+    }
+}
+
+/// An RGBA GeoTIFF on the test grid: red 200 under zero alpha in the left third,
+/// red 100 under full alpha elsewhere.
+fn rgba_with_transparent_border() -> tempfile::NamedTempFile {
+    use std::io::BufWriter;
+    use tiff::encoder::colortype::RGBA8;
+    use tiff::encoder::TiffEncoder;
+    use tiff::tags::Tag;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut data = Vec::with_capacity((W * H * 4) as usize);
+    for _ in 0..H {
+        for c in 0..W {
+            let transparent = c < W / 3;
+            data.extend_from_slice(&[if transparent { 200 } else { 100 }, 0, 0]);
+            data.push(if transparent { 0 } else { 255 });
+        }
+    }
+    let mut encoder =
+        TiffEncoder::new(BufWriter::new(std::fs::File::create(file.path()).unwrap())).unwrap();
+    let mut image = encoder.new_image::<RGBA8>(W, H).unwrap();
+    let tie = [0.0f64, 0.0, 0.0, ORIGIN.0, ORIGIN.1, 0.0];
+    image
+        .encoder()
+        .write_tag(Tag::Unknown(33922), &tie[..])
+        .unwrap();
+    image
+        .encoder()
+        .write_tag(Tag::Unknown(33550), &[PIXEL, PIXEL, 0.0][..])
+        .unwrap();
+    let geokeys: [u16; 12] = [1, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326];
+    image
+        .encoder()
+        .write_tag(Tag::Unknown(34735), &geokeys[..])
+        .unwrap();
+    // The fourth sample is unassociated alpha.
+    image
+        .encoder()
+        .write_tag(Tag::ExtraSamples, &[2u16][..])
+        .unwrap();
+    image.write_data(&data).unwrap();
+    file
+}
+
+#[test]
+fn transfer_modes_skip_transparent_pixels() {
+    let file = rgba_with_transparent_border();
+    for grid in GridKind::ALL {
+        for (mode, offset) in [
+            (TransferMode::AssignCenters, 0),
+            (TransferMode::Sample(SampleMethod::Nearest), 1),
+            (TransferMode::Sample(SampleMethod::Bilinear), 1),
+            (TransferMode::OVERLAY, -1),
+        ] {
+            let cells = scan(file.path(), &config(grid, matched(grid, offset), mode));
+            assert!(!cells.is_empty(), "{grid} {mode:?}");
+            for acc in cells.values() {
+                let close = |v: f64| (v - 100.0).abs() < 1e-9;
+                assert!(close(acc.min) && close(acc.max), "{grid} {mode:?}: {acc:?}");
+            }
+        }
+    }
+}

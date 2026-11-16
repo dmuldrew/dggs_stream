@@ -276,7 +276,10 @@ impl MultiScanHorizonStreamer {
     /// Advance scanline horizon until at least `min_rows` completed records are available or finished
     #[inline(always)]
     pub fn advance_until_completed(&mut self, min_rows: usize) -> Result<()> {
-        self.inner.advance_until_completed(min_rows)
+        match &mut self.transfer {
+            Some(transfer) => transfer.advance_until_completed(min_rows),
+            None => self.inner.advance_until_completed(min_rows),
+        }
     }
 
     /// Return current southernmost latitude reached by scanline horizon

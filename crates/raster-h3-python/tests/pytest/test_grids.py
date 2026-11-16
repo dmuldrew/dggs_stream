@@ -793,6 +793,7 @@ def test_histogram_option_errors(raster_h3, classes_tif):
         (dict(histogram="values", histogram_normalize="density"), "density"),
         (dict(histogram_weight="mass"), "weight"),
         (dict(histogram_weight="area", transfer="sample"), "overlay"),
+        (dict(histogram_weight="area", transfer="overlay", overlay_weighted=False), "weighted"),
         (dict(histogram="2:0:9", remap={1: 2}), "remap"),
     ]:
         with pytest.raises(Exception, match=message):

@@ -238,8 +238,9 @@ impl HistogramSpec {
         self.bins.bin_count().is_some()
     }
 
-    /// The transfer mode a scan with this histogram runs: area weights need `overlay`,
-    /// which is chosen when the scan asks for the default mode and refused for `sample`.
+    /// The transfer mode a scan with this histogram runs: area weights need a weighted
+    /// `overlay`, which is chosen when the scan asks for the default mode and refused for
+    /// `sample` and for an unweighted overlay (which would weight each pixel 1).
     pub fn transfer_mode(&self, requested: TransferMode) -> Result<TransferMode> {
         match (self.weight, requested) {
             (HistogramWeight::Count, mode) => Ok(mode),
@@ -247,7 +248,17 @@ impl HistogramSpec {
                 weighted: true,
                 mass_preserve: false,
             }),
-            (HistogramWeight::Area, mode @ TransferMode::Overlay { .. }) => Ok(mode),
+            (HistogramWeight::Area, mode @ TransferMode::Overlay { weighted: true, .. }) => {
+                Ok(mode)
+            }
+            (
+                HistogramWeight::Area,
+                TransferMode::Overlay {
+                    weighted: false, ..
+                },
+            ) => Err(invalid(
+                "histogram weight 'area' needs a weighted overlay (overlay_weighted=true)".into(),
+            )),
             (HistogramWeight::Area, TransferMode::Sample(_)) => Err(invalid(
                 "histogram weight 'area' needs transfer 'overlay', not 'sample'".into(),
             )),
@@ -413,6 +424,15 @@ mod tests {
         assert!(area
             .transfer_mode(TransferMode::Sample(SampleMethod::Nearest))
             .is_err());
+        let unweighted = TransferMode::Overlay {
+            weighted: false,
+            mass_preserve: false,
+        };
+        assert!(area.transfer_mode(unweighted).is_err());
+        assert_eq!(
+            HistogramSpec::default().transfer_mode(unweighted).unwrap(),
+            unweighted
+        );
         assert_eq!(
             HistogramSpec::default()
                 .transfer_mode(TransferMode::AssignCenters)

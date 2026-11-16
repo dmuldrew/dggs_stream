@@ -112,6 +112,9 @@ impl RowWindow {
         let nodata = selection.nodata.or(meta.nodata);
         let spp = usize::from(meta.samples_per_pixel.max(1));
         let band_index = selection.band.saturating_sub(1).min(spp - 1);
+        // A pixel whose alpha sample is zero is transparent: missing, as in the centre
+        // kernel (`walker::is_transparent`).
+        let alpha_index = meta.alpha_sample.map(usize::from).filter(|&a| a < spp);
         let scaling = if selection.apply_scale_offset {
             meta.band_scaling(selection.band)
         } else {
@@ -136,7 +139,18 @@ impl RowWindow {
                             let (_, data) = tile.reader.read_chunk(index)?;
                             let samples = BorrowedSamples::from(&data);
                             crate::dispatch_samples!(samples, nodata, |slice, nd| {
-                                convert(slice, nd, &bounds, spp, band_index, scaling, &mut out)
+                                convert(
+                                    slice,
+                                    nd,
+                                    &bounds,
+                                    Layout {
+                                        spp,
+                                        band_index,
+                                        alpha_index,
+                                    },
+                                    scaling,
+                                    &mut out,
+                                )
                             });
                         }
                         let decoded = Arc::new(out);
@@ -159,23 +173,44 @@ impl RowWindow {
     }
 }
 
+/// Where a pixel's samples sit in an interleaved chunk.
+#[derive(Clone, Copy)]
+struct Layout {
+    /// Samples per pixel.
+    spp: usize,
+    /// Zero-based sample of the selected band.
+    band_index: usize,
+    /// Zero-based alpha sample, if the raster has one.
+    alpha_index: Option<usize>,
+}
+
 /// Append one band of a decoded chunk to `out` as `f64`, row-major over the chunk's own
-/// `bounds` (decoded tiles may be padded to the full tile width).
+/// `bounds` (decoded tiles may be padded to the full tile width). NoData and
+/// transparent (zero-alpha) pixels become NaN.
 fn convert<T: SimdSpanAccumulate>(
     slice: &[T],
     nodata: Option<T>,
     bounds: &RasterChunk,
-    spp: usize,
-    band_index: usize,
+    layout: Layout,
     scaling: crate::raster::metadata::BandScaling,
     out: &mut Vec<f64>,
 ) {
+    let Layout {
+        spp,
+        band_index,
+        alpha_index,
+    } = layout;
     let (width, height) = (bounds.width as usize, bounds.height as usize);
     let stride = (slice.len() / (spp * height)).max(width);
     for row in 0..height {
         for col in 0..width {
+            let pixel = (row * stride + col) * spp;
+            let transparent = alpha_index
+                .and_then(|a| slice.get(pixel + a))
+                .is_some_and(|alpha| alpha.to_f64_val() == 0.0);
             let value = slice
-                .get((row * stride + col) * spp + band_index)
+                .get(pixel + band_index)
+                .filter(|_| !transparent)
                 .copied()
                 .filter(|v| v.is_valid(nodata))
                 .map(|v| scaling.apply(v.to_f64_val()))
