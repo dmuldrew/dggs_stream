@@ -166,9 +166,14 @@ fn main() {
         }
     }
 
+    // Each case runs in a child process that inherits RAYON_NUM_THREADS, so its
+    // Rayon pool matches this one. Scans default to that many worker tasks, at
+    // most 8 (`MultiResolutionConfig::aggregation_workers` unset).
+    let rayon_threads = rayon::current_num_threads();
     println!(
-        "Hawaii scans per grid: fastest of {runs} runs, largest peak RSS, {} threads\n",
-        std::thread::available_parallelism().map_or(1, usize::from)
+        "Hawaii scans per grid: fastest of {runs} runs, largest peak RSS, {} worker tasks \
+         ({rayon_threads} Rayon threads)\n",
+        rayon_threads.clamp(1, 8)
     );
     for (label, path, categorical) in DATASETS {
         let reader = GeoTiffStreamReader::open(path).unwrap();
