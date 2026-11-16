@@ -25,6 +25,7 @@ const DATASETS: [(&str, &str, bool); 2] = [
 ];
 
 /// Peak resident set size of this process in bytes.
+#[cfg(unix)]
 fn peak_rss_bytes() -> u64 {
     // SAFETY: `getrusage` fills the zeroed struct it is given and has no other effect.
     let usage = unsafe {
@@ -35,6 +36,12 @@ fn peak_rss_bytes() -> u64 {
     // Bytes on macOS, kilobytes elsewhere.
     let scale = if cfg!(target_os = "macos") { 1 } else { 1024 };
     usage.ru_maxrss as u64 * scale
+}
+
+/// Peak resident set size; not measured on this platform (reported as 0).
+#[cfg(not(unix))]
+fn peak_rss_bytes() -> u64 {
+    0
 }
 
 /// One scan in this process: prints `seconds cells pixels peak_rss_bytes`.

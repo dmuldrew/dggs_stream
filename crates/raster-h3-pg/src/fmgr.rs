@@ -674,54 +674,78 @@ macro_rules! grid_text_v1 {
 
 grid_text_v1!(
     /// `a5_to_string(int8) -> text`
-    pg_finfo_pg_a5_to_string, pg_a5_to_string,
-    |fcinfo| grid_to_string(fcinfo, GridKind::A5));
+    pg_finfo_pg_a5_to_string,
+    pg_a5_to_string,
+    |fcinfo| grid_to_string(fcinfo, GridKind::A5)
+);
 grid_text_v1!(
     /// `string_to_a5(text) -> int8` (NULL when the text is not a cell's hexadecimal id).
-    pg_finfo_pg_string_to_a5, pg_string_to_a5,
-    |fcinfo| string_to_grid(fcinfo, GridKind::A5));
+    pg_finfo_pg_string_to_a5,
+    pg_string_to_a5,
+    |fcinfo| string_to_grid(fcinfo, GridKind::A5)
+);
 grid_text_v1!(
     /// `a5_is_valid(text) -> bool`
-    pg_finfo_pg_a5_is_valid_text, pg_a5_is_valid_text,
-    |fcinfo| grid_is_valid_text(fcinfo, GridKind::A5));
+    pg_finfo_pg_a5_is_valid_text,
+    pg_a5_is_valid_text,
+    |fcinfo| grid_is_valid_text(fcinfo, GridKind::A5)
+);
 grid_text_v1!(
     /// `a5_to_wkb(int8) -> bytea`
-    pg_finfo_pg_a5_to_wkb, pg_a5_to_wkb,
-    |fcinfo| grid_to_wkb(fcinfo, GridKind::A5));
+    pg_finfo_pg_a5_to_wkb,
+    pg_a5_to_wkb,
+    |fcinfo| grid_to_wkb(fcinfo, GridKind::A5)
+);
 
 grid_text_v1!(
     /// `s2_to_string(int8) -> text`
-    pg_finfo_pg_s2_to_string, pg_s2_to_string,
-    |fcinfo| grid_to_string(fcinfo, GridKind::S2));
+    pg_finfo_pg_s2_to_string,
+    pg_s2_to_string,
+    |fcinfo| grid_to_string(fcinfo, GridKind::S2)
+);
 grid_text_v1!(
     /// `string_to_s2(text) -> int8` (NULL when the text is not a cell's hexadecimal id).
-    pg_finfo_pg_string_to_s2, pg_string_to_s2,
-    |fcinfo| string_to_grid(fcinfo, GridKind::S2));
+    pg_finfo_pg_string_to_s2,
+    pg_string_to_s2,
+    |fcinfo| string_to_grid(fcinfo, GridKind::S2)
+);
 grid_text_v1!(
     /// `s2_is_valid(text) -> bool`
-    pg_finfo_pg_s2_is_valid_text, pg_s2_is_valid_text,
-    |fcinfo| grid_is_valid_text(fcinfo, GridKind::S2));
+    pg_finfo_pg_s2_is_valid_text,
+    pg_s2_is_valid_text,
+    |fcinfo| grid_is_valid_text(fcinfo, GridKind::S2)
+);
 grid_text_v1!(
     /// `s2_to_wkb(int8) -> bytea`
-    pg_finfo_pg_s2_to_wkb, pg_s2_to_wkb,
-    |fcinfo| grid_to_wkb(fcinfo, GridKind::S2));
+    pg_finfo_pg_s2_to_wkb,
+    pg_s2_to_wkb,
+    |fcinfo| grid_to_wkb(fcinfo, GridKind::S2)
+);
 
 grid_text_v1!(
     /// `healpix_to_string(int8) -> text`
-    pg_finfo_pg_healpix_to_string, pg_healpix_to_string,
-    |fcinfo| grid_to_string(fcinfo, GridKind::Healpix));
+    pg_finfo_pg_healpix_to_string,
+    pg_healpix_to_string,
+    |fcinfo| grid_to_string(fcinfo, GridKind::Healpix)
+);
 grid_text_v1!(
     /// `string_to_healpix(text) -> int8` (NULL when the text is not a cell's hexadecimal id).
-    pg_finfo_pg_string_to_healpix, pg_string_to_healpix,
-    |fcinfo| string_to_grid(fcinfo, GridKind::Healpix));
+    pg_finfo_pg_string_to_healpix,
+    pg_string_to_healpix,
+    |fcinfo| string_to_grid(fcinfo, GridKind::Healpix)
+);
 grid_text_v1!(
     /// `healpix_is_valid(text) -> bool`
-    pg_finfo_pg_healpix_is_valid_text, pg_healpix_is_valid_text,
-    |fcinfo| grid_is_valid_text(fcinfo, GridKind::Healpix));
+    pg_finfo_pg_healpix_is_valid_text,
+    pg_healpix_is_valid_text,
+    |fcinfo| grid_is_valid_text(fcinfo, GridKind::Healpix)
+);
 grid_text_v1!(
     /// `healpix_to_wkb(int8) -> bytea`
-    pg_finfo_pg_healpix_to_wkb, pg_healpix_to_wkb,
-    |fcinfo| grid_to_wkb(fcinfo, GridKind::Healpix));
+    pg_finfo_pg_healpix_to_wkb,
+    pg_healpix_to_wkb,
+    |fcinfo| grid_to_wkb(fcinfo, GridKind::Healpix)
+);
 
 // =============================================================================
 // Value-per-call set-returning functions
@@ -1158,20 +1182,28 @@ unsafe fn grid_auto_resolution(fcinfo: pg_func_call_info, grid: GridKind) -> Dat
 
 grid_text_v1!(
     /// `h3_auto_resolution(text, int4, text) -> int4`
-    pg_finfo_pg_h3_auto_resolution, pg_h3_auto_resolution,
-    |fcinfo| grid_auto_resolution(fcinfo, GridKind::H3));
+    pg_finfo_pg_h3_auto_resolution,
+    pg_h3_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::H3)
+);
 grid_text_v1!(
     /// `a5_auto_resolution(text, int4, text) -> int4`
-    pg_finfo_pg_a5_auto_resolution, pg_a5_auto_resolution,
-    |fcinfo| grid_auto_resolution(fcinfo, GridKind::A5));
+    pg_finfo_pg_a5_auto_resolution,
+    pg_a5_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::A5)
+);
 grid_text_v1!(
     /// `s2_auto_resolution(text, int4, text) -> int4`
-    pg_finfo_pg_s2_auto_resolution, pg_s2_auto_resolution,
-    |fcinfo| grid_auto_resolution(fcinfo, GridKind::S2));
+    pg_finfo_pg_s2_auto_resolution,
+    pg_s2_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::S2)
+);
 grid_text_v1!(
     /// `healpix_auto_resolution(text, int4, text) -> int4`
-    pg_finfo_pg_healpix_auto_resolution, pg_healpix_auto_resolution,
-    |fcinfo| grid_auto_resolution(fcinfo, GridKind::Healpix));
+    pg_finfo_pg_healpix_auto_resolution,
+    pg_healpix_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::Healpix)
+);
 
 /// Defines one aggregate SRF entry point (and its `pg_finfo_*` record).
 macro_rules! grid_srf_v1 {
@@ -1196,30 +1228,48 @@ macro_rules! grid_srf_v1 {
 
 grid_srf_v1!(
     /// `a5_raster_continuous_aggregate(text, int4, text, float8, text) -> SETOF record`
-    pg_finfo_pg_a5_raster_continuous_aggregate, pg_a5_raster_continuous_aggregate,
-    |args| open_continuous_for(GridKind::A5, args), next_continuous);
+    pg_finfo_pg_a5_raster_continuous_aggregate,
+    pg_a5_raster_continuous_aggregate,
+    |args| open_continuous_for(GridKind::A5, args),
+    next_continuous
+);
 grid_srf_v1!(
     /// `a5_raster_categorical_aggregate(text, int4, text, float8, text) -> SETOF record`
-    pg_finfo_pg_a5_raster_categorical_aggregate, pg_a5_raster_categorical_aggregate,
-    |args| open_categorical_for(GridKind::A5, args), next_categorical);
+    pg_finfo_pg_a5_raster_categorical_aggregate,
+    pg_a5_raster_categorical_aggregate,
+    |args| open_categorical_for(GridKind::A5, args),
+    next_categorical
+);
 
 grid_srf_v1!(
     /// `s2_raster_continuous_aggregate(text, int4, text, float8, text) -> SETOF record`
-    pg_finfo_pg_s2_raster_continuous_aggregate, pg_s2_raster_continuous_aggregate,
-    |args| open_continuous_for(GridKind::S2, args), next_continuous);
+    pg_finfo_pg_s2_raster_continuous_aggregate,
+    pg_s2_raster_continuous_aggregate,
+    |args| open_continuous_for(GridKind::S2, args),
+    next_continuous
+);
 grid_srf_v1!(
     /// `s2_raster_categorical_aggregate(text, int4, text, float8, text) -> SETOF record`
-    pg_finfo_pg_s2_raster_categorical_aggregate, pg_s2_raster_categorical_aggregate,
-    |args| open_categorical_for(GridKind::S2, args), next_categorical);
+    pg_finfo_pg_s2_raster_categorical_aggregate,
+    pg_s2_raster_categorical_aggregate,
+    |args| open_categorical_for(GridKind::S2, args),
+    next_categorical
+);
 
 grid_srf_v1!(
     /// `healpix_raster_continuous_aggregate(text, int4, text, float8, text) -> SETOF record`
-    pg_finfo_pg_healpix_raster_continuous_aggregate, pg_healpix_raster_continuous_aggregate,
-    |args| open_continuous_for(GridKind::Healpix, args), next_continuous);
+    pg_finfo_pg_healpix_raster_continuous_aggregate,
+    pg_healpix_raster_continuous_aggregate,
+    |args| open_continuous_for(GridKind::Healpix, args),
+    next_continuous
+);
 grid_srf_v1!(
     /// `healpix_raster_categorical_aggregate(text, int4, text, float8, text) -> SETOF record`
-    pg_finfo_pg_healpix_raster_categorical_aggregate, pg_healpix_raster_categorical_aggregate,
-    |args| open_categorical_for(GridKind::Healpix, args), next_categorical);
+    pg_finfo_pg_healpix_raster_categorical_aggregate,
+    pg_healpix_raster_categorical_aggregate,
+    |args| open_categorical_for(GridKind::Healpix, args),
+    next_categorical
+);
 
 #[cfg(test)]
 mod tests {

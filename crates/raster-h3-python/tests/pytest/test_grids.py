@@ -19,6 +19,42 @@ GRIDS = ["h3", "a5", "s2", "healpix"]
 RES = {"h3": 9, "a5": 14, "s2": 15, "healpix": 14}
 
 
+try:
+    from polars.io.plugins import register_io_source  # noqa: F401
+
+    HAS_IO_SOURCE = True
+except ImportError:
+    HAS_IO_SOURCE = False
+
+
+class _EagerScans:
+    """`raster_h3` whose `scan_raster` / `scan_raster_h3` always return a `LazyFrame`.
+
+    Without `register_io_source` (Polars < 1.4) they return a `RasterH3ArrowStream`; it
+    is read here, so the grid checks below still run (pushdown is then Polars' own)."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    def _lazy(self, fn, *args, **kwargs):
+        out = fn(*args, **kwargs)
+        return out if isinstance(out, pl.LazyFrame) else frame(pa.table(out)).lazy()
+
+    def scan_raster(self, *args, **kwargs):
+        return self._lazy(self._module.scan_raster, *args, **kwargs)
+
+    def scan_raster_h3(self, *args, **kwargs):
+        return self._lazy(self._module.scan_raster_h3, *args, **kwargs)
+
+
+@pytest.fixture
+def raster_h3(raster_h3):
+    return raster_h3 if HAS_IO_SOURCE else _EagerScans(raster_h3)
+
+
 def expected(raster_h3, grid, width, height, value):
     acc = defaultdict(list)
     for r in range(height):

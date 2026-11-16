@@ -441,83 +441,121 @@ macro_rules! grid_scalar_v1 {
 
 grid_scalar_v1!(
     /// `h3_lonlat_to_cell(float8, float8, int8) -> int8`
-    pg_finfo_pg_h3_lonlat_to_cell, pg_h3_lonlat_to_cell,
-    |info| grid_lonlat_datum(info, GridKind::H3));
+    pg_finfo_pg_h3_lonlat_to_cell,
+    pg_h3_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::H3)
+);
 
 grid_scalar_v1!(
     /// `a5_to_lat(int8) -> float8`
-    pg_finfo_pg_a5_to_lat, pg_a5_to_lat,
-    |info| grid_centre_datum(info, GridKind::A5, true));
+    pg_finfo_pg_a5_to_lat,
+    pg_a5_to_lat,
+    |info| grid_centre_datum(info, GridKind::A5, true)
+);
 grid_scalar_v1!(
     /// `a5_to_lng(int8) -> float8`
-    pg_finfo_pg_a5_to_lng, pg_a5_to_lng,
-    |info| grid_centre_datum(info, GridKind::A5, false));
+    pg_finfo_pg_a5_to_lng,
+    pg_a5_to_lng,
+    |info| grid_centre_datum(info, GridKind::A5, false)
+);
 grid_scalar_v1!(
     /// `a5_get_resolution(int8) -> int8`
-    pg_finfo_pg_a5_get_resolution, pg_a5_get_resolution,
-    |info| grid_resolution_datum(info, GridKind::A5));
+    pg_finfo_pg_a5_get_resolution,
+    pg_a5_get_resolution,
+    |info| grid_resolution_datum(info, GridKind::A5)
+);
 grid_scalar_v1!(
     /// `a5_is_valid(int8) -> bool`
-    pg_finfo_pg_a5_is_valid, pg_a5_is_valid,
-    |info| grid_is_valid_datum(info, GridKind::A5));
+    pg_finfo_pg_a5_is_valid,
+    pg_a5_is_valid,
+    |info| grid_is_valid_datum(info, GridKind::A5)
+);
 grid_scalar_v1!(
     /// `a5_cell_to_parent(int8, int8) -> int8`
-    pg_finfo_pg_a5_cell_to_parent, pg_a5_cell_to_parent,
-    |info| grid_parent_datum(info, GridKind::A5));
+    pg_finfo_pg_a5_cell_to_parent,
+    pg_a5_cell_to_parent,
+    |info| grid_parent_datum(info, GridKind::A5)
+);
 grid_scalar_v1!(
     /// `a5_lonlat_to_cell(float8, float8, int8) -> int8`
-    pg_finfo_pg_a5_lonlat_to_cell, pg_a5_lonlat_to_cell,
-    |info| grid_lonlat_datum(info, GridKind::A5));
+    pg_finfo_pg_a5_lonlat_to_cell,
+    pg_a5_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::A5)
+);
 
 grid_scalar_v1!(
     /// `s2_to_lat(int8) -> float8`
-    pg_finfo_pg_s2_to_lat, pg_s2_to_lat,
-    |info| grid_centre_datum(info, GridKind::S2, true));
+    pg_finfo_pg_s2_to_lat,
+    pg_s2_to_lat,
+    |info| grid_centre_datum(info, GridKind::S2, true)
+);
 grid_scalar_v1!(
     /// `s2_to_lng(int8) -> float8`
-    pg_finfo_pg_s2_to_lng, pg_s2_to_lng,
-    |info| grid_centre_datum(info, GridKind::S2, false));
+    pg_finfo_pg_s2_to_lng,
+    pg_s2_to_lng,
+    |info| grid_centre_datum(info, GridKind::S2, false)
+);
 grid_scalar_v1!(
     /// `s2_get_resolution(int8) -> int8`
-    pg_finfo_pg_s2_get_resolution, pg_s2_get_resolution,
-    |info| grid_resolution_datum(info, GridKind::S2));
+    pg_finfo_pg_s2_get_resolution,
+    pg_s2_get_resolution,
+    |info| grid_resolution_datum(info, GridKind::S2)
+);
 grid_scalar_v1!(
     /// `s2_is_valid(int8) -> bool`
-    pg_finfo_pg_s2_is_valid, pg_s2_is_valid,
-    |info| grid_is_valid_datum(info, GridKind::S2));
+    pg_finfo_pg_s2_is_valid,
+    pg_s2_is_valid,
+    |info| grid_is_valid_datum(info, GridKind::S2)
+);
 grid_scalar_v1!(
     /// `s2_cell_to_parent(int8, int8) -> int8`
-    pg_finfo_pg_s2_cell_to_parent, pg_s2_cell_to_parent,
-    |info| grid_parent_datum(info, GridKind::S2));
+    pg_finfo_pg_s2_cell_to_parent,
+    pg_s2_cell_to_parent,
+    |info| grid_parent_datum(info, GridKind::S2)
+);
 grid_scalar_v1!(
     /// `s2_lonlat_to_cell(float8, float8, int8) -> int8`
-    pg_finfo_pg_s2_lonlat_to_cell, pg_s2_lonlat_to_cell,
-    |info| grid_lonlat_datum(info, GridKind::S2));
+    pg_finfo_pg_s2_lonlat_to_cell,
+    pg_s2_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::S2)
+);
 
 grid_scalar_v1!(
     /// `healpix_to_lat(int8) -> float8`
-    pg_finfo_pg_healpix_to_lat, pg_healpix_to_lat,
-    |info| grid_centre_datum(info, GridKind::Healpix, true));
+    pg_finfo_pg_healpix_to_lat,
+    pg_healpix_to_lat,
+    |info| grid_centre_datum(info, GridKind::Healpix, true)
+);
 grid_scalar_v1!(
     /// `healpix_to_lng(int8) -> float8`
-    pg_finfo_pg_healpix_to_lng, pg_healpix_to_lng,
-    |info| grid_centre_datum(info, GridKind::Healpix, false));
+    pg_finfo_pg_healpix_to_lng,
+    pg_healpix_to_lng,
+    |info| grid_centre_datum(info, GridKind::Healpix, false)
+);
 grid_scalar_v1!(
     /// `healpix_get_resolution(int8) -> int8`
-    pg_finfo_pg_healpix_get_resolution, pg_healpix_get_resolution,
-    |info| grid_resolution_datum(info, GridKind::Healpix));
+    pg_finfo_pg_healpix_get_resolution,
+    pg_healpix_get_resolution,
+    |info| grid_resolution_datum(info, GridKind::Healpix)
+);
 grid_scalar_v1!(
     /// `healpix_is_valid(int8) -> bool`
-    pg_finfo_pg_healpix_is_valid, pg_healpix_is_valid,
-    |info| grid_is_valid_datum(info, GridKind::Healpix));
+    pg_finfo_pg_healpix_is_valid,
+    pg_healpix_is_valid,
+    |info| grid_is_valid_datum(info, GridKind::Healpix)
+);
 grid_scalar_v1!(
     /// `healpix_cell_to_parent(int8, int8) -> int8`
-    pg_finfo_pg_healpix_cell_to_parent, pg_healpix_cell_to_parent,
-    |info| grid_parent_datum(info, GridKind::Healpix));
+    pg_finfo_pg_healpix_cell_to_parent,
+    pg_healpix_cell_to_parent,
+    |info| grid_parent_datum(info, GridKind::Healpix)
+);
 grid_scalar_v1!(
     /// `healpix_lonlat_to_cell(float8, float8, int8) -> int8`
-    pg_finfo_pg_healpix_lonlat_to_cell, pg_healpix_lonlat_to_cell,
-    |info| grid_lonlat_datum(info, GridKind::Healpix));
+    pg_finfo_pg_healpix_lonlat_to_cell,
+    pg_healpix_lonlat_to_cell,
+    |info| grid_lonlat_datum(info, GridKind::Healpix)
+);
 
 // =============================================================================
 // Set-Returning Functions (SRF) for PostgreSQL (`{grid}_raster_*_aggregate`)
