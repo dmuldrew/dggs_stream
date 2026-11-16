@@ -431,6 +431,9 @@ impl Drop for MultiScanHorizonStreamer {
     fn drop(&mut self) {
         // A scan abandoned early (a LIMIT) still reports what it did.
         self.inner.publish_profile();
+        if let Some(profile) = self.inner.run_profile() {
+            profile.stream_finished();
+        }
     }
 }
 

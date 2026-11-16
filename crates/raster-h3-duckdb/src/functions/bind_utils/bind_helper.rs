@@ -494,6 +494,7 @@ impl BindHelper {
         let mut execution = ExecutionParams {
             output,
             transfer,
+            profile: self.get_named_bool("profile").unwrap_or(false),
             aggregation_workers: positive(&["workers", "threads"]).ok()?,
             decode_workers: positive(&["decode_workers"]).ok()?,
             fetch_workers: positive(&["fetch_workers"]).ok()?,
@@ -625,6 +626,9 @@ pub struct ExecutionParams {
     /// `transfer`, `sample_method`, `overlay_weighted` and `mass_preserve`: how pixels
     /// map onto cells.
     pub transfer: TransferMode,
+    /// `profile`: print where the scan's time went on stderr when it ends, and keep the
+    /// report as `raster_h3_core::run_profile::last_report()`.
+    pub profile: bool,
     /// `workers` / `threads`: dedicated aggregation pool size.
     pub aggregation_workers: Option<usize>,
     /// `decode_workers`: chunk decoding threads.
@@ -663,6 +667,9 @@ impl ExecutionParams {
         config.emit_nodata_value = self.output.nodata_value;
         config.decimals = self.output.decimals;
         config.transfer = self.transfer;
+        if self.profile {
+            config.profile = Some(raster_h3_core::run_profile::RunProfile::announcing());
+        }
     }
 }
 

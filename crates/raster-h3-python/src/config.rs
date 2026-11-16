@@ -62,6 +62,8 @@ pub struct PyScanConfig {
     pub output: OutputPolicy,
     /// How pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
+    /// Runtime telemetry of the scan, if asked for.
+    pub profile: Option<Arc<raster_h3_core::run_profile::RunProfile>>,
 }
 
 impl PyScanConfig {
@@ -110,6 +112,7 @@ impl Default for PyScanConfig {
             max_mean: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            profile: None,
         }
     }
 }

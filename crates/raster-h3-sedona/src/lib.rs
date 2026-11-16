@@ -55,6 +55,7 @@ pub use polyfill::H3PolygonToCells;
 pub use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 pub use raster_h3_core::grid::GridKind;
 pub use raster_h3_core::resolution::ResolutionSpec;
+pub use raster_h3_core::run_profile::{ProfileReport, RunProfile};
 pub use raster_h3_core::transfer::{SampleMethod, TransferMode};
 pub use table::{RasterH3Table, TableKind};
 pub use udf::{scalar_udfs, LonLatToCell, RasterH3ScalarUdf};

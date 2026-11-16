@@ -332,6 +332,18 @@ fn estimate_sample_costs(window: &WalkContext<'_>) -> (f64, f64) {
     let chunk = window.chunk;
     let mut located = [(0.0f64, 0.0f64); PROBES as usize];
     let mut found = 0usize;
+    // One untimed pass first: the scan's own samples run with warm caches.
+    for i in 0..PROBES {
+        let t = (f64::from(i) + 0.5) / f64::from(PROBES);
+        let col = f64::from(chunk.col_offset) + t * f64::from(chunk.width);
+        let row = f64::from(chunk.row_offset) + t * f64::from(chunk.height);
+        let (x, y) = window.gt.pixel_to_coord(col, row);
+        if let Ok((lon, lat)) = window.crs.transform_point(x, y) {
+            for &res in window.resolution_u8s {
+                std::hint::black_box(window.grid.cell_at(lat, lon, res));
+            }
+        }
+    }
     let start = std::time::Instant::now();
     for i in 0..PROBES {
         let t = (f64::from(i) + 0.5) / f64::from(PROBES);

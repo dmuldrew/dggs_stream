@@ -234,6 +234,21 @@ def _get_lib() -> ctypes.CDLL:
         lib.raster_h3_py_create_arrow_schema_v2.restype = ctypes.c_void_p
         lib.raster_h3_py_quantile_columns.argtypes = [ctypes.c_char_p] + err_ptr
         lib.raster_h3_py_quantile_columns.restype = ctypes.c_void_p
+    if hasattr(lib, "raster_h3_py_profile_scan_v2"):
+        lib.raster_h3_py_profile_scan_v2.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_double,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int64,
+            ctypes.c_char_p,
+        ] + err_ptr
+        lib.raster_h3_py_profile_scan_v2.restype = ctypes.c_void_p
 
     if hasattr(lib, "raster_h3_py_parquet_to_pmtiles"):
         lib.raster_h3_py_parquet_to_pmtiles.argtypes = [
@@ -1509,6 +1524,61 @@ def read_raster_h3(
         return stream
 
 
+def profile_raster(
+    path: Union[str, Path],
+    resolutions: Union[int, str, Sequence[int]] = 8,
+    *,
+    categorical: bool = False,
+    format: str = "wide",
+    crs: Optional[str] = None,
+    nodata: Optional[float] = None,
+    bbox: Optional[Union[str, Sequence[float]]] = None,
+    columns: Optional[Sequence[str]] = None,
+    limit: Optional[int] = None,
+    **options: Any,
+) -> Dict[str, Any]:
+    """Run a scan to completion, discarding its rows, and report where the time went.
+
+    Takes the arguments and options of `scan_raster_h3`. Returns `{"rows": n,
+    "profile": {...}}`; the profile has `elapsed_ms`, a tree of `phases` (`fetch`,
+    `tiff_decode`, `kernel` with its `crs_transform` / `grid_index` / `accumulate` split,
+    `horizon` with `spill`, `stall`, `serialize`), each with `wall_ms` summed over worker
+    threads and `cpu_ms` where the platform reports it, and counters: `pixels_read`,
+    `samples_indexed`, `indexed_pct`, `cells`, `stall_pct`, `chunks`, `spill_runs`,
+    `forced_compaction_flushes` and peak bytes. The kernel split is a sampled upper estimate
+    (`accumulate` is left out when it cannot be resolved).
+    Telemetry is collected per chunk, never per pixel.
+    """
+    lib = _get_lib()
+    if not hasattr(lib, "raster_h3_py_profile_scan_v2"):
+        raise RuntimeError("profile_raster requires a newer raster_h3 native library")
+    unknown = [k for k in options if k not in _SCAN_OPTIONS]
+    if unknown:
+        raise TypeError(f"unknown scan option(s) {sorted(unknown)}")
+    err = ctypes.c_void_p(0)
+    ptr = lib.raster_h3_py_profile_scan_v2(
+        str(path).encode("utf-8"),
+        _encode_resolutions(resolutions),
+        1 if categorical else 0,
+        format.encode("utf-8"),
+        crs.encode("utf-8") if crs else None,
+        1 if nodata is not None else 0,
+        float(nodata) if nodata is not None else 0.0,
+        _encode_bbox(bbox),
+        _encode_columns(columns),
+        int(limit) if limit is not None else -1,
+        _encode_scan_options(options),
+        ctypes.byref(err),
+    )
+    _raise_if_err(err)
+    if not ptr:
+        raise RuntimeError("Failed to profile the scan")
+    try:
+        return json.loads(ctypes.string_at(ptr).decode("utf-8"))
+    finally:
+        lib.raster_h3_py_free_string(ptr)
+
+
 #: Grid-neutral names for `scan_raster_h3` and `read_raster_h3`; pass `grid=`.
 scan_raster = scan_raster_h3
 read_raster = read_raster_h3
@@ -2144,6 +2214,7 @@ __all__ = [
     "read_raster",
     "GRIDS",
     "auto_resolution",
+    "profile_raster",
     "lonlat_to_cell",
     "cell_to_string",
     "string_to_cell",

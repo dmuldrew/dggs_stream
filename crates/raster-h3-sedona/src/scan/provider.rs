@@ -632,6 +632,13 @@ impl ContinuousRasterTableProvider {
         self
     }
 
+    /// Collect runtime telemetry of every scan of this table into `profile` (see
+    /// `raster_h3_core::run_profile`); read `profile.report()` after a query.
+    pub fn with_profile(mut self, profile: Arc<raster_h3_core::run_profile::RunProfile>) -> Self {
+        self.config.profile = Some(profile);
+        self
+    }
+
     /// The grid this table aggregates onto.
     pub fn grid(&self) -> GridKind {
         self.config.grid
@@ -944,6 +951,13 @@ impl CategoricalRasterTableProvider {
     /// cell centres, or an area-weighted overlay (see [`TransferMode`]).
     pub fn with_transfer(mut self, transfer: TransferMode) -> Self {
         self.config.transfer = transfer;
+        self
+    }
+
+    /// Collect runtime telemetry of every scan of this table into `profile` (see
+    /// `raster_h3_core::run_profile`); read `profile.report()` after a query.
+    pub fn with_profile(mut self, profile: Arc<raster_h3_core::run_profile::RunProfile>) -> Self {
+        self.config.profile = Some(profile);
         self
     }
 

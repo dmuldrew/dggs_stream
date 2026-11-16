@@ -608,3 +608,26 @@ def test_transfer_option_errors(raster_h3, gradient_tif):
             scan(**kw)
     with pytest.raises(TypeError):
         scan(transfer="overlay", mass_preserve=1)
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+@pytest.mark.parametrize("transfer", ["assign_centers", "overlay"])
+def test_profile_raster(raster_h3, gradient_tif, grid, transfer):
+    rows = raster_h3.scan_raster_h3(gradient_tif, RES[grid], grid=grid, transfer=transfer).collect().height
+    out = raster_h3.profile_raster(gradient_tif, RES[grid], grid=grid, transfer=transfer)
+    profile = out["profile"]
+    assert out["rows"] == rows == profile["cells"]
+    assert profile["pixels_read"] == 64 * 48
+    assert profile["samples_indexed"] > 0
+    assert profile["elapsed_ms"] > 0
+    assert 0 <= profile["stall_pct"] <= 100
+    names = {p["name"] for p in profile["phases"]}
+    assert {"fetch", "tiff_decode", "kernel", "horizon", "serialize"} <= names
+    kernel = next(p for p in profile["phases"] if p["name"] == "kernel")
+    assert kernel["wall_ms"] > 0
+    # Only the pixel-centre kernel is split further; sample and overlay report it whole.
+    if transfer == "assign_centers":
+        split = {c["name"] for c in kernel["children"]}
+        assert {"crs_transform", "grid_index"} <= split <= {"crs_transform", "grid_index", "accumulate"}
+    with pytest.raises(TypeError, match="unknown scan option"):
+        raster_h3.profile_raster(gradient_tif, 8, nope=1)

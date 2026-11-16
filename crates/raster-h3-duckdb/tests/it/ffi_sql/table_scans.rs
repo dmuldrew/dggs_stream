@@ -1010,3 +1010,30 @@ fn test_transfer_modes() {
         }
     }
 }
+
+/// `profile := true` leaves the scan's rows alone and keeps its telemetry as the core's
+/// last report.
+#[test]
+fn test_profile_named_parameter() {
+    install_mock_api();
+    let (_tmp, path) = TestGeoTiffBuilder::new(40, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| (c + r) as f32);
+    let plain = scan_stats(&path, vec![("resolution", MockVal::Int(9))]).unwrap();
+    assert!(raster_h3_core::run_profile::last_report().is_none());
+    let profiled = scan_stats(
+        &path,
+        vec![
+            ("resolution", MockVal::Int(9)),
+            ("profile", MockVal::Bool(true)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(plain, profiled);
+    let report = raster_h3_core::run_profile::last_report().expect("a report");
+    assert_eq!(report.pixels_read, 40 * 32);
+    assert_eq!(report.cells as usize, plain.len());
+    assert!(report.phase("kernel").unwrap().wall_ms > 0.0);
+    assert!(report.phase("grid_index").is_some());
+}

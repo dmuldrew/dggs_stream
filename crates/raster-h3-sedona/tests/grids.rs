@@ -1015,3 +1015,31 @@ async fn transfer_modes_on_every_grid() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn providers_report_a_run_profile() {
+    let tif = gradient_tif(SIZE, SIZE);
+    let src = source(&tif);
+    for grid in GridKind::ALL {
+        let res = res_of(grid);
+        let profile = raster_h3_sedona::RunProfile::new();
+        let provider = ContinuousRasterTableProvider::try_new(&src, vec![res])
+            .unwrap()
+            .with_grid(grid)
+            .with_profile(Arc::clone(&profile));
+        let ctx = context();
+        ctx.register_table("cells", Arc::new(RasterH3Table::continuous(provider)))
+            .unwrap();
+        let batches = collect(
+            &ctx,
+            &format!("SELECT {}, count, sum FROM cells", grid.index_column_name()),
+        )
+        .await;
+        assert_eq!(cell_stats(&batches), expected(grid, res), "{grid}");
+        let report = profile.report();
+        assert_eq!(report.pixels_read, u64::from(SIZE * SIZE), "{grid}");
+        assert_eq!(report.cells as usize, expected(grid, res).len(), "{grid}");
+        assert!(report.phase("kernel").unwrap().wall_ms > 0.0, "{grid}");
+        assert!(report.to_json().contains("\"grid_index\""), "{grid}");
+    }
+}

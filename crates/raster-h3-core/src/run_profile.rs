@@ -88,7 +88,19 @@ pub struct RunProfile {
     /// Whether [`Phase::KernelCrs`] and [`Phase::KernelIndex`] hold exact per-sample
     /// timings (the `stream-profile` feature) rather than sampled estimates.
     exact_kernel_split: AtomicU64,
+    /// Whether the scan prints the report on stderr and keeps it as
+    /// [`last_report`] when its stream ends.
+    announce: AtomicU64,
 }
+
+/// The report of the most recent scan that ended with an announcing profile
+/// ([`RunProfile::announcing`]): the hook for engines whose scans the caller does not
+/// hold, such as SQL table functions.
+pub fn last_report() -> Option<ProfileReport> {
+    LAST_REPORT.lock().ok().and_then(|report| report.clone())
+}
+
+static LAST_REPORT: std::sync::Mutex<Option<ProfileReport>> = std::sync::Mutex::new(None);
 
 impl fmt::Debug for RunProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -105,7 +117,28 @@ impl RunProfile {
             cpu_ns: Default::default(),
             counters: Default::default(),
             exact_kernel_split: AtomicU64::new(0),
+            announce: AtomicU64::new(0),
         })
+    }
+
+    /// A profile whose scan prints the report on stderr when its stream ends and
+    /// stores it for [`last_report`].
+    pub fn announcing() -> Arc<Self> {
+        let profile = Self::new();
+        profile.announce.store(1, Ordering::Relaxed);
+        profile
+    }
+
+    /// Called by a stream when it ends: an announcing profile prints and stores its
+    /// report, once.
+    pub fn stream_finished(&self) {
+        if self.announce.swap(0, Ordering::Relaxed) != 0 {
+            let report = self.report();
+            eprintln!("{report}");
+            if let Ok(mut last) = LAST_REPORT.lock() {
+                *last = Some(report);
+            }
+        }
     }
 
     /// Add wall (and, if known, CPU) time to a phase.
@@ -168,8 +201,28 @@ impl RunProfile {
         let exact = self.exact_kernel_split.load(Ordering::Relaxed) != 0;
         // The split is an estimate (or covers only the instrumented calls): keep it
         // within the kernel's own time.
-        let crs = self.wall(Phase::KernelCrs).min(kernel);
-        let index = self.wall(Phase::KernelIndex).min(kernel - crs);
+        // The estimates are per pixel handed to the kernel; pixels it skipped (NoData,
+        // outside the bbox) were neither transformed nor indexed.
+        let pixels_read = self.counter(Counter::PixelsRead);
+        let valid = if exact || pixels_read == 0 {
+            1.0
+        } else {
+            (self.counter(Counter::SamplesIndexed) as f64 / pixels_read as f64).min(1.0)
+        };
+        let scaled = |phase: Phase| (self.wall(phase) as f64 * valid) as u64;
+        let (mut crs, mut index) = (scaled(Phase::KernelCrs), scaled(Phase::KernelIndex));
+        // Probed costs are upper estimates (the scan shares work between neighbouring
+        // pixels). When they exceed the kernel's measured time, keep their ratio and
+        // leave out the remainder, which the estimate cannot resolve.
+        let saturated = !exact && crs + index >= kernel;
+        if saturated && crs + index > 0 {
+            let fit = kernel as f64 / (crs + index) as f64;
+            crs = (crs as f64 * fit) as u64;
+            index = kernel - crs;
+        } else {
+            crs = crs.min(kernel);
+            index = index.min(kernel - crs);
+        }
         let part = |name: &'static str, ns: u64| PhaseReport {
             name,
             wall_ms: ns as f64 / 1e6,
@@ -178,11 +231,11 @@ impl RunProfile {
             children: Vec::new(),
         };
         let kernel_children = if crs + index > 0 {
-            vec![
-                part("crs_transform", crs),
-                part("grid_index", index),
-                part("accumulate", kernel - crs - index),
-            ]
+            let mut parts = vec![part("crs_transform", crs), part("grid_index", index)];
+            if !saturated {
+                parts.push(part("accumulate", kernel - crs - index));
+            }
+            parts
         } else {
             Vec::new()
         };
@@ -500,9 +553,18 @@ mod tests {
         assert_eq!(kernel.wall_ms, 10.0);
         let parts: f64 = kernel.children.iter().map(|c| c.wall_ms).sum();
         assert!((parts - 10.0).abs() < 1e-9);
-        assert_eq!(report.phase("crs_transform").unwrap().wall_ms, 4.0);
-        assert_eq!(report.phase("grid_index").unwrap().wall_ms, 6.0);
+        // A quarter of the pixels were indexed, so a quarter of the probed cost counts.
+        assert_eq!(report.phase("crs_transform").unwrap().wall_ms, 1.0);
+        assert_eq!(report.phase("grid_index").unwrap().wall_ms, 2.25);
+        assert_eq!(report.phase("accumulate").unwrap().wall_ms, 6.75);
         assert!(report.phase("grid_index").unwrap().estimated);
+        // Estimates above the kernel's time keep their ratio and drop the remainder.
+        profile.add(Phase::KernelCrs, 36_000_000, None);
+        profile.add(Phase::KernelIndex, 111_000_000, None);
+        let report = profile.report();
+        assert_eq!(report.phase("crs_transform").unwrap().wall_ms, 2.5);
+        assert_eq!(report.phase("grid_index").unwrap().wall_ms, 7.5);
+        assert!(report.phase("accumulate").is_none());
         assert!(report.phase("spill").is_some() && report.phase("nope").is_none());
         profile.mark_exact_kernel_split();
         assert!(!profile.report().phase("grid_index").unwrap().estimated);
