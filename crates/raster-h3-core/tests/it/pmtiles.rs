@@ -1577,3 +1577,93 @@ fn test_tile_cap_metadata_absent_without_polar_cells() {
         "{metadata}"
     );
 }
+
+/// Tiles per zoom in a PMTiles archive whose entries all sit in the root directory.
+fn tiles_per_zoom(archive: &[u8]) -> std::collections::BTreeMap<u8, usize> {
+    use raster_h3_core::pmtiles::writer::tile_id_to_zxy;
+    let field = |at: usize| u64::from_le_bytes(archive[at..at + 8].try_into().unwrap()) as usize;
+    let (offset, len) = (field(8), field(16));
+    let mut dir = Vec::new();
+    GzDecoder::new(&archive[offset..offset + len])
+        .read_to_end(&mut dir)
+        .unwrap();
+    let mut pos = 0;
+    let mut varint = || {
+        let (mut value, mut shift) = (0u64, 0);
+        loop {
+            let byte = dir[pos];
+            pos += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte < 0x80 {
+                return value;
+            }
+            shift += 7;
+        }
+    };
+    let n = varint() as usize;
+    let mut ids = Vec::with_capacity(n);
+    let mut id = 0;
+    for _ in 0..n {
+        id += varint();
+        ids.push(id);
+    }
+    let mut zooms = std::collections::BTreeMap::new();
+    for id in ids {
+        let run = varint();
+        assert!(
+            run > 0,
+            "a leaf directory: the archive is larger than expected"
+        );
+        for i in 0..run {
+            *zooms.entry(tile_id_to_zxy(id + i).0).or_insert(0) += 1;
+        }
+    }
+    zooms
+}
+
+#[test]
+fn preindexed_export_fills_every_zoom_between_resolutions() {
+    use raster_h3_core::pmtiles::mvt::MvtValue;
+    use raster_h3_core::pmtiles::tiler::H3Feature;
+    use raster_h3_core::pmtiles::ExternalFeatureExport;
+
+    // One cell at each of resolutions 0..=5, all ancestors of one res-8 cell.
+    let leaf = h3o::CellIndex::try_from(0x8828308281fffff_u64).unwrap();
+    let chain = |resolutions: std::ops::RangeInclusive<u8>| {
+        resolutions
+            .map(|r| {
+                let res = h3o::Resolution::try_from(r).unwrap();
+                H3Feature::new(
+                    u64::from(leaf.parent(res).unwrap()),
+                    vec![("r", MvtValue::UInt(u64::from(r)))],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut exporter = ExternalFeatureExport::new(1 << 20, None);
+    for f in chain(0..=5) {
+        exporter.push(f).unwrap();
+    }
+    let mut archive = Vec::new();
+    let summary = exporter.finish_into(&mut archive).unwrap();
+    assert_eq!((summary.min_zoom, summary.max_zoom), (0, 9));
+    let zooms = tiles_per_zoom(&archive);
+    assert_eq!(
+        zooms.keys().copied().collect::<Vec<_>>(),
+        (0..=9).collect::<Vec<_>>(),
+        "every zoom of the bands holds a tile: {zooms:?}"
+    );
+    assert_eq!(zooms.values().sum::<usize>(), summary.total_tiles);
+
+    // Zoom limits clip the bands: nothing outside 7..=8, and both zooms filled.
+    let mut clipped = ExternalFeatureExport::new(1 << 20, None).with_zoom_limits(Some(7), Some(8));
+    for f in chain(3..=5) {
+        clipped.push(f).unwrap();
+    }
+    let mut archive = Vec::new();
+    let summary = clipped.finish_into(&mut archive).unwrap();
+    assert_eq!((summary.min_zoom, summary.max_zoom), (7, 8));
+    let zooms = tiles_per_zoom(&archive);
+    assert_eq!(zooms.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+}
