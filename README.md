@@ -340,6 +340,13 @@ returns the same cells and statistics for the same input.
 | **CLI** | `raster-h3-cli` | `cargo build --release -p raster-h3-cli` (also in the Python wheel) | [CLI](docs/engines/cli.md) |
 | **Rust library** | `raster-h3-core` | Cargo dependency | [Core Engine](docs/engines/core.md) |
 
+**Grids.** Besides Uber H3 (resolutions 0–15), DuckDB, the CLI and the Rust library index
+pixels onto A5 pentagons (0–30), Google S2 cells (levels 0–30, 64-bit cell ids) and HEALPix
+cells (nested scheme, depths 0–29, NUNIQ ids `4 * 4^depth + pixel`). Each grid has its own
+SQL functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...; or
+`grid := 's2'` on the H3 ones) and output columns (`s2_index`, `s2_hex`); the CLI takes
+`--grid h3|a5|s2|healpix`. See the [DuckDB registered functions](docs/engines/duckdb.md#registered-functions).
+
 Feature coverage differs per engine: DuckDB exposes every parameter (sampling, bands,
 spectral formulas, quantiles, remapping, budgets), DataFusion exposes most of them through
 builders, Python exposes all but compaction, single-cell pushdown and resource budgets
