@@ -26,6 +26,11 @@ impl Ring {
                 "non-finite coordinates",
             ));
         }
+        if points.iter().any(|p| !(-90.0..=90.0).contains(&p.1)) {
+            return Err(PolygonToCellsError::InvalidGeometry(
+                "latitude outside [-90, 90]",
+            ));
+        }
         if points.len() > 1 && points.first() == points.last() {
             points.pop();
         }
@@ -207,11 +212,23 @@ fn cell_ring(grid: GridKind, cell: u64, level: u8) -> Option<Ring> {
         }
     }
     if let Some(north) = grid.interior_pole(cell) {
-        // The boundary circles the pole once: close the ring over it.
+        // The boundary circles the pole once. The traced sides stop short of the first
+        // vertex, so finish the turn at that vertex (one turn on from where the ring
+        // started) and only then close the ring over the pole; closing straight from
+        // the last sample would leave out the wedge between it and the first vertex.
         let pole = if north { 90.0 } else { -90.0 };
-        let (first, last) = (points[0].0, points[points.len() - 1].0);
-        points.push((last, pole));
-        points.push((first, pole));
+        let (first_lon, first_lat) = points[0];
+        let last = points[points.len() - 1].0;
+        let mut end = first_lon;
+        while end - last > 180.0 {
+            end -= 360.0;
+        }
+        while end - last < -180.0 {
+            end += 360.0;
+        }
+        points.push((end, first_lat));
+        points.push((end, pole));
+        points.push((first_lon, pole));
     }
     Some(Ring { points })
 }
@@ -262,8 +279,16 @@ fn estimate_cells(grid: GridKind, res: u8, bbox: &LonLatBox) -> usize {
     let area = lon_span * band.max(0.0) * EARTH_RADIUS_M * EARTH_RADIUS_M;
     // Cells along the box's edge are visited too.
     let cell_area = grid.area_m2(res);
-    let across = (area / cell_area).sqrt();
-    (area / cell_area + 4.0 * across + 16.0).ceil() as usize
+    // sqrt(area) undercounts the perimeter of long, thin boxes, even tending
+    // to zero for a line that crosses millions of cells.
+    let height = (bbox[3] - bbox[1]).to_radians() * EARTH_RADIUS_M;
+    let nearest_equator = if bbox[1] <= 0.0 && bbox[3] >= 0.0 {
+        0.0
+    } else {
+        bbox[1].abs().min(bbox[3].abs())
+    };
+    let width = lon_span * nearest_equator.to_radians().cos() * EARTH_RADIUS_M;
+    (area / cell_area + 2.0 * (width + height) / cell_area.sqrt() + 16.0).ceil() as usize
 }
 
 /// Fill `multi` with cells of `grid` (S2 or HEALPix) at `res`, appending to `out`.
