@@ -338,6 +338,11 @@ pub struct MultiResolutionConfig {
     /// single-pass horizon kernel), interpolation at cell centres, or an area-weighted
     /// overlay. See [`crate::transfer`].
     pub transfer: crate::transfer::TransferMode,
+    /// A per-cell histogram of a categorical scan: its classes (pixel values or bins),
+    /// the weight of a pixel and the scaling of the result. Set it with
+    /// [`Self::set_histogram`], which also picks the transfer mode area weights need.
+    /// See [`crate::histogram`].
+    pub histogram: Option<crate::histogram::HistogramSpec>,
     /// Stream only this part of the mosaic (see [`super::partition`]). Cells that other
     /// partitions may also hold samples for are emitted as unfiltered partial states for a
     /// later merge, so the stream must be drained with `drain_partitioned_into`.
@@ -384,6 +389,7 @@ impl MultiResolutionConfig {
             decimals: None,
             profile: None,
             transfer: crate::transfer::TransferMode::AssignCenters,
+            histogram: None,
             partition: None,
         }
     }
@@ -428,7 +434,29 @@ impl MultiResolutionConfig {
     /// and compaction is active, the child resolution (8) would emit parent cells (7) that collide
     /// and duplicate records from the requested parent resolution (7). Therefore, adjacent
     /// resolutions cannot be combined with hierarchical compaction.
+    /// Ask for a per-cell histogram. Area weights run the `overlay` transfer mode, so a
+    /// scan left on the default mode switches to it; `sample` is refused.
+    pub fn set_histogram(&mut self, spec: crate::histogram::HistogramSpec) -> Result<()> {
+        spec.validate()?;
+        self.transfer = spec.transfer_mode(self.transfer)?;
+        self.histogram = Some(spec);
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(spec) = &self.histogram {
+            spec.validate()?;
+            if spec.transfer_mode(self.transfer)? != self.transfer {
+                return Err(RasterH3Error::InvalidParameter(
+                    "histogram weight 'area' needs transfer 'overlay'".into(),
+                ));
+            }
+            if spec.is_binned() && self.remapper.is_some() {
+                return Err(RasterH3Error::InvalidParameter(
+                    "a binned histogram cannot be combined with a category remap".into(),
+                ));
+            }
+        }
         if self.aggregation_budget_bytes < self.resolutions.len().max(1) * 64 * 1024 {
             return Err(RasterH3Error::InvalidParameter(
                 "aggregation budget must provide at least 64 KiB per resolution".into(),

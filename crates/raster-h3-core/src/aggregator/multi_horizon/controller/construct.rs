@@ -221,6 +221,11 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             apply_scale_offset: config.apply_scale_offset,
             emit_nodata: config.nodata_policy
                 == crate::aggregator::output_policy::NodataPolicy::Emit,
+            histogram_bins: config
+                .histogram
+                .as_ref()
+                .filter(|spec| spec.is_binned())
+                .map(|spec| Arc::new(spec.bins.clone())),
             output_policy: config.output_policy(),
             run_profile: config.profile.clone(),
             profile_published: false,

@@ -152,6 +152,8 @@ pub struct TransferStream<A: TransferAccumulator> {
     track_quantiles: bool,
     filters: Filters,
     remapper: Option<Arc<CategoryRemapper>>,
+    /// Bins of a binned histogram scan: a value's class is the index of its bin.
+    histogram_bins: Option<Arc<crate::histogram::HistogramBins>>,
     blocks: Vec<Block>,
     /// `horizon[i]`: the northernmost latitude any cell of blocks `i..` can reach.
     horizon: Vec<f64>,
@@ -171,6 +173,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
     /// A stream over `mosaic` for the non-default `config.transfer`.
     pub fn new(mosaic: Arc<MosaicReader>, config: &MultiResolutionConfig) -> Result<Self> {
         let mode = config.transfer;
+        let histogram_bins = config
+            .histogram
+            .as_ref()
+            .filter(|spec| A::CATEGORICAL && spec.is_binned())
+            .map(|spec| Arc::new(spec.bins.clone()));
         let invalid = |message: &str| {
             Err(RasterH3Error::InvalidParameter(format!(
                 "transfer '{}' {message}",
@@ -224,7 +231,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
             selection: BandSelection {
                 band: config.band,
                 nodata: config.custom_nodata,
-                apply_scale_offset: config.apply_scale_offset && !A::CATEGORICAL,
+                // Classes are stored values; bins are in calibrated units.
+                apply_scale_offset: config.apply_scale_offset
+                    && (!A::CATEGORICAL || histogram_bins.is_some()),
             },
             emit_nodata: config.nodata_policy == NodataPolicy::Emit,
             bbox: config.bbox,
@@ -236,6 +245,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 min_majority_fraction: config.min_majority_fraction,
             },
             remapper: config.remapper.clone(),
+            histogram_bins,
             blocks,
             horizon,
             next_block: 0,
@@ -360,6 +370,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
 
     /// The class a value stands for after remapping, or the value itself.
     fn mapped(&self, value: f64) -> Option<f64> {
+        if let Some(bins) = &self.histogram_bins {
+            return bins.bin_of(value).map(|bin| bin as f64);
+        }
         match &self.remapper {
             Some(remapper) if A::CATEGORICAL => {
                 remapper.remap(value.round() as i64).map(|c| c as f64)

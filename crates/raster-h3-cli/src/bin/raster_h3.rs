@@ -60,6 +60,13 @@ fn print_help() {
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
           --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \
                                      conserved exactly\n  \
+          --histogram <SPEC>         Structured per-cell histogram (implies -c): `values`\n                                     \
+                                     (a weight per pixel value), `N:min:max` (N equal\n                                     \
+                                     bins) or `e0,e1,...` (bin edges). `ipc` and `jsonl`\n                                     \
+                                     only\n  \
+          --histogram-weight <W>     count (default) or area (overlap area, in pixels;\n                                     \
+                                     runs --transfer overlay)\n  \
+          --histogram-normalize <N>  none (default), fraction or density (bins only)\n  \
           --profile                  Print where the time went (decode, kernel, horizon,\n                                     \
                                      serialization; pixels, cells, stalls) on stderr\n  \
           --raw-values               Skip GDAL band scale/offset calibration\n  \
@@ -86,6 +93,15 @@ fn reject_partition(opts: &raster_h3_cli::CliStreamOptions, subcmd: &str) -> Res
     if opts.partition.is_some() {
         return Err(raster_h3_core::error::RasterH3Error::InvalidParameter(format!(
             "{subcmd} does not take --partition: scan partitions with `ipc` and combine them with `merge`"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_histogram(opts: &raster_h3_cli::CliStreamOptions, subcmd: &str) -> Result<()> {
+    if opts.histogram.is_some() {
+        return Err(raster_h3_core::error::RasterH3Error::InvalidParameter(format!(
+            "{subcmd} does not take --histogram: its files have no histogram column; use `ipc` or `jsonl`"
         )));
     }
     Ok(())
@@ -125,6 +141,7 @@ fn main() {
             .and_then(|(opts, out)| with_output(out, |mut w| merge_partition_files(&opts, &mut w))),
         "parquet" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
             reject_partition(&opts, "parquet")?;
+            reject_histogram(&opts, "parquet")?;
             let out_path = out.ok_or_else(|| {
                 raster_h3_core::error::RasterH3Error::InvalidParameter(
                     "Missing -o / --output path for parquet export".into(),
@@ -148,6 +165,7 @@ fn main() {
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
             reject_partition(&opts, "pmtiles")?;
+            reject_histogram(&opts, "pmtiles")?;
             let out_path = out.ok_or_else(|| {
                 raster_h3_core::error::RasterH3Error::InvalidParameter(
                     "Missing -o / --output path for pmtiles export".into(),

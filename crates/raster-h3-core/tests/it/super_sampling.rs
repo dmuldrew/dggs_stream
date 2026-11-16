@@ -697,6 +697,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
                     band_scaling: &[],
                     alpha_sample: None,
                     emit_nodata: false,
+                    histogram_bins: None,
                 };
                 for quantiles in [false, true] {
                     let mut actual =

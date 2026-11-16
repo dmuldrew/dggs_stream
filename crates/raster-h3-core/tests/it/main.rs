@@ -21,6 +21,7 @@ mod exact_cell_assignment;
 mod geodetic_reference;
 mod geoparquet;
 mod geotiff_crs;
+mod histogram;
 mod horizon_streaming;
 mod memory_budgets;
 mod mosaic;

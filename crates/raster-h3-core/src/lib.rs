@@ -16,6 +16,7 @@ pub mod encoding;
 pub mod error;
 /// Configurable DGGS grid backends (H3, A5, S2 and HEALPix).
 pub mod grid;
+pub mod histogram;
 /// Native Parquet and GeoParquet streaming export.
 pub mod parquet;
 /// Direct PMTiles v3 vector tile export with MVT encoding.

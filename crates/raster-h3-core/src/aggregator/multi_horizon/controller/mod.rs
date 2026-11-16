@@ -164,6 +164,8 @@ pub struct MultiHorizonStreamer<K: HorizonStreamKernel> {
     apply_scale_offset: bool,
     /// `NodataPolicy::Emit`: the kernels also walk NoData pixels.
     emit_nodata: bool,
+    /// Bins of a binned histogram scan (see `WalkContext::histogram_bins`).
+    histogram_bins: Option<Arc<crate::histogram::HistogramBins>>,
     /// NoData policy, NoData value and rounding for serializers of this stream.
     output_policy: crate::aggregator::output_policy::OutputPolicy,
     /// Runtime telemetry of this scan, if asked for.

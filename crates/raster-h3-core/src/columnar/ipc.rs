@@ -54,6 +54,8 @@ fn encode_dtype(dt: ArrowDataType) -> u8 {
         ArrowDataType::Boolean => 5,
         ArrowDataType::Utf8 => 6,
         ArrowDataType::Binary => 7,
+        ArrowDataType::ValueHistogram => 8,
+        ArrowDataType::BinHistogram => 9,
     }
 }
 
@@ -66,6 +68,8 @@ fn decode_dtype(tag: u8) -> Result<ArrowDataType> {
         5 => Ok(ArrowDataType::Boolean),
         6 => Ok(ArrowDataType::Utf8),
         7 => Ok(ArrowDataType::Binary),
+        8 => Ok(ArrowDataType::ValueHistogram),
+        9 => Ok(ArrowDataType::BinHistogram),
         other => Err(RasterH3Error::InvalidParameter(format!(
             "Unknown IPC data type tag: {}",
             other
@@ -176,6 +180,23 @@ where
                     for b in values {
                         write_u32(writer, b.len() as u32)?;
                         writer.write_all(b)?;
+                    }
+                }
+                // Per row: an entry count, then `class, weight` or `lower, upper,
+                // weight` per entry.
+                ColumnArray::Histogram(column) => {
+                    for row in 0..column.len() {
+                        let entries = column.row(row);
+                        write_u32(writer, entries.len() as u32)?;
+                        for e in entries {
+                            if column.binned {
+                                writer.write_all(&e.lower.to_le_bytes())?;
+                                writer.write_all(&e.upper.to_le_bytes())?;
+                            } else {
+                                writer.write_all(&e.class.to_le_bytes())?;
+                            }
+                            writer.write_all(&e.weight.to_le_bytes())?;
+                        }
                     }
                 }
             }
@@ -312,6 +333,32 @@ impl<R: Read> IpcStreamReader<R> {
                     }
                     ColumnArray::Binary { values, validity }
                 }
+                ArrowDataType::ValueHistogram | ArrowDataType::BinHistogram => {
+                    let binned = field.data_type == ArrowDataType::BinHistogram;
+                    let mut column = super::HistogramColumn::new(binned);
+                    let mut entries = Vec::new();
+                    for _ in 0..num_rows {
+                        entries.clear();
+                        for i in 0..read_u32(reader)? {
+                            let mut entry = crate::histogram::HistogramEntry {
+                                class: i64::from(i),
+                                lower: 0.0,
+                                upper: 0.0,
+                                weight: 0.0,
+                            };
+                            if binned {
+                                entry.lower = f64::from_bits(read_u64(reader)?);
+                                entry.upper = f64::from_bits(read_u64(reader)?);
+                            } else {
+                                entry.class = read_u64(reader)? as i64;
+                            }
+                            entry.weight = f64::from_bits(read_u64(reader)?);
+                            entries.push(entry);
+                        }
+                        column.push(&entries);
+                    }
+                    ColumnArray::Histogram(column)
+                }
             };
             columns.push(col);
         }
@@ -376,6 +423,8 @@ where
                         }
                         serde_json::Value::String(hex)
                     }
+                    ColumnArray::Histogram(column) => serde_json::from_str(&column.row_json(row))
+                        .unwrap_or(serde_json::Value::Null),
                 };
                 map.insert(field.name.clone(), json_val);
             }

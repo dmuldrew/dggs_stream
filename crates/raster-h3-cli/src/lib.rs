@@ -31,6 +31,7 @@ use raster_h3_core::columnar::{
 };
 use raster_h3_core::error::{RasterH3Error, Result};
 use raster_h3_core::grid::GridKind;
+use raster_h3_core::histogram::HistogramSpec;
 use raster_h3_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use raster_h3_core::pmtiles::{H3PmtilesTiler, PmtilesExportSummary};
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
@@ -74,6 +75,9 @@ pub struct CliStreamOptions {
     /// `--transfer`, `--sample-method`, `--overlay-weighted` and `--mass-preserve`: how
     /// pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
+    /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
+    /// per-cell histogram (see [`raster_h3_core::histogram`]). Implies `--categorical`.
+    pub histogram: Option<HistogramSpec>,
     /// `--profile`: collect runtime telemetry of the scan (see
     /// [`raster_h3_core::run_profile`]); the binary prints the report on stderr.
     pub profile: Option<Arc<RunProfile>>,
@@ -98,6 +102,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            histogram: None,
             profile: None,
         }
     }
@@ -170,6 +175,14 @@ fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<us
     config.overlap_rule = OverlapRule::Cutline;
     apply_output_policy(&mut config, &opts.output);
     config.transfer = opts.transfer;
+    if let Some(spec) = &opts.histogram {
+        if opts.partition.is_some() {
+            return Err(RasterH3Error::InvalidParameter(
+                "--histogram cannot be combined with --partition".into(),
+            ));
+        }
+        config.set_histogram(spec.clone())?;
+    }
     config.profile = opts.profile.clone();
 
     if let Some(partition) = &opts.partition {
@@ -1138,6 +1151,7 @@ pub fn parse_stream_args(
     let mut raw_resolutions: Option<(String, String)> = None;
     let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
     let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
+    let mut histogram = [None::<String>, None, None];
 
     let invalid = |flag: &str, value: &str, expected: &str| {
         RasterH3Error::InvalidParameter(format!(
@@ -1215,6 +1229,9 @@ pub fn parse_stream_args(
                 });
             }
             "--mass-preserve" => mass_preserve = Some(true),
+            "--histogram" => histogram[0] = Some(value()?.to_string()),
+            "--histogram-weight" => histogram[1] = Some(value()?.to_string()),
+            "--histogram-normalize" => histogram[2] = Some(value()?.to_string()),
             "--profile" => opts.profile = Some(RunProfile::new()),
             "--nodata-policy" => {
                 let v = value()?;
@@ -1291,6 +1308,16 @@ pub fn parse_stream_args(
         overlay_weighted,
         mass_preserve,
     )?;
+    opts.histogram = HistogramSpec::from_options(
+        histogram[0].as_deref(),
+        histogram[1].as_deref(),
+        histogram[2].as_deref(),
+    )?;
+    if let Some(spec) = &opts.histogram {
+        // A histogram is a categorical aggregation; area weights run `overlay`.
+        opts.categorical = true;
+        opts.transfer = spec.transfer_mode(opts.transfer)?;
+    }
     if opts.output.nodata_value.is_some() && !opts.output.emits_nodata() {
         return Err(RasterH3Error::InvalidParameter(
             "--emit-nodata-value needs --nodata-policy emit".into(),
@@ -1726,6 +1753,103 @@ mod tests {
             &["--decimals", "-1"],
             &["--emit-nodata-value", "nan"],
             &["--emit-nodata-value", "0"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_cli_histograms() {
+        // 24 x 24 pixels, all 2.5.
+        let tif = write_test_tif(24, 24, 2.5);
+        let input = tif.path().to_str().unwrap();
+        let run = |extra: &[&str]| -> Result<Vec<serde_json::Value>> {
+            let mut args: Vec<String> = [input, "--crs", "EPSG:4326"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl)?;
+            assert!(opts.categorical);
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out)?;
+            Ok(String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect())
+        };
+        // The weight of bin `bin` over all cells, and that of the other bins.
+        let totals = |rows: &[serde_json::Value], bin: usize| -> (f64, f64) {
+            let mut totals = (0.0, 0.0);
+            for row in rows {
+                let bins = row["histogram"].as_array().unwrap();
+                assert_eq!(bins.len(), 4);
+                for (i, entry) in bins.iter().enumerate() {
+                    assert_eq!(entry[0].as_f64().unwrap(), i as f64);
+                    assert_eq!(entry[1].as_f64().unwrap(), i as f64 + 1.0);
+                    let weight = entry[2].as_f64().unwrap();
+                    if i == bin {
+                        totals.0 += weight;
+                    } else {
+                        totals.1 += weight;
+                    }
+                }
+            }
+            totals
+        };
+        for grid in GridKind::ALL {
+            let base = [
+                "--grid",
+                grid.as_str(),
+                "-r",
+                "auto-1",
+                "--histogram",
+                "4:0:4",
+            ];
+            let with = |extra: &[&str]| run(&[&base[..], extra].concat()).unwrap();
+            // 2.5 is in bin 2 of [0, 1, 2, 3, 4].
+            let counts = with(&[]);
+            assert_eq!(totals(&counts, 2), (576.0, 0.0), "{grid}");
+            let area = with(&["--histogram-weight", "area"]);
+            assert!(area.len() >= counts.len(), "{grid}");
+            let (in_bin, outside) = totals(&area, 2);
+            assert!(
+                (in_bin / 576.0 - 1.0).abs() < 1e-6 && outside == 0.0,
+                "{grid}"
+            );
+            let fractions = with(&["--histogram-normalize", "fraction"]);
+            assert_eq!(
+                totals(&fractions, 2),
+                (fractions.len() as f64, 0.0),
+                "{grid}"
+            );
+
+            // By value: 2.5 rounds to class 3 (ties away from zero).
+            let values = run(&[
+                "--grid",
+                grid.as_str(),
+                "-r",
+                "auto-1",
+                "--histogram",
+                "values",
+            ])
+            .unwrap();
+            let total: f64 = values
+                .iter()
+                .map(|row| {
+                    let object = row["histogram"].as_object().unwrap();
+                    assert_eq!(object.len(), 1);
+                    object["3"].as_f64().unwrap()
+                })
+                .sum();
+            assert_eq!(total, 576.0, "{grid}");
+        }
+        for bad in [
+            &["--histogram", "0:0:1"][..],
+            &["--histogram", "values", "--histogram-normalize", "density"],
+            &["--histogram-weight", "mass"],
+            &["--histogram-weight", "area", "--transfer", "sample"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }

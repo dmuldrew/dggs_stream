@@ -238,6 +238,8 @@ fn batches_to_columnar_json(schema: &ColumnSchema, batches: &[RecordBatch]) -> R
                         }
                         serde_json::Value::String(hex)
                     }
+                    ColumnArray::Histogram(column) => serde_json::from_str(&column.row_json(row))
+                        .unwrap_or(serde_json::Value::Null),
                 };
                 arr.push(val);
             }

@@ -36,9 +36,23 @@ pub enum ArrowDataType {
     Boolean,
     Utf8,
     Binary,
+    /// A histogram of pixel values: `List<Struct<class: Int64, weight: Float64>>`.
+    ValueHistogram,
+    /// A binned histogram: `List<Struct<lower: Float64, upper: Float64, weight:
+    /// Float64>>`.
+    BinHistogram,
 }
 
 impl ArrowDataType {
+    /// Whether this is one of the nested histogram types.
+    #[inline]
+    pub const fn is_histogram(self) -> bool {
+        matches!(
+            self,
+            ArrowDataType::ValueHistogram | ArrowDataType::BinHistogram
+        )
+    }
+
     /// Official Apache Arrow C Data Interface format string.
     #[inline]
     pub const fn arrow_format_str(self) -> &'static str {
@@ -50,6 +64,7 @@ impl ArrowDataType {
             ArrowDataType::Boolean => "b",
             ArrowDataType::Utf8 => "u",
             ArrowDataType::Binary => "z",
+            ArrowDataType::ValueHistogram | ArrowDataType::BinHistogram => "+l",
         }
     }
 }
@@ -163,6 +178,23 @@ impl ColumnSchema {
         }
     }
 
+    /// This (wide categorical) schema with its `histogram` column structured as `spec`
+    /// asks, instead of the default JSON text.
+    pub fn with_histogram(mut self, spec: Option<&crate::histogram::HistogramSpec>) -> Self {
+        if let Some(spec) = spec {
+            for field in &mut self.fields {
+                if field.name == "histogram" {
+                    field.data_type = if spec.is_binned() {
+                        ArrowDataType::BinHistogram
+                    } else {
+                        ArrowDataType::ValueHistogram
+                    };
+                }
+            }
+        }
+        self
+    }
+
     /// This schema under `policy`: when all-NoData cells are output without a NoData
     /// value, the statistics that are then NULL (`mean`, `min`, `max`, the majority
     /// class or category) become nullable.
@@ -236,6 +268,128 @@ pub enum ColumnArray {
         values: Vec<Vec<u8>>,
         validity: Option<Vec<bool>>,
     },
+    /// One histogram per row (see [`HistogramColumn`]); never null.
+    Histogram(HistogramColumn),
+}
+
+/// A column of per-cell histograms, stored as an Arrow list of structs: row `i` owns
+/// entries `offsets[i]..offsets[i + 1]` of the entry vectors.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HistogramColumn {
+    /// Binned ([`ArrowDataType::BinHistogram`], entries are `lower`, `upper`, `weight`)
+    /// or by value ([`ArrowDataType::ValueHistogram`], entries are `class`, `weight`).
+    pub binned: bool,
+    /// `rows + 1` ascending entry offsets, starting at 0.
+    pub offsets: Vec<i32>,
+    /// Pixel values; empty when binned.
+    pub classes: Vec<i64>,
+    /// Bin edges; empty unless binned.
+    pub lower: Vec<f64>,
+    pub upper: Vec<f64>,
+    pub weights: Vec<f64>,
+}
+
+impl HistogramColumn {
+    pub fn new(binned: bool) -> Self {
+        Self {
+            binned,
+            offsets: vec![0],
+            ..Default::default()
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Append one row.
+    pub fn push(&mut self, entries: &[crate::histogram::HistogramEntry]) {
+        for entry in entries {
+            if self.binned {
+                self.lower.push(entry.lower);
+                self.upper.push(entry.upper);
+            } else {
+                self.classes.push(entry.class);
+            }
+            self.weights.push(entry.weight);
+        }
+        self.offsets.push(self.weights.len() as i32);
+    }
+
+    /// The entries of row `row`.
+    pub fn row(&self, row: usize) -> Vec<crate::histogram::HistogramEntry> {
+        (self.offsets[row] as usize..self.offsets[row + 1] as usize)
+            .map(|i| {
+                let (class, lower, upper) = if self.binned {
+                    (
+                        i as i64 - i64::from(self.offsets[row]),
+                        self.lower[i],
+                        self.upper[i],
+                    )
+                } else {
+                    (
+                        self.classes[i],
+                        self.classes[i] as f64,
+                        self.classes[i] as f64,
+                    )
+                };
+                crate::histogram::HistogramEntry {
+                    class,
+                    lower,
+                    upper,
+                    weight: self.weights[i],
+                }
+            })
+            .collect()
+    }
+
+    /// Row `row` as JSON: `{"class": weight, ...}` or `[[lower, upper, weight], ...]`.
+    pub fn row_json(&self, row: usize) -> String {
+        use std::fmt::Write;
+        let mut out = String::from(if self.binned { "[" } else { "{" });
+        for (i, e) in self.row(row).iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = if self.binned {
+                write!(out, "[{},{},{}]", e.lower, e.upper, e.weight)
+            } else {
+                write!(out, "\"{}\":{}", e.class, e.weight)
+            };
+        }
+        out.push(if self.binned { ']' } else { '}' });
+        out
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Self {
+        let (first, last) = (self.offsets[start] as usize, self.offsets[end] as usize);
+        let cut = |v: &Vec<f64>| {
+            if v.is_empty() {
+                Vec::new()
+            } else {
+                v[first..last].to_vec()
+            }
+        };
+        Self {
+            binned: self.binned,
+            offsets: self.offsets[start..=end]
+                .iter()
+                .map(|o| o - first as i32)
+                .collect(),
+            classes: if self.classes.is_empty() {
+                Vec::new()
+            } else {
+                self.classes[first..last].to_vec()
+            },
+            lower: cut(&self.lower),
+            upper: cut(&self.upper),
+            weights: cut(&self.weights),
+        }
+    }
 }
 
 impl ColumnArray {
@@ -249,6 +403,7 @@ impl ColumnArray {
             ColumnArray::Boolean { values, .. } => values.len(),
             ColumnArray::Utf8 { values, .. } => values.len(),
             ColumnArray::Binary { values, .. } => values.len(),
+            ColumnArray::Histogram(column) => column.len(),
         }
     }
 
@@ -267,6 +422,8 @@ impl ColumnArray {
             ColumnArray::Boolean { .. } => ArrowDataType::Boolean,
             ColumnArray::Utf8 { .. } => ArrowDataType::Utf8,
             ColumnArray::Binary { .. } => ArrowDataType::Binary,
+            ColumnArray::Histogram(column) if column.binned => ArrowDataType::BinHistogram,
+            ColumnArray::Histogram(_) => ArrowDataType::ValueHistogram,
         }
     }
 
@@ -280,6 +437,7 @@ impl ColumnArray {
             | ColumnArray::Boolean { validity, .. }
             | ColumnArray::Utf8 { validity, .. }
             | ColumnArray::Binary { validity, .. } => validity.as_deref(),
+            ColumnArray::Histogram(_) => None,
         }
     }
 
@@ -325,6 +483,7 @@ impl ColumnArray {
                 values: values[start..end].to_vec(),
                 validity: slice_val(validity),
             },
+            ColumnArray::Histogram(column) => ColumnArray::Histogram(column.slice(start, end)),
         }
     }
 }
@@ -598,7 +757,21 @@ impl RecordBatch {
         records: &[MultiCategoricalRecord],
         projection: Option<&[usize]>,
     ) -> Result<Self> {
-        let full_schema = ColumnSchema::categorical_wide_for(grid).with_output_policy(policy);
+        Self::from_categorical_wide_records_hist(grid, policy, None, records, projection)
+    }
+
+    /// [`Self::from_categorical_wide_records_with`] with the `histogram` column built as
+    /// `histogram` asks (a list of structs) instead of JSON text.
+    pub fn from_categorical_wide_records_hist(
+        grid: GridKind,
+        policy: &OutputPolicy,
+        histogram: Option<&crate::histogram::HistogramSpec>,
+        records: &[MultiCategoricalRecord],
+        projection: Option<&[usize]>,
+    ) -> Result<Self> {
+        let full_schema = ColumnSchema::categorical_wide_for(grid)
+            .with_output_policy(policy)
+            .with_histogram(histogram);
         let active_indices: Vec<usize> = match projection {
             Some(indices) => indices.to_vec(),
             None => (0..full_schema.fields.len()).collect(),
@@ -660,12 +833,30 @@ impl RecordBatch {
                     values: records.iter().map(|r| r.accumulator.total_count).collect(),
                     validity: None,
                 },
-                7 => ColumnArray::Utf8 {
-                    values: records
-                        .iter()
-                        .map(|r| r.accumulator.histogram_json())
-                        .collect(),
-                    validity: None,
+                7 => match histogram {
+                    Some(spec) => {
+                        let mut column = HistogramColumn::new(spec.is_binned());
+                        let mut entries = Vec::new();
+                        for r in records {
+                            spec.entries_into(&r.accumulator, &mut entries);
+                            if let Some(decimals) = policy.decimals {
+                                for e in &mut entries {
+                                    e.weight = crate::aggregator::output_policy::round_decimals(
+                                        e.weight, decimals,
+                                    );
+                                }
+                            }
+                            column.push(&entries);
+                        }
+                        ColumnArray::Histogram(column)
+                    }
+                    None => ColumnArray::Utf8 {
+                        values: records
+                            .iter()
+                            .map(|r| r.accumulator.histogram_json())
+                            .collect(),
+                        validity: None,
+                    },
                 },
                 8 => ColumnArray::UInt8 {
                     values: records.iter().map(|r| r.resolution).collect(),
@@ -923,7 +1114,8 @@ impl CategoricalBatchReader {
             CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(streamer.grid()),
             CategoricalFormat::Long => ColumnSchema::categorical_long_for(streamer.grid()),
         }
-        .with_output_policy(&streamer.output_policy());
+        .with_output_policy(&streamer.output_policy())
+        .with_histogram(streamer.histogram());
         let schema = match &projection {
             Some(indices) => Arc::new(full_schema.project(indices)?),
             None => Arc::new(full_schema),
@@ -1122,9 +1314,10 @@ impl Iterator for CategoricalBatchReader {
                         if let Some(rem) = &mut self.remaining_limit {
                             *rem = rem.saturating_sub(count);
                         }
-                        Some(RecordBatch::from_categorical_wide_records_with(
+                        Some(RecordBatch::from_categorical_wide_records_hist(
                             self.streamer.grid(),
                             &self.streamer.output_policy(),
+                            self.streamer.histogram(),
                             &records,
                             self.projection.as_deref(),
                         ))

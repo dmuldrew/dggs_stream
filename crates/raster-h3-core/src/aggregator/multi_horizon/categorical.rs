@@ -159,6 +159,7 @@ fn process_categorical_slice_into_maps_impl<T: CategoricalUniformity + Default>(
     let emit = ctx.emit_nodata;
     let mut engine = CategoricalEngine::new(native_nodata, remapper);
     engine.emit_nodata = emit;
+    engine.bins = ctx.histogram_bins.map(|bins| (bins, ctx.scaling(band)));
     let samples_per_pixel = ctx.samples_per_pixel as usize;
     if samples_per_pixel <= 1 {
         walk_direct(
@@ -193,6 +194,11 @@ struct CategoricalEngine<'a, T> {
     /// `NodataPolicy::Emit`: NoData pixels are reported as [`NODATA_CLASS`], which adds
     /// nothing to a cell but makes it exist.
     emit_nodata: bool,
+    /// Binned histogram: classes are bin indices of the calibrated pixel value.
+    bins: Option<(
+        &'a crate::histogram::HistogramBins,
+        crate::raster::metadata::BandScaling,
+    )>,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -207,6 +213,7 @@ impl<'a, T: CategoricalUniformity> CategoricalEngine<'a, T> {
             native_nodata,
             remapper,
             emit_nodata: false,
+            bins: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -216,6 +223,9 @@ impl<'a, T: CategoricalUniformity> CategoricalEngine<'a, T> {
         let rule = PixelValidity::new(self.native_nodata);
         if !rule.is_valid(val) {
             return None;
+        }
+        if let Some((bins, scaling)) = self.bins {
+            return bins.bin_of(scaling.apply(val.to_bin_value()));
         }
         let raw_cat = val.to_category()?;
         if let Some(rem) = self.remapper {

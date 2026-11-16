@@ -123,9 +123,16 @@ pub struct MultiCategoricalHorizonStreamer {
     /// horizon kernel in `inner` is then idle.
     transfer: Option<Box<crate::transfer::TransferStream<CategoricalAccumulator>>>,
     transfer_mode: crate::transfer::TransferMode,
+    histogram: Option<Arc<crate::histogram::HistogramSpec>>,
 }
 
 impl MultiCategoricalHorizonStreamer {
+    /// The histogram this scan was asked for (see [`crate::histogram`]): with bins, the
+    /// classes of its records are bin indices.
+    pub fn histogram(&self) -> Option<&crate::histogram::HistogramSpec> {
+        self.histogram.as_deref()
+    }
+
     /// Category remapping applied before aggregation, if configured
     pub fn remapper(&self) -> Option<&CategoryRemapper> {
         self.remapper.as_deref()
@@ -142,6 +149,7 @@ impl MultiCategoricalHorizonStreamer {
             remapper,
             transfer,
             transfer_mode: config.transfer,
+            histogram: config.histogram.clone().map(Arc::new),
         })
     }
 
@@ -156,6 +164,7 @@ impl MultiCategoricalHorizonStreamer {
             remapper,
             transfer,
             transfer_mode: config.transfer,
+            histogram: config.histogram.clone().map(Arc::new),
         })
     }
 

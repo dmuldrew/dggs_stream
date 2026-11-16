@@ -128,6 +128,7 @@ fn rows(batches: &[RecordBatch]) -> BTreeMap<(u8, u64), Vec<Cell>> {
                         ColumnArray::Binary { values, .. } => {
                             Cell::Other(format!("{:?}", values[i]))
                         }
+                        ColumnArray::Histogram(column) => Cell::Other(column.row_json(i)),
                     }
                 })
                 .collect();

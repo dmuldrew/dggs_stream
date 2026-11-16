@@ -88,6 +88,9 @@ pub struct WalkContext<'a> {
     /// `NodataPolicy::Emit`: NoData pixels are walked too, so the cells they fall in
     /// exist in the output with no samples.
     pub emit_nodata: bool,
+    /// Bins of a binned histogram scan: the categorical kernel's classes are then the
+    /// indices of the bins holding the (calibrated) pixel values.
+    pub histogram_bins: Option<&'a crate::histogram::HistogramBins>,
 }
 
 impl WalkContext<'_> {
@@ -200,6 +203,7 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
         band_scaling: &[],
         alpha_sample: None,
         emit_nodata: false,
+        histogram_bins: None,
     };
     walk_direct(&ctx, slice, is_row_all_nodata, engine, chunk_maps);
 }
@@ -850,6 +854,7 @@ pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<
                 band_scaling: &[],
                 alpha_sample: None,
                 emit_nodata: false,
+                histogram_bins: None,
             };
             f(name, &ctx);
         }
@@ -913,6 +918,7 @@ mod tests {
             band_scaling: &[],
             alpha_sample: None,
             emit_nodata: false,
+            histogram_bins: None,
         };
         RowPruner::new(&ctx).unwrap().columns(&ctx, 0, 200)
     }
@@ -961,6 +967,7 @@ mod tests {
                     band_scaling: &[],
                     alpha_sample: None,
                     emit_nodata: false,
+                    histogram_bins: None,
                 };
                 let mut projector = SampleProjector::new(&ctx);
                 assert!(matches!(projector.cache, RowCache::Mercator(_)));
@@ -1021,6 +1028,7 @@ mod tests {
                     band_scaling: &[],
                     alpha_sample: None,
                     emit_nodata: false,
+                    histogram_bins: None,
                 };
                 let mut projector = SampleProjector::new(&ctx);
                 match (&crs, &projector.cache) {

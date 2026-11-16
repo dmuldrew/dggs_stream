@@ -153,6 +153,7 @@ fn value(col: &ColumnArray, i: usize) -> serde_json::Value {
         ColumnArray::Boolean { values, .. } => values[i].into(),
         ColumnArray::Utf8 { values, .. } => values[i].clone().into(),
         ColumnArray::Binary { values, .. } => serde_json::json!(values[i]),
+        ColumnArray::Histogram(column) => column.row_json(i).into(),
     }
 }
 

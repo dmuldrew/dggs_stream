@@ -245,9 +245,17 @@ pub trait CategoricalUniformity: NativeNoData {
 
     /// Convert native pixel value to an i64 category ID if in valid range
     fn to_category(self) -> Option<i64>;
+
+    /// The pixel value as a number, for binning it into a histogram.
+    fn to_bin_value(self) -> f64;
 }
 
 impl CategoricalUniformity for u8 {
+    #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
     #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self as i64)
@@ -281,6 +289,11 @@ impl CategoricalUniformity for u8 {
 
 impl CategoricalUniformity for i8 {
     #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
+    #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self as i64)
     }
@@ -297,6 +310,11 @@ impl CategoricalUniformity for i8 {
 }
 
 impl CategoricalUniformity for u16 {
+    #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
     #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self as i64)
@@ -330,6 +348,11 @@ impl CategoricalUniformity for u16 {
 
 impl CategoricalUniformity for i16 {
     #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
+    #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self as i64)
     }
@@ -346,6 +369,11 @@ impl CategoricalUniformity for i16 {
 }
 
 impl CategoricalUniformity for u32 {
+    #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
     #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self as i64)
@@ -379,6 +407,11 @@ impl CategoricalUniformity for u32 {
 
 impl CategoricalUniformity for i32 {
     #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
+    #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self as i64)
     }
@@ -395,6 +428,11 @@ impl CategoricalUniformity for i32 {
 }
 
 impl CategoricalUniformity for u64 {
+    #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
     #[inline(always)]
     fn to_category(self) -> Option<i64> {
         if self <= i64::MAX as u64 {
@@ -432,6 +470,11 @@ impl CategoricalUniformity for u64 {
 
 impl CategoricalUniformity for i64 {
     #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
+    #[inline(always)]
     fn to_category(self) -> Option<i64> {
         Some(self)
     }
@@ -448,6 +491,11 @@ impl CategoricalUniformity for i64 {
 }
 
 impl CategoricalUniformity for f32 {
+    #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self as f64
+    }
+
     #[inline(always)]
     fn to_category(self) -> Option<i64> {
         if self.is_finite() {
@@ -489,6 +537,11 @@ impl CategoricalUniformity for f32 {
 }
 
 impl CategoricalUniformity for f64 {
+    #[inline(always)]
+    fn to_bin_value(self) -> f64 {
+        self
+    }
+
     #[inline(always)]
     fn to_category(self) -> Option<i64> {
         if self.is_finite() {

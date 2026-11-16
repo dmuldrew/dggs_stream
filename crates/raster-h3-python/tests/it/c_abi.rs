@@ -201,6 +201,7 @@ pub fn core_rows(
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
                 .into(),
+            ColumnArray::Histogram(column) => column.row_json(i).into(),
         }
     };
     let mut out = BTreeMap::new();
