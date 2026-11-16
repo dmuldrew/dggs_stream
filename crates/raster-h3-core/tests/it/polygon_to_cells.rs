@@ -136,3 +136,25 @@ fn polygon_to_cells_matches_h3o_for_containment_modes_and_overlaps() {
         }
     }
 }
+
+#[test]
+fn s2_polar_faces_cover_every_longitude_at_level_zero() {
+    use raster_h3_core::scalar_ops::grid_polygon_to_cells_wkb_into;
+    use raster_h3_core::GridKind;
+
+    // A polar face's boundary circles the pole; its ring must close the full turn, or a
+    // wedge next to the closing meridian is missed.
+    for lat in [84.0, -84.2] {
+        let face = GridKind::S2.cell_at(lat, 0.0, 0).unwrap();
+        let mut lon = -180.0;
+        while lon < 180.0 {
+            let wkb = polygon_wkb(&rectangle(lon, lat, lon + 0.2, lat + 0.2));
+            for mode in [ContainmentMode::Covers, ContainmentMode::IntersectsBoundary] {
+                let mut out = Vec::new();
+                grid_polygon_to_cells_wkb_into(GridKind::S2, &wkb, 0, mode, &mut out).unwrap();
+                assert_eq!(out, vec![face], "lon {lon} lat {lat} {mode:?}");
+            }
+            lon += 0.25;
+        }
+    }
+}

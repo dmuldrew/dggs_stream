@@ -212,11 +212,23 @@ fn cell_ring(grid: GridKind, cell: u64, level: u8) -> Option<Ring> {
         }
     }
     if let Some(north) = grid.interior_pole(cell) {
-        // The boundary circles the pole once: close the ring over it.
+        // The boundary circles the pole once. The traced sides stop short of the first
+        // vertex, so finish the turn at that vertex (one turn on from where the ring
+        // started) and only then close the ring over the pole; closing straight from
+        // the last sample would leave out the wedge between it and the first vertex.
         let pole = if north { 90.0 } else { -90.0 };
-        let (first, last) = (points[0].0, points[points.len() - 1].0);
-        points.push((last, pole));
-        points.push((first, pole));
+        let (first_lon, first_lat) = points[0];
+        let last = points[points.len() - 1].0;
+        let mut end = first_lon;
+        while end - last > 180.0 {
+            end -= 360.0;
+        }
+        while end - last < -180.0 {
+            end += 360.0;
+        }
+        points.push((end, first_lat));
+        points.push((end, pole));
+        points.push((first_lon, pole));
     }
     Some(Ring { points })
 }
