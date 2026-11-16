@@ -331,6 +331,9 @@ pub struct MultiResolutionConfig {
     /// Round floating-point output statistics to this many decimals (at most
     /// [`crate::aggregator::output_policy::MAX_DECIMALS`]); `None` leaves them as computed.
     pub decimals: Option<u8>,
+    /// Collect runtime telemetry of the scan into this profile (see
+    /// [`crate::run_profile`]). `None` (the default) costs one check per chunk.
+    pub profile: Option<Arc<crate::run_profile::RunProfile>>,
     /// How pixels are transferred onto cells: centre assignment (the default, the
     /// single-pass horizon kernel), interpolation at cell centres, or an area-weighted
     /// overlay. See [`crate::transfer`].
@@ -379,6 +382,7 @@ impl MultiResolutionConfig {
             nodata_policy: NodataPolicy::Omit,
             emit_nodata_value: None,
             decimals: None,
+            profile: None,
             transfer: crate::transfer::TransferMode::AssignCenters,
             partition: None,
         }

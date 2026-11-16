@@ -60,6 +60,8 @@ fn print_help() {
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
           --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \
                                      conserved exactly\n  \
+          --profile                  Print where the time went (decode, kernel, horizon,\n                                     \
+                                     serialization; pixels, cells, stalls) on stderr\n  \
           --raw-values               Skip GDAL band scale/offset calibration\n  \
           --bbox <minx,miny,maxx,maxy> WGS84 bounding box filter\n  \
           --columns <col1,col2,...>  Column projection pushdown\n  \
@@ -141,6 +143,7 @@ fn main() {
                 opts.apply_scale_offset,
                 &opts.output,
                 opts.transfer,
+                opts.profile.clone(),
             )
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
@@ -162,6 +165,7 @@ fn main() {
                 opts.apply_scale_offset,
                 &opts.output,
                 opts.transfer,
+                opts.profile.clone(),
             )
         }),
         "parquet-to-pmtiles" => parse_parquet_to_pmtiles_args(rest).and_then(|args| {

@@ -100,12 +100,13 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             resolution_u8s.push(res_u8);
         }
 
-        let prefetcher = PrefetchedMosaicReader::spawn_with_budget(
+        let prefetcher = PrefetchedMosaicReader::spawn_with_profile(
             Arc::clone(&mosaic),
             config.prefetch_chunks,
             config.decode_workers,
             config.fetch_workers,
             config.decode_budget_bytes,
+            config.profile.clone(),
         );
         let num_res = resolution_u8s.len();
         let mut resolution_shards: Vec<_> =
@@ -221,6 +222,8 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             emit_nodata: config.nodata_policy
                 == crate::aggregator::output_policy::NodataPolicy::Emit,
             output_policy: config.output_policy(),
+            run_profile: config.profile.clone(),
+            profile_published: false,
             transform_failure_counter: config.transform_failure_counter.clone(),
             strict_transforms: config.strict_transforms,
             bbox: config.bbox,

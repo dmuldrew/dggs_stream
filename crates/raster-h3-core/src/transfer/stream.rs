@@ -163,6 +163,8 @@ pub struct TransferStream<A: TransferAccumulator> {
     transform_failures: u64,
     failure_counter: Option<Arc<AtomicU64>>,
     strict_transforms: bool,
+    /// Runtime telemetry, updated once per block.
+    profile: Option<Arc<crate::run_profile::RunProfile>>,
 }
 
 impl<A: TransferAccumulator> TransferStream<A> {
@@ -244,6 +246,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             transform_failures: 0,
             failure_counter: config.transform_failure_counter.clone(),
             strict_transforms: config.strict_transforms,
+            profile: config.profile.clone(),
         })
     }
 
@@ -294,6 +297,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
             return Ok(());
         }
         self.transform_failures += failures;
+        if let Some(profile) = &self.profile {
+            profile.count(crate::run_profile::Counter::TransformFailures, failures);
+        }
         if let Some(counter) = &self.failure_counter {
             counter.fetch_add(failures, Ordering::Relaxed);
         }
@@ -303,7 +309,36 @@ impl<A: TransferAccumulator> TransferStream<A> {
         Ok(())
     }
 
+    /// Read a window of `tile`, timed as decoding when a profile is attached.
+    fn load_window(&mut self, tile: &TileDescriptor, rows: Range<u32>) -> Result<RowWindow> {
+        use crate::run_profile::{Counter, Phase, PhaseTimer};
+        let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
+        let window = RowWindow::load(tile, self.selection, rows, &mut self.cache)?;
+        if let (Some(profile), Some(timer)) = (&self.profile, timer) {
+            timer.stop(profile, Phase::Decode);
+            let pixels = u64::from(window.width()) * window.rows().len() as u64;
+            profile.count(Counter::DecodedBytes, pixels * 8);
+        }
+        Ok(window)
+    }
+
     fn process(&mut self, block: &Block) -> Result<()> {
+        use crate::run_profile::{Counter, Phase, PhaseTimer};
+        let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
+        let outcome = self.process_block(block);
+        if let (Some(profile), Some(timer)) = (&self.profile, timer) {
+            // The block's time, window reading included, is the transfer kernel's.
+            timer.stop(profile, Phase::Kernel);
+            profile.count(Counter::Windows, 1);
+            profile.count(
+                Counter::PixelsRead,
+                block.rows.len() as u64 * block.cols.len() as u64,
+            );
+        }
+        outcome
+    }
+
+    fn process_block(&mut self, block: &Block) -> Result<()> {
         if self.cache_tile != block.tile {
             self.cache.clear();
             self.cache_tile = block.tile;
@@ -338,7 +373,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let tile = &mosaic.tiles[block.tile];
         let margin = method.margin();
         let rows = block.rows.start.saturating_sub(margin)..block.rows.end.saturating_add(margin);
-        let window = RowWindow::load(tile, self.selection, rows, &mut self.cache)?;
+        let window = self.load_window(tile, rows)?;
         let cells = cells_in_bbox(
             self.grid,
             bbox,
@@ -386,7 +421,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
     ) -> Result<()> {
         let mosaic = Arc::clone(&self.mosaic);
         let tile = &mosaic.tiles[block.tile];
-        let window = RowWindow::load(tile, self.selection, block.rows.clone(), &mut self.cache)?;
+        let window = self.load_window(tile, block.rows.clone())?;
         let width = i64::from(window.width());
         let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
         let band_width = window.width() as usize;

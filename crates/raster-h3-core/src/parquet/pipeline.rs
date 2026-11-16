@@ -56,6 +56,11 @@ pub trait ParquetStreamer {
     fn output_policy(&self) -> OutputPolicy {
         OutputPolicy::default()
     }
+
+    /// The runtime profile to report row-group writing into, if any.
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        None
+    }
 }
 
 impl<T: RecordStreamer> ParquetStreamer for T {
@@ -86,6 +91,10 @@ impl<T: RecordStreamer> ParquetStreamer for T {
     #[inline]
     fn output_policy(&self) -> OutputPolicy {
         RecordStreamer::output_policy(self)
+    }
+
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        RecordStreamer::run_profile(self)
     }
 }
 
@@ -262,6 +271,7 @@ where
     let grid = streamer.grid();
     let policy = streamer.output_policy();
     B::check_output_policy(&policy)?;
+    let run_profile = streamer.run_profile();
 
     let message_type = B::schema_message_for(grid, compact, geoparquet);
     let schema = Arc::new(parse_message_type(&message_type)?);
@@ -317,12 +327,15 @@ where
         move || -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
             let mut total_rows = 0usize;
             let mut bbox: Option<[f64; 4]> = None;
-            while let Ok(mut buf) = writer_rx.recv() {
+            // Sorting and writing row groups is this exporter's serialization time.
+            let mut clock = crate::run_profile::SerializeClock::start(run_profile);
+            while let Ok(mut buf) = clock.wait(|| writer_rx.recv()) {
                 if !buf.is_empty() {
                     buf.sort_by_h3_index();
                     let count = buf.len();
                     buf.flush_to_row_group(&mut writer)?;
                     total_rows += count;
+                    clock.rows(count);
                     if let Some(b) = buf.geometry_bounds() {
                         bbox = Some(bbox.map_or(b, |a| {
                             [

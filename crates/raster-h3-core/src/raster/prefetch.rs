@@ -803,6 +803,26 @@ impl PrefetchedMosaicReader {
         fetch_workers: usize,
         decode_budget_bytes: usize,
     ) -> Self {
+        Self::spawn_with_profile(
+            mosaic,
+            buffer_capacity,
+            num_workers,
+            fetch_workers,
+            decode_budget_bytes,
+            None,
+        )
+    }
+
+    /// [`Self::spawn_with_budget`] that also records fetch and decode time, chunks and
+    /// decoded bytes into `profile` (one update per chunk).
+    pub fn spawn_with_profile(
+        mosaic: Arc<MosaicReader>,
+        buffer_capacity: usize,
+        num_workers: usize,
+        fetch_workers: usize,
+        decode_budget_bytes: usize,
+        profile: Option<Arc<crate::run_profile::RunProfile>>,
+    ) -> Self {
         let remote_config = crate::raster::remote_prefetch::RemotePrefetchConfig {
             num_workers: fetch_workers,
             ..Default::default()
@@ -848,6 +868,7 @@ impl PrefetchedMosaicReader {
             let worker_budget = Arc::clone(&budget);
             let worker_remote_queue = remote_queue.clone();
             let worker_next_uses = Arc::clone(&next_uses);
+            let worker_profile = profile.clone();
             #[cfg(any(test, feature = "test-hooks"))]
             let worker_decoder_opens = Arc::clone(&decoder_opens);
 
@@ -901,11 +922,24 @@ impl PrefetchedMosaicReader {
                             }
                         };
 
+                        // Telemetry is per chunk: two clock reads around each stage.
+                        let timer = worker_profile
+                            .as_ref()
+                            .map(|_| crate::run_profile::PhaseTimer::start());
                         let prefetched_bytes = worker_remote_queue
                             .as_ref()
                             .map(|q| q.get_chunk_payload(tile_idx, chunk_idx))
                             .transpose()
                             .map(Option::flatten);
+                        let timer = match (worker_profile.as_deref(), timer) {
+                            (Some(profile), Some(timer)) => {
+                                if worker_remote_queue.is_some() {
+                                    timer.stop(profile, crate::run_profile::Phase::Fetch);
+                                }
+                                Some(crate::run_profile::PhaseTimer::start())
+                            }
+                            _ => None,
+                        };
 
                         let item = prefetched_bytes
                             .and_then(|payload| {
@@ -919,6 +953,12 @@ impl PrefetchedMosaicReader {
                         let actual = item
                             .as_ref()
                             .map_or(0, |(_, _, _, data, _)| decoded_buffer_bytes(data));
+                        if let (Some(profile), Some(timer)) = (worker_profile.as_deref(), timer) {
+                            use crate::run_profile::{Counter, Phase};
+                            timer.stop(profile, Phase::Decode);
+                            profile.count(Counter::Chunks, 1);
+                            profile.count(Counter::DecodedBytes, actual as u64);
+                        }
                         worker_budget.settle(charged, actual);
 
                         if !worker_queue.push(job_id, item) {

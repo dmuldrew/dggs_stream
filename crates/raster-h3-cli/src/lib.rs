@@ -35,6 +35,7 @@ use raster_h3_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use raster_h3_core::pmtiles::{H3PmtilesTiler, PmtilesExportSummary};
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use raster_h3_core::resolution::ResolutionSpec;
+use raster_h3_core::run_profile::RunProfile;
 use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
 use raster_h3_core::transfer::TransferMode;
 
@@ -73,6 +74,9 @@ pub struct CliStreamOptions {
     /// `--transfer`, `--sample-method`, `--overlay-weighted` and `--mass-preserve`: how
     /// pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
+    /// `--profile`: collect runtime telemetry of the scan (see
+    /// [`raster_h3_core::run_profile`]); the binary prints the report on stderr.
+    pub profile: Option<Arc<RunProfile>>,
 }
 
 impl Default for CliStreamOptions {
@@ -94,6 +98,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            profile: None,
         }
     }
 }
@@ -128,6 +133,13 @@ fn apply_output_policy(config: &mut MultiResolutionConfig, policy: &OutputPolicy
     config.decimals = policy.decimals;
 }
 
+/// Print the runtime profile of a finished scan on stderr (`--profile`).
+fn print_profile(profile: &Option<Arc<RunProfile>>) {
+    if let Some(profile) = profile {
+        eprintln!("{}", profile.report());
+    }
+}
+
 /// Report valid samples the coordinate transform could not place, on stderr
 /// so streamed output stays clean.
 fn warn_transform_failures(failures: u64) {
@@ -142,6 +154,13 @@ fn warn_transform_failures(failures: u64) {
 /// Stream a GeoTIFF/COG aggregation directly to `writer` in binary IPC or JSONL format.
 /// Returns the total number of rows emitted.
 pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
+    let rows = stream_raster(opts, writer);
+    // The scan's stream has been dropped by now, so its totals are in the profile.
+    print_profile(&opts.profile);
+    rows
+}
+
+fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
     let paths = resolve_raster_sources(&opts.input_path)?;
     let mut config = MultiResolutionConfig::new(opts.resolutions.clone()).with_grid(opts.grid);
     config.custom_crs = opts.source_crs.clone();
@@ -151,6 +170,7 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
     config.overlap_rule = OverlapRule::Cutline;
     apply_output_policy(&mut config, &opts.output);
     config.transfer = opts.transfer;
+    config.profile = opts.profile.clone();
 
     if let Some(partition) = &opts.partition {
         config.partition = Some(partition.clone());
@@ -835,11 +855,12 @@ pub fn export_raster_to_parquet_with_policy(
         apply_scale_offset,
         policy,
         TransferMode::AssignCenters,
+        None,
     )
 }
 
 /// [`export_raster_to_parquet_with_policy`] with a [`TransferMode`] (`sample` or
-/// `overlay` instead of pixel-centre assignment).
+/// `overlay` instead of pixel-centre assignment) and an optional runtime profile.
 #[allow(clippy::too_many_arguments)]
 pub fn export_raster_to_parquet_with_transfer(
     grid: GridKind,
@@ -854,6 +875,7 @@ pub fn export_raster_to_parquet_with_transfer(
     apply_scale_offset: bool,
     policy: &OutputPolicy,
     transfer: TransferMode,
+    profile: Option<Arc<RunProfile>>,
 ) -> Result<usize> {
     let paths = resolve_raster_sources(input_path)?;
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
@@ -862,6 +884,8 @@ pub fn export_raster_to_parquet_with_transfer(
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
     config.transfer = transfer;
+    let report_profile = profile.clone();
+    config.profile = profile;
     apply_output_policy(&mut config, policy);
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
@@ -888,6 +912,7 @@ pub fn export_raster_to_parquet_with_transfer(
     }
     .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
+    print_profile(&report_profile);
     Ok(rows)
 }
 
@@ -970,6 +995,7 @@ pub fn export_raster_to_pmtiles_with_policy(
         apply_scale_offset,
         policy,
         TransferMode::AssignCenters,
+        None,
     )
 }
 
@@ -987,9 +1013,12 @@ pub fn export_raster_to_pmtiles_with_transfer(
     apply_scale_offset: bool,
     policy: &OutputPolicy,
     transfer: TransferMode,
+    profile: Option<Arc<RunProfile>>,
 ) -> Result<usize> {
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.transfer = transfer;
+    let report_profile = profile.clone();
+    config.profile = profile;
     config.custom_crs = source_crs;
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
@@ -1005,6 +1034,7 @@ pub fn export_raster_to_pmtiles_with_transfer(
     }
     .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
+    print_profile(&report_profile);
     Ok(tiles)
 }
 
@@ -1185,6 +1215,7 @@ pub fn parse_stream_args(
                 });
             }
             "--mass-preserve" => mass_preserve = Some(true),
+            "--profile" => opts.profile = Some(RunProfile::new()),
             "--nodata-policy" => {
                 let v = value()?;
                 opts.output.nodata = NodataPolicy::parse(v)

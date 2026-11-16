@@ -856,13 +856,22 @@ impl Iterator for ContinuousBatchReader {
                 if let Some(rem) = &mut self.remaining_limit {
                     *rem = rem.saturating_sub(count);
                 }
-                Some(RecordBatch::from_continuous_records_with(
-                    self.streamer.grid(),
-                    &self.streamer.output_policy(),
-                    &records,
-                    &self.quantiles,
-                    self.projection.as_deref(),
-                ))
+                let build = || {
+                    RecordBatch::from_continuous_records_with(
+                        self.streamer.grid(),
+                        &self.streamer.output_policy(),
+                        &records,
+                        &self.quantiles,
+                        self.projection.as_deref(),
+                    )
+                };
+                Some(match self.streamer.run_profile() {
+                    Some(profile) => {
+                        profile.count(crate::run_profile::Counter::RowsSerialized, count as u64);
+                        profile.time(crate::run_profile::Phase::Serialize, build)
+                    }
+                    None => build(),
+                })
             }
             Err(e) => {
                 self.finished = true;

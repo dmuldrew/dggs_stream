@@ -26,6 +26,8 @@ mod polygon_fill;
 pub mod raster;
 /// Resolution selection, including `auto` (cells matched to the pixel size).
 pub mod resolution;
+/// Opt-in runtime telemetry of a scan, by pipeline phase.
+pub mod run_profile;
 /// Engine-neutral grid scalar and utility operations (H3, A5, S2, HEALPix).
 pub mod scalar_ops;
 /// Cross-format dataset transcoding pipelines (e.g. Parquet to PMTiles).

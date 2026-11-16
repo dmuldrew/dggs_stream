@@ -615,6 +615,8 @@ impl H3PmtilesTiler {
             String::new(),
         )?;
 
+        // Building and writing tiles is this exporter's serialization time.
+        let mut clock = crate::run_profile::SerializeClock::start(streamer.run_profile());
         let (tx, rx) = std::sync::mpsc::sync_channel::<StreamBatch<K::Record>>(4);
         let producer_handle = std::thread::spawn(move || -> crate::error::Result<()> {
             loop {
@@ -640,7 +642,8 @@ impl H3PmtilesTiler {
         });
         let mut producer_channel = ProducerChannel::new(rx, producer_handle);
 
-        while let Ok(batch) = producer_channel.recv() {
+        while let Ok(batch) = clock.wait(|| producer_channel.recv()) {
+            clock.rows(batch.records.len());
             let prepared_batch: Vec<PreparedHex<K>> = batch
                 .records
                 .into_par_iter()

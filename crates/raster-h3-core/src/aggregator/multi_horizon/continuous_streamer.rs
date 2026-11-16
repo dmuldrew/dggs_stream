@@ -235,9 +235,23 @@ impl MultiScanHorizonStreamer {
     where
         F: FnMut(usize, MultiContinuousRecord),
     {
-        match &mut self.transfer {
+        let mut consumer = consumer;
+        // With a runtime profile, count the cells handed out and the samples behind
+        // those of the first resolution. One check per drain call otherwise.
+        let profile = self.inner.run_profile().cloned();
+        let first_resolution = self.inner.resolution_u8s().first().copied();
+        let (mut cells, mut samples) = (0u64, 0.0f64);
+        let mut consumer = |i: usize, record: MultiContinuousRecord| {
+            if profile.is_some() {
+                cells += 1;
+                if Some(record.resolution) == first_resolution {
+                    samples += record.accumulator.count;
+                }
+            }
+            consumer(i, record)
+        };
+        let drained = match &mut self.transfer {
             Some(transfer) => {
-                let mut consumer = consumer;
                 transfer.drain_into(max_rows, |i, resolution, h3_index, accumulator| {
                     consumer(
                         i,
@@ -249,8 +263,14 @@ impl MultiScanHorizonStreamer {
                     )
                 })
             }
-            None => self.inner.drain_completed_into(max_rows, consumer),
+            None => self.inner.drain_completed_into(max_rows, &mut consumer),
+        };
+        if let Some(profile) = &profile {
+            use crate::run_profile::Counter;
+            profile.count(Counter::Cells, cells);
+            profile.count(Counter::SamplesIndexed, samples.round() as u64);
         }
+        drained
     }
 
     /// Advance scanline horizon until at least `min_rows` completed records are available or finished
@@ -400,6 +420,17 @@ impl RecordStreamer for MultiScanHorizonStreamer {
     #[inline(always)]
     fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
         self.inner.output_policy()
+    }
+
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        self.inner.run_profile().cloned()
+    }
+}
+
+impl Drop for MultiScanHorizonStreamer {
+    fn drop(&mut self) {
+        // A scan abandoned early (a LIMIT) still reports what it did.
+        self.inner.publish_profile();
     }
 }
 

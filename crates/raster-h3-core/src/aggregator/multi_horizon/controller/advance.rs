@@ -150,6 +150,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                     self.metrics.peak_decoded_bytes = prefetcher.peak_decoded_bytes();
                 }
                 self.finishing = true;
+                self.publish_profile();
                 // Keep the published horizon conservative until deferred output
                 // is consumed; downstream tilers must not flush ahead of it.
                 continue;
