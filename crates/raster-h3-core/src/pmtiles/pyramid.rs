@@ -1,5 +1,6 @@
 //! Web Mercator tile pyramid coordinate math and bounding boxes for PMTiles v3.
 
+use crate::grid::GridKind;
 use crate::pmtiles::mvt::MercatorPoint;
 use h3o::{CellIndex, LatLng};
 
@@ -202,6 +203,32 @@ pub fn cell_boundary_mercator(cell: CellIndex) -> ([MercatorPoint; 10], usize) {
     (arr, count)
 }
 
+/// Compute boundary vertices for a cell on `grid` directly into a stack-allocated array
+#[inline(always)]
+pub fn cell_boundary_mercator_for(
+    grid: GridKind,
+    cell_u64: u64,
+) -> Option<([MercatorPoint; 10], usize)> {
+    match grid {
+        GridKind::H3 => {
+            let cell = CellIndex::try_from(cell_u64).ok()?;
+            Some(cell_boundary_mercator(cell))
+        }
+        GridKind::A5 => {
+            let mut verts = [(0.0, 0.0); 10];
+            let count = grid.boundary_lng_lat(cell_u64, &mut verts);
+            if count == 0 {
+                return None;
+            }
+            let mut arr = [MercatorPoint { x: 0.0, y: 0.0 }; 10];
+            for (i, &(lng, lat)) in verts[..count].iter().enumerate() {
+                arr[i] = MercatorPoint::from_lat_lng(lat, lng);
+            }
+            Some((arr, count))
+        }
+    }
+}
+
 /// Accumulates exact WGS84 vertex bounds across H3 cells with polar and antimeridian awareness.
 #[derive(Debug, Clone, Copy)]
 pub struct Wgs84BoundsAccumulator {
@@ -282,6 +309,51 @@ impl Wgs84BoundsAccumulator {
         }
         if !is_north_pole && !is_south_pole && (cell_max_lng - cell_min_lng > 180.0) {
             self.crosses_antimeridian = true;
+        }
+    }
+
+    /// Record a cell's center and boundary vertices for `grid`.
+    #[inline]
+    pub fn record_cell_for(&mut self, grid: GridKind, cell_u64: u64) {
+        match grid {
+            GridKind::H3 => {
+                if let Ok(cell) = CellIndex::try_from(cell_u64) {
+                    self.record_cell(cell);
+                }
+            }
+            GridKind::A5 => {
+                let Some((c_lat, c_lng)) = grid.center_lat_lng(cell_u64) else {
+                    return;
+                };
+                let mut verts = [(0.0, 0.0); 10];
+                let count = grid.boundary_lng_lat(cell_u64, &mut verts);
+                if count == 0 {
+                    return;
+                }
+                self.count += 1;
+                let [north_pole, south_pole] = crate::grid::a5_pole_cells();
+                let is_north_pole = cell_u64 == north_pole;
+                let is_south_pole = cell_u64 == south_pole;
+                if is_north_pole {
+                    self.max_lat = 90.0;
+                    self.full_lon = true;
+                }
+                if is_south_pole {
+                    self.min_lat = -90.0;
+                    self.full_lon = true;
+                }
+                self.observe_point(c_lng, c_lat);
+                let mut cell_min_lng = f64::INFINITY;
+                let mut cell_max_lng = f64::NEG_INFINITY;
+                for &(lng, lat) in &verts[..count] {
+                    self.observe_point(lng, lat);
+                    cell_min_lng = cell_min_lng.min(lng);
+                    cell_max_lng = cell_max_lng.max(lng);
+                }
+                if !is_north_pole && !is_south_pole && (cell_max_lng - cell_min_lng > 180.0) {
+                    self.crosses_antimeridian = true;
+                }
+            }
         }
     }
 
@@ -429,14 +501,27 @@ pub fn zooms_for_h3_res(res: u8, min_res: u8) -> Vec<u8> {
 /// nothing to aggregate into parent cells, and pushing fine cells into
 /// low-zoom tiles would make those tiles enormous.
 pub fn zoom_bands_for_resolutions(resolutions: u16) -> [Option<(u8, u8)>; 16] {
-    let standard = |res: u8| zooms_for_h3_res(res, u8::MAX);
-    let mut bands = [None; 16];
-    let present: Vec<u8> = (0..16u8).filter(|r| resolutions & (1 << r) != 0).collect();
+    let bands = zoom_bands_for_grid_resolutions(GridKind::H3, u32::from(resolutions));
+    core::array::from_fn(|r| bands[r])
+}
+
+/// [`zoom_bands_for_resolutions`] on any grid: bit `r` of `resolutions` marks
+/// resolution `r` of `grid` as present (bits above the grid's finest resolution
+/// are ignored), bands start at [`zooms_for_grid_res`], and the result is indexed
+/// by resolution (`grid.max_resolution() + 1` entries). Where two present
+/// resolutions start at the same zoom (A5 above 24), each keeps that one zoom.
+pub fn zoom_bands_for_grid_resolutions(grid: GridKind, resolutions: u32) -> Vec<Option<(u8, u8)>> {
+    let max_res = grid.max_resolution();
+    let standard = |res: u8| zooms_for_grid_res(grid, res, u8::MAX);
+    let mut bands = vec![None; usize::from(max_res) + 1];
+    let present: Vec<u8> = (0..=max_res)
+        .filter(|&r| resolutions & (1u32 << r) != 0)
+        .collect();
     for (i, &res) in present.iter().enumerate() {
         let zooms = standard(res);
         let start = zooms[0];
         let end = match present.get(i + 1) {
-            Some(&finer) => standard(finer)[0] - 1,
+            Some(&finer) => standard(finer)[0].saturating_sub(1),
             None => *zooms.last().unwrap_or(&start),
         };
         bands[usize::from(res)] = Some((start, end.max(start)));
@@ -447,7 +532,17 @@ pub fn zoom_bands_for_resolutions(resolutions: u16) -> [Option<(u8, u8)>; 16] {
 /// Overall `(min_zoom, max_zoom)` of [`zoom_bands_for_resolutions`], or `None`
 /// when no resolution is present.
 pub fn zoom_extent_for_resolutions(resolutions: u16) -> Option<(u8, u8)> {
-    let bands = zoom_bands_for_resolutions(resolutions);
+    zoom_extent_for_grid_resolutions(GridKind::H3, u32::from(resolutions))
+}
+
+/// Overall `(min_zoom, max_zoom)` of [`zoom_bands_for_grid_resolutions`], or
+/// `None` when no resolution is present.
+pub fn zoom_extent_for_grid_resolutions(grid: GridKind, resolutions: u32) -> Option<(u8, u8)> {
+    zoom_band_extent(&zoom_bands_for_grid_resolutions(grid, resolutions))
+}
+
+/// Overall `(min_zoom, max_zoom)` of a set of bands.
+pub fn zoom_band_extent(bands: &[Option<(u8, u8)>]) -> Option<(u8, u8)> {
     let mut it = bands.iter().flatten();
     let &(first_lo, first_hi) = it.next()?;
     Some(it.fold((first_lo, first_hi), |(lo, hi), &(a, b)| {
@@ -478,9 +573,74 @@ pub fn max_hex_radius_deg(res: u8) -> f64 {
     }
 }
 
+/// Default mapping from grid resolution to Web Mercator zoom level
+pub fn grid_res_to_zoom(grid: GridKind, res: u8) -> u8 {
+    match grid {
+        GridKind::H3 => h3_res_to_zoom(res),
+        GridKind::A5 => res.min(24),
+    }
+}
+
+/// Determine the optimal grid resolution for a given Web Mercator zoom level
+pub fn grid_res_for_zoom(grid: GridKind, zoom: u8) -> u8 {
+    match grid {
+        GridKind::H3 => h3_res_for_zoom(zoom),
+        GridKind::A5 => zoom.min(30),
+    }
+}
+
+/// Map a grid resolution to the continuous range of Web Mercator zoom levels it covers
+pub fn zooms_for_grid_res(grid: GridKind, res: u8, min_res: u8) -> Vec<u8> {
+    match grid {
+        GridKind::H3 => zooms_for_h3_res(res, min_res),
+        GridKind::A5 => {
+            let z = res.min(24);
+            if res == min_res {
+                (0..=z).collect()
+            } else {
+                vec![z]
+            }
+        }
+    }
+}
+
+/// Estimate maximum radius (in WGS84 degrees) of a cell on `grid` at resolution `res`.
+pub fn max_cell_radius_deg(grid: GridKind, res: u8) -> f64 {
+    match grid {
+        GridKind::H3 => max_hex_radius_deg(res),
+        GridKind::A5 => match res {
+            // Measured extents are 37.5, 21.5 and 11.5 degrees, then halve per level.
+            0 => 42.0,
+            1 => 23.0,
+            r => 12.5 * 0.5_f64.powi(i32::from(r - 2)),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_zoom_bands_follow_each_grid() {
+        // H3 through the generic function matches the H3 one.
+        let mask = (1 << 2) | (1 << 4) | (1 << 8);
+        let generic = zoom_bands_for_grid_resolutions(GridKind::H3, mask);
+        assert_eq!(generic.len(), 16);
+        assert_eq!(generic[..], zoom_bands_for_resolutions(mask as u16)[..]);
+        // A5: one zoom per resolution, so gaps stretch the coarser band.
+        let a5 = zoom_bands_for_grid_resolutions(GridKind::A5, (1 << 3) | (1 << 5) | (1 << 26));
+        assert_eq!(a5.len(), 31);
+        assert_eq!(
+            (a5[3], a5[5], a5[26]),
+            (Some((3, 4)), Some((5, 23)), Some((24, 24)))
+        );
+        assert_eq!(
+            zoom_extent_for_grid_resolutions(GridKind::A5, (1 << 3) | (1 << 26)),
+            Some((3, 24))
+        );
+        assert_eq!(zoom_extent_for_grid_resolutions(GridKind::A5, 0), None);
+    }
 
     #[test]
     fn test_lon_lat_to_tile_xy() {

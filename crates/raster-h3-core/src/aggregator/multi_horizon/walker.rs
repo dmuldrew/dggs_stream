@@ -9,7 +9,8 @@
 //! pattern and resolution count, not by row or raster size.
 
 use crate::aggregator::cell_hash::H3BuildHasher;
-use h3o::{LatLng, LatLngIndexer, Resolution};
+use crate::grid::{A5Backend, GridBackend, GridKind, H3Backend};
+use h3o::Resolution;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -32,6 +33,12 @@ pub trait ScanlineEngine<T, Acc> {
 
     /// Opt in only when combining weights for the same pixel preserves semantics.
     fn combine_sample_weights(&self) -> bool {
+        false
+    }
+
+    /// Opt in to absolute pixel coordinates for each retained cell contribution.
+    /// This disables the span fast path for direct walks.
+    fn needs_pixel_coordinates(&self) -> bool {
         false
     }
 
@@ -58,6 +65,19 @@ pub trait ScanlineEngine<T, Acc> {
 
     /// Update an accumulator with a sample and weight
     fn update_sample(&self, acc: &mut Acc, sample: Self::Sample, weight: f64);
+
+    /// Update with absolute raster column and row for location-dependent weights.
+    /// Called only when `needs_pixel_coordinates` returns true.
+    fn update_sample_at(
+        &self,
+        acc: &mut Acc,
+        sample: Self::Sample,
+        weight: f64,
+        _col: usize,
+        _row: usize,
+    ) {
+        self.update_sample(acc, sample, weight);
+    }
 }
 
 type CellMap<Acc> = HashMap<u64, Acc, H3BuildHasher>;
@@ -66,7 +86,9 @@ type CellMap<Acc> = HashMap<u64, Acc, H3BuildHasher>;
 #[derive(Clone, Copy)]
 pub struct WalkContext<'a> {
     pub chunk: &'a RasterChunk,
+    pub grid: GridKind,
     pub resolutions: &'a [Resolution],
+    pub resolution_u8s: &'a [u8],
     pub crs: &'a CrsTransformer,
     pub gt: &'a GeoTransform,
     pub sampling: &'a SamplingPattern,
@@ -118,7 +140,7 @@ pub fn walk_direct<T, Acc, E, N>(
     E: ScanlineEngine<T, Acc>,
     N: Fn(&[T]) -> bool,
 {
-    let batch = ctx.sampling.is_single_point();
+    let batch = ctx.sampling.is_single_point() && !engine.needs_pixel_coordinates();
     walk(
         ctx,
         slice,
@@ -181,7 +203,9 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
 {
     let ctx = WalkContext {
         chunk,
+        grid: GridKind::H3,
         resolutions,
+        resolution_u8s: &[],
         crs: crs_transformer,
         gt,
         sampling,
@@ -213,6 +237,59 @@ fn walk<T, Acc, E, N, R>(
     N: Fn(&[T]) -> bool,
     R: Fn(&[T]) -> Option<E::Sample>,
 {
+    let owned_res: Vec<u8>;
+    let res_u8s: &[u8] = if !ctx.resolution_u8s.is_empty() {
+        ctx.resolution_u8s
+    } else {
+        owned_res = ctx.resolutions.iter().map(|&r| u8::from(r)).collect();
+        &owned_res
+    };
+    match ctx.grid {
+        GridKind::H3 => walk_grid::<T, Acc, E, N, R, H3Backend>(
+            ctx,
+            res_u8s,
+            slice,
+            spp,
+            is_row_all_nodata,
+            read,
+            batch,
+            engine,
+            maps,
+        ),
+        GridKind::A5 => walk_grid::<T, Acc, E, N, R, A5Backend>(
+            ctx,
+            res_u8s,
+            slice,
+            spp,
+            is_row_all_nodata,
+            read,
+            batch,
+            engine,
+            maps,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn walk_grid<T, Acc, E, N, R, B>(
+    ctx: &WalkContext<'_>,
+    res_u8s: &[u8],
+    slice: &[T],
+    spp: usize,
+    is_row_all_nodata: N,
+    read: R,
+    batch: bool,
+    engine: &E,
+    maps: &mut [CellMap<Acc>],
+) where
+    T: Copy,
+    Acc: Clone,
+    E: ScanlineEngine<T, Acc>,
+    N: Fn(&[T]) -> bool,
+    R: Fn(&[T]) -> Option<E::Sample>,
+    B: GridBackend,
+{
     let chunk = ctx.chunk;
     let width = chunk.width as usize;
     let spp = spp.max(1);
@@ -223,12 +300,12 @@ fn walk<T, Acc, E, N, R>(
         s if s > 0 && slice.len() >= s => s,
         _ => width * spp,
     };
-    let num_res = ctx.resolutions.len();
+    let num_res = res_u8s.len();
     let combine = engine.combine_sample_weights();
     let pruner = RowPruner::new(ctx);
     let mut projector = SampleProjector::new(ctx);
-    let mut runs = Runs::new(num_res, engine);
-    let mut positions: Vec<(LatLng, f64)> = Vec::with_capacity(ctx.sampling.points.len());
+    let mut runs = Runs::<Acc, B>::new(num_res, res_u8s, engine);
+    let mut positions: Vec<(B::Point, f64)> = Vec::with_capacity(ctx.sampling.points.len());
     let mut assignments: Vec<(u64, f64)> = Vec::with_capacity(ctx.sampling.points.len());
     let mut position_cells: Vec<u64> = Vec::with_capacity(ctx.sampling.points.len() * num_res);
 
@@ -265,7 +342,7 @@ fn walk<T, Acc, E, N, R>(
                 let Some(ll) = projector
                     .project(col_offset + c, row_idx, 0, sp)
                     .filter(|&(_, lat)| (-90.0..=90.0).contains(&lat))
-                    .and_then(|(lon, lat)| LatLng::new(lat, lon).ok())
+                    .and_then(|(lon, lat)| B::make_point(lon, lat))
                 else {
                     super::profile::transform_failed();
                     if let Some(s) = span_start.take() {
@@ -273,14 +350,7 @@ fn walk<T, Acc, E, N, R>(
                     }
                     continue;
                 };
-                runs.advance_cells(
-                    ll,
-                    ctx.resolutions,
-                    &row[..c],
-                    &mut span_start,
-                    engine,
-                    maps,
-                );
+                runs.advance_cells(ll, res_u8s, &row[..c], &mut span_start, engine, maps);
             }
             if let Some(s) = span_start {
                 runs.add_span(&row[s..cols.end], engine);
@@ -310,9 +380,9 @@ fn walk<T, Acc, E, N, R>(
                         continue;
                     }
                 }
-                match LatLng::new(lat, lon) {
-                    Ok(ll) => positions.push((ll, sp.weight)),
-                    Err(_) => super::profile::transform_failed(),
+                match B::make_point(lon, lat) {
+                    Some(ll) => positions.push((ll, sp.weight)),
+                    None => super::profile::transform_failed(),
                 }
             }
             if positions.is_empty() {
@@ -326,7 +396,7 @@ fn walk<T, Acc, E, N, R>(
             if batch {
                 runs.advance_cells(
                     positions[0].0,
-                    ctx.resolutions,
+                    res_u8s,
                     &row[..c],
                     &mut span_start,
                     engine,
@@ -341,7 +411,7 @@ fn walk<T, Acc, E, N, R>(
                 .iter()
                 .zip(position_cells.chunks_exact_mut(num_res))
             {
-                super::profile::index_all(&mut runs.indexer, ll, ctx.resolutions, cells);
+                B::index_all(&mut runs.indexer, ll, res_u8s, cells);
             }
             for i in 0..num_res {
                 assignments.clear();
@@ -358,7 +428,15 @@ fn walk<T, Acc, E, N, R>(
                     combine_by_cell(&mut assignments);
                 }
                 for &(cell, weight) in &assignments {
-                    runs.update(i, cell, sample, weight, engine, &mut maps[i]);
+                    runs.update(
+                        i,
+                        cell,
+                        sample,
+                        weight,
+                        (col, row_idx),
+                        engine,
+                        &mut maps[i],
+                    );
                 }
             }
         }
@@ -489,20 +567,20 @@ impl<'a> SampleProjector<'a> {
 
 /// Current cell (None before the first) and partial accumulator per
 /// resolution, and the indexer that remembers recent cells across samples.
-struct Runs<Acc> {
+struct Runs<Acc, B: GridBackend> {
     cells: Vec<Option<u64>>,
     next_cells: Vec<u64>,
     accs: Vec<Acc>,
-    indexer: LatLngIndexer,
+    indexer: B::Indexer,
 }
 
-impl<Acc: Clone> Runs<Acc> {
-    fn new<T, E: ScanlineEngine<T, Acc>>(num_res: usize, engine: &E) -> Self {
+impl<Acc: Clone, B: GridBackend> Runs<Acc, B> {
+    fn new<T, E: ScanlineEngine<T, Acc>>(num_res: usize, res_u8s: &[u8], engine: &E) -> Self {
         Self {
             cells: vec![None; num_res],
             next_cells: vec![0; num_res],
             accs: (0..num_res).map(|_| engine.new_acc()).collect(),
-            indexer: LatLngIndexer::default(),
+            indexer: B::new_indexer(res_u8s),
         }
     }
 
@@ -510,14 +588,14 @@ impl<Acc: Clone> Runs<Acc> {
     #[inline(always)]
     fn advance_cells<T, E: ScanlineEngine<T, Acc>>(
         &mut self,
-        ll: LatLng,
-        resolutions: &[Resolution],
+        ll: B::Point,
+        resolutions: &[u8],
         preceding: &[T],
         span_start: &mut Option<usize>,
         engine: &E,
         maps: &mut [CellMap<Acc>],
     ) {
-        super::profile::index_all(&mut self.indexer, ll, resolutions, &mut self.next_cells);
+        B::index_all(&mut self.indexer, ll, resolutions, &mut self.next_cells);
         let changed = self
             .next_cells
             .iter()
@@ -549,6 +627,7 @@ impl<Acc: Clone> Runs<Acc> {
         self.cells[i] = Some(cell);
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn update<T, E: ScanlineEngine<T, Acc>>(
         &mut self,
@@ -556,13 +635,18 @@ impl<Acc: Clone> Runs<Acc> {
         cell: u64,
         sample: E::Sample,
         weight: f64,
+        pixel: (usize, usize),
         engine: &E,
         map: &mut CellMap<Acc>,
     ) {
         if Some(cell) != self.cells[i] {
             self.restart(i, cell, engine, map);
         }
-        engine.update_sample(&mut self.accs[i], sample, weight);
+        if engine.needs_pixel_coordinates() {
+            engine.update_sample_at(&mut self.accs[i], sample, weight, pixel.0, pixel.1);
+        } else {
+            engine.update_sample(&mut self.accs[i], sample, weight);
+        }
     }
 
     /// Only called once every resolution has a current cell.
@@ -593,6 +677,11 @@ fn flush_run<T, Acc, E: ScanlineEngine<T, Acc>>(
     let Some(cell) = cell.filter(|_| engine.has_samples(acc)) else {
         return;
     };
+    if cell == 0 {
+        // 0 is no cell in any grid: it marks a sample the backend could not index.
+        engine.clear_acc(acc);
+        return;
+    }
     match map.entry(cell) {
         Entry::Occupied(mut entry) => {
             engine.merge_acc(entry.get_mut(), acc);
@@ -689,7 +778,7 @@ impl RowPruner {
 /// Walk contexts for checking that two kernel builds agree: WGS84 north-up,
 /// WGS84 rotated and sheared, UTM and Web Mercator, each with centre and
 /// sixteen-point sampling, at resolutions 7, 9 and 11. `f` gets each context.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<'_>)) {
     let chunk = RasterChunk {
         col_offset: 3,
@@ -755,7 +844,9 @@ pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<
         for sampling in [SamplingPattern::center(), SamplingPattern::sixteen_point()] {
             let ctx = WalkContext {
                 chunk: &chunk,
+                grid: GridKind::H3,
                 resolutions: &resolutions,
+                resolution_u8s: &[7, 9, 11],
                 crs,
                 gt: &gt,
                 sampling: &sampling,
@@ -774,6 +865,122 @@ pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinate_aware_engine_receives_absolute_pixel_positions() {
+        type Observation = (usize, usize, u8, f64);
+        struct Engine;
+        impl ScanlineEngine<u8, Vec<Observation>> for Engine {
+            type Sample = u8;
+
+            fn needs_pixel_coordinates(&self) -> bool {
+                true
+            }
+            fn combine_sample_weights(&self) -> bool {
+                true
+            }
+            fn new_acc(&self) -> Vec<Observation> {
+                Vec::new()
+            }
+            fn clear_acc(&self, acc: &mut Vec<Observation>) {
+                acc.clear();
+            }
+            fn has_samples(&self, acc: &Vec<Observation>) -> bool {
+                !acc.is_empty()
+            }
+            fn merge_acc(&self, dest: &mut Vec<Observation>, src: &Vec<Observation>) {
+                dest.extend_from_slice(src);
+            }
+            fn accumulate_span(&self, _: &mut Vec<Observation>, _: &[u8]) {
+                panic!("coordinate-aware scans must not use spans");
+            }
+            fn accumulate_span_multi(&self, _: &mut [Vec<Observation>], _: &[u8]) {
+                panic!("coordinate-aware scans must not use spans");
+            }
+            fn get_sample(&self, value: u8) -> Option<u8> {
+                (value != 0).then_some(value)
+            }
+            fn update_sample(&self, _: &mut Vec<Observation>, _: u8, _: f64) {
+                panic!("expected an update with coordinates");
+            }
+            fn update_sample_at(
+                &self,
+                acc: &mut Vec<Observation>,
+                value: u8,
+                weight: f64,
+                col: usize,
+                row: usize,
+            ) {
+                acc.push((col, row, value, weight));
+            }
+        }
+
+        let chunk = RasterChunk {
+            col_offset: 10,
+            row_offset: 20,
+            width: 2,
+            height: 2,
+        };
+        let gt = GeoTransform {
+            c0: -122.5,
+            a: 0.001,
+            b: 0.0,
+            f0: 38.0,
+            d: 0.0,
+            e: -0.001,
+        };
+        let resolutions = [5u8, 9].map(|r| Resolution::try_from(r).unwrap());
+        let crs = CrsTransformer::Wgs84Identity;
+        let engine = Engine;
+
+        for sampling in [SamplingPattern::center(), SamplingPattern::rgss()] {
+            let ctx = WalkContext {
+                chunk: &chunk,
+                grid: GridKind::H3,
+                resolution_u8s: &[],
+                resolutions: &resolutions,
+                crs: &crs,
+                gt: &gt,
+                sampling: &sampling,
+                bbox: None,
+                stride: 0,
+                samples_per_pixel: 1,
+                owner: None,
+                band_scaling: &[],
+                alpha_sample: None,
+            };
+            for interleaved in [false, true] {
+                let mut maps: Vec<CellMap<Vec<Observation>>> =
+                    (0..resolutions.len()).map(|_| CellMap::default()).collect();
+                if interleaved {
+                    let ctx = WalkContext {
+                        samples_per_pixel: 2,
+                        ..ctx
+                    };
+                    walk_interleaved(
+                        &ctx,
+                        &[1, 99, 2, 99, 3, 99, 4, 99],
+                        |p| Some(p[0]),
+                        &engine,
+                        &mut maps,
+                    );
+                } else {
+                    walk_direct(&ctx, &[1, 2, 3, 4], |_| false, &engine, &mut maps);
+                }
+                for map in maps {
+                    let mut sums = [0.0; 4];
+                    for &(col, row, value, weight) in map.values().flatten() {
+                        let index = (value - 1) as usize;
+                        assert_eq!((col, row), (10 + index % 2, 20 + index / 2));
+                        sums[index] += weight;
+                    }
+                    for sum in sums {
+                        assert!((sum - 1.0).abs() < 1e-12);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_is_point_in_bbox() {
@@ -815,7 +1022,9 @@ mod tests {
         };
         let ctx = WalkContext {
             chunk: &chunk,
+            grid: GridKind::H3,
             resolutions: &[],
+            resolution_u8s: &[],
             crs: &CrsTransformer::Wgs84Identity,
             gt: &gt,
             sampling,
@@ -860,7 +1069,9 @@ mod tests {
             for sampling in [SamplingPattern::center(), SamplingPattern::sixteen_point()] {
                 let ctx = WalkContext {
                     chunk: &chunk,
+                    grid: GridKind::H3,
                     resolutions: &[],
+                    resolution_u8s: &[],
                     crs: &CrsTransformer::WebMercatorFast,
                     gt: &gt,
                     sampling: &sampling,
@@ -917,7 +1128,9 @@ mod tests {
             for sampling in [SamplingPattern::center(), SamplingPattern::rgss()] {
                 let ctx = WalkContext {
                     chunk: &chunk,
+                    grid: GridKind::H3,
                     resolutions: &[],
+                    resolution_u8s: &[],
                     crs: &crs,
                     gt: &gt,
                     sampling: &sampling,

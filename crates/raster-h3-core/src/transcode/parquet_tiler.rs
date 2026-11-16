@@ -4,7 +4,6 @@
 //! multi-zoom PMTiles v3 vector hexagon archive with streaming latitude
 //! horizon eviction to maintain a bounded memory footprint.
 
-use h3o::{CellIndex, LatLng};
 use parquet::file::reader::{FileReader, RowGroupReader, SerializedFileReader};
 use serde_json::json;
 use std::borrow::Cow;
@@ -12,13 +11,14 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::encoding::parse_hex_u64;
+use crate::grid::GridKind;
 use crate::pmtiles::features::{
     build_pmtiles_metadata, PmtilesExportSummary, TilePyramidAccumulator,
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
 use crate::pmtiles::pyramid::{
-    cell_boundary_mercator, max_hex_radius_deg, zoom_bands_for_resolutions,
-    zoom_extent_for_resolutions, Wgs84BoundsAccumulator,
+    cell_boundary_mercator_for, max_cell_radius_deg, zoom_bands_for_grid_resolutions,
+    zoom_extent_for_grid_resolutions, Wgs84BoundsAccumulator,
 };
 use crate::pmtiles::writer::PmtilesWriter;
 
@@ -34,12 +34,22 @@ pub struct RowGroupExtent {
     pub max_zoom: u8,
     pub min_res: u8,
     /// Bit `r` set when the row group holds cells at H3 resolution `r`.
-    pub resolutions: u16,
+    pub resolutions: u32,
     pub bounds: Wgs84BoundsAccumulator,
 }
 
 /// Pre-scanned geographical and resolution extent of a Parquet row group
 pub fn scan_row_group_h3_extent(
+    rg: &dyn RowGroupReader,
+    h3_idx: usize,
+    rg_idx: usize,
+) -> Result<Option<RowGroupExtent>, Box<dyn std::error::Error + Send + Sync>> {
+    scan_row_group_grid_extent(GridKind::H3, rg, h3_idx, rg_idx)
+}
+
+/// Pre-scanned geographical and resolution extent of a Parquet row group for `grid`
+pub fn scan_row_group_grid_extent(
+    grid: GridKind,
     rg: &dyn RowGroupReader,
     h3_idx: usize,
     rg_idx: usize,
@@ -51,16 +61,15 @@ pub fn scan_row_group_h3_extent(
 
     let mut bounds = Wgs84BoundsAccumulator::new();
     let mut min_res = 255u8;
-    let mut resolutions = 0u16;
+    let mut resolutions = 0u32;
 
     let mut process_h3 = |h3: u64| {
-        if let Ok(cell) = CellIndex::try_from(h3) {
-            bounds.record_cell(cell);
-            let res: u8 = cell.resolution().into();
+        if let Some(res) = grid.resolution(h3) {
+            bounds.record_cell_for(grid, h3);
             if res < min_res {
                 min_res = res;
             }
-            resolutions |= 1 << res;
+            resolutions |= 1u32 << res;
         }
     };
 
@@ -140,7 +149,8 @@ pub fn scan_row_group_h3_extent(
         Ok(None)
     } else {
         let resolved = bounds.finish([-180.0, -85.0, 180.0, 85.0]);
-        let (min_zoom, max_zoom) = zoom_extent_for_resolutions(resolutions).unwrap_or((0, 0));
+        let (min_zoom, max_zoom) =
+            zoom_extent_for_grid_resolutions(grid, resolutions).unwrap_or((0, 0));
         Ok(Some(RowGroupExtent {
             rg_idx,
             min_lat: resolved[1],
@@ -194,17 +204,26 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
             .position(|field| {
                 matches!(
                     field.name().to_ascii_lowercase().as_str(),
-                    "h3_index" | "h3_hex" | "h3" | "cell" | "hex"
+                    "h3_index" | "h3_hex" | "h3" | "a5_index" | "a5_hex" | "a5" | "cell" | "hex"
                 )
             })
             .unwrap_or(0)
+    };
+    let grid = match schema
+        .columns()
+        .get(h3_idx)
+        .map(|f| f.name().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("a5_index" | "a5_hex" | "a5") => GridKind::A5,
+        _ => GridKind::H3,
     };
 
     // Pre-scan row group extents to compute global bounds and row group horizons
     let mut rg_extents = Vec::with_capacity(num_rgs);
     for rg_i in 0..num_rgs {
         if let Ok(rg) = reader.get_row_group(rg_i) {
-            if let Ok(Some(ext)) = scan_row_group_h3_extent(&*rg, h3_idx, rg_i) {
+            if let Ok(Some(ext)) = scan_row_group_grid_extent(grid, &*rg, h3_idx, rg_i) {
                 rg_extents.push(ext);
             }
         }
@@ -241,11 +260,12 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
     let global_bbox = global_bounds.finish([-180.0, -85.0, 180.0, 85.0]);
     // Zoom bands come from the resolutions present in the whole file, so every
     // zoom between the coarsest and finest band has tiles.
-    let all_resolutions = rg_extents.iter().fold(0u16, |m, e| m | e.resolutions);
-    let zoom_bands = zoom_bands_for_resolutions(all_resolutions);
-    let (min_zoom, max_zoom) = zoom_extent_for_resolutions(all_resolutions).unwrap_or((0, 0));
+    let all_resolutions = rg_extents.iter().fold(0u32, |m, e| m | e.resolutions);
+    let zoom_bands = zoom_bands_for_grid_resolutions(grid, all_resolutions);
+    let (min_zoom, max_zoom) =
+        zoom_extent_for_grid_resolutions(grid, all_resolutions).unwrap_or((0, 0));
     let min_res = rg_extents.iter().map(|e| e.min_res).min().unwrap_or(0);
-    let max_cell_radius = max_hex_radius_deg(min_res);
+    let max_cell_radius = max_cell_radius_deg(grid, min_res);
     let safety_margin = 2.5 * max_cell_radius;
 
     // Schedule row groups North-to-South (descending max_lat)
@@ -262,9 +282,11 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
     }
 
     // Build dynamic fields metadata for vector layer
+    let idx_col = grid.index_column_name();
+    let hex_col = grid.hex_column_name();
     let mut fields_map = serde_json::Map::new();
-    fields_map.insert("h3_index".to_string(), json!("Number"));
-    fields_map.insert("h3_hex".to_string(), json!("String"));
+    fields_map.insert(idx_col.to_string(), json!("Number"));
+    fields_map.insert(hex_col.to_string(), json!("String"));
     fields_map.insert("resolution".to_string(), json!("Number"));
     for (idx, col) in schema.columns().iter().enumerate() {
         if idx == h3_idx {
@@ -348,24 +370,23 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
                 }
             };
 
-            let cell = match CellIndex::try_from(h3_u64) {
-                Ok(c) => c,
-                Err(_) => {
-                    invalid_dropped += 1;
-                    continue;
-                }
+            let Some((c_lat, c_lon)) = grid.center_lat_lng(h3_u64) else {
+                invalid_dropped += 1;
+                continue;
+            };
+            let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, h3_u64) else {
+                invalid_dropped += 1;
+                continue;
+            };
+            let Some(res_u8) = grid.resolution(h3_u64) else {
+                invalid_dropped += 1;
+                continue;
             };
             valid_features += 1;
 
-            let center: LatLng = cell.into();
-            let c_lat = center.lat();
-            let c_lon = center.lng();
-
             let center_merc = MercatorPoint::from_lat_lng(c_lat, c_lon);
-            let (v_merc, v_count) = cell_boundary_mercator(cell);
             let vertices_merc = &v_merc[..v_count];
 
-            let res_u8: u8 = cell.resolution().into();
             // Present in the prescan, so the band exists.
             let Some(zooms) = zoom_bands[usize::from(res_u8)] else {
                 continue;
@@ -396,11 +417,11 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
                 }
             }
 
-            if !properties.iter().any(|(k, _)| k == "h3_index") {
-                properties.push((Cow::Borrowed("h3_index"), MvtValue::UInt(h3_u64)));
+            if !properties.iter().any(|(k, _)| k == idx_col) {
+                properties.push((Cow::Borrowed(idx_col), MvtValue::UInt(h3_u64)));
             }
-            if !properties.iter().any(|(k, _)| k == "h3_hex") {
-                properties.push((Cow::Borrowed("h3_hex"), MvtValue::from_hex_u64(h3_u64)));
+            if !properties.iter().any(|(k, _)| k == hex_col) {
+                properties.push((Cow::Borrowed(hex_col), MvtValue::from_hex_u64(h3_u64)));
             }
             if !properties.iter().any(|(k, _)| k == "resolution") {
                 properties.push((Cow::Borrowed("resolution"), MvtValue::UInt(res_u8 as u64)));
