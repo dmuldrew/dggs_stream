@@ -45,6 +45,9 @@ sedona-e2e = ["dep:sedona"]
 flate2 = "1"
 # SedonaDB's extension ABI, for the `extension_abi` round-trip tests (same revision as `sedona`).
 sedona-extension = { git = "https://github.com/apache/sedona-db", rev = "55da508d9f5297bc06fae0ff5662e99608d7e8b1" }
+# The CLI and the Python bindings' scanner, for the cross-engine consistency test.
+raster-h3-cli = { version = "0.7.0", path = "../raster-h3-cli" }
+raster-h3-python = { version = "0.7.0", path = "../raster-h3-python" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tempfile = "3.10"
 tiff = "0.11"

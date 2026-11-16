@@ -1203,3 +1203,113 @@ fn test_histogram_parameters() {
         }
     }
 }
+
+/// The table function and the CLI return the same cells and statistics for the same
+/// raster and options, on every grid and in every transfer mode. The CLI is compared
+/// with the Python bindings and DataFusion SQL, on a raster with the same pixels, by
+/// `cross_engine` in `raster-h3-sedona`.
+#[test]
+fn test_cross_engine_consistency_with_the_cli() {
+    use raster_h3_cli::{parse_stream_args, stream_raster_to_writer, StreamOutputFormat};
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    // Pixel values are the column index: a field linear in longitude.
+    let (_tmp, path) = TestGeoTiffBuilder::new(48, 48)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, _| c as f32);
+    let source = path.to_string_lossy().into_owned();
+    type Options = Vec<(&'static str, MockVal)>;
+    let text = |s: &str| MockVal::Str(s.into());
+    let cases: Vec<(&str, &str, &[&str], Options)> = vec![
+        ("centres", "auto", &[], vec![]),
+        (
+            "centres, emit, decimals",
+            "auto-1",
+            &["--nodata-policy", "emit", "--decimals", "2"],
+            vec![
+                ("nodata_policy", text("emit")),
+                ("decimals", MockVal::Int(2)),
+            ],
+        ),
+        (
+            "overlay, mass preserving",
+            "auto-1",
+            &["--transfer", "overlay", "--mass-preserve"],
+            vec![
+                ("transfer", text("overlay")),
+                ("mass_preserve", MockVal::Bool(true)),
+            ],
+        ),
+        (
+            "sample, bilinear",
+            "auto+1",
+            &["--transfer", "sample", "--sample-method", "bilinear"],
+            vec![
+                ("transfer", text("sample")),
+                ("sample_method", text("bilinear")),
+            ],
+        ),
+        (
+            "sample, bicubic",
+            "auto+1",
+            &["--transfer", "sample", "--sample-method", "bicubic"],
+            vec![
+                ("transfer", text("sample")),
+                ("sample_method", text("bicubic")),
+            ],
+        ),
+    ];
+    let close = |x: f64, y: f64| (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0);
+    for grid in GridKind::ALL {
+        for (name, resolution, cli_options, sql_options) in &cases {
+            let what = format!("{grid}, {name}");
+            let mut args: Vec<String> = vec![source.clone(), "--grid".into(), grid.to_string()];
+            args.extend(["-r".to_string(), resolution.to_string()]);
+            args.extend(cli_options.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out).unwrap();
+            let column = grid.index_column_name();
+            // `cell -> (count, mean, min)`.
+            let from_cli: std::collections::BTreeMap<u64, (f64, Option<f64>, Option<f64>)> =
+                String::from_utf8(out)
+                    .unwrap()
+                    .lines()
+                    .map(|line| {
+                        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+                        (
+                            row[column].as_u64().unwrap(),
+                            (
+                                row["count"].as_f64().unwrap(),
+                                row["mean"].as_f64(),
+                                row["min"].as_f64(),
+                            ),
+                        )
+                    })
+                    .collect();
+            assert!(!from_cli.is_empty(), "{what}");
+
+            let mut params = vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolutions", MockVal::Str(resolution.to_string())),
+            ];
+            params.extend(sql_options.iter().cloned());
+            let rows = scan_stats(&path, params).unwrap();
+            assert_eq!(rows.len(), from_cli.len(), "{what}: cells");
+            for (cell, mean, count, min) in rows {
+                let (cli_count, cli_mean, cli_min) = *from_cli
+                    .get(&cell)
+                    .unwrap_or_else(|| panic!("{what}: {cell:x}"));
+                assert!(close(count, cli_count), "{what}: count of {cell:x}");
+                for (ours, theirs) in [(mean, cli_mean), (min, cli_min)] {
+                    match (ours.filter(|v| v.is_finite()), theirs) {
+                        (Some(x), Some(y)) => assert!(close(x, y), "{what}: {cell:x}"),
+                        (None, None) => {}
+                        other => panic!("{what}: {cell:x}: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+}

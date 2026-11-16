@@ -1226,6 +1226,7 @@ dependencies = [
  "h3o",
  "libc",
  "parquet",
+ "raster-h3-cli",
  "raster-h3-core",
  "serde_json",
  "tempfile",

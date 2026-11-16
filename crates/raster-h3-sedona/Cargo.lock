@@ -3148,6 +3148,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raster-h3-cli"
+version = "0.7.0"
+dependencies = [
+ "flate2",
+ "h3o",
+ "raster-h3-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "raster-h3-core"
 version = "0.7.0"
 dependencies = [
@@ -3176,6 +3187,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raster-h3-python"
+version = "0.7.0"
+dependencies = [
+ "h3o",
+ "libc",
+ "raster-h3-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "raster-h3-sedona"
 version = "0.7.0"
 dependencies = [
@@ -3185,7 +3207,9 @@ dependencies = [
  "flate2",
  "futures",
  "h3o",
+ "raster-h3-cli",
  "raster-h3-core",
+ "raster-h3-python",
  "rayon",
  "sedona",
  "sedona-extension",
