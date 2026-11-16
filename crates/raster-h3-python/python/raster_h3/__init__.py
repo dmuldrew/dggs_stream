@@ -1323,7 +1323,12 @@ def scan_raster_h3(
             options = dict(extra)
             scan_resolutions: Union[int, str, Sequence[int]] = resolutions
             if predicate is not None:
-                pushed = _pushdown_bounds(predicate, categorical, format)
+                pushed = _pushdown_bounds(predicate, categorical, format, GRIDS[grid])
+                if options.get("decimals") is not None:
+                    # The engine's statistic bounds compare unrounded values, so a row
+                    # whose rounded statistic passes the predicate could be dropped.
+                    for key in ("min_mean", "max_mean", "min_majority_fraction"):
+                        pushed.pop(key, None)
                 if _native_has_scan_options():
                     if str(options.get("nodata_policy") or "").strip().lower() == "emit":
                         # `emit` scans cannot take a count bound (their all-NoData cells
@@ -1513,13 +1518,16 @@ def _comparisons(node: Any) -> Iterable[Tuple[str, str, float]]:
             return
 
 
-def _pushdown_bounds(predicate: Any, categorical: bool, format: str) -> Dict[str, Any]:
+def _pushdown_bounds(
+    predicate: Any, categorical: bool, format: str, max_resolution: int = 15
+) -> Dict[str, Any]:
     """Scan bounds implied by a Polars predicate: `min_count`, `min_mean`, `max_mean`,
     `min_majority_fraction` and the set of allowed `resolutions`.
 
     Every bound keeps a superset of the rows the predicate keeps (the engine's filters are
     inclusive: `count >= min_count`, ...), so applying the predicate afterwards gives the
-    exact result. An expression this cannot read pushes nothing.
+    exact result. An expression this cannot read pushes nothing. `max_resolution` is the
+    grid's finest resolution.
     """
     try:
         tree = json.loads(predicate.meta.serialize(format="json"))
@@ -1531,7 +1539,7 @@ def _pushdown_bounds(predicate: Any, categorical: bool, format: str) -> Dict[str
     resolutions: Optional[set] = None
     for column, op, value in _comparisons(tree):
         if column == "resolution":
-            allowed = {r for r in range(16) if _COMPARE[op](r, value)}
+            allowed = {r for r in range(max_resolution + 1) if _COMPARE[op](r, value)}
             resolutions = allowed if resolutions is None else resolutions & allowed
             continue
         if column == count_col:

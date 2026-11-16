@@ -94,6 +94,13 @@ fn emits_nodata(config: &MultiResolutionConfig) -> bool {
     config.nodata_policy == NodataPolicy::Emit
 }
 
+/// With `decimals` the table shows rounded statistics, while the scan's value thresholds
+/// compare unrounded ones: a row whose rounded mean passes a predicate could be dropped.
+/// Such predicates are left to DataFusion.
+fn rounds(config: &MultiResolutionConfig) -> bool {
+    config.decimals.is_some()
+}
+
 /// Compaction changes both row identity and aggregate values. Scan predicates must
 /// remain residual predicates over the completed table, not filter its children.
 fn compacts(config: &MultiResolutionConfig) -> bool {
@@ -780,6 +787,11 @@ impl RasterScan for ContinuousRasterTableProvider {
                 FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
                     FilterPushdownStatus::Unsupported
                 }
+                FilterPredicate::MinMean(_) | FilterPredicate::MaxMean(_)
+                    if rounds(&self.config) =>
+                {
+                    FilterPushdownStatus::Unsupported
+                }
                 FilterPredicate::MinCount(_)
                 | FilterPredicate::MinMean(_)
                 | FilterPredicate::MaxMean(_)
@@ -1082,6 +1094,9 @@ impl RasterScan for CategoricalRasterTableProvider {
             .iter()
             .map(|f| match f {
                 FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
+                    FilterPushdownStatus::Unsupported
+                }
+                FilterPredicate::MinMajorityFraction(_) if rounds(&self.config) => {
                     FilterPushdownStatus::Unsupported
                 }
                 FilterPredicate::MinCount(_)

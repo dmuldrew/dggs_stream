@@ -807,6 +807,35 @@ async fn nodata_policy_and_decimals_on_every_grid() {
             }
         }
 
+        // A predicate on a rounded mean keeps every row whose shown mean passes, also
+        // where the unrounded mean is just below the threshold (it is not pushed).
+        let rounded = OutputPolicy {
+            decimals: Some(1),
+            ..Default::default()
+        };
+        let shown: Vec<(f64, f64)> = want
+            .values()
+            .filter(|v| v.0 > 0.0)
+            .map(|&(count, sum)| (sum / count, (sum / count * 10.0).round() / 10.0))
+            .collect();
+        let threshold = shown
+            .iter()
+            .filter(|(raw, shown)| raw < shown)
+            .map(|&(_, shown)| shown)
+            .next()
+            .expect("a mean that rounds up");
+        let kept = query(
+            rounded,
+            format!("SELECT 1 FROM cells WHERE mean >= {threshold} AND mean <= {threshold}"),
+        )
+        .await;
+        let expected = shown.iter().filter(|s| s.1 == threshold).count();
+        assert_eq!(rows(&kept), expected, "{grid}");
+        let pushdown = table(rounded)
+            .supports_filters_pushdown(&[&col("mean").gt_eq(lit(threshold))])
+            .unwrap();
+        assert_eq!(pushdown, vec![TableProviderFilterPushDown::Unsupported]);
+
         // The table functions take the options as `key=value` strings.
         let ctx = context();
         let from = format!(

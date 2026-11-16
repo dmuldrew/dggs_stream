@@ -145,6 +145,32 @@ def test_multi_resolution_and_resolution_filter(raster_h3, gradient_tif, grid):
         assert raster_h3.cell_resolution(cell, grid) == res[0]
 
 
+@pytest.mark.parametrize("grid", ["a5", "s2", "healpix"])
+def test_resolution_filter_above_h3_range(raster_h3, gradient_tif, grid):
+    """Resolutions past H3's 15 survive a pushed-down `resolution` predicate."""
+    res = [RES[grid], 17]
+    lazy = raster_h3.scan_raster_h3(gradient_tif, res, grid=grid)
+    fine = lazy.filter(pl.col("resolution") == 17).collect()
+    assert fine.height > 0 and set(fine["resolution"]) == {17}
+    assert lazy.filter(pl.col("resolution") > 15).collect().height == fine.height
+    assert lazy.filter(pl.col("resolution") <= 15).collect().height > 0
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_mean_filter_sees_rounded_means(raster_h3, gradient_tif, grid):
+    """With `decimals`, a mean predicate compares the rounded means the rows show."""
+    lazy = raster_h3.scan_raster_h3(gradient_tif, RES[grid], grid=grid, decimals=1)
+    df = lazy.collect()
+    raw = raster_h3.scan_raster_h3(gradient_tif, RES[grid], grid=grid).collect()
+    joined = raw.join(df, on=f"{grid}_index", suffix="_shown")
+    # A mean that rounds up to the threshold must be kept.
+    candidates = joined.filter(pl.col("mean") < pl.col("mean_shown"))
+    assert candidates.height > 0
+    threshold = candidates["mean_shown"][0]
+    kept = lazy.filter(pl.col("mean") >= threshold).collect()
+    assert kept.height == df.filter(pl.col("mean") >= threshold).height
+
+
 @pytest.mark.parametrize("grid,finest", [("h3", 15), ("a5", 30), ("s2", 30), ("healpix", 29)])
 def test_resolution_range_follows_the_grid(raster_h3, gradient_tif, grid, finest):
     assert raster_h3.GRIDS[grid] == finest
