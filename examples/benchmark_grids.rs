@@ -34,6 +34,7 @@ fn area_matched_resolution(grid: GridKind, area_m2: f64) -> u8 {
 }
 
 /// Peak resident set size of this process in bytes.
+#[cfg(unix)]
 fn peak_rss_bytes() -> u64 {
     // SAFETY: `getrusage` fills the zeroed struct it is given and has no other effect.
     let usage = unsafe {
@@ -44,6 +45,12 @@ fn peak_rss_bytes() -> u64 {
     // Bytes on macOS, kilobytes elsewhere.
     let scale = if cfg!(target_os = "macos") { 1 } else { 1024 };
     usage.ru_maxrss as u64 * scale
+}
+
+/// Peak resident set size; not measured on this platform (reported as 0).
+#[cfg(not(unix))]
+fn peak_rss_bytes() -> u64 {
+    0
 }
 
 /// One scan in this process: prints `seconds cells pixels peak_rss_bytes`.
@@ -144,7 +151,11 @@ fn main() {
             .and_then(|i| args.get(i + 1))
     };
     let h3_resolutions: Vec<u8> = value("--h3-res")
-        .map(|v| v.split(',').map(|r| r.parse().expect("H3 resolution")).collect())
+        .map(|v| {
+            v.split(',')
+                .map(|r| r.parse().expect("H3 resolution"))
+                .collect()
+        })
         .unwrap_or_else(|| vec![8, 10]);
     let runs: usize = value("--runs").map_or(3, |v| v.parse().expect("runs"));
 
