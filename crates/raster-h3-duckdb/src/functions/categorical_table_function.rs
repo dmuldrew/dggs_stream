@@ -481,10 +481,18 @@ unsafe fn scan_long(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
                 }
                 2 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.category)),
                 3 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.count)),
-                4 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.fraction)),
+                4 => writer.fill_column(
+                    out_idx,
+                    num_taken,
+                    rows.iter().map(|r| global.policy.round(r.fraction)),
+                ),
                 5 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.total_count)),
                 6 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.resolution)),
-                7 | 8 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.entropy)),
+                7 | 8 => writer.fill_column(
+                    out_idx,
+                    num_taken,
+                    rows.iter().map(|r| global.policy.round(r.entropy)),
+                ),
                 9 | 10 => {
                     writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.distinct_classes))
                 }

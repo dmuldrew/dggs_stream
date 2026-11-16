@@ -202,10 +202,11 @@ struct CategoricalEngine<'a, T> {
     _marker: std::marker::PhantomData<T>,
 }
 
-/// The sample standing for a NoData pixel under `NodataPolicy::Emit`. No raster class
-/// reaches it: classes come from pixel values of at most 64 bits through `to_category`,
-/// and this is the one value a remap target or stored class is never expected to be.
-const NODATA_CLASS: i64 = i64::MIN;
+/// The sample standing for a NoData pixel under `NodataPolicy::Emit`, which reserves
+/// it: a remap may not target it (the configuration is refused), and a stored pixel of
+/// this value (only a 64-bit signed raster can hold one, where it is the conventional
+/// NoData) counts as NoData. Without `emit` it is an ordinary class.
+pub(crate) const NODATA_CLASS: i64 = i64::MIN;
 
 impl<'a, T: CategoricalUniformity> CategoricalEngine<'a, T> {
     fn new(native_nodata: Option<T>, remapper: Option<&'a CategoryRemapper>) -> Self {

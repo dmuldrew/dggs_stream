@@ -529,6 +529,17 @@ impl MultiResolutionConfig {
                         .into(),
                 ));
             }
+            if self
+                .remapper
+                .as_ref()
+                .is_some_and(|r| r.targets(super::categorical::NODATA_CLASS))
+            {
+                return Err(RasterH3Error::InvalidParameter(format!(
+                    "nodata_policy 'emit' reserves class {} for NoData pixels; remap to \
+                     another class",
+                    super::categorical::NODATA_CLASS
+                )));
+            }
         }
         let max_res = self.grid.max_resolution();
         let grid_label = self.grid.label();

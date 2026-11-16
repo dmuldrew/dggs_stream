@@ -120,6 +120,13 @@ impl CategoryRemapper {
         }
     }
 
+    /// Whether a rule or the unmapped action names `class` as its target.
+    pub fn targets(&self, class: i64) -> bool {
+        self.direct_map.values().any(|&t| t == Some(class))
+            || self.range_rules.iter().any(|&(_, _, t)| t == Some(class))
+            || self.unmapped_action == UnmappedAction::MapTo(class)
+    }
+
     /// Remap a category value to its target category or None (dropped/nodata).
     /// Executed on the inner pixel loop of worker threads.
     #[inline(always)]

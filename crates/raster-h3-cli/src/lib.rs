@@ -301,7 +301,27 @@ fn scan_identity(opts: &CliStreamOptions) -> serde_json::Value {
         "nodata": opts.nodata,
         "apply_scale_offset": opts.apply_scale_offset,
         "bbox": opts.bbox,
+        "nodata_policy": opts.output.nodata.as_str(),
+        "emit_nodata_value": opts.output.nodata_value,
+        "decimals": opts.output.decimals,
     })
+}
+
+/// The output policy a partition file's header records (the default for files written
+/// before it was recorded).
+fn header_output_policy(scan: &serde_json::Value) -> OutputPolicy {
+    OutputPolicy {
+        nodata: scan
+            .get("nodata_policy")
+            .and_then(|v| v.as_str())
+            .and_then(NodataPolicy::parse)
+            .unwrap_or_default(),
+        nodata_value: scan.get("emit_nodata_value").and_then(|v| v.as_f64()),
+        decimals: scan
+            .get("decimals")
+            .and_then(|v| v.as_u64())
+            .and_then(|d| u8::try_from(d).ok()),
+    }
 }
 
 fn write_partition_header<W: Write>(writer: &mut W, header: &PartitionHeader) -> Result<()> {
@@ -512,6 +532,7 @@ pub fn merge_partition_files<W: Write>(opts: &CliMergeOptions, writer: &mut W) -
             categorical,
             projection,
             batch_size: opts.batch_size,
+            output: header_output_policy(&headers[0].scan),
         }),
     };
     let rows = match opts.output_format {
@@ -629,6 +650,9 @@ struct MergeSpec {
     categorical: bool,
     projection: Vec<usize>,
     batch_size: usize,
+    /// NoData policy, NoData value and decimals of the scan, so merged boundary cells
+    /// are written as the interior ones were.
+    output: OutputPolicy,
 }
 
 /// Yields every file's final rows, streaming the files one batch at a time and keeping
@@ -680,8 +704,10 @@ impl PartitionMerge {
                 return Ok(None);
             };
             // The CLI's scans have no value filters or quantiles, so the default merge
-            // settings match them; the resolutions come from the partial rows.
-            let config = MultiResolutionConfig::new(vec![8]).with_grid(spec.grid);
+            // settings match them apart from the output policy; the resolutions come from
+            // the partial rows.
+            let mut config = MultiResolutionConfig::new(vec![8]).with_grid(spec.grid);
+            apply_output_policy(&mut config, &spec.output);
             let (_, merged) = merge_partial_batches(
                 &std::mem::take(&mut self.partials),
                 spec.categorical,
@@ -1690,6 +1716,79 @@ mod tests {
             let total: usize = batches.iter().map(|b| b.num_rows).sum();
             assert_eq!(total, whole.len(), "{grid}");
         }
+    }
+
+    #[test]
+    fn test_cli_partition_merge_keeps_the_output_policy() {
+        // Strips of 4 rows, so the plan has several partitions.
+        let tif = NamedTempFile::new().unwrap();
+        {
+            let mut encoder = TiffEncoder::new(File::create(tif.path()).unwrap()).unwrap();
+            let mut img = encoder.new_image::<Gray32Float>(32, 32).unwrap();
+            img.rows_per_strip(4).unwrap();
+            img.encoder()
+                .write_tag(tiff::tags::Tag::Unknown(33550), &[0.001f64, 0.001, 0.0][..])
+                .unwrap();
+            img.encoder()
+                .write_tag(
+                    tiff::tags::Tag::Unknown(33922),
+                    &[0.0f64, 0.0, 0.0, -122.45, 37.80, 0.0][..],
+                )
+                .unwrap();
+            img.write_data(&[1.23456f32; 32 * 32]).unwrap();
+        }
+        let input = tif.path().to_str().unwrap();
+        let plan = plan_raster_partitions(input, 1, Some("EPSG:4326"), None).unwrap();
+        assert!(plan.len() > 1);
+        let dir = tempfile::tempdir().unwrap();
+        let write_parts = |extra: &[&str], tag: &str| -> Vec<String> {
+            let mut parts = Vec::new();
+            for (i, partition) in plan.iter().enumerate() {
+                let spec = partition.to_json();
+                let mut args: Vec<String> = [
+                    input,
+                    "--crs",
+                    "EPSG:4326",
+                    "-r",
+                    "9",
+                    "--columns",
+                    "h3_index,resolution,mean",
+                    "--partition",
+                    &spec,
+                ]
+                .iter()
+                .chain(extra)
+                .map(|s| s.to_string())
+                .collect();
+                args.dedup();
+                let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Ipc).unwrap();
+                let path = dir.path().join(format!("{tag}{i}.rh3"));
+                let mut file = std::fs::File::create(&path).unwrap();
+                stream_raster_to_writer(&opts, &mut file).unwrap();
+                parts.push(path.to_string_lossy().to_string());
+            }
+            parts
+        };
+        let rounded = write_parts(&["--decimals", "2"], "rounded");
+        let (merge, _) = parse_merge_args(&rounded).unwrap();
+        let mut out = Vec::new();
+        merge_partition_files(&merge, &mut out).unwrap();
+        let (_, batches) = read_ipc_stream(&mut std::io::Cursor::new(out)).unwrap();
+        let mut means = Vec::new();
+        for batch in &batches {
+            let ColumnArray::Float64 { values, .. } = &batch.columns[2] else {
+                panic!("mean is Float64");
+            };
+            means.extend_from_slice(values);
+        }
+        assert!(means.len() > 1);
+        assert!(means.iter().all(|&m| m == 1.23), "{means:?}");
+
+        // Partitions of scans with other output settings do not merge together.
+        let plain = write_parts(&[], "plain");
+        let mixed = vec![rounded[0].clone(), plain[1].clone()];
+        let (merge, _) = parse_merge_args(&mixed).unwrap();
+        assert!(merge_partition_files(&merge, &mut Vec::new()).is_err());
     }
 
     #[test]

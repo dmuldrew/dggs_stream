@@ -1313,3 +1313,75 @@ fn test_cross_engine_consistency_with_the_cli() {
         }
     }
 }
+
+/// `(fraction, entropy)` of every row of a long-format categorical scan.
+fn long_fractions(path: &std::path::Path, decimals: Option<i64>) -> Vec<(f64, f64)> {
+    let mut named = HashMap::new();
+    named.insert("resolution".to_string(), MockVal::Int(7));
+    named.insert("format".to_string(), MockVal::Str("long".to_string()));
+    if let Some(d) = decimals {
+        named.insert("decimals".to_string(), MockVal::Int(d));
+    }
+    let mut bind = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: a live `MockBindContext`, which the mock C API treats as the bind info.
+    unsafe {
+        raster_h3_categorical_bind(&mut bind as *mut MockBindContext as duckdb_bind_info);
+    }
+    assert!(bind.error.is_none(), "{:?}", bind.error);
+    let columns = bind.result_columns.len();
+    let mut init = MockInitContext::new(bind.bind_data, (0..columns).collect());
+    let mut local = MockInitContext::new(bind.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying the bind data installed above.
+    unsafe {
+        raster_h3_categorical_init(&mut init as *mut MockInitContext as duckdb_init_info);
+        raster_h3_categorical_init_local(&mut local as *mut MockInitContext as duckdb_init_info);
+    }
+    let mut func = MockFuncContext {
+        bind_data: bind.bind_data,
+        init_data: init.init_data,
+        local_init_data: local.init_data,
+        error: None,
+    };
+    let mut out = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live function context and a chunk with one vector per column.
+        unsafe {
+            raster_h3_categorical_scan(
+                &mut func as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        for i in 0..chunk.size {
+            // SAFETY: columns 4 (fraction) and 8 (entropy) hold `chunk.size` doubles.
+            let f =
+                |col: usize| unsafe { *(chunk.vectors[col].data.as_ptr() as *const f64).add(i) };
+            out.push((f(4), f(8)));
+        }
+    }
+    out
+}
+
+#[test]
+fn long_categorical_rows_are_rounded() {
+    install_mock_api();
+    let (_tmp, path) = TestGeoTiffBuilder::new(48, 48)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_tempfile(|c, r| ((c * 7 + r * 3) % 3 + 1) as u8);
+    let plain = long_fractions(&path, None);
+    let rounded = long_fractions(&path, Some(2));
+    assert_eq!(plain.len(), rounded.len());
+    let round = |v: f64| (v * 100.0).round() / 100.0;
+    assert!(plain.iter().any(|&(f, e)| f != round(f) || e != round(e)));
+    for (p, r) in plain.iter().zip(&rounded) {
+        assert_eq!(*r, (round(p.0), round(p.1)));
+    }
+}

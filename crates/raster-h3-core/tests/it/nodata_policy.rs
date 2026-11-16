@@ -191,6 +191,23 @@ fn emit_refuses_options_that_need_samples() {
         .contains("decimals"));
     config.decimals = Some(15);
     assert!(config.validate().is_ok());
+
+    // The class standing for NoData pixels is reserved: no remap may produce it.
+    use raster_h3_core::aggregator::remap::CategoryRemapper;
+    for spec in [
+        "1: -9223372036854775808",
+        "1-3: -9223372036854775808",
+        "1: 2, *: -9223372036854775808",
+    ] {
+        config.remapper = Some(CategoryRemapper::parse(spec).unwrap().into_arc());
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("reserves class"), "{spec}: {err}");
+        config.nodata_policy = NodataPolicy::Omit;
+        assert!(config.validate().is_ok(), "{spec}");
+        config.nodata_policy = NodataPolicy::Emit;
+    }
+    config.remapper = Some(CategoryRemapper::parse("1: 2").unwrap().into_arc());
+    assert!(config.validate().is_ok());
 }
 
 mod batches {
