@@ -452,17 +452,39 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let mut slots: Vec<u64> = Vec::new();
         let mut polygon = Vec::with_capacity(10);
         let mut failures = 0;
-        for cell in cells {
-            let Some((lat, lng)) = self.grid.center_lat_lng(cell) else {
-                continue;
-            };
-            if !is_point_in_bbox(lng, lat, self.bbox) {
-                continue;
+        // Cells this large are assigned whole pixels by centre (see below).
+        let coarse =
+            self.grid.spec().max_cell_diameter_km(block.resolution) > COARSE_CELL_DIAMETER_KM;
+        // The cell holding each pixel centre of the block, built when first needed.
+        let mut pixel_cells: Option<Vec<Option<u64>>> = None;
+        let owners_of_block = || {
+            let mut owners = Vec::with_capacity(band_width * block.rows.len());
+            for r in rows.0..rows.1 {
+                for c in 0..width {
+                    let (x, y) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
+                    owners.push(tile.crs_transformer.transform_point(x, y).ok().and_then(
+                        |(lon, lat)| self.grid.cell_at(lat, wrap_lon_180(lon), block.resolution),
+                    ));
+                }
             }
+            owners
+        };
+        // Coarse cells are exactly those holding a pixel centre.
+        let cells = if coarse {
+            let owners = owners_of_block();
+            let mut cells: Vec<u64> = owners.iter().flatten().copied().collect();
+            cells.sort_unstable();
+            cells.dedup();
+            pixel_cells = Some(owners);
+            cells
+        } else {
+            cells
+        };
+        for cell in cells {
             let slot = slots.len() as u32;
             let before = overlaps.len();
             let end_row;
-            if cell_polygon_in_pixels(self.grid, cell, tile, &mut polygon) {
+            if !coarse && cell_polygon_in_pixels(self.grid, cell, tile, &mut polygon) {
                 end_row = polygon
                     .iter()
                     .fold(f64::NEG_INFINITY, |m, p| m.max(p.1))
@@ -473,23 +495,15 @@ impl<A: TransferAccumulator> TransferStream<A> {
                         overlaps.push((slot, pixel as u32, if weighted { area } else { 1.0 }));
                     }
                 });
-            } else if self.grid.interior_pole(cell).is_some() {
-                // A cell holding a pole has no polygon in a lon/lat raster: it takes the
-                // pixels whose centres it holds.
+            } else if coarse || self.grid.interior_pole(cell).is_some() {
+                // A cell holding a pole has no polygon in a lon/lat raster, and the edges
+                // of a very large cell are far from straight in pixel space: such a cell
+                // takes the pixels whose centres it holds.
                 end_row = i64::from(tile.reader.metadata.height);
-                for r in rows.0..rows.1 {
-                    for c in 0..width {
-                        let (x, y) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
-                        let inside = tile.crs_transformer.transform_point(x, y).ok().is_some_and(
-                            |(lon, lat)| {
-                                self.grid.cell_at(lat, wrap_lon_180(lon), block.resolution)
-                                    == Some(cell)
-                            },
-                        );
-                        if inside {
-                            let pixel = (r - rows.0) as usize * band_width + c as usize;
-                            overlaps.push((slot, pixel as u32, 1.0));
-                        }
+                let owners = pixel_cells.get_or_insert_with(&owners_of_block);
+                for (pixel, owner) in owners.iter().enumerate() {
+                    if *owner == Some(cell) {
+                        overlaps.push((slot, pixel as u32, 1.0));
                     }
                 }
             } else {
@@ -516,6 +530,21 @@ impl<A: TransferAccumulator> TransferStream<A> {
             pending.touched |= overlaps.len() > before;
         }
 
+        // A bbox selects pixels by their centres, as the centre kernel does; a cell
+        // larger than the box still takes the pixels inside it.
+        if self.bbox.is_some() {
+            let bbox = self.bbox;
+            let mut inside = vec![None::<bool>; band_width * block.rows.len()];
+            overlaps.retain(|&(_, pixel, _)| {
+                *inside[pixel as usize].get_or_insert_with(|| {
+                    let (c, r) = (pixel as usize % band_width, pixel as usize / band_width);
+                    let (x, y) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + rows.0 as f64 + 0.5);
+                    tile.crs_transformer
+                        .transform_point(x, y)
+                        .is_ok_and(|(lon, lat)| is_point_in_bbox(wrap_lon_180(lon), lat, bbox))
+                })
+            });
+        }
         // In a mosaic a pixel counts only in the tile that owns it.
         if several_tiles {
             overlaps.retain(|&(_, pixel, _)| {
@@ -732,6 +761,12 @@ fn block_bbox(
     ])
 }
 
+/// Above this cell diameter bound (`GridSpec::max_cell_diameter_km`, about four times a
+/// typical edge) `overlay` assigns whole pixels to cells by centre: the edges of such
+/// cells bend by more than a kilometre from the straight lines the polygon clipping
+/// assumes, and a pixel is negligible next to the cell.
+const COARSE_CELL_DIAMETER_KM: f64 = 500.0;
+
 /// The cells of `grid` at `resolution` selected by `mode` against the lon/lat box
 /// `[west, south, east, north]` (`west > east` across the antimeridian), sorted and
 /// without repeats.
@@ -758,6 +793,13 @@ fn cells_in_bbox(
             let e = span_west + (span_east - span_west) * f64::from(slice + 1) / f64::from(slices);
             if e - w < 1e-12 || north - south < 1e-12 {
                 continue;
+            }
+            // A cell that holds the whole rectangle has neither its centre nor an edge
+            // crossing in it, so the fill can miss it; the rectangle's corners are in it.
+            if mode == ContainmentMode::Covers {
+                for (lon, lat) in [(w, south), (e, south), (e, north), (w, north)] {
+                    cells.extend(grid.cell_at(lat, lon, resolution));
+                }
             }
             let wkb = rectangle_wkb(w, south, e, north);
             match grid_polygon_to_cells_wkb_into(grid, &wkb, i64::from(resolution), mode, &mut part)

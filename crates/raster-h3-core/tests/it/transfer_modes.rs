@@ -375,3 +375,67 @@ fn transfer_modes_refuse_options_of_the_centre_kernel() {
     filtered.min_mean = Some(0.5);
     assert!(!scan(&path, &filtered).is_empty());
 }
+
+/// Cells larger than the raster, or than the bbox, still take every pixel: a bbox
+/// selects pixels by centre (as the centre kernel does), not cells by centre.
+#[test]
+fn overlay_keeps_cells_larger_than_the_raster_or_the_bbox() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| (c + 2 * r) as f32);
+    let total: f64 = (0..H)
+        .flat_map(|r| (0..W).map(move |c| f64::from(c + 2 * r)))
+        .sum();
+    // Columns 10..30 and rows 8..20, with edges between pixel centres.
+    let bbox = [
+        ORIGIN.0 + PIXEL * 10.0,
+        ORIGIN.1 - PIXEL * 20.0,
+        ORIGIN.0 + PIXEL * 30.0,
+        ORIGIN.1 - PIXEL * 8.0,
+    ];
+    let boxed: f64 = (8..20)
+        .flat_map(|r| (10..30).map(move |c| f64::from(c + 2 * r)))
+        .sum();
+    let overlay = TransferMode::Overlay {
+        weighted: true,
+        mass_preserve: false,
+    };
+    let totals = |cells: &BTreeMap<u64, H3Accumulator>| {
+        cells
+            .values()
+            .fold((0.0, 0.0), |(n, s), a| (n + a.count, s + a.sum))
+    };
+    for grid in GridKind::ALL {
+        // Resolution 0 (one cell holds the raster), a coarse one, and one near the pixels.
+        for res in [0, matched(grid, -6), matched(grid, -2)] {
+            let whole = scan(&path, &config(grid, res, overlay));
+            let (count, sum) = totals(&whole);
+            assert!(
+                (count / f64::from(W * H) - 1.0).abs() < 1e-6,
+                "{grid} res {res}: {count}"
+            );
+            assert!((sum / total - 1.0).abs() < 1e-6, "{grid} res {res}: {sum}");
+
+            let mut config = config(grid, res, overlay);
+            config.bbox = Some(bbox);
+            let cut = scan(&path, &config);
+            let (count, sum) = totals(&cut);
+            assert!(
+                (count / 240.0 - 1.0).abs() < 1e-6,
+                "{grid} res {res} bbox: {count}"
+            );
+            assert!(
+                (sum / boxed - 1.0).abs() < 1e-6,
+                "{grid} res {res} bbox: {sum}"
+            );
+            // The centre kernel sees the same pixels.
+            config.transfer = TransferMode::AssignCenters;
+            assert_eq!(
+                totals(&scan(&path, &config)),
+                (240.0, boxed),
+                "{grid} res {res}"
+            );
+        }
+    }
+}
