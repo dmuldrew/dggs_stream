@@ -966,6 +966,18 @@ impl CategoricalRasterTableProvider {
         self.config.grid
     }
 
+    /// A structured per-cell histogram (see [`raster_h3_core::histogram`]): the wide
+    /// format's `histogram` column becomes a list of structs, and with bins the class
+    /// columns hold bin indices. Area weights switch a scan on the default transfer mode
+    /// to `overlay`; inconsistent requests are refused.
+    pub fn with_histogram(
+        mut self,
+        histogram: raster_h3_core::histogram::HistogramSpec,
+    ) -> raster_h3_core::error::Result<Self> {
+        self.config.set_histogram(histogram)?;
+        Ok(self)
+    }
+
     pub fn with_format(mut self, format: CategoricalFormat) -> Self {
         self.format = format;
         self
@@ -1039,7 +1051,8 @@ impl RasterScan for CategoricalRasterTableProvider {
             CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(self.config.grid),
             CategoricalFormat::Long => ColumnSchema::categorical_long_for(self.config.grid),
         }
-        .with_output_policy(&self.config.output_policy());
+        .with_output_policy(&self.config.output_policy())
+        .with_histogram(self.config.histogram.as_ref());
         match self.config.partition {
             Some(_) => Arc::new(with_partial_state_field(&base)),
             None => Arc::new(base),

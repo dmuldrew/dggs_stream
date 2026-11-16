@@ -631,3 +631,109 @@ def test_profile_raster(raster_h3, gradient_tif, grid, transfer):
         assert {"crs_transform", "grid_index"} <= split <= {"crs_transform", "grid_index", "accumulate"}
     with pytest.raises(TypeError, match="unknown scan option"):
         raster_h3.profile_raster(gradient_tif, 8, nope=1)
+
+
+def _bins(c, r):
+    """A continuous field with fractions: 0.1 .. 9.85 in steps of 0.25."""
+    return ((c * 7 + r * 13) % 40) * 0.25 + 0.1
+
+
+@pytest.fixture(scope="module")
+def bins_tif(tmp_path_factory):
+    from conftest import write_geotiff
+
+    path = tmp_path_factory.mktemp("rasters") / "bins.tif"
+    write_geotiff(path, 64, 48, _bins)
+    return path
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_binned_histogram(raster_h3, bins_tif, grid):
+    import polars as pl
+
+    edges = [0.0, 2.0, 4.0, 6.0, 8.0]
+    want = defaultdict(lambda: [0.0] * 4)
+    for cell, values in expected(raster_h3, grid, 64, 48, _bins).items():
+        for v in values:
+            if v <= 8.0:
+                want[cell][min(int(v // 2), 3)] += 1.0
+    lf = raster_h3.scan_raster_h3(bins_tif, RES[grid], grid=grid, histogram="4:0:8")
+    assert lf.collect_schema()["histogram"] == pl.List(
+        pl.Struct({"lower": pl.Float64, "upper": pl.Float64, "weight": pl.Float64})
+    )
+    df = lf.collect()
+    got = {}
+    for cell, hist in zip(df[f"{grid}_index"], df["histogram"]):
+        rows = hist.to_list()
+        assert [(e["lower"], e["upper"]) for e in rows] == list(zip(edges, edges[1:]))
+        got[cell] = [e["weight"] for e in rows]
+    assert got == dict(want)
+
+    # Explicit edges are the same bins; fractions sum to one, densities integrate to one.
+    same = raster_h3.scan_raster_h3(bins_tif, RES[grid], grid=grid, histogram=edges).collect()
+    assert same["histogram"].to_list() == df["histogram"].to_list()
+    for normalize, width in (("fraction", 1.0), ("density", 2.0)):
+        scaled = raster_h3.scan_raster_h3(
+            bins_tif, RES[grid], grid=grid, histogram=edges, histogram_normalize=normalize
+        ).collect()
+        totals = scaled.select(
+            pl.col("histogram").list.eval(pl.element().struct.field("weight")).list.sum()
+        )["histogram"]
+        assert all(abs(t * width - 1.0) < 1e-12 for t in totals)
+
+    # Area weights spread each pixel over the cells it overlaps; every bin keeps its pixels.
+    area = raster_h3.scan_raster_h3(
+        bins_tif, RES[grid], grid=grid, histogram="4:0:8", histogram_weight="area"
+    ).collect()
+    per_bin = [0.0] * 4
+    for hist in area["histogram"]:
+        for i, e in enumerate(hist.to_list()):
+            per_bin[i] += e["weight"]
+    counted = [sum(w[i] for w in want.values()) for i in range(4)]
+    assert all(abs(a / c - 1.0) < 1e-6 for a, c in zip(per_bin, counted))
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_value_histogram(raster_h3, classes_tif, grid):
+    import polars as pl
+    import pyarrow as pa
+
+    want = {
+        cell: sorted((v, float(values.count(v))) for v in set(values))
+        for cell, values in expected(raster_h3, grid, 48, 48, class_value).items()
+    }
+    df = raster_h3.scan_raster_h3(classes_tif, RES[grid], grid=grid, histogram="values").collect()
+    assert df.schema["histogram"] == pl.List(pl.Struct({"class": pl.Int64, "weight": pl.Float64}))
+    got = {
+        cell: [(e["class"], e["weight"]) for e in hist.to_list()]
+        for cell, hist in zip(df[f"{grid}_index"], df["histogram"])
+    }
+    assert got == want
+    # The Arrow stream carries the same list of structs, and JSON the same numbers.
+    stream = raster_h3.RasterH3ArrowStream(classes_tif, RES[grid], grid=grid, histogram="values")
+    table = pa.table(stream)
+    assert pa.types.is_list(table.schema.field("histogram").type)
+    assert pa.types.is_struct(table.schema.field("histogram").type.value_type)
+    assert sorted(map(str, table.column("histogram").to_pylist())) == sorted(
+        map(str, df["histogram"].to_list())
+    )
+    # Without a spec the column is still JSON text (class fractions).
+    plain = raster_h3.scan_raster_h3(classes_tif, RES[grid], grid=grid, categorical=True).collect()
+    assert plain.schema["histogram"] == pl.String
+    assert set(plain[f"{grid}_index"]) == set(want)
+    assert all(text.startswith("{") for text in plain["histogram"])
+
+
+def test_histogram_option_errors(raster_h3, classes_tif):
+    for options, message in [
+        (dict(histogram="0:0:1"), "bins"),
+        (dict(histogram=[2, 1]), "ascending"),
+        (dict(histogram="values", histogram_normalize="density"), "density"),
+        (dict(histogram_weight="mass"), "weight"),
+        (dict(histogram_weight="area", transfer="sample"), "overlay"),
+        (dict(histogram="2:0:9", remap={1: 2}), "remap"),
+    ]:
+        with pytest.raises(Exception, match=message):
+            raster_h3.scan_raster_h3(classes_tif, 9, **options).collect()
+    with pytest.raises(TypeError, match="numbers"):
+        raster_h3.scan_raster_h3(classes_tif, 9, histogram=["a", "b"])

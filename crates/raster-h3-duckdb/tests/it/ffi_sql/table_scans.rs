@@ -1037,3 +1037,169 @@ fn test_profile_named_parameter() {
     assert!(report.phase("kernel").unwrap().wall_ms > 0.0);
     assert!(report.phase("grid_index").is_some());
 }
+
+/// Wide categorical rows as `(cell, total_count, histogram text)`.
+fn scan_histograms(
+    path: &std::path::Path,
+    extra: Vec<(&str, MockVal)>,
+) -> Result<Vec<(u64, f64, String)>, String> {
+    let mut named = HashMap::new();
+    for (name, value) in extra {
+        named.insert(name.to_string(), value);
+    }
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: live `MockBindContext` for the installed mock C API.
+    unsafe {
+        raster_h3_categorical_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    if let Some(error) = bind_ctx.error.take() {
+        return Err(error);
+    }
+    let columns = bind_ctx.result_columns.len();
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, (0..columns).collect());
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying bind_data from `bind_ctx`.
+    unsafe {
+        raster_h3_categorical_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_categorical_init_local(
+            &mut local_ctx as *mut MockInitContext as duckdb_init_info,
+        );
+    }
+    if let Some(error) = init_ctx.error.take() {
+        return Err(error);
+    }
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut rows = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live `MockFuncContext` and `MockDataChunk`.
+        unsafe {
+            raster_h3_categorical_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func_ctx.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        for i in 0..chunk.size {
+            // SAFETY: column 6 (total_count) holds `chunk.size` doubles written by the scan.
+            let total = unsafe { *(chunk.vectors[6].data.as_ptr() as *const f64).add(i) };
+            let text = String::from_utf8(chunk.vectors[7].strings[i].clone()).unwrap();
+            rows.push((chunk.vectors[0].data[i], total, text));
+        }
+    }
+    Ok(rows)
+}
+
+/// `histogram :=` writes the `histogram` column as the spec asks, on every grid.
+#[test]
+fn test_histogram_parameters() {
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    let value = |c: u32, r: u32| ((c * 7 + r * 13) % 40) as f32 * 0.25 + 0.1;
+    let (_tmp, path) = TestGeoTiffBuilder::new(40, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(value);
+    // Pixels per bin of [0, 2, 4, 6, 8]; values above 8 are not counted.
+    let mut per_bin = [0.0f64; 4];
+    for r in 0..32 {
+        for c in 0..40 {
+            let v = value(c, r);
+            if v <= 8.0 {
+                per_bin[((v / 2.0) as usize).min(3)] += 1.0;
+            }
+        }
+    }
+    for grid in GridKind::ALL {
+        let scan = |extra: Vec<(&'static str, MockVal)>| {
+            let mut params = vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolutions", MockVal::Str("auto-1".into())),
+            ];
+            params.extend(extra);
+            scan_histograms(&path, params)
+        };
+        // `[[lower, upper, weight], ...]` per cell, summed per bin over the cells.
+        let bins = |rows: &[(u64, f64, String)]| -> [f64; 4] {
+            let mut sums = [0.0; 4];
+            for (_, total, text) in rows {
+                let entries: Vec<[f64; 3]> = serde_json::from_str(text).unwrap();
+                assert_eq!(entries.len(), 4);
+                for (i, [lower, upper, weight]) in entries.iter().enumerate() {
+                    assert_eq!((*lower, *upper), (2.0 * i as f64, 2.0 * i as f64 + 2.0));
+                    sums[i] += weight;
+                }
+                let weights: f64 = entries.iter().map(|e| e[2]).sum();
+                assert!((weights - total).abs() < 1e-9 || weights <= 1.0 + 1e-9);
+            }
+            sums
+        };
+        let counts = scan(vec![("histogram", MockVal::Str("4:0:8".into()))]).unwrap();
+        assert_eq!(bins(&counts), per_bin, "{grid}");
+        let edges = scan(vec![("histogram", MockVal::Str("0,2,4,6,8".into()))]).unwrap();
+        assert_eq!(edges, counts, "{grid}");
+        let area = scan(vec![
+            ("histogram", MockVal::Str("4:0:8".into())),
+            ("histogram_weight", MockVal::Str("area".into())),
+        ])
+        .unwrap();
+        for (got, want) in bins(&area).iter().zip(per_bin) {
+            assert!((got / want - 1.0).abs() < 1e-6, "{grid}: {got} vs {want}");
+        }
+        // One cell holding the whole raster (resolution 0) still takes every pixel.
+        let whole = scan_histograms(
+            &path,
+            vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolution", MockVal::Int(0)),
+                ("histogram", MockVal::Str("4:0:8".into())),
+                ("histogram_weight", MockVal::Str("area".into())),
+            ],
+        )
+        .unwrap();
+        for (got, want) in bins(&whole).iter().zip(per_bin) {
+            assert!(
+                (got / want - 1.0).abs() < 1e-6,
+                "{grid} res 0: {got} vs {want}"
+            );
+        }
+        let fractions = scan(vec![
+            ("histogram", MockVal::Str("4:0:8".into())),
+            ("histogram_normalize", MockVal::Str("fraction".into())),
+        ])
+        .unwrap();
+        let total: f64 = bins(&fractions).iter().sum();
+        assert!((total - fractions.len() as f64).abs() < 1e-9, "{grid}");
+
+        // By value: an object of class weights (counts, not the default fractions).
+        let values = scan(vec![("histogram", MockVal::Str("values".into()))]).unwrap();
+        for (_, total, text) in &values {
+            let classes: std::collections::BTreeMap<String, f64> =
+                serde_json::from_str(text).unwrap();
+            assert_eq!(classes.values().sum::<f64>(), *total, "{grid}");
+        }
+
+        for bad in [
+            vec![("histogram", MockVal::Str("0:0:1".into()))],
+            vec![("histogram_normalize", MockVal::Str("density".into()))],
+            vec![("histogram_weight", MockVal::Str("mass".into()))],
+            vec![
+                ("histogram_weight", MockVal::Str("area".into())),
+                ("transfer", MockVal::Str("sample".into())),
+            ],
+        ] {
+            assert!(scan(bad.clone()).is_err(), "{grid}: {bad:?}");
+        }
+    }
+}

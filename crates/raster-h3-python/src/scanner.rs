@@ -46,7 +46,9 @@ impl PyRasterScanner {
                 CategoricalFormat::Long => ColumnSchema::categorical_long_for(grid),
             }
         };
-        schema.with_output_policy(&self.config.output)
+        schema
+            .with_output_policy(&self.config.output)
+            .with_histogram(self.config.histogram.as_ref())
     }
 
     pub(crate) fn resolve_projection(&self) -> Result<Option<Vec<usize>>> {
@@ -136,6 +138,9 @@ impl PyRasterScanner {
         mr_cfg.spectral_formula = self.config.spectral_formula;
         mr_cfg.remapper = self.config.remapper.clone();
         mr_cfg.transfer = self.config.transfer;
+        if let Some(spec) = &self.config.histogram {
+            mr_cfg.set_histogram(spec.clone())?;
+        }
         mr_cfg.profile = self.config.profile.clone();
         self.config.apply_cell_options(&mut mr_cfg);
         mr_cfg.strict_transforms = self.config.strict_transforms;

@@ -211,6 +211,12 @@ pub(crate) struct PyScanOptions {
     pub(crate) sample_method: Option<String>,
     pub(crate) overlay_weighted: Option<bool>,
     pub(crate) mass_preserve: Option<bool>,
+    /// `values`, `N:min:max` or comma-separated bin edges.
+    histogram: Option<String>,
+    /// `count` (default) or `area`.
+    histogram_weight: Option<String>,
+    /// `none` (default), `fraction` or `density`.
+    histogram_normalize: Option<String>,
 }
 
 /// The output policy of an options object: `nodata_policy`, `emit_nodata_value` and
@@ -335,6 +341,25 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         opts.overlay_weighted,
         opts.mass_preserve,
     )?;
+    cfg.histogram = raster_h3_core::histogram::HistogramSpec::from_options(
+        opts.histogram.as_deref(),
+        opts.histogram_weight.as_deref(),
+        opts.histogram_normalize.as_deref(),
+    )?;
+    if let Some(spec) = &cfg.histogram {
+        // A histogram is a categorical aggregation; area weights run `overlay`.
+        if !cfg.categorical {
+            return Err(RasterH3Error::InvalidParameter(
+                "histogram options apply to categorical scans only".into(),
+            ));
+        }
+        if cfg.partition.is_some() {
+            return Err(RasterH3Error::InvalidParameter(
+                "histogram options cannot be combined with a partition".into(),
+            ));
+        }
+        cfg.transfer = spec.transfer_mode(cfg.transfer)?;
+    }
     cfg.output = output_policy_of(
         opts.nodata_policy.as_deref(),
         opts.emit_nodata_value,

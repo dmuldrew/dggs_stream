@@ -16,7 +16,12 @@
 //! `'transfer=sample'` (with `'sample_method=nearest|bilinear|bicubic|lanczos'`) gives
 //! each cell the value interpolated at its centre, and `'transfer=overlay'` (with
 //! `'overlay_weighted=false'` or `'mass_preserve=true'`) aggregates the pixels each cell
-//! overlaps by overlap area, instead of assigning each pixel to the cell at its centre. A string argument holding a partition spec (a JSON
+//! overlaps by overlap area, instead of assigning each pixel to the cell at its centre.
+//! The categorical functions also take `'histogram=values'`, `'histogram=N:min:max'` or
+//! `'histogram=e0,e1,...'` (with `'histogram_weight=count|area'` and
+//! `'histogram_normalize=none|fraction|density'`): their `histogram` column is then a
+//! list of structs (`class, weight` or `lower, upper, weight`) instead of JSON text.
+//! A string argument holding a partition spec (a JSON
 //! object from `h3_raster_plan_partitions`) scans only that partition, adding a
 //! `partial_state` column (see [`crate::merge`]). Use [`RasterH3Table`] with a configured
 //! provider for the other options (nodata, quantiles, categorical format, ...).
@@ -107,6 +112,9 @@ fn continuous_table(
     .map_err(to_df_error)?
     .with_output_policy(args.output)
     .with_transfer(args.transfer);
+    if args.histogram.is_some() {
+        return plan_err!("{name}: histogram options apply to the categorical function");
+    }
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
@@ -130,6 +138,9 @@ fn categorical_table(
     .with_transfer(args.transfer);
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
+    }
+    if let Some(histogram) = args.histogram {
+        provider = provider.with_histogram(histogram).map_err(to_df_error)?;
     }
     Ok(Arc::new(RasterH3Table::categorical(provider)))
 }
@@ -202,6 +213,7 @@ struct Args {
     partition: Option<ScanPartition>,
     output: OutputPolicy,
     transfer: TransferMode,
+    histogram: Option<raster_h3_core::histogram::HistogramSpec>,
 }
 
 fn string_literal(expr: &Expr) -> Option<&str> {
@@ -240,6 +252,16 @@ fn transfer_option(text: &str) -> Option<(&str, &str)> {
     ]
     .contains(&key)
     .then_some((key, value.trim()))
+}
+
+/// `Some((slot, value))` if `text` is `histogram=`, `histogram_weight=` or
+/// `histogram_normalize=` followed by a value; the slot is the option's position.
+fn histogram_option(text: &str) -> Option<(usize, &str)> {
+    let (key, value) = text.split_once('=')?;
+    let slot = ["histogram", "histogram_weight", "histogram_normalize"]
+        .iter()
+        .position(|k| *k == key.trim())?;
+    Some((slot, value.trim()))
 }
 
 fn set_output_option(name: &str, policy: &mut OutputPolicy, key: &str, value: &str) -> Result<()> {
@@ -287,7 +309,9 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         partition: None,
         output: OutputPolicy::default(),
         transfer: TransferMode::AssignCenters,
+        histogram: None,
     };
+    let mut histogram = [None::<String>, None, None];
     let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
     let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
     let mut grid = None;
@@ -321,6 +345,12 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                         _ => mass_preserve = Some(flag()?),
                     }
                 }
+                // `'histogram=8:0:100'`, `'histogram_weight=area'`,
+                // `'histogram_normalize=fraction'`.
+                Some(option) if histogram_option(option).is_some() => {
+                    let (slot, value) = histogram_option(option).unwrap_or_default();
+                    histogram[slot] = Some(value.to_string());
+                }
                 // `'nodata_policy=emit'`, `'emit_nodata_value=-1'`, `'decimals=2'`.
                 Some(option) if output_option(option).is_some() => {
                     let (key, value) = output_option(option).unwrap_or_default();
@@ -346,6 +376,12 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         sample_method.as_deref(),
         overlay_weighted,
         mass_preserve,
+    )
+    .map_err(to_df_error)?;
+    args.histogram = raster_h3_core::histogram::HistogramSpec::from_options(
+        histogram[0].as_deref(),
+        histogram[1].as_deref(),
+        histogram[2].as_deref(),
     )
     .map_err(to_df_error)?;
     if args.output.nodata_value.is_some() && !args.output.emits_nodata() {

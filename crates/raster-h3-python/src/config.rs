@@ -62,6 +62,8 @@ pub struct PyScanConfig {
     pub output: OutputPolicy,
     /// How pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
+    /// A structured per-cell histogram of a categorical scan.
+    pub histogram: Option<raster_h3_core::histogram::HistogramSpec>,
     /// Runtime telemetry of the scan, if asked for.
     pub profile: Option<Arc<raster_h3_core::run_profile::RunProfile>>,
 }
@@ -112,6 +114,7 @@ impl Default for PyScanConfig {
             max_mean: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            histogram: None,
             profile: None,
         }
     }

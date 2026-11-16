@@ -138,6 +138,34 @@ The subtype counters are disjoint subsets of `waves`. Serial execution and the
 helper-thread bridge avoid Rayon work-stealing deadlocks when callers hold locks.
 `stream-profile` additionally enables hot-path per-sample worker counters and timers.
 
+### Histograms
+
+`MultiResolutionConfig::set_histogram(HistogramSpec)` asks a categorical scan for a
+structured per-cell histogram. `HistogramBins::Values` keeps one class per pixel value;
+`HistogramBins::uniform(n, min, max)` and `HistogramBins::edges(...)` bin the calibrated
+values of a continuous raster, and the scan's classes are then bin indices (so
+`majority_class` is the fullest bin). A bin holds `lower <= v < upper`, the last one
+also its upper edge; values outside the edges are not counted. `HistogramWeight::Area`
+weights each pixel by the area of the cell it covers, in pixels, and runs the `overlay`
+transfer mode; `HistogramNormalize` scales a cell's weights to fractions or densities.
+
+```rust
+let mut config = MultiResolutionConfig::single(8);
+config.set_histogram(HistogramSpec {
+    bins: HistogramBins::uniform(10, 0.0, 100.0)?,
+    weight: HistogramWeight::Count,
+    normalize: HistogramNormalize::Fraction,
+})?;
+let reader = CategoricalBatchReader::open(&paths, &config, CategoricalFormat::Wide, None, 8192, None)?;
+// reader.schema(): `histogram` is `ArrowDataType::BinHistogram`,
+// List<Struct<lower, upper, weight>>, exported as such through the Arrow C interface.
+```
+
+`HistogramSpec::entries(&record.accumulator)` gives the same entries from a streamer's
+records. Occupied bins are counters in the horizon maps like classes are, so memory
+stays bounded by the cells open at once; a spec takes at most 4096 bins. Histograms are
+not combinable with partitions, or (when binned) with a category remap.
+
 ### Runtime profile
 
 `MultiResolutionConfig::profile` takes an `Arc<run_profile::RunProfile>`; it needs no

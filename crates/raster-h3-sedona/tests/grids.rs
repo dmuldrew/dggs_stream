@@ -1043,3 +1043,92 @@ async fn providers_report_a_run_profile() {
         assert!(report.to_json().contains("\"grid_index\""), "{grid}");
     }
 }
+
+/// `'histogram=...'` turns the categorical `histogram` column into a list of structs.
+#[tokio::test(flavor = "multi_thread")]
+async fn categorical_functions_return_structured_histograms() {
+    use datafusion::arrow::array::{ListArray, StructArray};
+    let tif = gradient_tif(SIZE, SIZE);
+    let src = source(&tif);
+    let ctx = context();
+    for grid in GridKind::ALL {
+        let res = res_of(grid);
+        // Pixel values are the column index, 0..48: four bins of twelve columns.
+        let mut want: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let lon = -122.45 + 0.001 * (f64::from(x) + 0.5);
+                let lat = 37.80 - 0.001 * (f64::from(y) + 0.5);
+                want.entry(grid.cell_at(lat, lon, res).unwrap())
+                    .or_insert_with(|| vec![0.0; 4])[(x / 12) as usize] += 1.0;
+            }
+        }
+        let function = format!("{grid}_raster_categorical_aggregate");
+        let column = grid.index_column_name();
+        let binned = collect(
+            &ctx,
+            &format!(
+                "SELECT {column}, histogram FROM {function}('{src}', {res}, 'histogram=4:0:48')"
+            ),
+        )
+        .await;
+        let mut got = BTreeMap::new();
+        for b in &binned {
+            let ids = b.column(0).as_primitive::<UInt64Type>();
+            let lists = b.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+            for i in 0..b.num_rows() {
+                let entries = lists.value(i);
+                let entries = entries.as_any().downcast_ref::<StructArray>().unwrap();
+                assert_eq!(entries.column_names(), ["lower", "upper", "weight"]);
+                let lower = entries.column(0).as_primitive::<Float64Type>();
+                assert_eq!(lower.values().to_vec(), [0.0, 12.0, 24.0, 36.0]);
+                let weights = entries.column(2).as_primitive::<Float64Type>();
+                got.insert(ids.value(i), weights.values().to_vec());
+            }
+        }
+        assert_eq!(got, want, "{grid}");
+
+        // Fractions of every cell sum to one, and area weights keep the raster's pixel
+        // count. The last entry field is the weight.
+        for (options, total) in [
+            (
+                "'histogram=values', 'histogram_normalize=fraction'",
+                want.len() as f64,
+            ),
+            (
+                "'histogram=4:0:48', 'histogram_weight=area'",
+                f64::from(SIZE * SIZE),
+            ),
+        ] {
+            let batches = collect(
+                &ctx,
+                &format!("SELECT histogram FROM {function}('{src}', {res}, {options})"),
+            )
+            .await;
+            let mut sum = 0.0;
+            for b in &batches {
+                let lists = b.column(0).as_any().downcast_ref::<ListArray>().unwrap();
+                let entries = lists
+                    .values()
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .unwrap();
+                let weights = entries.column(entries.num_columns() - 1);
+                sum += weights
+                    .as_primitive::<Float64Type>()
+                    .values()
+                    .iter()
+                    .sum::<f64>();
+            }
+            assert!((sum / total - 1.0).abs() < 1e-6, "{grid} {options}: {sum}");
+        }
+
+        for bad in [
+            format!("SELECT * FROM {function}('{src}', {res}, 'histogram=values', 'histogram_normalize=density')"),
+            format!("SELECT * FROM {function}('{src}', {res}, 'histogram=0:0:1')"),
+            format!("SELECT * FROM {grid}_raster_continuous_aggregate('{src}', {res}, 'histogram=values')"),
+        ] {
+            assert!(ctx.sql(&bad).await.is_err(), "{bad}");
+        }
+    }
+}

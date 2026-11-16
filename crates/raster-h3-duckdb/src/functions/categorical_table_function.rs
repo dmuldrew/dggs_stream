@@ -32,6 +32,9 @@ pub struct RasterH3CategoricalBindData {
     pub min_count: Option<f64>,
     pub min_majority_fraction: Option<f64>,
     pub remapper: Option<Arc<CategoryRemapper>>,
+    /// `histogram`, `histogram_weight` and `histogram_normalize`: what the `histogram`
+    /// column holds (see `raster_h3_core::histogram`).
+    pub histogram: Option<raster_h3_core::histogram::HistogramSpec>,
     /// `partition`: scan one partition of a plan (wide format), adding `partial_state`.
     pub partition: Option<ScanPartition>,
 }
@@ -49,6 +52,8 @@ pub struct RasterH3CategoricalGlobalData {
     pub partial_state_column: Option<usize>,
     /// NoData policy and value, and decimal rounding, of the values written.
     pub policy: OutputPolicy,
+    /// The histogram asked for; `None` writes the default JSON of class fractions.
+    pub histogram: Option<raster_h3_core::histogram::HistogramSpec>,
 }
 
 pub type RasterH3CategoricalLocalData = TableFunctionLocalData;
@@ -75,6 +80,11 @@ impl RasterTable for CategoricalTable {
             add_named_parameter(tf, "min_majority_fraction", DuckDBType::Double);
             add_named_parameter(tf, "geom", DuckDBType::Boolean);
             add_named_parameter(tf, "remap", DuckDBType::Varchar);
+            // The `histogram` column as a histogram spec asks: `values`, `N:min:max`
+            // or bin edges; `count` or `area` weights; `none`, `fraction` or `density`.
+            add_named_parameter(tf, "histogram", DuckDBType::Varchar);
+            add_named_parameter(tf, "histogram_weight", DuckDBType::Varchar);
+            add_named_parameter(tf, "histogram_normalize", DuckDBType::Varchar);
             add_named_parameter(tf, "partition", DuckDBType::Varchar);
         }
     }
@@ -102,6 +112,18 @@ impl RasterTable for CategoricalTable {
                 }
             },
             None => None,
+        };
+
+        let histogram = match raster_h3_core::histogram::HistogramSpec::from_options(
+            bind.get_named_string("histogram").as_deref(),
+            bind.get_named_string("histogram_weight").as_deref(),
+            bind.get_named_string("histogram_normalize").as_deref(),
+        ) {
+            Ok(histogram) => histogram,
+            Err(e) => {
+                bind.set_error(&e.to_string());
+                return None;
+            }
         };
 
         let partition = match parse_partition_param(bind) {
@@ -163,6 +185,7 @@ impl RasterTable for CategoricalTable {
             min_count,
             min_majority_fraction,
             remapper,
+            histogram,
             partition,
         })
     }
@@ -181,6 +204,11 @@ impl RasterTable for CategoricalTable {
         config.min_majority_fraction = bind.min_majority_fraction;
         config.remapper = bind.remapper.clone();
         config.partition = bind.partition.clone();
+        if let Some(histogram) = &bind.histogram {
+            config
+                .set_histogram(histogram.clone())
+                .map_err(|e| e.to_string())?;
+        }
         let policy = config.output_policy();
 
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)
@@ -190,6 +218,7 @@ impl RasterTable for CategoricalTable {
         let with_entropy = projected_columns.iter().any(|&c| c == 7 || c == 8);
         Ok(RasterH3CategoricalGlobalData {
             policy,
+            histogram: bind.histogram.clone(),
             grid: bind.common.grid,
             streamer: Mutex::new(streamer),
             record_queue: ConcurrentRecordQueue::new(),
@@ -284,8 +313,14 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
                 ),
                 7 => {
                     let mut hist_buf = String::with_capacity(256);
+                    let mut entries = Vec::new();
                     for (i, rec) in batch.iter().enumerate() {
-                        rec.accumulator.histogram_json_into(&mut hist_buf);
+                        match &global.histogram {
+                            Some(spec) => {
+                                spec.json_into(&rec.accumulator, &mut entries, &mut hist_buf)
+                            }
+                            None => rec.accumulator.histogram_json_into(&mut hist_buf),
+                        }
                         writer.set_string_bytes(out_idx, i, hist_buf.as_bytes());
                     }
                 }

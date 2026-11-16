@@ -33,6 +33,7 @@ fn cell_text(col: &ColumnArray, i: usize) -> String {
         ColumnArray::Boolean { values, .. } => values[i].to_string(),
         ColumnArray::Utf8 { values, .. } => values[i].clone(),
         ColumnArray::Binary { values, .. } => format!("{:?}", values[i]),
+        ColumnArray::Histogram(column) => column.row_json(i),
     }
 }
 

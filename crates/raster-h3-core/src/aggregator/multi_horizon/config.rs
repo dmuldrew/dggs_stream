@@ -451,6 +451,11 @@ impl MultiResolutionConfig {
                     "histogram weight 'area' needs transfer 'overlay'".into(),
                 ));
             }
+            if self.partition.is_some() {
+                return Err(RasterH3Error::InvalidParameter(
+                    "a histogram cannot be combined with a partition".into(),
+                ));
+            }
             if spec.is_binned() && self.remapper.is_some() {
                 return Err(RasterH3Error::InvalidParameter(
                     "a binned histogram cannot be combined with a category remap".into(),

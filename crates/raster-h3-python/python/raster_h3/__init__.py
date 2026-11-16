@@ -550,6 +550,9 @@ _SCAN_OPTIONS = (
     "sample_method",
     "overlay_weighted",
     "mass_preserve",
+    "histogram",
+    "histogram_weight",
+    "histogram_normalize",
 )
 
 _INT_OPTIONS = (
@@ -568,6 +571,8 @@ _STR_OPTIONS = (
     "nodata_policy",
     "transfer",
     "sample_method",
+    "histogram_weight",
+    "histogram_normalize",
 )
 _BOOL_OPTIONS = ("overlay_weighted", "mass_preserve")
 _FLOAT_OPTIONS = (
@@ -644,6 +649,22 @@ def _encode_remap(value: Union[str, Mapping[Any, Optional[int]]]) -> str:
     return ", ".join(entries)
 
 
+def _encode_histogram(value: Union[str, Sequence[float]]) -> str:
+    """`"values"`, `"10:0:100"` or bin edges (`[0, 1, 5]` or `"0,1,5"`) as the native
+    `histogram` string."""
+    if isinstance(value, str):
+        return value
+    edges = list(value)
+    if any(isinstance(e, bool) or not isinstance(e, (int, float)) for e in edges):
+        raise TypeError("histogram bin edges must be numbers")
+    return ",".join(repr(float(e)) for e in edges)
+
+
+def _wants_histogram(*options: Any) -> bool:
+    """Whether any histogram option is set: such a scan is categorical."""
+    return any(o is not None for o in options)
+
+
 def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
     """The options JSON of the `_v2` entry points, or None when every option is unset.
 
@@ -659,6 +680,8 @@ def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
             name = _normalize_grid(value)
             if name != "h3":
                 opts[key] = name
+        elif key == "histogram":
+            opts[key] = _encode_histogram(value)
         elif key in _INT_OPTIONS:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{key} must be an int, got {type(value).__name__}")
@@ -780,7 +803,12 @@ class RasterH3ArrowStream:
         sample_method: Optional[str] = None,
         overlay_weighted: Optional[bool] = None,
         mass_preserve: Optional[bool] = None,
+        histogram: Optional[Union[str, Sequence[float]]] = None,
+        histogram_weight: Optional[str] = None,
+        histogram_normalize: Optional[str] = None,
     ) -> None:
+        if _wants_histogram(histogram, histogram_weight, histogram_normalize):
+            categorical = True
         self.path = str(path)
         #: The grid scanned onto (`h3`, `a5`, `s2` or `healpix`); it names the cell
         #: columns `{grid}_index` and `{grid}_hex`.
@@ -1083,6 +1111,9 @@ def scan_raster_h3(
     sample_method: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
+    histogram: Optional[Union[str, Sequence[float]]] = None,
+    histogram_weight: Optional[str] = None,
+    histogram_normalize: Optional[str] = None,
 ) -> Any:
     """
     Scan a GeoTIFF / COG into the cells of a discrete global grid (H3 by default).
@@ -1149,6 +1180,18 @@ def scan_raster_h3(
       and `"sample"` with `sample_method="nearest"`. Not combinable with `sampling`,
       `spectral_formula` or partitions.
 
+    `histogram` asks for a structured per-cell histogram and makes the scan categorical:
+    the wide format's `histogram` column is then a list of structs instead of JSON text.
+    `"values"` gives a weight per pixel value (`{class, weight}`); `"N:min:max"` (N equal
+    bins) or a sequence of bin edges bins the calibrated values of a continuous raster
+    (`{lower, upper, weight}`, every bin listed; a bin holds `lower <= v < upper`, the
+    last also its upper edge; values outside the edges are not counted). The class
+    columns (`majority_class`, `category`) then hold bin indices. `histogram_weight` is
+    `"count"` (default) or `"area"` (the overlapped area in pixels; runs
+    `transfer="overlay"`), and `histogram_normalize` is `"none"`, `"fraction"` (weights
+    sum to 1) or `"density"` (fractions per unit of value; bins only). Not combinable
+    with `remap` when binned, or with partitions.
+
     A Polars `filter` on `count` (`total_count` for categorical scans), `mean`,
     `majority_fraction` or `resolution`, combined with `&`, is also pushed into the scan
     as these bounds; Polars still applies the full predicate afterwards. Before Polars
@@ -1157,6 +1200,9 @@ def scan_raster_h3(
     """
     grid = _normalize_grid(grid)
     index_col, hex_col = f"{grid}_index", f"{grid}_hex"
+    structured = _wants_histogram(histogram, histogram_weight, histogram_normalize)
+    if structured:
+        categorical = True
     _locals = locals()
     extra = {k: _locals[k] for k in _SCAN_OPTIONS}
     stream = RasterH3ArrowStream(
@@ -1221,6 +1267,18 @@ def scan_raster_h3(
                 "distinct_classes": pl.Int64,
                 "wkb": pl.Binary,
             }
+
+        if structured and "histogram" in pl_schema:
+            binned = histogram is not None and not (
+                isinstance(histogram, str)
+                and histogram.strip().lower() in ("values", "categorical")
+            )
+            entry = (
+                {"lower": pl.Float64, "upper": pl.Float64, "weight": pl.Float64}
+                if binned
+                else {"class": pl.Int64, "weight": pl.Float64}
+            )
+            pl_schema["histogram"] = pl.List(pl.Struct(entry))
 
         if not categorical and quantiles is not None:
             for name in _quantile_columns(quantiles):
@@ -1549,6 +1607,8 @@ def profile_raster(
     (`accumulate` is left out when it cannot be resolved).
     Telemetry is collected per chunk, never per pixel.
     """
+    if _wants_histogram(*(options.get(k) for k in _SCAN_OPTIONS if k.startswith("histogram"))):
+        categorical = True
     lib = _get_lib()
     if not hasattr(lib, "raster_h3_py_profile_scan_v2"):
         raise RuntimeError("profile_raster requires a newer raster_h3 native library")
