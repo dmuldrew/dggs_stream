@@ -78,7 +78,7 @@ pub enum PolygonFill {
     H3Tiler,
     /// The `a5` crate's `polygon_to_cells`.
     A5Native,
-    /// [`crate::polygon_fill`]'s descent through the grid's 4-ary hierarchy, testing
+    /// The polygon fill's descent through the grid's 4-ary hierarchy, testing
     /// cells against the polygon in lon/lat.
     NestedDescent,
 }

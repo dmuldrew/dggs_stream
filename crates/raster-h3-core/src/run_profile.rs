@@ -1,6 +1,6 @@
 //! Opt-in runtime telemetry of a scan: where the time went, by pipeline phase.
 //!
-//! A [`RunProfile`] is a set of atomic counters shared by everything that works on one
+//! A [`RunProfile`](crate::run_profile::RunProfile) is a set of atomic counters shared by everything that works on one
 //! scan (`MultiResolutionConfig::profile`). Stages add to it at chunk, window and batch
 //! boundaries only, never per pixel, and each stage checks for it once per chunk, so a
 //! scan without one pays a branch per chunk and nothing else. It is available in release

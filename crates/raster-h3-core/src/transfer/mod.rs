@@ -1,13 +1,13 @@
 //! How raster pixels are transferred onto grid cells, independent of the grid.
 //!
-//! - [`TransferMode::AssignCenters`] (the default): each pixel (or sub-pixel sample) is
+//! - [`TransferMode::AssignCenters`](crate::transfer::TransferMode::AssignCenters) (the default): each pixel (or sub-pixel sample) is
 //!   indexed to the cell holding its centre and aggregated there. This is the
 //!   single-pass horizon kernel in [`crate::aggregator::multi_horizon`]; nothing in
 //!   this module runs for it.
-//! - [`TransferMode::Sample`]: each cell whose centre lies on the raster takes the raster
+//! - [`TransferMode::Sample`](crate::transfer::TransferMode::Sample): each cell whose centre lies on the raster takes the raster
 //!   value interpolated at that centre. For cells finer than the pixels, where centre
 //!   assignment leaves most cells empty.
-//! - [`TransferMode::Overlay`]: each cell aggregates the pixels it overlaps, weighted by
+//! - [`TransferMode::Overlay`](crate::transfer::TransferMode::Overlay): each cell aggregates the pixels it overlaps, weighted by
 //!   the overlapped fraction of each pixel, computed exactly from the cell's polygon in
 //!   pixel space. With `mass_preserve`, every pixel's weights are normalised to sum to
 //!   one, so the cells' `sum` column adds up to the raster's total.
