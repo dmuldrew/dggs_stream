@@ -12,8 +12,8 @@ import os
 import subprocess
 import sys
 
-import pytest
 import dggs_stream_spark_demo as demo
+import pytest
 
 
 def run(sedona, paths, resolutions, target_chunks):
