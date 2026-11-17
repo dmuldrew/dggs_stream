@@ -1,0 +1,769 @@
+//! Tests multi-threaded raster aggregation and thread pool scaling.
+//!
+//! Validates deterministic aggregation results across varying Rayon worker thread counts,
+//! prefetched chunk reader ordering, and resilience under high thread-contention stress.
+
+use crate::helpers;
+use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::error::Result;
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use std::collections::HashMap;
+use tempfile::tempdir;
+use tiff::tags::CompressionMethod;
+
+fn drain_streamer_to_map(
+    reader: GeoTiffStreamReader,
+    config: &MultiResolutionConfig,
+) -> HashMap<u64, H3Accumulator> {
+    drain_with_peak(MultiScanHorizonStreamer::new(reader, config).unwrap()).0
+}
+
+/// Drain every record, failing on any repeated cell (merging would hide
+/// duplicate emission), and report peak simultaneous kernel jobs.
+fn drain_with_peak(mut streamer: MultiScanHorizonStreamer) -> (HashMap<u64, H3Accumulator>, usize) {
+    let mut map = HashMap::new();
+    while !streamer.is_finished() {
+        for record in streamer.fetch_next_batch(128).unwrap() {
+            let cell = record.h3_index;
+            assert!(
+                map.insert(cell, record.accumulator).is_none(),
+                "cell {cell:x} emitted twice"
+            );
+        }
+    }
+    (map, streamer.metrics().peak_concurrent_jobs)
+}
+
+#[test]
+fn test_threaded_aggregation_consistency() -> Result<()> {
+    // Create a small temporary GeoTIFF
+    let dir = tempdir()?;
+    let path = dir.path().join("thread_test.tif");
+    helpers::create_temp_geotiff(&path, 128, 128, CompressionMethod::None)?;
+
+    let config = MultiResolutionConfig::new(vec![8]);
+
+    // Parallel aggregation (default Rayon pool)
+    let reader_par = GeoTiffStreamReader::open(&path)?;
+    let map_parallel = drain_streamer_to_map(reader_par, &config);
+
+    // Sequential aggregation by forcing single thread
+    let reader_seq = GeoTiffStreamReader::open(&path)?;
+    let sequential_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let map_sequential = sequential_pool.install(|| drain_streamer_to_map(reader_seq, &config));
+
+    // Compare maps
+    assert_eq!(map_parallel.len(), map_sequential.len());
+    for (k, v) in map_parallel {
+        let v_seq = map_sequential
+            .get(&k)
+            .expect("key missing in sequential map");
+        assert!((v.mean() - v_seq.mean()).abs() < 1e-12);
+        assert!((v.count - v_seq.count).abs() < 1e-12);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_multithreaded_pool_scaling() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("thread_scale_test.tif");
+    helpers::create_temp_geotiff(&path, 64, 64, CompressionMethod::None)?;
+
+    let config = MultiResolutionConfig::new(vec![8]);
+
+    // Baseline with 1 thread
+    let reader_1 = GeoTiffStreamReader::open(&path)?;
+    let pool_1 = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let baseline_map = pool_1.install(|| drain_streamer_to_map(reader_1, &config));
+
+    // Compare against 2, 4, and 8 worker threads
+    for num_threads in [2, 4] {
+        let reader_n = GeoTiffStreamReader::open(&path)?;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+        let map = pool.install(|| drain_streamer_to_map(reader_n, &config));
+
+        assert_eq!(
+            map.len(),
+            baseline_map.len(),
+            "Thread count {} produced different map size",
+            num_threads
+        );
+        for (k, v) in &baseline_map {
+            let v_other = map
+                .get(k)
+                .unwrap_or_else(|| panic!("Key {} missing for thread count {}", k, num_threads));
+            assert!((v.mean() - v_other.mean()).abs() < 1e-12);
+            assert!((v.count - v_other.count).abs() < 1e-12);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_multithreaded_streamer_high_contention_stress() -> Result<()> {
+    use dggs_stream_core::aggregator::multi_horizon::{
+        MultiContinuousRecord, MultiResolutionConfig, MultiScanHorizonStreamer,
+    };
+    use rayon::prelude::*;
+    use std::sync::{Arc, Mutex};
+
+    let dir = tempdir()?;
+    let path = dir.path().join("contention_test.tif");
+    helpers::create_temp_geotiff(&path, 128, 128, CompressionMethod::None)?;
+
+    let reader = GeoTiffStreamReader::open(&path)?;
+    let config = MultiResolutionConfig::new(vec![7, 8]);
+    let streamer = MultiScanHorizonStreamer::new(reader, &config).unwrap();
+    let streamer_shared = Arc::new(Mutex::new(streamer));
+
+    // Spawn 16 worker threads concurrently draining the streamer in small batches
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(16)
+        .build()
+        .unwrap();
+    let total_records: Vec<Vec<MultiContinuousRecord>> = pool.install(|| {
+        (0..16)
+            .into_par_iter()
+            .map(|_| {
+                let mut local_batch = Vec::new();
+                loop {
+                    let batch = {
+                        let mut guard = match streamer_shared.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        guard.fetch_next_batch(128).unwrap()
+                    };
+                    if batch.is_empty() {
+                        break;
+                    }
+                    local_batch.extend(batch);
+                }
+                local_batch
+            })
+            .collect()
+    });
+
+    let all_records: Vec<MultiContinuousRecord> = total_records.into_iter().flatten().collect();
+    assert!(
+        !all_records.is_empty(),
+        "Should have received streamed multi-resolution records"
+    );
+
+    // Total pixel mass for 128x128 = 16,384 pixels across 2 resolutions (7 and 8) = 32,768 pixel units
+    let res7_pixels: f64 = all_records
+        .iter()
+        .filter(|r| r.resolution == 7)
+        .map(|r| r.accumulator.count)
+        .sum();
+    let res8_pixels: f64 = all_records
+        .iter()
+        .filter(|r| r.resolution == 8)
+        .map(|r| r.accumulator.count)
+        .sum();
+
+    assert_eq!(
+        res7_pixels, 16384.0,
+        "Resolution 7 must strictly conserve total pixel mass under high thread contention"
+    );
+    assert_eq!(
+        res8_pixels, 16384.0,
+        "Resolution 8 must strictly conserve total pixel mass under high thread contention"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_prefetched_chunk_reader_multithreaded_pipeline() -> Result<()> {
+    use dggs_stream_core::raster::prefetch::PrefetchedChunkReader;
+
+    let dir = tempdir()?;
+    let path = dir.path().join("prefetch_test.tif");
+    // Create a 256x256 GeoTIFF
+    helpers::create_temp_geotiff(&path, 256, 256, CompressionMethod::None)?;
+
+    let reader = GeoTiffStreamReader::open(&path)?;
+    let total_chunks = reader.chunk_layout.total_chunks;
+    let chunk_indices: Vec<u32> = (0..total_chunks).collect();
+
+    // Spawn prefetcher with 4 background worker threads and capacity 16
+    let prefetcher =
+        PrefetchedChunkReader::spawn_with_workers(reader.clone(), chunk_indices.clone(), 16, 4);
+
+    let mut drained_chunks = Vec::new();
+    let mut batch = Vec::new();
+    let mut buffers_to_recycle = Vec::new();
+
+    while prefetcher.drain_chunk_batch_into(&mut batch, 2, 4) > 0 {
+        for item in batch.drain(..) {
+            let (chunk_idx, bounds, data) = item.expect("Prefetch chunk decoding error");
+            // Check order
+            assert_eq!(
+                chunk_idx as usize,
+                drained_chunks.len(),
+                "Chunks must arrive in strict sequential order"
+            );
+            drained_chunks.push((chunk_idx, bounds));
+            buffers_to_recycle.push(data);
+        }
+        // Recycle buffers back to test pool reuse
+        if buffers_to_recycle.len() >= 4 {
+            prefetcher.recycle_batch(buffers_to_recycle.drain(..));
+        }
+    }
+    // Recycle any remaining
+    prefetcher.recycle_batch(buffers_to_recycle);
+
+    assert_eq!(drained_chunks.len(), total_chunks as usize);
+
+    // Verify bitwise and bounds parity against baseline reader
+    for (chunk_idx, bounds) in drained_chunks {
+        let (expected_bounds, _) = reader.read_chunk(chunk_idx)?;
+        assert_eq!(bounds, expected_bounds);
+    }
+
+    // Verify early drop cancellation does not deadlock or leak threads
+    let prefetcher_early = PrefetchedChunkReader::spawn_with_workers(
+        reader.clone(),
+        (0..total_chunks).collect(),
+        16,
+        4,
+    );
+    // Drain only 1 chunk then drop prefetcher immediately
+    let _ = prefetcher_early.next_chunk();
+    drop(prefetcher_early);
+
+    Ok(())
+}
+
+/// `ThreadPool::install` does not choose where kernel windows run: with the
+/// ambient default a Rayon caller runs them serially, while a dedicated
+/// `aggregation_workers` pool runs them concurrently from any caller.
+#[test]
+fn test_aggregation_workers_run_concurrently_inside_pool_install() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("agg_pool.tif");
+    helpers::create_temp_geotiff(&path, 512, 512, CompressionMethod::None)?;
+    let mut config = MultiResolutionConfig::new(vec![6, 8, 10]);
+    config.sampling = dggs_stream_core::aggregator::sampling::SamplingPattern::rgss();
+    config.aggregation_budget_bytes = 1 << 30;
+
+    let reference = drain_streamer_to_map(GeoTiffStreamReader::open(&path)?, &config);
+    let caller = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+
+    let (ambient, ambient_peak) = caller.install(|| {
+        drain_with_peak(
+            MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &config)
+                .unwrap(),
+        )
+    });
+    assert_eq!(ambient_peak, 1, "ambient policy is serial on Rayon workers");
+
+    config.aggregation_workers = Some(4);
+    let (dedicated, dedicated_peak) = caller.install(|| {
+        drain_with_peak(
+            MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &config)
+                .unwrap(),
+        )
+    });
+    assert!(
+        dedicated_peak > 1,
+        "dedicated pool never ran jobs concurrently"
+    );
+    assert!(dedicated_peak <= 4);
+
+    for map in [ambient, dedicated] {
+        assert_eq!(map.len(), reference.len());
+        for (k, v) in &reference {
+            let o = &map[k];
+            assert_eq!(v.count, o.count);
+            assert!((v.sum - o.sum).abs() <= 1e-9 * v.sum.abs().max(1.0));
+            assert_eq!((v.min, v.max), (o.min, o.max));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_wave_dispatch_counters_for_each_caller_and_pool() -> Result<()> {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    // Each dispatch covers one batch of chunks, so use several strips.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("strips.tif");
+    write_geotiff(
+        &path,
+        (64, 64),
+        Layout::Strips(4),
+        Crs::Geographic {
+            lon: -100.0,
+            lat: 40.0,
+            pixel_deg: 0.001,
+        },
+        "-9999",
+        |_, _| 1.0f32,
+    );
+    let caller = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+
+    for dedicated in [false, true] {
+        for nested in [false, true] {
+            let mut config = MultiResolutionConfig::single(8);
+            config.aggregation_budget_bytes = 256 * 1024;
+            config.aggregation_workers = dedicated.then_some(2);
+            let run = || -> Result<()> {
+                let mut streamer =
+                    MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path)?, &config)?;
+                let counters = |s: &MultiScanHorizonStreamer| {
+                    let m = s.metrics();
+                    (m.waves, m.bridged_waves, m.serial_waves, m.jobs)
+                };
+                assert_eq!(counters(&streamer), (0, 0, 0, 0));
+                let mut count = 0.0;
+                while !streamer.is_finished() {
+                    count += streamer
+                        .fetch_next_batch(128)?
+                        .iter()
+                        .map(|r| r.accumulator.count)
+                        .sum::<f64>();
+                }
+                assert_eq!(count, 64.0 * 64.0);
+                let (waves, bridged, serial, jobs) = counters(&streamer);
+                assert!(waves > 1, "fixture must exercise multiple dispatches");
+                assert!(jobs >= waves);
+                assert_eq!(bridged, if dedicated && nested { waves } else { 0 });
+                assert_eq!(serial, if !dedicated && nested { waves } else { 0 });
+
+                assert!(streamer.fetch_next_batch(128)?.is_empty());
+                assert_eq!(counters(&streamer), (waves, bridged, serial, jobs));
+                Ok(())
+            };
+            if nested {
+                caller.install(run)?;
+            } else {
+                run()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rayon workers that hold a shared streamer mutex while sibling tasks wait
+/// for it must not deadlock when the streamer uses a dedicated pool.
+#[test]
+fn test_dedicated_pool_under_shared_mutex_does_not_deadlock() -> Result<()> {
+    use rayon::prelude::*;
+    use std::sync::Mutex;
+
+    let dir = tempdir()?;
+    let path = dir.path().join("agg_mutex.tif");
+    helpers::create_temp_geotiff(&path, 256, 256, CompressionMethod::None)?;
+    let mut config = MultiResolutionConfig::new(vec![7, 8]);
+    config.aggregation_workers = Some(3);
+    let streamer = Mutex::new(MultiScanHorizonStreamer::new(
+        GeoTiffStreamReader::open(&path)?,
+        &config,
+    )?);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let counts: Vec<f64> = pool.install(|| {
+        (0..8)
+            .into_par_iter()
+            .map(|_| {
+                let mut total = 0.0;
+                loop {
+                    let batch = streamer.lock().unwrap().fetch_next_batch(64).unwrap();
+                    if batch.is_empty() {
+                        return total;
+                    }
+                    total += batch.iter().map(|r| r.accumulator.count).sum::<f64>();
+                }
+            })
+            .collect()
+    });
+    assert_eq!(counts.iter().sum::<f64>(), 2.0 * 256.0 * 256.0);
+    Ok(())
+}
+
+/// The workers precompute the eviction key of every cell the serial merge
+/// inserts, so the merge never computes one itself, and the output still
+/// matches a single-worker run cell for cell.
+#[test]
+fn test_workers_precompute_every_eviction_key() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("eviction_keys.tif");
+    helpers::create_temp_geotiff(&path, 512, 512, CompressionMethod::None)?;
+    let mut config = MultiResolutionConfig::new(vec![6, 8, 10]);
+    config.aggregation_workers = Some(1);
+    let mut streamer = MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path)?, &config)?;
+    let mut reference = HashMap::new();
+    while !streamer.is_finished() {
+        for record in streamer.fetch_next_batch(128)? {
+            reference.insert(record.h3_index, record.accumulator);
+        }
+    }
+    assert_eq!(streamer.metrics().eviction_key_fallbacks, 0);
+
+    config.aggregation_workers = Some(4);
+    let mut streamer = MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path)?, &config)?;
+    let mut map = HashMap::new();
+    while !streamer.is_finished() {
+        for record in streamer.fetch_next_batch(128)? {
+            assert!(map.insert(record.h3_index, record.accumulator).is_none());
+        }
+    }
+    assert_eq!(streamer.metrics().eviction_key_fallbacks, 0);
+    assert!(streamer.metrics().jobs > 1);
+    assert_eq!(map.len(), reference.len());
+    for (k, v) in &reference {
+        let o = &map[k];
+        assert_eq!(v.count, o.count);
+        assert!((v.sum - o.sum).abs() <= 1e-9 * v.sum.abs().max(1.0));
+        assert_eq!((v.min, v.max), (o.min, o.max));
+    }
+    Ok(())
+}
+
+/// Drain a stream, returning (cells, peak horizon-map bytes, spill runs, waves).
+fn drain_stats(
+    mut streamer: MultiScanHorizonStreamer,
+) -> (HashMap<u64, H3Accumulator>, usize, u64, u64) {
+    let mut map = HashMap::new();
+    while !streamer.is_finished() {
+        for record in streamer.fetch_next_batch(512).unwrap() {
+            assert!(map.insert(record.h3_index, record.accumulator).is_none());
+        }
+    }
+    (
+        map,
+        streamer.peak_active_bytes(),
+        streamer.spill_run_count(),
+        streamer.metrics().waves,
+    )
+}
+
+fn stream_paths(
+    paths: &[std::path::PathBuf],
+    config: &MultiResolutionConfig,
+) -> MultiScanHorizonStreamer {
+    use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
+    let mosaic = MosaicReader::open(paths, None, None, OverlapRule::Cutline).unwrap();
+    MultiScanHorizonStreamer::new_mosaic(std::sync::Arc::new(mosaic), config).unwrap()
+}
+
+/// Horizon maps hold a whole batch of cells, so a batch must not grow by
+/// whole chunks with the worker count: with strips larger than a batch's
+/// pixel target, 1 and 4 workers hold the same cells and neither spills.
+#[test]
+fn test_batch_cells_do_not_grow_with_workers() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("strips.tif");
+    let crs = Crs::Geographic {
+        lon: -100.0,
+        lat: 40.0,
+        pixel_deg: 0.0005,
+    };
+    // 64 strips of 16 x 256 = 4096 pixels.
+    write_geotiff(
+        &path,
+        (256, 1024),
+        Layout::Strips(16),
+        crs,
+        "-9999",
+        |c, r| ((c * 31 + r * 17) % 97) as f32,
+    );
+    let mut config = MultiResolutionConfig::new(vec![7, 9, 11]);
+    // RGSS over three resolutions makes the per-pixel worker allowance large,
+    // so windows are small and one strip already exceeds a batch's pixel target.
+    config.sampling = dggs_stream_core::aggregator::sampling::SamplingPattern::rgss();
+    let paths = [path];
+
+    config.aggregation_workers = Some(1);
+    let (one, peak_one, spills_one, _) = drain_stats(stream_paths(&paths, &config));
+    config.aggregation_workers = Some(4);
+    let (four, peak_four, spills_four, _) = drain_stats(stream_paths(&paths, &config));
+
+    assert_eq!(
+        (spills_one, spills_four),
+        (0, 0),
+        "no spill under the default budget"
+    );
+    assert!(
+        peak_four * 2 <= peak_one * 3,
+        "peak horizon bytes grew with workers: {peak_one} at 1, {peak_four} at 4"
+    );
+    assert_eq!(one.len(), four.len());
+    for (k, v) in &one {
+        let o = &four[k];
+        assert_eq!((v.count, v.min, v.max), (o.count, o.min, o.max));
+    }
+}
+
+/// Batch length follows the sizes of the chunks being drained, so a large
+/// chunk elsewhere in a mosaic does not shrink batches of narrow strips. A
+/// batch takes whichever chunks are already decoded, so the exact wave count
+/// depends on timing; sizing batches by the mosaic's largest chunk instead
+/// ran about 4x the waves of the two files streamed separately.
+#[test]
+fn test_mixed_mosaic_batches_follow_their_own_chunks() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    let dir = tempdir().unwrap();
+    let pixel_deg = 0.0005;
+    let value = |c: u32, r: u32| ((c * 7 + r * 3) % 50) as f32;
+    // A: one 256 x 256 strip; B: 512 one-row strips directly south of it.
+    let a = dir.path().join("a.tif");
+    write_geotiff(
+        &a,
+        (256, 256),
+        Layout::Strips(256),
+        Crs::Geographic {
+            lon: -100.0,
+            lat: 40.0,
+            pixel_deg,
+        },
+        "-9999",
+        value,
+    );
+    let b = dir.path().join("b.tif");
+    write_geotiff(
+        &b,
+        (256, 512),
+        Layout::Strips(1),
+        Crs::Geographic {
+            lon: -100.0,
+            lat: 40.0 - 256.0 * pixel_deg,
+            pixel_deg,
+        },
+        "-9999",
+        value,
+    );
+    let mut config = MultiResolutionConfig::new(vec![9]);
+    config.aggregation_workers = Some(4);
+
+    let (_, _, _, waves_a) = drain_stats(stream_paths(std::slice::from_ref(&a), &config));
+    let (_, _, _, waves_b) = drain_stats(stream_paths(std::slice::from_ref(&b), &config));
+    let (_, _, _, waves_mosaic) = drain_stats(stream_paths(&[a, b], &config));
+    assert!(
+        waves_mosaic <= 2 * (waves_a + waves_b),
+        "mosaic ran {waves_mosaic} waves, its files {waves_a} + {waves_b} separately"
+    );
+}
+
+/// Worker windows are sized from the kernel's per-sample worst case, so even
+/// when every sample lands in its own cell (coarse pixels, fine resolution,
+/// 5-point sampling) the worker maps stay within their share of the budget.
+#[test]
+fn test_worker_bytes_stay_within_budget_when_every_sample_is_a_new_cell() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::aggregator::sampling::SamplingPattern;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("coarse.tif");
+    // ~1 km pixels at r12 (~10 m cells): all five samples of a pixel are
+    // hundreds of metres apart, so each one adds a distinct cell.
+    write_geotiff(
+        &path,
+        (512, 256),
+        Layout::Strips(16),
+        Crs::Geographic {
+            lon: -100.0,
+            lat: 40.0,
+            pixel_deg: 0.01,
+        },
+        "-9999",
+        |c, r| ((c * 13 + r * 7) % 89) as f32,
+    );
+    for quantiles in [false, true] {
+        let mut config = MultiResolutionConfig::new(vec![12]);
+        config.sampling = SamplingPattern::five_point();
+        config.aggregation_budget_bytes = 8 * 1024 * 1024;
+        config.aggregation_workers = Some(4);
+        if quantiles {
+            config.quantiles = vec![
+                dggs_stream_core::aggregator::multi_horizon::QuantileTarget::Percentile(
+                    0.5,
+                    "p50".into(),
+                ),
+            ];
+        }
+        let worker_budget = config.aggregation_budget_bytes / 4;
+        let mut streamer = stream_paths(std::slice::from_ref(&path), &config);
+        let mut cells = 0usize;
+        while !streamer.is_finished() {
+            cells += streamer.fetch_next_batch(4096).unwrap().len();
+        }
+        assert_eq!(cells, 512 * 256 * 5, "every sample should be its own cell");
+        let peak = streamer.metrics().peak_worker_bytes;
+        assert!(
+            peak <= worker_budget,
+            "quantiles={quantiles}: worker maps peaked at {peak} B over the {worker_budget} B allowance"
+        );
+        assert!(
+            peak * 4 >= worker_budget,
+            "quantiles={quantiles}: worker maps peaked at only {peak} B of {worker_budget} B; \
+             windows are sized far below the allowance"
+        );
+    }
+}
+
+/// Continuous streams without quantile sketches own no per-cell heap state,
+/// so they get larger worker windows (fewer jobs) than the 1 KiB/sample
+/// allowance quantile sketches need, with identical results.
+#[test]
+fn test_inline_continuous_kernel_uses_larger_windows() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::aggregator::sampling::SamplingPattern;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rows.tif");
+    write_geotiff(
+        &path,
+        (4096, 64),
+        Layout::Strips(1),
+        Crs::Geographic {
+            lon: -100.0,
+            lat: 40.0,
+            pixel_deg: 0.0003,
+        },
+        "-9999",
+        |c, r| ((c / 5 + r * 3) % 41) as f32,
+    );
+    let run = |quantiles: bool| {
+        let mut config = MultiResolutionConfig::new(vec![9]);
+        config.sampling = SamplingPattern::five_point();
+        config.aggregation_workers = Some(4);
+        if quantiles {
+            config.quantiles = vec![
+                dggs_stream_core::aggregator::multi_horizon::QuantileTarget::Percentile(
+                    0.5,
+                    "p50".into(),
+                ),
+            ];
+        }
+        let mut streamer = stream_paths(std::slice::from_ref(&path), &config);
+        let mut map = HashMap::new();
+        while !streamer.is_finished() {
+            for record in streamer.fetch_next_batch(4096).unwrap() {
+                map.insert(record.h3_index, record.accumulator);
+            }
+        }
+        (map, streamer.metrics().jobs)
+    };
+    let (inline, inline_jobs) = run(false);
+    let (sketch, sketch_jobs) = run(true);
+    assert!(
+        inline_jobs * 3 <= sketch_jobs,
+        "expected far fewer jobs without quantiles: {inline_jobs} vs {sketch_jobs}"
+    );
+    assert_eq!(inline.len(), sketch.len());
+    for (k, v) in &inline {
+        let o = &sketch[k];
+        assert_eq!((v.min, v.max), (o.min, o.max));
+        assert!((v.count - o.count).abs() <= 1e-9 * v.count.abs());
+        assert!((v.sum - o.sum).abs() <= 1e-9 * v.sum.abs().max(1.0));
+    }
+}
+
+/// Pipelined batches merge windows in window order whatever order the
+/// workers finish them in, so a run on 8 workers matches the serial run of
+/// the same windows bit for bit: per-cell count, sum, min and max, and the
+/// order records come out. Values are non-integers sampled at five points,
+/// so any change in summation order would show in the sums.
+#[test]
+fn test_pipelined_batches_match_serial_bit_for_bit() {
+    assert_pipelined_matches_serial((2048, 48), helpers::Layout::Strips(1));
+}
+
+#[test]
+fn test_pipelined_tiles_match_serial_bit_for_bit() {
+    assert_pipelined_matches_serial((321, 257), helpers::Layout::Tiles(256, 256));
+}
+
+fn assert_pipelined_matches_serial(size: (u32, u32), layout: helpers::Layout) {
+    use crate::helpers::{write_geotiff, Crs};
+    use dggs_stream_core::aggregator::sampling::SamplingPattern;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rows.tif");
+    write_geotiff(
+        &path,
+        size,
+        layout,
+        Crs::Geographic {
+            lon: -100.0,
+            lat: 40.0,
+            pixel_deg: 0.0003,
+        },
+        "-9999",
+        |c, r| ((c * 7 + r * 13) % 101) as f32 * 0.37 + 0.011 * (c % 3) as f32,
+    );
+    let mut config = MultiResolutionConfig::new(vec![8, 10]);
+    config.sampling = SamplingPattern::five_point();
+    // Small windows: dozens of jobs in flight per row.
+    config.aggregation_budget_bytes = 4 * 1024 * 1024;
+    let run = || {
+        let mut streamer =
+            MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &config)
+                .unwrap();
+        let mut records = Vec::new();
+        while !streamer.is_finished() {
+            for r in streamer.fetch_next_batch(1000).unwrap() {
+                let a = &r.accumulator;
+                records.push((
+                    r.resolution,
+                    r.h3_index,
+                    a.count.to_bits(),
+                    a.sum.to_bits(),
+                    a.min.to_bits(),
+                    a.max.to_bits(),
+                ));
+            }
+        }
+        let m = streamer.metrics();
+        (
+            records,
+            m.jobs,
+            m.waves,
+            m.serial_waves,
+            m.peak_concurrent_jobs,
+        )
+    };
+    // Same worker count both ways, so the windows are the same.
+    let caller = rayon::ThreadPoolBuilder::new()
+        .num_threads(rayon::current_num_threads())
+        .build()
+        .unwrap();
+    let (pipelined, jobs, waves, serial_waves, peak) = run();
+    let (again, ..) = run();
+    let (serial, serial_jobs, _, serial_count, _) = caller.install(run);
+    assert_eq!(serial_waves, 0);
+    assert!(serial_count > 0, "the nested run must be serial");
+    assert!(
+        jobs >= 10 * waves,
+        "too few jobs per batch: {jobs} in {waves}"
+    );
+    if rayon::current_num_threads() > 1 {
+        assert!(peak > 1, "windows never ran concurrently");
+    }
+    assert_eq!(jobs, serial_jobs);
+    assert!(!pipelined.is_empty());
+    assert_eq!(pipelined, again, "pipelined runs differ");
+    assert_eq!(pipelined, serial, "pipelined and serial runs differ");
+}

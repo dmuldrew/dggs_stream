@@ -3,7 +3,7 @@
 SET allow_extensions_metadata_mismatch=true;
 
 -- 1. Load the compiled native DuckDB extension
-LOAD '/extensions/raster_h3.duckdb_extension';
+LOAD '/extensions/dggs_stream.duckdb_extension';
 
 -- 2. Verify Scalar Helper Functions
 SELECT 

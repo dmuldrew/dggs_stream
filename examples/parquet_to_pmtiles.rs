@@ -6,7 +6,7 @@
 //!     --output data/census.pmtiles \
 //!     --h3-col h3_index
 
-use raster_h3::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
 use std::env;
 use std::time::Instant;
 

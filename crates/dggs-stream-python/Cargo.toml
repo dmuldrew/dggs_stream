@@ -1,0 +1,29 @@
+[package]
+name = "dggs-stream-python"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Python, Polars (register_io_source + expressions), and Arrow PyCapsule (__arrow_c_stream__) bindings for dggs_stream"
+
+[lints]
+workspace = true
+
+[lib]
+name = "dggs_stream_python"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dggs-stream-core = { version = "0.7.0", path = "../dggs-stream-core" }
+h3o.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tiff.workspace = true

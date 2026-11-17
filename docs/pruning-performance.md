@@ -57,11 +57,11 @@ copy the baseline directories). Run on an otherwise idle machine:
 
 ```sh
 # Baseline implementation plus the benchmark fixture
-cargo bench -p raster-h3-core --bench streaming --locked -- pruning \
+cargo bench -p dggs-stream-core --bench streaming --locked -- pruning \
   --sample-size 10 --measurement-time 1 --warm-up-time 1 --save-baseline before-polar
 
 # Updated implementation, with the saved baseline available
-cargo bench -p raster-h3-core --bench streaming --locked -- pruning \
+cargo bench -p dggs-stream-core --bench streaming --locked -- pruning \
   --sample-size 10 --measurement-time 1 --warm-up-time 1 --baseline before-polar
 ```
 

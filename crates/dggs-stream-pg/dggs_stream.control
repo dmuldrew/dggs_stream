@@ -1,0 +1,6 @@
+# dggs_stream PostgreSQL extension
+comment = 'High-performance GeoTIFF/COG aggregation onto discrete global grids (H3, A5, S2, HEALPix) and PMTiles/GeoParquet export'
+default_version = '0.7.0'
+module_pathname = '$libdir/dggs_stream_pg'
+relocatable = true
+superuser = true

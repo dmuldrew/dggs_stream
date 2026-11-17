@@ -12,11 +12,11 @@ use tiff::encoder::colortype::Gray32Float;
 use tiff::encoder::TiffEncoder;
 use tiff::tags::Tag;
 
-use raster_h3::aggregator::{
+use dggs_stream::aggregator::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
     SamplingPattern,
 };
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 
 fn generate_benchmark_raster(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
     let file = File::create(path)?;

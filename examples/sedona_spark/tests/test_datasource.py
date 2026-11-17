@@ -1,4 +1,4 @@
-"""`raster_h3.spark`: the Spark 4 Python data source and its partial-cell merge.
+"""`dggs_stream.spark`: the Spark 4 Python data source and its partial-cell merge.
 
 Every result is compared with one unpartitioned `RasterH3ArrowStream` scan of the same
 raster and options: the same cells, each once, with equal values (statistics within 1e-9
@@ -12,9 +12,9 @@ import math
 import pyarrow as pa
 import pytest
 
-import raster_h3
+import dggs_stream
 
-spark_ds = pytest.importorskip("raster_h3.spark")
+spark_ds = pytest.importorskip("dggs_stream.spark")
 pytest.importorskip("pyspark.sql.datasource")
 
 
@@ -25,7 +25,7 @@ def registered(sedona):
 
 def assert_matches_single_scan(cells, path, **options):
     got = cells.toArrow()
-    want = pa.table(raster_h3.RasterH3ArrowStream(path, **options))
+    want = pa.table(dggs_stream.RasterH3ArrowStream(path, **options))
     assert sorted(got.column_names) == sorted(want.column_names)
 
     def rows(table):
@@ -51,15 +51,15 @@ def assert_matches_single_scan(cells, path, **options):
 
 def test_load_and_merge_match_a_single_scan(sedona, terrain):
     path = terrain()
-    df = sedona.read.format("raster_h3").option("resolutions", "8,9").option("target_chunks", 8).load(path)
+    df = sedona.read.format("dggs_stream").option("resolutions", "8,9").option("target_chunks", 8).load(path)
 
-    assert df.rdd.getNumPartitions() == len(raster_h3.plan_partitions(path, target_chunks=8)) > 4
+    assert df.rdd.getNumPartitions() == len(dggs_stream.plan_partitions(path, target_chunks=8)) > 4
     assert dict(df.dtypes)["h3_index"] == "bigint"
     assert df.where("partial_state IS NOT NULL").count() > 0
     cells = spark_ds.merge_partials(df)
     assert "partial_state" not in cells.columns
     # One scan of the raster feeds both the final rows and the merge.
-    assert cells._jdf.queryExecution().optimizedPlan().toString().count("raster_h3") == 1
+    assert cells._jdf.queryExecution().optimizedPlan().toString().count("dggs_stream") == 1
     assert assert_matches_single_scan(cells, path, resolutions=[8, 9]) > 0
 
 
@@ -87,7 +87,7 @@ def test_categorical_wide(sedona, terrain):
 
 def test_one_partition_has_no_partial_rows(sedona, terrain):
     path = terrain()
-    df = sedona.read.format("raster_h3").option("resolutions", "9").option("target_chunks", 10_000).load(path)
+    df = sedona.read.format("dggs_stream").option("resolutions", "9").option("target_chunks", 10_000).load(path)
     assert df.rdd.getNumPartitions() == 1
     assert df.where("partial_state IS NOT NULL").count() == 0
     assert_matches_single_scan(spark_ds.merge_partials(df), path, resolutions=[9])
@@ -97,7 +97,7 @@ def test_sql_and_sedona_geometry(sedona, terrain):
     """The data source works from Spark SQL, and its WKB is Sedona geometry."""
     path = terrain()
     sedona.sql(
-        f"CREATE OR REPLACE TEMPORARY VIEW raster_parts USING raster_h3 "
+        f"CREATE OR REPLACE TEMPORARY VIEW raster_parts USING dggs_stream "
         f"OPTIONS (path '{path}', resolutions '9', target_chunks '8')"
     )
     cells = spark_ds.merge_partials(sedona.table("raster_parts"))
@@ -118,7 +118,7 @@ def test_sql_and_sedona_geometry(sedona, terrain):
     "options, message",
     [
         ({}, "needs a path"),
-        ({"path": "x.tif", "colour": "red"}, "unknown raster_h3 option"),
+        ({"path": "x.tif", "colour": "red"}, "unknown dggs_stream option"),
         ({"path": "x.tif", "resolutions": "eight"}, "option resolutions"),
         ({"path": "x.tif", "categorical": "maybe"}, "option categorical"),
     ],
@@ -131,16 +131,16 @@ def test_bad_options_are_rejected(options, message):
 def test_scan_errors_reach_spark(sedona, terrain):
     path = terrain()
     with pytest.raises(Exception, match="(?i)resolution"):
-        sedona.read.format("raster_h3").option("resolutions", "16").load(path).count()
+        sedona.read.format("dggs_stream").option("resolutions", "16").load(path).count()
 
 
 def _parts_view(sedona, name, path, **options):
     opts = ", ".join(f"{k} '{v}'" for k, v in {"path": path, "target_chunks": 8, **options}.items())
-    sedona.sql(f"CREATE OR REPLACE TEMPORARY VIEW {name} USING raster_h3 OPTIONS ({opts})")
+    sedona.sql(f"CREATE OR REPLACE TEMPORARY VIEW {name} USING dggs_stream OPTIONS ({opts})")
 
 
 def test_sql_merge_table_function(sedona, terrain):
-    """`raster_h3_merge(TABLE(t))` merges a raster_h3 scan in SQL alone."""
+    """`raster_h3_merge(TABLE(t))` merges a dggs_stream scan in SQL alone."""
     path = terrain()
     _parts_view(sedona, "sql_parts", path, resolutions="8,9")
     assert sedona.table("sql_parts").where("partial_state IS NOT NULL").count() > 0

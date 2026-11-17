@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use libfuzzer_sys::fuzz_target;
-use raster_h3_core::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 
 fuzz_target!(|data: &[u8]| {
     let mut file = tempfile::NamedTempFile::new().unwrap();

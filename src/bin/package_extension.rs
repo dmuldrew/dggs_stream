@@ -446,7 +446,7 @@ fn print_help() {
             --print-platform         Print the platform tag for --duckdb-version on this host and exit\n  \
         -h, --help                   Print help information\n\n\
         Example:\n  \
-        package_extension -i target/release/libraster_h3.so -o target/release/raster_h3.duckdb_extension \\\n    \
+        package_extension -i target/release/libdggs_stream.so -o target/release/dggs_stream.duckdb_extension \\\n    \
             -k signing_key.pem -m dist/.well-known/duckdb-extension-repo.json",
         env!("CARGO_PKG_VERSION")
     );

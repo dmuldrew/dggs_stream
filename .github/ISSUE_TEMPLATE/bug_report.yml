@@ -8,7 +8,7 @@ body:
     id: environment
     attributes:
       label: Version and environment
-      description: raster_h3 version, engine/version, OS, architecture, and Rust version if building from source.
+      description: dggs_stream version, engine/version, OS, architecture, and Rust version if building from source.
     validations:
       required: true
   - type: textarea

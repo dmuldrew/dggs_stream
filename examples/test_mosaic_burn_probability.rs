@@ -8,9 +8,9 @@ use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
 
-use raster_h3::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
-use raster_h3::pmtiles::tiler::H3PmtilesTiler;
-use raster_h3::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
+use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!(
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Found {} GeoTIFF tile(s) in mosaic:", paths.len());
     for (i, p) in paths.iter().enumerate() {
-        if let Ok(reader) = raster_h3::raster::geotiff::GeoTiffStreamReader::open(p) {
+        if let Ok(reader) = dggs_stream::raster::geotiff::GeoTiffStreamReader::open(p) {
             let (c0, f0) = (
                 reader.metadata.geotransform.c0,
                 reader.metadata.geotransform.f0,

@@ -4,8 +4,8 @@
 //!
 //! Run with: `cargo run --example verify_pushdown`
 
-use raster_h3::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 use std::path::Path;
 use std::time::Instant;
 
@@ -14,7 +14,7 @@ fn main() {
         "========================================================================================="
     );
     println!(
-        "                 raster_h3 Spatial Bounding Box Filter Pushdown Verification             "
+        "                 dggs_stream Spatial Bounding Box Filter Pushdown Verification             "
     );
     println!(
         "========================================================================================="

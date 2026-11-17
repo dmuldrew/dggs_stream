@@ -1,0 +1,1648 @@
+//! Compressed-chunk codecs: SIMD-accelerated Deflate (`libdeflater`) and fast LZW (`weezl`).
+//!
+//! The Deflate tests verify exact bitwise parity with standard `flate2`/`tiff` decoders across tiled and striped
+//! layouts, horizontal and floating-point predictors, corrupted stream handling, and buffer auto-resizing.
+
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use std::fs::File;
+use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
+use std::path::Path;
+use tempfile::NamedTempFile;
+use tiff::decoder::{Decoder, DecodingResult};
+use tiff::encoder::{colortype, TiffEncoder};
+use tiff::tags::{CompressionMethod, Predictor, Tag};
+use weezl::encode::Encoder as LZWEncoder;
+use weezl::BitOrder;
+
+fn ifd_entry(bytes: &mut [u8], tag: u16) -> &mut [u8] {
+    assert_eq!(&bytes[..2], b"II");
+    let offset = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as usize;
+    bytes[offset + 2..offset + 2 + count * 12]
+        .as_chunks_mut::<12>()
+        .0
+        .iter_mut()
+        .find(|entry| u16::from_le_bytes(entry[..2].try_into().unwrap()) == tag)
+        .unwrap_or_else(|| panic!("tag {tag} not found in IFD"))
+}
+
+#[test]
+fn test_unrecognised_sample_format_is_rejected() {
+    let tmp = NamedTempFile::new().unwrap();
+    write_tiled_deflate_geotiff(tmp.path(), 32, 32, 16, 16, 1, &[7.0; 1024]);
+    GeoTiffStreamReader::open(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    // SampleFormat is a single inline SHORT; patch after encoding so the
+    // encoder cannot replace the invalid value with its own default.
+    let entry = ifd_entry(&mut bytes, 339);
+    assert_eq!(u16::from_le_bytes(entry[2..4].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(entry[4..8].try_into().unwrap()), 1);
+    entry[8..10].copy_from_slice(&99u16.to_le_bytes());
+    std::fs::write(tmp.path(), bytes).unwrap();
+
+    let err = match GeoTiffStreamReader::open(tmp.path()) {
+        Ok(_) => panic!("unknown SampleFormat must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("SampleFormat"), "{err}");
+}
+
+#[test]
+fn test_unrecognised_predictor_and_photometric_are_rejected() {
+    for tag in [317, 262] {
+        let tmp = NamedTempFile::new().unwrap();
+        write_tiled_deflate_geotiff(tmp.path(), 32, 32, 16, 16, 1, &[7.0; 1024]);
+        GeoTiffStreamReader::open(tmp.path()).unwrap();
+
+        let mut bytes = std::fs::read(tmp.path()).unwrap();
+        ifd_entry(&mut bytes, tag)[8..10].copy_from_slice(&99u16.to_le_bytes());
+        std::fs::write(tmp.path(), bytes).unwrap();
+        assert!(
+            GeoTiffStreamReader::open(tmp.path()).is_err(),
+            "tag {tag}=99 must not open"
+        );
+    }
+}
+
+#[test]
+fn test_short_chunk_arrays_are_rejected_at_open() {
+    let tmp = NamedTempFile::new().unwrap();
+    write_tiled_deflate_geotiff(tmp.path(), 32, 32, 16, 16, 1, &[7.0; 1024]);
+    assert_eq!(
+        GeoTiffStreamReader::open(tmp.path())
+            .unwrap()
+            .chunk_layout
+            .total_chunks,
+        4
+    );
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    for tag in [324, 325] {
+        // Leave both arrays out-of-line and equally sized, but too short for
+        // the four-tile grid. This must not become sparse nodata chunks.
+        let entry = ifd_entry(&mut bytes, tag);
+        assert_eq!(u32::from_le_bytes(entry[4..8].try_into().unwrap()), 4);
+        entry[4..8].copy_from_slice(&2u32.to_le_bytes());
+    }
+    std::fs::write(tmp.path(), bytes).unwrap();
+    assert!(GeoTiffStreamReader::open(tmp.path()).is_err());
+}
+
+/// Helper to write a custom tiled GeoTIFF with Deflate compression and optional predictor.
+fn write_tiled_deflate_geotiff(
+    path: &Path,
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    predictor: u16,
+    data: &[f32],
+) {
+    let mut file = BufWriter::new(File::create(path).unwrap());
+
+    // 1. TIFF Header (Little Endian, version 42, IFD offset placeholder)
+    file.write_all(b"II\x2a\x00\x08\x00\x00\x00").unwrap();
+
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+    let total_tiles = tiles_across * tiles_down;
+
+    // Write tile data starting at offset 4096.
+    let tile_data_start = 4096u64;
+    file.seek(SeekFrom::Start(tile_data_start)).unwrap();
+
+    let mut tile_offsets = Vec::with_capacity(total_tiles as usize);
+    let mut tile_byte_counts = Vec::with_capacity(total_tiles as usize);
+    let mut compressor = libdeflater::Compressor::new(libdeflater::CompressionLvl::default());
+
+    for tile_idx in 0..total_tiles {
+        let tc = tile_idx % tiles_across;
+        let tr = tile_idx / tiles_across;
+        let x0 = tc * tile_w;
+        let y0 = tr * tile_h;
+
+        // Build raw tile buffer of size tile_w * tile_h * 4 bytes
+        let mut raw_bytes = vec![0u8; (tile_w * tile_h * 4) as usize];
+        for r in 0..tile_h {
+            for c in 0..tile_w {
+                let img_x = x0 + c;
+                let img_y = y0 + r;
+                let val = if img_x < width && img_y < height {
+                    data[(img_y * width + img_x) as usize]
+                } else {
+                    0.0f32 // padding
+                };
+                let offset = ((r * tile_w + c) * 4) as usize;
+                raw_bytes[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
+            }
+        }
+
+        // Apply predictor if requested
+        if predictor == 3 {
+            let mut pred_bytes = vec![0u8; raw_bytes.len()];
+            let w = tile_w as usize;
+            for r in 0..tile_h as usize {
+                let row_in = &raw_bytes[r * w * 4..(r + 1) * w * 4];
+                let row_out = &mut pred_bytes[r * w * 4..(r + 1) * w * 4];
+                for i in 0..w {
+                    let be_bytes = f32::from_le_bytes([
+                        row_in[i * 4],
+                        row_in[i * 4 + 1],
+                        row_in[i * 4 + 2],
+                        row_in[i * 4 + 3],
+                    ])
+                    .to_bits()
+                    .to_be_bytes();
+                    row_out[i] = be_bytes[0];
+                    row_out[w + i] = be_bytes[1];
+                    row_out[2 * w + i] = be_bytes[2];
+                    row_out[3 * w + i] = be_bytes[3];
+                }
+                for i in (1..row_out.len()).rev() {
+                    row_out[i] = row_out[i].wrapping_sub(row_out[i - 1]);
+                }
+            }
+            raw_bytes = pred_bytes;
+        }
+
+        // Compress tile with zlib framing
+        let mut comp_buf = vec![0u8; raw_bytes.len() + 256];
+        let comp_size = compressor.zlib_compress(&raw_bytes, &mut comp_buf).unwrap();
+
+        let current_offset = file.stream_position().unwrap();
+        file.write_all(&comp_buf[..comp_size]).unwrap();
+
+        tile_offsets.push(current_offset);
+        tile_byte_counts.push(comp_size as u64);
+    }
+
+    // Now write the metadata arrays right after the header (offset 8)
+    file.seek(SeekFrom::Start(8)).unwrap();
+
+    let tiepoint_offset = file.stream_position().unwrap();
+    let tiepoint: [f64; 6] = [0.0, 0.0, 0.0, -122.45, 37.85, 0.0];
+    for v in tiepoint {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+
+    let scale_offset = file.stream_position().unwrap();
+    let scale: [f64; 3] = [0.001, 0.001, 0.0];
+    for v in scale {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+
+    let tile_offsets_pos = file.stream_position().unwrap();
+    for off in &tile_offsets {
+        file.write_all(&(*off as u32).to_le_bytes()).unwrap();
+    }
+
+    let tile_byte_counts_pos = file.stream_position().unwrap();
+    for cnt in &tile_byte_counts {
+        file.write_all(&(*cnt as u32).to_le_bytes()).unwrap();
+    }
+
+    // IFD Directory
+    let ifd_offset = file.stream_position().unwrap() as u32;
+
+    // Update header pointer at offset 4
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.write_all(&ifd_offset.to_le_bytes()).unwrap();
+
+    file.seek(SeekFrom::Start(ifd_offset as u64)).unwrap();
+
+    // Helper to write a 12-byte IFD tag entry
+    let write_tag = |f: &mut BufWriter<File>, tag: u16, typ: u16, count: u32, val_or_off: u32| {
+        f.write_all(&tag.to_le_bytes()).unwrap();
+        f.write_all(&typ.to_le_bytes()).unwrap();
+        f.write_all(&count.to_le_bytes()).unwrap();
+        f.write_all(&val_or_off.to_le_bytes()).unwrap();
+    };
+
+    let num_tags = 14u16;
+    file.write_all(&num_tags.to_le_bytes()).unwrap();
+
+    // Tags MUST be written in ascending tag order:
+    // 256: ImageWidth (LONG)
+    write_tag(&mut file, 256, 4, 1, width);
+    // 257: ImageLength (LONG)
+    write_tag(&mut file, 257, 4, 1, height);
+    // 258: BitsPerSample (SHORT = 32)
+    write_tag(&mut file, 258, 3, 1, 32);
+    // 259: Compression (SHORT = 8 Deflate)
+    write_tag(&mut file, 259, 3, 1, 8);
+    // 262: PhotometricInterpretation (SHORT = 1 BlackIsZero)
+    write_tag(&mut file, 262, 3, 1, 1);
+    // 277: SamplesPerPixel (SHORT = 1)
+    write_tag(&mut file, 277, 3, 1, 1);
+    // 317: Predictor (SHORT)
+    write_tag(&mut file, 317, 3, 1, predictor as u32);
+    // 322: TileWidth (LONG)
+    write_tag(&mut file, 322, 4, 1, tile_w);
+    // 323: TileLength (LONG)
+    write_tag(&mut file, 323, 4, 1, tile_h);
+    // 324: TileOffsets (LONG)
+    write_tag(&mut file, 324, 4, total_tiles, tile_offsets_pos as u32);
+    // 325: TileByteCounts (LONG)
+    write_tag(&mut file, 325, 4, total_tiles, tile_byte_counts_pos as u32);
+    // 339: SampleFormat (SHORT = 3 IEEEFP)
+    write_tag(&mut file, 339, 3, 1, 3);
+    // 33550: ModelPixelScaleTag (DOUBLE, count=3)
+    write_tag(&mut file, 33550, 12, 3, scale_offset as u32);
+    // 33922: ModelTiepointTag (DOUBLE, count=6)
+    write_tag(&mut file, 33922, 12, 6, tiepoint_offset as u32);
+
+    // Next IFD offset = 0
+    file.write_all(&0u32.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+}
+
+#[test]
+fn test_deflate_striped_u8_parity() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+    let width = 120u32;
+    let height = 80u32;
+    let mut ground_truth = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            ground_truth.push(((x * 7 + y * 13) % 256) as u8);
+        }
+    }
+
+    {
+        let file = File::create(path).unwrap();
+        let mut encoder = TiffEncoder::new(BufWriter::new(file))
+            .unwrap()
+            .with_compression(tiff::encoder::Compression::Deflate(Default::default()));
+        let mut img = encoder
+            .new_image::<colortype::Gray8>(width, height)
+            .unwrap();
+        img.rows_per_strip(16).unwrap();
+        let tiepoint = [0.0f64, 0.0, 0.0, -122.45, 37.85, 0.0];
+        let pixel_scale = [0.001f64, 0.001, 0.0];
+        img.encoder()
+            .write_tag(Tag::ModelTiepointTag, &tiepoint[..])
+            .unwrap();
+        img.encoder()
+            .write_tag(Tag::ModelPixelScaleTag, &pixel_scale[..])
+            .unwrap();
+        img.write_data(&ground_truth).unwrap();
+    }
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    assert!(reader.chunk_info.is_some());
+    let info = reader.chunk_info.as_ref().unwrap();
+    assert_eq!(info.compression, CompressionMethod::Deflate);
+
+    let mut decoder = reader.open_decoder().unwrap();
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let (bounds, decoded) = decoder.read_chunk(chunk_idx).unwrap();
+        if let DecodingResult::U8(pixels) = decoded {
+            assert_eq!(pixels.len(), (bounds.width * bounds.height) as usize);
+            for r in 0..bounds.height {
+                for c in 0..bounds.width {
+                    let gx = bounds.col_offset + c;
+                    let gy = bounds.row_offset + r;
+                    let expected = ground_truth[(gy * width + gx) as usize];
+                    let actual = pixels[(r * bounds.width + c) as usize];
+                    assert_eq!(actual, expected, "Mismatch at ({}, {})", gx, gy);
+                }
+            }
+        } else {
+            panic!("Expected U8 result");
+        }
+    }
+}
+
+#[test]
+fn test_deflate_striped_f32_parity_and_streaming() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+    let width = 64u32;
+    let height = 48u32;
+    let mut ground_truth = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            ground_truth.push((x as f32) * 1.5 + (y as f32) * 2.5);
+        }
+    }
+
+    {
+        let file = File::create(path).unwrap();
+        let mut encoder = TiffEncoder::new(BufWriter::new(file))
+            .unwrap()
+            .with_compression(tiff::encoder::Compression::Deflate(Default::default()));
+        let mut img = encoder
+            .new_image::<colortype::Gray32Float>(width, height)
+            .unwrap();
+        img.rows_per_strip(8).unwrap();
+        let tiepoint = [0.0f64, 0.0, 0.0, -122.45, 37.85, 0.0];
+        let pixel_scale = [0.001f64, 0.001, 0.0];
+        img.encoder()
+            .write_tag(Tag::ModelTiepointTag, &tiepoint[..])
+            .unwrap();
+        img.encoder()
+            .write_tag(Tag::ModelPixelScaleTag, &pixel_scale[..])
+            .unwrap();
+        img.write_data(&ground_truth).unwrap();
+    }
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+
+    let mut all_pixels = vec![0.0f32; (width * height) as usize];
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let (bounds, decoded) = decoder.read_chunk(chunk_idx).unwrap();
+        if let DecodingResult::F32(pixels) = decoded {
+            for r in 0..bounds.height {
+                for c in 0..bounds.width {
+                    let gx = bounds.col_offset + c;
+                    let gy = bounds.row_offset + r;
+                    all_pixels[(gy * width + gx) as usize] =
+                        pixels[(r * bounds.width + c) as usize];
+                }
+            }
+        } else {
+            panic!("Expected F32 result");
+        }
+    }
+
+    for i in 0..ground_truth.len() {
+        assert_eq!(all_pixels[i], ground_truth[i]);
+    }
+}
+
+#[test]
+fn test_deflate_tiled_f32_with_padding_parity() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    // 100x70 image with 32x32 tiles (leaves 4 tiles across with right padding, 3 tiles down with bottom padding)
+    let width = 100u32;
+    let height = 70u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+
+    let mut ground_truth = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            ground_truth.push(10.0 + (x as f32) * 0.1 + (y as f32) * 0.2);
+        }
+    }
+
+    // Write tiled Deflate TIFF with Predictor::None
+    write_tiled_deflate_geotiff(path, width, height, tile_w, tile_h, 1, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    assert!(reader.chunk_info.is_some());
+    let info = reader.chunk_info.as_ref().unwrap();
+    assert_eq!(info.chunk_dimensions, (32, 32));
+
+    let mut decoder = reader.open_decoder().unwrap();
+    let mut reconstructed = vec![0.0f32; (width * height) as usize];
+
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let (bounds, decoded) = decoder.read_chunk(chunk_idx).unwrap();
+        if let DecodingResult::F32(pixels) = decoded {
+            assert_eq!(pixels.len(), (bounds.width * bounds.height) as usize);
+            for r in 0..bounds.height {
+                for c in 0..bounds.width {
+                    let gx = bounds.col_offset + c;
+                    let gy = bounds.row_offset + r;
+                    reconstructed[(gy * width + gx) as usize] =
+                        pixels[(r * bounds.width + c) as usize];
+                }
+            }
+        } else {
+            panic!("Expected F32 result");
+        }
+    }
+
+    for i in 0..ground_truth.len() {
+        assert_eq!(reconstructed[i], ground_truth[i], "Mismatch at index {}", i);
+    }
+}
+
+#[test]
+fn test_deflate_tiled_f32_floating_point_predictor() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    // 96x64 image with 32x32 tiles, Predictor::FloatingPoint
+    let width = 96u32;
+    let height = 64u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+
+    let mut ground_truth = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            ground_truth.push(100.5 + (x as f32) * 0.25 - (y as f32) * 0.5);
+        }
+    }
+
+    write_tiled_deflate_geotiff(path, width, height, tile_w, tile_h, 3, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let info = reader.chunk_info.as_ref().unwrap();
+    assert_eq!(info.predictor, Predictor::FloatingPoint);
+
+    let mut decoder = reader.open_decoder().unwrap();
+    let mut reconstructed = vec![0.0f32; (width * height) as usize];
+
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let (bounds, decoded) = decoder.read_chunk(chunk_idx).unwrap();
+        if let DecodingResult::F32(pixels) = decoded {
+            assert_eq!(pixels.len(), (bounds.width * bounds.height) as usize);
+            for r in 0..bounds.height {
+                for c in 0..bounds.width {
+                    let gx = bounds.col_offset + c;
+                    let gy = bounds.row_offset + r;
+                    reconstructed[(gy * width + gx) as usize] =
+                        pixels[(r * bounds.width + c) as usize];
+                }
+            }
+        } else {
+            panic!("Expected F32 result");
+        }
+    }
+
+    for i in 0..ground_truth.len() {
+        assert_eq!(reconstructed[i], ground_truth[i], "Mismatch at index {}", i);
+    }
+}
+
+#[test]
+fn test_deflate_read_chunk_into_buffer_recycling() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+    let width = 64u32;
+    let height = 64u32;
+    let ground_truth: Vec<f32> = (0..width * height).map(|v| v as f32).collect();
+
+    write_tiled_deflate_geotiff(path, width, height, 32, 32, 1, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+
+    // Pre-allocate a buffer of sufficient capacity
+    let mut recycled = DecodingResult::F32(Vec::with_capacity(32 * 32));
+
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let (bounds, decoded) = decoder.read_chunk_into(chunk_idx, recycled).unwrap();
+        if let DecodingResult::F32(ref pixels) = decoded {
+            assert_eq!(pixels.len(), (bounds.width * bounds.height) as usize);
+        }
+        recycled = decoded; // pass recycled buffer back
+    }
+}
+
+/// Helper to write a tiled GeoTIFF with U16 data, Deflate compression, and horizontal predictor.
+fn write_tiled_deflate_u16_geotiff(
+    path: &Path,
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    predictor: u16,
+    data: &[u16],
+) {
+    let mut file = BufWriter::new(File::create(path).unwrap());
+    file.write_all(b"II\x2a\x00\x08\x00\x00\x00").unwrap();
+
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+    let total_tiles = tiles_across * tiles_down;
+
+    let tile_data_start = 4096u64;
+    file.seek(SeekFrom::Start(tile_data_start)).unwrap();
+
+    let mut tile_offsets = Vec::with_capacity(total_tiles as usize);
+    let mut tile_byte_counts = Vec::with_capacity(total_tiles as usize);
+    let mut compressor = libdeflater::Compressor::new(libdeflater::CompressionLvl::default());
+
+    for tile_idx in 0..total_tiles {
+        let tc = tile_idx % tiles_across;
+        let tr = tile_idx / tiles_across;
+        let x0 = tc * tile_w;
+        let y0 = tr * tile_h;
+
+        let mut raw_u16 = vec![0u16; (tile_w * tile_h) as usize];
+        for r in 0..tile_h {
+            for c in 0..tile_w {
+                let img_x = x0 + c;
+                let img_y = y0 + r;
+                let val = if img_x < width && img_y < height {
+                    data[(img_y * width + img_x) as usize]
+                } else {
+                    0u16
+                };
+                raw_u16[(r * tile_w + c) as usize] = val;
+            }
+        }
+
+        if predictor == 2 {
+            // Horizontal differencing across rows
+            for r in 0..tile_h as usize {
+                let row = &mut raw_u16[r * tile_w as usize..(r + 1) * tile_w as usize];
+                for i in (1..row.len()).rev() {
+                    row[i] = row[i].wrapping_sub(row[i - 1]);
+                }
+            }
+        }
+
+        let mut raw_bytes = vec![0u8; (tile_w * tile_h * 2) as usize];
+        for (i, v) in raw_u16.iter().enumerate() {
+            raw_bytes[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+        }
+
+        let mut comp_buf = vec![0u8; raw_bytes.len() + 256];
+        let comp_size = compressor.zlib_compress(&raw_bytes, &mut comp_buf).unwrap();
+
+        let current_offset = file.stream_position().unwrap();
+        file.write_all(&comp_buf[..comp_size]).unwrap();
+
+        tile_offsets.push(current_offset);
+        tile_byte_counts.push(comp_size as u64);
+    }
+
+    file.seek(SeekFrom::Start(8)).unwrap();
+
+    let tiepoint_offset = file.stream_position().unwrap();
+    let tiepoint: [f64; 6] = [0.0, 0.0, 0.0, -122.45, 37.85, 0.0];
+    for v in tiepoint {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+
+    let scale_offset = file.stream_position().unwrap();
+    let scale: [f64; 3] = [0.001, 0.001, 0.0];
+    for v in scale {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+
+    let tile_offsets_pos = file.stream_position().unwrap();
+    for off in &tile_offsets {
+        file.write_all(&(*off as u32).to_le_bytes()).unwrap();
+    }
+
+    let tile_byte_counts_pos = file.stream_position().unwrap();
+    for cnt in &tile_byte_counts {
+        file.write_all(&(*cnt as u32).to_le_bytes()).unwrap();
+    }
+
+    let ifd_offset = file.stream_position().unwrap() as u32;
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.write_all(&ifd_offset.to_le_bytes()).unwrap();
+
+    file.seek(SeekFrom::Start(ifd_offset as u64)).unwrap();
+
+    let write_tag = |f: &mut BufWriter<File>, tag: u16, typ: u16, count: u32, val_or_off: u32| {
+        f.write_all(&tag.to_le_bytes()).unwrap();
+        f.write_all(&typ.to_le_bytes()).unwrap();
+        f.write_all(&count.to_le_bytes()).unwrap();
+        f.write_all(&val_or_off.to_le_bytes()).unwrap();
+    };
+
+    let num_tags = 14u16;
+    file.write_all(&num_tags.to_le_bytes()).unwrap();
+
+    write_tag(&mut file, 256, 4, 1, width);
+    write_tag(&mut file, 257, 4, 1, height);
+    write_tag(&mut file, 258, 3, 1, 16); // BitsPerSample = 16
+    write_tag(&mut file, 259, 3, 1, 8); // Compression = Deflate
+    write_tag(&mut file, 262, 3, 1, 1); // BlackIsZero
+    write_tag(&mut file, 277, 3, 1, 1); // SamplesPerPixel = 1
+    write_tag(&mut file, 317, 3, 1, predictor as u32);
+    write_tag(&mut file, 322, 4, 1, tile_w);
+    write_tag(&mut file, 323, 4, 1, tile_h);
+    write_tag(&mut file, 324, 4, total_tiles, tile_offsets_pos as u32);
+    write_tag(&mut file, 325, 4, total_tiles, tile_byte_counts_pos as u32);
+    write_tag(&mut file, 339, 3, 1, 1); // SampleFormat = 1 (Uint)
+    write_tag(&mut file, 33550, 12, 3, scale_offset as u32);
+    write_tag(&mut file, 33922, 12, 6, tiepoint_offset as u32);
+
+    file.write_all(&0u32.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+}
+
+#[test]
+fn test_deflate_tiled_u16_horizontal_predictor() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 75u32;
+    let height = 55u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+
+    let mut ground_truth = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            ground_truth.push(((x * 17 + y * 31) % 65535) as u16);
+        }
+    }
+
+    write_tiled_deflate_u16_geotiff(path, width, height, tile_w, tile_h, 2, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let info = reader.chunk_info.as_ref().unwrap();
+    assert_eq!(info.predictor, Predictor::Horizontal);
+
+    let mut decoder = reader.open_decoder().unwrap();
+    let mut reconstructed = vec![0u16; (width * height) as usize];
+
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let (bounds, decoded) = decoder.read_chunk(chunk_idx).unwrap();
+        if let DecodingResult::U16(pixels) = decoded {
+            assert_eq!(pixels.len(), (bounds.width * bounds.height) as usize);
+            for r in 0..bounds.height {
+                for c in 0..bounds.width {
+                    let gx = bounds.col_offset + c;
+                    let gy = bounds.row_offset + r;
+                    reconstructed[(gy * width + gx) as usize] =
+                        pixels[(r * bounds.width + c) as usize];
+                }
+            }
+        } else {
+            panic!("Expected U16 result");
+        }
+    }
+
+    for i in 0..ground_truth.len() {
+        assert_eq!(reconstructed[i], ground_truth[i], "Mismatch at index {}", i);
+    }
+}
+
+#[test]
+fn test_deflate_exact_bitwise_equivalence_with_tiff_decoder() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 100u32;
+    let height = 70u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+
+    let ground_truth: Vec<f32> = (0..width * height)
+        .map(|v| (v as f32) * std::f32::consts::PI)
+        .collect();
+
+    write_tiled_deflate_geotiff(path, width, height, tile_w, tile_h, 1, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mmap = reader.mmap().unwrap();
+
+    // 1. Decode with standard tiff Decoder (using flate2/miniz_oxide)
+    let cursor = Cursor::new(&mmap[..]);
+    let mut standard_decoder = Decoder::new(cursor).unwrap();
+
+    // 2. Decode with SIMD libdeflater ChunkDecoder
+    let mut simd_decoder = reader.open_decoder().unwrap();
+
+    for chunk_idx in 0..reader.chunk_layout.total_chunks {
+        let std_result = standard_decoder.read_chunk(chunk_idx).unwrap();
+        let (_bounds, simd_result) = simd_decoder.read_chunk(chunk_idx).unwrap();
+
+        match (std_result, simd_result) {
+            (DecodingResult::F32(std_pix), DecodingResult::F32(simd_pix)) => {
+                assert_eq!(std_pix.len(), simd_pix.len());
+                for (idx, (s, d)) in std_pix.iter().zip(simd_pix.iter()).enumerate() {
+                    assert_eq!(
+                        s.to_bits(),
+                        d.to_bits(),
+                        "Bitwise difference at chunk {}, sample {}: std={}, simd={}",
+                        chunk_idx,
+                        idx,
+                        s,
+                        d
+                    );
+                }
+            }
+            _ => panic!("Expected F32 DecodingResult for both standard and SIMD"),
+        }
+    }
+}
+
+#[test]
+fn test_deflate_corrupted_byte_stream_hardening() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let ground_truth: Vec<f32> = (0..width * height).map(|v| v as f32).collect();
+    write_tiled_deflate_geotiff(path, width, height, 32, 32, 1, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+
+    // 1. Empty byte slice
+    let res_empty = decoder.decompress_chunk_fast_bytes(0, &[], None);
+    assert!(res_empty.is_err(), "Empty byte slice must return Err");
+
+    // 2. Truncated zlib header (only 2 bytes)
+    let res_trunc = decoder.decompress_chunk_fast_bytes(0, &[0x78, 0x9c], None);
+    assert!(res_trunc.is_err(), "Truncated zlib stream must return Err");
+
+    // 3. Fuzzing: random / invalid byte streams
+    let corrupt_cases: Vec<Vec<u8>> = vec![
+        vec![0xFF; 64],
+        vec![0x00; 128],
+        vec![0x78, 0x9c, 0xFF, 0xFF, 0x00, 0x01],
+        (0..255).map(|x| (x * 37) as u8).collect(),
+        vec![0xAA; 1024],
+    ];
+
+    for (i, corrupted) in corrupt_cases.iter().enumerate() {
+        let res = decoder.decompress_chunk_fast_bytes(0, corrupted, None);
+        assert!(
+            res.is_err(),
+            "Corrupted stream case {} must return Err without panicking",
+            i
+        );
+
+        // Fallback resilience: when corrupted payload fails, read_chunk_with_payload
+        // safely falls back to reading from disk without crashing or panicking
+        let res_payload = decoder.read_chunk_with_payload(0, Some(corrupted), None);
+        assert!(
+            res_payload.is_ok(),
+            "Fallback to file on corrupted payload must succeed gracefully"
+        );
+    }
+}
+
+// Regression: a well-formed zlib stream that decompresses to fewer bytes than its
+// tile used to be accepted, leaving the recycled buffer's previous contents in the
+// tail to be decoded as pixels. It must now fail the fast path, and a full read
+// must fall back to the on-disk tile rather than return stale samples.
+#[test]
+fn test_deflate_short_fill_rejected_through_streaming_reader() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let (width, height, tile) = (64u32, 64u32, 32u32);
+    let ground_truth: Vec<f32> = (0..width * height).map(|v| v as f32).collect();
+    write_tiled_deflate_geotiff(
+        temp_file.path(),
+        width,
+        height,
+        tile,
+        tile,
+        1,
+        &ground_truth,
+    );
+
+    let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+
+    // Tile 0's first half, compressed as a complete zlib stream.
+    let half: Vec<u8> = (0..tile * tile / 2)
+        .flat_map(|i| ground_truth[((i / tile) * width + i % tile) as usize].to_le_bytes())
+        .collect();
+    let mut compressor = libdeflater::Compressor::new(libdeflater::CompressionLvl::default());
+    let mut short = vec![0u8; compressor.zlib_compress_bound(half.len())];
+    let n = compressor.zlib_compress(&half, &mut short).unwrap();
+    short.truncate(n);
+
+    // Recycle a buffer that holds another tile's samples, as the streaming path does.
+    let (_, mut recycled) = decoder.read_chunk_with_payload(3, None, None).unwrap();
+    let stale = match &recycled {
+        DecodingResult::F32(v) => v.clone(),
+        other => panic!("expected F32 samples, got {other:?}"),
+    };
+    assert!(
+        decoder
+            .decompress_chunk_fast_bytes(0, &short, Some(&mut recycled))
+            .is_err(),
+        "a short deflate tile must not be accepted into a recycled buffer"
+    );
+    assert!(decoder
+        .decompress_chunk_fast_bytes(0, &short, None)
+        .is_err());
+
+    // The full read falls back to the file and returns tile 0, not tile 3's tail.
+    let (_, data) = decoder
+        .read_chunk_with_payload(0, Some(&short), Some(DecodingResult::F32(stale)))
+        .unwrap();
+    let DecodingResult::F32(samples) = data else {
+        panic!("expected F32 samples");
+    };
+    for (i, &v) in samples.iter().enumerate() {
+        let (r, c) = (i as u32 / tile, i as u32 % tile);
+        assert_eq!(v, ground_truth[(r * width + c) as usize], "sample {i}");
+    }
+}
+
+#[test]
+fn test_deflate_buffer_auto_resizing_hardening() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let ground_truth: Vec<f32> = (0..width * height).map(|v| v as f32 * 2.5).collect();
+    write_tiled_deflate_geotiff(path, width, height, 32, 32, 1, &ground_truth);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+
+    let (bounds, _read_res) = decoder.read_chunk(0).expect("read_chunk(0) failed");
+    assert_eq!(bounds.width, 32);
+    assert_eq!(bounds.height, 32);
+
+    // Pass an undersized target buffer: only 4 elements instead of required 1024
+    let undersized = DecodingResult::F32(vec![0.0f32; 4]);
+    let (_, res_buf) = decoder
+        .read_chunk_into(0, undersized)
+        .expect("read_chunk_into failed");
+    if let DecodingResult::F32(ref v) = res_buf {
+        assert_eq!(
+            v.len(),
+            1024,
+            "Buffer must be automatically resized to match chunk sample count"
+        );
+        assert_eq!(v[0], ground_truth[0]);
+    } else {
+        panic!("Expected F32 DecodingResult");
+    }
+}
+
+#[test]
+fn cropped_edge_tiles_match_reference_in_both_streaming_paths() {
+    use h3o::{LatLng, Resolution};
+    use dggs_stream_core::aggregator::multi_horizon::{
+        MultiResolutionConfig, MultiScanHorizonStreamer,
+    };
+    use std::collections::HashMap;
+    let file = NamedTempFile::new().unwrap();
+    let (width, height) = (29u32, 23u32);
+    let data: Vec<f32> = (0..width * height).map(|v| (v % 19 + 1) as f32).collect();
+    write_tiled_deflate_geotiff(file.path(), width, height, 16, 16, 1, &data);
+    for budget in [65536, 64 * 1024 * 1024] {
+        let reader = GeoTiffStreamReader::open(file.path()).unwrap();
+        let gt = reader.metadata.geotransform;
+        let mut expected = HashMap::<u64, (f64, f64)>::new();
+        for r in 0..height {
+            for c in 0..width {
+                let (lon, lat) = gt.pixel_center_to_coord(c as usize, r as usize);
+                let key = u64::from(LatLng::new(lat, lon).unwrap().to_cell(Resolution::Ten));
+                let acc = expected.entry(key).or_default();
+                acc.0 += 1.0;
+                acc.1 += data[(r * width + c) as usize] as f64;
+            }
+        }
+        let mut config = MultiResolutionConfig::single(10);
+        config.custom_crs = Some("EPSG:4326".into());
+        config.aggregation_budget_bytes = budget;
+        let mut stream = MultiScanHorizonStreamer::new(reader, &config).unwrap();
+        let mut actual = HashMap::new();
+        while !stream.is_finished() {
+            for rec in stream.fetch_next_batch(3).unwrap() {
+                assert!(actual
+                    .insert(rec.h3_index, (rec.accumulator.count, rec.accumulator.sum))
+                    .is_none());
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+}
+
+// Tests accelerated zero-allocation LZW decompression powered by `weezl`.
+//
+// Validates bitwise equivalence against the standard TIFF decoder on real-world and synthetic datasets,
+// horizontal differencing predictors, edge padding, buffer recycling, and corrupted or truncated payloads.
+
+#[test]
+#[ignore = "requires external dataset data/CFL_HI.tif"]
+fn test_lzw_hawaii_cfl_exact_bitwise_parity() {
+    let path = &*crate::helpers::data_path("CFL_HI.tif");
+    assert!(
+        path.exists(),
+        "Required external dataset missing: {}",
+        path.display()
+    );
+
+    let reader = GeoTiffStreamReader::open(path).expect("Failed to open CFL_HI.tif");
+    let mmap = reader.mmap().expect("Failed to get mmap");
+    let mut std_decoder = Decoder::new(Cursor::new(&mmap[..])).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let total_chunks = reader.chunk_layout.total_chunks;
+    // Test a representative sample of chunks across beginning, middle, and end of the raster
+    let test_indices = [
+        0,
+        1,
+        2,
+        50,
+        100,
+        500,
+        1000,
+        2500,
+        5000,
+        7500,
+        10000,
+        12500,
+        15000,
+        total_chunks - 1,
+    ];
+
+    for &chunk_idx in &test_indices {
+        if chunk_idx >= total_chunks {
+            continue;
+        }
+        let std_chunk = std_decoder.read_chunk(chunk_idx).unwrap();
+        let (_bounds, fast_chunk) = fast_decoder.read_chunk(chunk_idx).unwrap();
+
+        match (std_chunk, fast_chunk) {
+            (DecodingResult::F32(v_std), DecodingResult::F32(v_fast)) => {
+                assert_eq!(
+                    v_std.len(),
+                    v_fast.len(),
+                    "Sample count mismatch on chunk {}",
+                    chunk_idx
+                );
+                for (i, (s, f)) in v_std.iter().zip(v_fast.iter()).enumerate() {
+                    if s.is_nan() && f.is_nan() {
+                        continue;
+                    }
+                    assert_eq!(
+                        s.to_bits(),
+                        f.to_bits(),
+                        "Bitwise mismatch on chunk {} sample {}: std={} vs fast={}",
+                        chunk_idx,
+                        i,
+                        s,
+                        f
+                    );
+                }
+            }
+            _ => panic!("Expected F32 DecodingResult for CFL_HI.tif"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires external dataset data/LF2024_FBFM40_HI.tif"]
+fn test_lzw_hawaii_landfire_exact_bitwise_parity() {
+    let path = &*crate::helpers::data_path("LF2024_FBFM40_HI.tif");
+    assert!(
+        path.exists(),
+        "Required external dataset missing: {}",
+        path.display()
+    );
+
+    let reader = GeoTiffStreamReader::open(path).expect("Failed to open LF2024_FBFM40_HI.tif");
+    let mmap = reader.mmap().expect("Failed to get mmap");
+    let mut std_decoder = Decoder::new(Cursor::new(&mmap[..])).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let total_chunks = reader.chunk_layout.total_chunks;
+    let test_indices = [
+        0,
+        1,
+        2,
+        50,
+        100,
+        500,
+        1000,
+        2500,
+        5000,
+        7500,
+        10000,
+        12500,
+        15000,
+        total_chunks - 1,
+    ];
+
+    for &chunk_idx in &test_indices {
+        if chunk_idx >= total_chunks {
+            continue;
+        }
+        let std_chunk = std_decoder.read_chunk(chunk_idx).unwrap();
+        let (_bounds, fast_chunk) = fast_decoder.read_chunk(chunk_idx).unwrap();
+
+        match (std_chunk, fast_chunk) {
+            (DecodingResult::I16(v_std), DecodingResult::I16(v_fast)) => {
+                assert_eq!(
+                    v_std.len(),
+                    v_fast.len(),
+                    "Sample count mismatch on chunk {}",
+                    chunk_idx
+                );
+                assert_eq!(
+                    v_std, v_fast,
+                    "Pixel mismatch on chunk {}: std != fast",
+                    chunk_idx
+                );
+            }
+            _ => panic!("Expected I16 DecodingResult for LF2024_FBFM40_HI.tif"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires external dataset data/LF2024_FBFM40_HI.tif"]
+fn test_lzw_read_chunk_into_buffer_recycling() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+    write_synthetic_lzw_geotiff(path, width, height, tile_w, tile_h, 1);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let total_chunks = reader.chunk_layout.total_chunks;
+    assert_eq!(total_chunks, 4);
+
+    // Read first chunk to establish baseline and recycled buffer
+    let (_bounds0, mut recycled) = fast_decoder.read_chunk(0).unwrap();
+
+    for chunk_idx in 1..total_chunks {
+        let (_bounds_direct, direct) = fast_decoder.read_chunk(chunk_idx).unwrap();
+        let (_bounds_rec, next_recycled) =
+            fast_decoder.read_chunk_into(chunk_idx, recycled).unwrap();
+
+        match (&next_recycled, &direct) {
+            (DecodingResult::U16(v_rec), DecodingResult::U16(v_dir)) => {
+                assert_eq!(v_rec, v_dir, "Mismatch on chunk {chunk_idx}");
+            }
+            _ => panic!("Expected U16 DecodingResult"),
+        }
+        recycled = next_recycled;
+    }
+}
+
+#[test]
+#[ignore = "requires external dataset data/LF2024_FBFM40_HI.tif"]
+fn test_lzw_hawaii_landfire_read_chunk_into_buffer_recycling() {
+    let path = &*crate::helpers::data_path("LF2024_FBFM40_HI.tif");
+    assert!(
+        path.exists(),
+        "Required external dataset missing: {}",
+        path.display()
+    );
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    // Read first chunk to establish baseline and recycled buffer
+    let (_bounds0, buf) = fast_decoder.read_chunk(500).unwrap();
+
+    // Verify read_chunk_into populates the recycled buffer
+    let (_bounds1, buf_recycled) = fast_decoder.read_chunk_into(501, buf).unwrap();
+    let (_bounds_direct, buf_direct) = fast_decoder.read_chunk(501).unwrap();
+
+    match (buf_recycled, buf_direct) {
+        (DecodingResult::I16(v_rec), DecodingResult::I16(v_dir)) => {
+            assert_eq!(v_rec, v_dir);
+        }
+        _ => panic!("Expected I16"),
+    }
+}
+
+/// Helper to write a custom synthetic LZW GeoTIFF with optional horizontal predictor
+fn write_synthetic_lzw_geotiff(
+    path: &Path,
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    predictor: u16,
+) {
+    let mut file = BufWriter::new(File::create(path).unwrap());
+    file.write_all(b"II\x2a\x00\x08\x00\x00\x00").unwrap();
+
+    let tiles_across = width.div_ceil(tile_w);
+    let tiles_down = height.div_ceil(tile_h);
+    let total_tiles = tiles_across * tiles_down;
+
+    let tile_data_start = 65536u64;
+    file.seek(SeekFrom::Start(tile_data_start)).unwrap();
+
+    let mut tile_offsets = Vec::with_capacity(total_tiles as usize);
+    let mut tile_byte_counts = Vec::with_capacity(total_tiles as usize);
+
+    for tile_idx in 0..total_tiles {
+        let tc = tile_idx % tiles_across;
+        let tr = tile_idx / tiles_across;
+        let x0 = tc * tile_w;
+        let y0 = tr * tile_h;
+
+        let mut raw_u16: Vec<u16> = Vec::with_capacity((tile_w * tile_h) as usize);
+        for r in 0..tile_h {
+            for c in 0..tile_w {
+                let img_x = x0 + c;
+                let img_y = y0 + r;
+                let val = ((img_x * 7 + img_y * 11) % 5000) as u16;
+                raw_u16.push(val);
+            }
+        }
+
+        // Apply horizontal differencing if predictor == 2
+        let mut processed_u16 = raw_u16.clone();
+        if predictor == 2 {
+            for r in 0..tile_h as usize {
+                let row_start = r * tile_w as usize;
+                for col in (1..tile_w as usize).rev() {
+                    processed_u16[row_start + col] = processed_u16[row_start + col]
+                        .wrapping_sub(processed_u16[row_start + col - 1]);
+                }
+            }
+        }
+
+        // Convert to little endian bytes
+        let mut raw_bytes = Vec::with_capacity(processed_u16.len() * 2);
+        for &v in &processed_u16 {
+            raw_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+
+        // Compress with LZW (with TIFF size switch, MSB bit order)
+        let mut encoder = LZWEncoder::with_tiff_size_switch(BitOrder::Msb, 8);
+        let comp_buf = encoder.encode(&raw_bytes).unwrap();
+
+        let current_offset = file.stream_position().unwrap();
+        file.write_all(&comp_buf).unwrap();
+
+        tile_offsets.push(current_offset);
+        tile_byte_counts.push(comp_buf.len() as u64);
+    }
+
+    file.seek(SeekFrom::Start(8)).unwrap();
+
+    let tiepoint_offset = file.stream_position().unwrap();
+    let tiepoint: [f64; 6] = [0.0, 0.0, 0.0, -122.0, 38.0, 0.0];
+    for v in tiepoint {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+
+    let scale_offset = file.stream_position().unwrap();
+    let scale: [f64; 3] = [0.001, 0.001, 0.0];
+    for v in scale {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+
+    let tile_offsets_pos = file.stream_position().unwrap();
+    for off in &tile_offsets {
+        file.write_all(&(*off as u32).to_le_bytes()).unwrap();
+    }
+
+    let tile_byte_counts_pos = file.stream_position().unwrap();
+    for cnt in &tile_byte_counts {
+        file.write_all(&(*cnt as u32).to_le_bytes()).unwrap();
+    }
+
+    let ifd_offset = file.stream_position().unwrap() as u32;
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.write_all(&ifd_offset.to_le_bytes()).unwrap();
+
+    file.seek(SeekFrom::Start(ifd_offset as u64)).unwrap();
+
+    let write_tag = |f: &mut BufWriter<File>, tag: u16, typ: u16, count: u32, val_or_off: u32| {
+        f.write_all(&tag.to_le_bytes()).unwrap();
+        f.write_all(&typ.to_le_bytes()).unwrap();
+        f.write_all(&count.to_le_bytes()).unwrap();
+        f.write_all(&val_or_off.to_le_bytes()).unwrap();
+    };
+
+    let num_tags = 14u16;
+    file.write_all(&num_tags.to_le_bytes()).unwrap();
+
+    write_tag(&mut file, 256, 4, 1, width);
+    write_tag(&mut file, 257, 4, 1, height);
+    write_tag(&mut file, 258, 3, 1, 16); // BitsPerSample = 16
+    write_tag(&mut file, 259, 3, 1, 5); // Compression = 5 (LZW)
+    write_tag(&mut file, 262, 3, 1, 1);
+    write_tag(&mut file, 277, 3, 1, 1);
+    write_tag(&mut file, 317, 3, 1, predictor as u32); // Predictor
+    write_tag(&mut file, 322, 4, 1, tile_w);
+    write_tag(&mut file, 323, 4, 1, tile_h);
+    write_tag(&mut file, 324, 4, total_tiles, tile_offsets_pos as u32);
+    write_tag(&mut file, 325, 4, total_tiles, tile_byte_counts_pos as u32);
+    write_tag(&mut file, 339, 3, 1, 1); // Uint
+    write_tag(&mut file, 33550, 12, 3, scale_offset as u32);
+    write_tag(&mut file, 33922, 12, 6, tiepoint_offset as u32);
+
+    file.write_all(&0u32.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+}
+
+#[test]
+fn test_lzw_tiled_u16_horizontal_predictor_parity() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+    // Predictor = 2 (Horizontal differencing)
+    write_synthetic_lzw_geotiff(path, width, height, tile_w, tile_h, 2);
+
+    let reader = GeoTiffStreamReader::open(path).expect("Failed to open synthetic raster");
+    let mut std_decoder = Decoder::new(Cursor::new(&reader.mmap().unwrap()[..])).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let total_chunks = reader.chunk_layout.total_chunks;
+    assert_eq!(total_chunks, 4);
+
+    for c in 0..total_chunks {
+        let std_chunk = std_decoder.read_chunk(c).unwrap();
+        let (_bounds, fast_chunk) = fast_decoder.read_chunk(c).unwrap();
+
+        match (std_chunk, fast_chunk) {
+            (DecodingResult::U16(v_std), DecodingResult::U16(v_fast)) => {
+                assert_eq!(v_std, v_fast, "Mismatch on chunk {}", c);
+            }
+            _ => panic!("Expected U16 DecodingResult"),
+        }
+    }
+}
+
+#[test]
+fn test_lzw_tiled_with_edge_padding_parity() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    // 70x50 with 32x32 tiles requires right-edge and bottom-edge tile padding
+    let width = 70u32;
+    let height = 50u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+    write_synthetic_lzw_geotiff(path, width, height, tile_w, tile_h, 1);
+
+    let reader = GeoTiffStreamReader::open(path).expect("Failed to open synthetic raster");
+    let mut std_decoder = Decoder::new(Cursor::new(&reader.mmap().unwrap()[..])).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let total_chunks = reader.chunk_layout.total_chunks;
+    assert_eq!(total_chunks, 6); // 3 across x 2 down
+
+    for c in 0..total_chunks {
+        let std_chunk = std_decoder.read_chunk(c).unwrap();
+        let (_bounds, fast_chunk) = fast_decoder.read_chunk(c).unwrap();
+
+        match (std_chunk, fast_chunk) {
+            (DecodingResult::U16(v_std), DecodingResult::U16(v_fast)) => {
+                assert_eq!(v_std, v_fast, "Mismatch on edge-padded chunk {}", c);
+            }
+            _ => panic!("Expected U16 DecodingResult"),
+        }
+    }
+}
+
+#[test]
+fn test_lzw_corrupted_byte_stream_hardening() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+    write_synthetic_lzw_geotiff(path, width, height, tile_w, tile_h, 1);
+
+    let reader = GeoTiffStreamReader::open(path).expect("Failed to open synthetic raster");
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    // 1. Empty byte slice
+    let res_empty = fast_decoder.decompress_chunk_fast_bytes(0, &[], None);
+    assert!(res_empty.is_err(), "Empty byte slice must return Err");
+
+    // 2. Truncated byte slice
+    let res_one_byte = fast_decoder.decompress_chunk_fast_bytes(0, &[0x80], None);
+    assert!(res_one_byte.is_err(), "Single byte stream must return Err");
+
+    // 3. Corrupted / fuzz byte streams
+    let corrupt_cases: Vec<Vec<u8>> = vec![
+        vec![0x00; 64],
+        vec![0xFF; 64],
+        (0..128).map(|x| (x * 43) as u8).collect(),
+        vec![0x80, 0x01, 0xFF, 0xFE, 0x00],
+    ];
+
+    for (i, corrupted) in corrupt_cases.iter().enumerate() {
+        let res = fast_decoder.decompress_chunk_fast_bytes(0, corrupted, None);
+        assert!(
+            res.is_err(),
+            "Corrupted LZW case {} must return Err without panicking",
+            i
+        );
+
+        // Fallback resilience: when provided corrupted payload fails, read_chunk_with_payload
+        // safely falls back to standard TIFF reader without panicking
+        let res_payload = fast_decoder.read_chunk_with_payload(0, Some(corrupted), None);
+        assert!(
+            res_payload.is_ok(),
+            "Fallback to file on corrupted payload must succeed gracefully"
+        );
+    }
+}
+
+#[test]
+fn test_lzw_truncated_valid_stream() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+    write_synthetic_lzw_geotiff(path, width, height, tile_w, tile_h, 1);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let info = reader.chunk_info.as_ref().unwrap();
+    let valid_payload = reader.source.get_chunk_payload(0, info).unwrap();
+    let payload_bytes = valid_payload.as_ref();
+    assert!(
+        payload_bytes.len() > 10,
+        "Payload must have sufficient length"
+    );
+
+    // Truncate at 25% and 50%
+    let quarter = &payload_bytes[..payload_bytes.len() / 4];
+    let half = &payload_bytes[..payload_bytes.len() / 2];
+
+    let res_quarter = fast_decoder.decompress_chunk_fast_bytes(0, quarter, None);
+    assert!(
+        res_quarter.is_err(),
+        "Truncated 25% LZW stream must return Err"
+    );
+
+    let res_half = fast_decoder.decompress_chunk_fast_bytes(0, half, None);
+    assert!(
+        res_half.is_err(),
+        "Truncated 50% LZW stream must return Err"
+    );
+}
+
+#[test]
+fn test_lzw_buffer_auto_resizing_hardening() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let path = temp_file.path();
+
+    let width = 64u32;
+    let height = 64u32;
+    let tile_w = 32u32;
+    let tile_h = 32u32;
+    write_synthetic_lzw_geotiff(path, width, height, tile_w, tile_h, 1);
+
+    let reader = GeoTiffStreamReader::open(path).unwrap();
+    let mut fast_decoder = reader.open_decoder().unwrap();
+
+    let (bounds, read_res) = fast_decoder.read_chunk(0).unwrap();
+    assert_eq!(bounds.width, 32);
+
+    // Pass an undersized U16 buffer
+    let undersized = DecodingResult::U16(vec![0u16; 4]);
+    let (_, res_buf) = fast_decoder.read_chunk_into(0, undersized).unwrap();
+
+    match (read_res, res_buf) {
+        (DecodingResult::U16(expected), DecodingResult::U16(actual)) => {
+            assert_eq!(
+                actual.len(),
+                1024,
+                "Buffer must be resized to chunk dimensions"
+            );
+            assert_eq!(
+                actual, expected,
+                "Pixel data must match expected chunk decode"
+            );
+        }
+        _ => panic!("Expected U16 results"),
+    }
+}
+
+/// Write a well-formed `PlanarConfiguration=Planar` GeoTIFF: `bands` planes of
+/// `width × height` u8 samples, one strip per plane. The chunk layout itself is
+/// valid, so opening must fail at the explicit planar rejection, not earlier.
+pub fn write_planar_geotiff(path: &Path, width: u32, height: u32, bands: u32) {
+    let mut file = BufWriter::new(File::create(path).unwrap());
+    file.write_all(b"II\x2a\x00\x08\x00\x00\x00").unwrap();
+
+    // One strip of `width*height` bytes per band plane, starting at 4096.
+    let strip_bytes = (width * height) as usize;
+    file.seek(SeekFrom::Start(4096)).unwrap();
+    let mut strip_offsets = Vec::with_capacity(bands as usize);
+    for band in 0..bands {
+        strip_offsets.push(file.stream_position().unwrap());
+        file.write_all(&vec![(band * 40 + 10) as u8; strip_bytes])
+            .unwrap();
+    }
+
+    // Metadata arrays right after the header (offset 8).
+    file.seek(SeekFrom::Start(8)).unwrap();
+    let tiepoint_offset = file.stream_position().unwrap();
+    for v in [0.0f64, 0.0, 0.0, -122.45, 37.85, 0.0] {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let scale_offset = file.stream_position().unwrap();
+    for v in [0.001f64, 0.001, 0.0] {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let bits_offset = file.stream_position().unwrap();
+    for _ in 0..bands {
+        file.write_all(&8u16.to_le_bytes()).unwrap();
+    }
+    let geokeys_offset = file.stream_position().unwrap();
+    for v in [1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326] {
+        file.write_all(&v.to_le_bytes()).unwrap();
+    }
+    let offsets_pos = file.stream_position().unwrap();
+    for off in &strip_offsets {
+        file.write_all(&(*off as u32).to_le_bytes()).unwrap();
+    }
+    let counts_pos = file.stream_position().unwrap();
+    for _ in 0..bands {
+        file.write_all(&(strip_bytes as u32).to_le_bytes()).unwrap();
+    }
+
+    let ifd_offset = file.stream_position().unwrap() as u32;
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.write_all(&ifd_offset.to_le_bytes()).unwrap();
+    file.seek(SeekFrom::Start(ifd_offset as u64)).unwrap();
+
+    let write_tag = |f: &mut BufWriter<File>, tag: u16, typ: u16, count: u32, val_or_off: u32| {
+        f.write_all(&tag.to_le_bytes()).unwrap();
+        f.write_all(&typ.to_le_bytes()).unwrap();
+        f.write_all(&count.to_le_bytes()).unwrap();
+        f.write_all(&val_or_off.to_le_bytes()).unwrap();
+    };
+
+    // Tags in ascending order; SHORT count=1 values sit inline (low bytes).
+    file.write_all(&13u16.to_le_bytes()).unwrap();
+    write_tag(&mut file, 256, 4, 1, width); // ImageWidth LONG
+    write_tag(&mut file, 257, 4, 1, height); // ImageLength LONG
+    write_tag(&mut file, 258, 3, bands, bits_offset as u32); // BitsPerSample SHORT[]
+    write_tag(&mut file, 259, 3, 1, 1); // Compression SHORT = none
+    write_tag(&mut file, 262, 3, 1, 2); // PhotometricInterpretation SHORT = RGB
+    write_tag(&mut file, 273, 4, bands, offsets_pos as u32); // StripOffsets LONG[]
+    write_tag(&mut file, 277, 3, 1, bands); // SamplesPerPixel SHORT
+    write_tag(&mut file, 278, 4, 1, height); // RowsPerStrip LONG
+    write_tag(&mut file, 279, 4, bands, counts_pos as u32); // StripByteCounts LONG[]
+    write_tag(&mut file, 284, 3, 1, 2); // PlanarConfiguration SHORT = Planar
+    write_tag(&mut file, 33550, 12, 3, scale_offset as u32); // ModelPixelScaleTag DOUBLE[3]
+    write_tag(&mut file, 33922, 12, 6, tiepoint_offset as u32); // ModelTiepointTag DOUBLE[6]
+    write_tag(&mut file, 34735, 3, 12, geokeys_offset as u32); // GeoKeyDirectoryTag SHORT[12]
+
+    file.write_all(&0u32.to_le_bytes()).unwrap(); // next IFD offset
+    file.flush().unwrap();
+}
+
+fn f32_samples(data: &DecodingResult) -> &[f32] {
+    match data {
+        DecodingResult::F32(v) => v,
+        other => panic!("expected F32 samples, got {other:?}"),
+    }
+}
+
+// Regression: a tile clipped by the bottom image edge still inflates to a whole
+// tile, which the direct-decode path tried to fit into the clipped sample buffer.
+// libdeflate refused it and every such tile was decoded a second time by the
+// generic decoder.
+#[test]
+fn test_deflate_edge_tiles_decode_on_fast_path() {
+    let temp_file = NamedTempFile::new().unwrap();
+    // 16x16 tiles over 24x24: whole, right-clipped, bottom-clipped and corner tiles.
+    let (width, height, tile) = (24u32, 24u32, 16u32);
+    let ground_truth: Vec<f32> = (0..width * height).map(|v| v as f32).collect();
+    write_tiled_deflate_geotiff(
+        temp_file.path(),
+        width,
+        height,
+        tile,
+        tile,
+        1,
+        &ground_truth,
+    );
+
+    let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+    for idx in 0..4u32 {
+        let (col0, row0) = ((idx % 2) * tile, (idx / 2) * tile);
+        let (w, h) = ((width - col0).min(tile), (height - row0).min(tile));
+        let expected: Vec<f32> = (0..w * h)
+            .map(|i| ground_truth[((row0 + i / w) * width + col0 + i % w) as usize])
+            .collect();
+
+        let fresh = decoder
+            .decompress_chunk_simd(idx, None)
+            .unwrap_or_else(|e| panic!("tile {idx} ({w}x{h}) left the fast path: {e}"));
+        assert_eq!(f32_samples(fresh.as_ref().unwrap()), expected);
+
+        // A recycled buffer of another size, as the streaming path hands in.
+        let mut recycled = DecodingResult::F32(vec![-1.0; (tile * tile) as usize + 3]);
+        let in_place = decoder
+            .decompress_chunk_simd(idx, Some(&mut recycled))
+            .unwrap_or_else(|e| panic!("tile {idx} ({w}x{h}) left the fast path: {e}"));
+        assert!(
+            in_place.is_none(),
+            "tile {idx} must fill the recycled buffer"
+        );
+        assert_eq!(f32_samples(&recycled), expected);
+
+        let (bounds, data) = decoder.read_chunk(idx).unwrap();
+        assert_eq!((bounds.width, bounds.height), (w, h));
+        assert_eq!(f32_samples(&data), expected);
+    }
+}
+
+// A chunk whose own stored bytes are corrupt is an error from the accelerated
+// decoder, not a silent second attempt through the generic one.
+#[test]
+fn test_corrupt_stored_deflate_tile_reports_fast_path_error() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let ground_truth: Vec<f32> = (0..32 * 32).map(|v| v as f32).collect();
+    write_tiled_deflate_geotiff(temp_file.path(), 32, 32, 16, 16, 1, &ground_truth);
+
+    let (offset, len) = {
+        let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+        let info = reader.chunk_info.as_ref().unwrap();
+        (info.chunk_offsets[0] as usize, info.chunk_bytes[0] as usize)
+    };
+    let mut bytes = std::fs::read(temp_file.path()).unwrap();
+    for b in &mut bytes[offset + 2..offset + len] {
+        *b = 0xFF;
+    }
+    std::fs::write(temp_file.path(), bytes).unwrap();
+
+    let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+    let err = match decoder.read_chunk(0) {
+        Ok(_) => panic!("a corrupt stored tile must not decode"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("decompress failed"), "{err}");
+    // The other tiles are untouched.
+    assert_eq!(
+        f32_samples(&decoder.read_chunk(3).unwrap().1)[0],
+        ground_truth[16 * 32 + 16]
+    );
+}
+
+// A chunk that cannot be read from the source fails with that read's error.
+#[test]
+fn test_unreadable_stored_tile_reports_read_error() {
+    let temp_file = NamedTempFile::new().unwrap();
+    let ground_truth: Vec<f32> = (0..32 * 32).map(|v| v as f32).collect();
+    write_tiled_deflate_geotiff(temp_file.path(), 32, 32, 16, 16, 1, &ground_truth);
+
+    let mut bytes = std::fs::read(temp_file.path()).unwrap();
+    let file_len = bytes.len() as u32;
+    // TileOffsets: four LONGs stored out of line. Move tile 0 past the end of the file.
+    let entry = ifd_entry(&mut bytes, 324);
+    assert_eq!(u32::from_le_bytes(entry[4..8].try_into().unwrap()), 4);
+    let array = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+    bytes[array..array + 4].copy_from_slice(&(file_len + 4096).to_le_bytes());
+    std::fs::write(temp_file.path(), bytes).unwrap();
+
+    let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+    let err = match decoder.read_chunk(0) {
+        Ok(_) => panic!("a tile stored past the end of the file must not decode"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("chunk offset out of bounds"),
+        "{err}"
+    );
+}
+
+// A stream that inflates past the chunk's declared layout is not corrupt: the
+// generic decoder reads the samples it needs and ignores the rest.
+#[test]
+fn test_overlong_deflate_tile_falls_back_to_generic_decoder() {
+    let temp_file = NamedTempFile::new().unwrap();
+    // Two 16x32 tiles, then declared as a 32x16 image of 16x16 tiles.
+    let ground_truth: Vec<f32> = (0..32 * 32).map(|v| v as f32).collect();
+    write_tiled_deflate_geotiff(temp_file.path(), 32, 32, 16, 32, 1, &ground_truth);
+    let mut bytes = std::fs::read(temp_file.path()).unwrap();
+    for tag in [257, 323] {
+        let entry = ifd_entry(&mut bytes, tag);
+        assert_eq!(u32::from_le_bytes(entry[4..8].try_into().unwrap()), 1);
+        let value = if u16::from_le_bytes(entry[2..4].try_into().unwrap()) == 3 {
+            8..10
+        } else {
+            8..12
+        };
+        let width = value.len();
+        entry[value].copy_from_slice(&16u32.to_le_bytes()[..width]);
+    }
+    std::fs::write(temp_file.path(), bytes).unwrap();
+
+    let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+    for idx in 0..2u32 {
+        assert!(decoder.decompress_chunk_simd(idx, None).is_err());
+        let (bounds, data) = decoder.read_chunk(idx).unwrap();
+        assert_eq!((bounds.width, bounds.height), (16, 16));
+        let expected: Vec<f32> = (0..16 * 16)
+            .map(|i| ground_truth[((i / 16) * 32 + idx * 16 + i % 16) as usize])
+            .collect();
+        assert_eq!(f32_samples(&data), expected);
+    }
+}

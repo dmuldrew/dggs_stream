@@ -1,4 +1,4 @@
-//! raster_h3 GeoTIFF / Cloud Optimized GeoTIFF (COG) Inspector
+//! dggs_stream GeoTIFF / Cloud Optimized GeoTIFF (COG) Inspector
 //!
 //! Inspects local GeoTIFF files or remote HTTP/S3 COG URLs, displaying
 //! raster dimensions, chunk layouts, spatial reference, geotransform,
@@ -12,12 +12,12 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
-use raster_h3::crs::transformer::CrsTransformer;
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
-use raster_h3::raster::RasterSource;
+use dggs_stream::crs::transformer::CrsTransformer;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::RasterSource;
 
 fn print_help() {
-    println!("raster_h3 GeoTIFF / COG Inspector");
+    println!("dggs_stream GeoTIFF / COG Inspector");
     println!("Usage:");
     println!("  inspect_tif <PATH_OR_URL> [OPTIONS]");
     println!();
@@ -224,7 +224,7 @@ fn main() {
         println!(
             "================================================================================"
         );
-        println!("raster_h3 GeoTIFF / COG Inspector");
+        println!("dggs_stream GeoTIFF / COG Inspector");
         println!(
             "================================================================================"
         );

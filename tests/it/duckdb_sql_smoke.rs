@@ -1,6 +1,6 @@
 //! Real-engine SQL smoke test. Run after `cargo build --lib` with
-//! `cargo test -p raster_h3 --test it duckdb_sql_smoke -- --ignored`.
-//! DUCKDB_BIN and RASTER_H3_LIBRARY optionally select the CLI and built library.
+//! `cargo test -p dggs_stream --test it duckdb_sql_smoke -- --ignored`.
+//! DUCKDB_BIN and DGGS_STREAM_LIBRARY optionally select the CLI and built library.
 //! CI runs it explicitly against the DuckDB CLI it downloads (see ci.yml).
 use crate::helpers;
 
@@ -86,12 +86,12 @@ impl DuckDbHarness {
                     })
                     .to_string()
             });
-        let library = std::env::var_os("RASTER_H3_LIBRARY")
+        let library = std::env::var_os("DGGS_STREAM_LIBRARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let exe = std::env::current_exe().unwrap();
                 exe.parent().unwrap().parent().unwrap().join(format!(
-                    "{}raster_h3{}",
+                    "{}dggs_stream{}",
                     std::env::consts::DLL_PREFIX,
                     std::env::consts::DLL_SUFFIX
                 ))
@@ -101,7 +101,7 @@ impl DuckDbHarness {
             "Build the cdylib first: cargo build --lib"
         );
         let temp = tempfile::tempdir().unwrap();
-        let extension = temp.path().join("raster_h3.duckdb_extension");
+        let extension = temp.path().join("dggs_stream.duckdb_extension");
         let version = std::env::var("DUCKDB_VERSION").unwrap_or_else(|_| "v1.2.0".to_string());
         let result = Command::new(env!("CARGO_BIN_EXE_package_extension"))
             .arg("-i")
@@ -237,7 +237,7 @@ fn real_sql_raster_scans_and_parquet_parity() {
         SELECT count(*) > 0 AND bool_and(abs(mean - 42.0) < 1e-9)
         FROM h3_raster_continuous({tif}, resolution := 8, crs := 'EPSG:4326');
         SELECT count(*) > 0 AND bool_and(abs(mean - 42.0) < 1e-9)
-        FROM raster_h3({tif}, resolution := 8, crs := 'EPSG:4326');
+        FROM dggs_stream({tif}, resolution := 8, crs := 'EPSG:4326');
         SELECT status = 'SUCCESS' AND total_hexagons > 0
         FROM h3_raster_to_parquet({tif}, {parquet}, crs := 'EPSG:4326',
             resolutions := '7,8', compact := false, workers := 2);

@@ -4,15 +4,15 @@
 //!
 //! Run with: `cargo run --example benchmark_features`
 
-use raster_h3::aggregator::multi_horizon::{
+use dggs_stream::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 use std::time::Instant;
 
 fn main() {
     println!("=========================================================================");
-    println!("     raster_h3 Benchmarking: Multi-Band, Compaction & Pushdown Features  ");
+    println!("     dggs_stream Benchmarking: Multi-Band, Compaction & Pushdown Features  ");
     println!("=========================================================================");
 
     let cfl_path = "data/CFL_HI.tif";

@@ -1,17 +1,17 @@
-# Core Engine Deep Dive: `raster-h3-core`
+# Core Engine Deep Dive: `dggs-stream-core`
 
 [← Engines Overview](README.md) · [← Back to README](../../README.md)
 
-`raster-h3-core` ([`crates/raster-h3-core`](../../crates/raster-h3-core)) is the
+`dggs-stream-core` ([`crates/dggs-stream-core`](../../crates/dggs-stream-core)) is the
 engine-neutral library every adapter builds on. It has no dependency on DuckDB,
 PostgreSQL, Python or DataFusion. It holds the modules that used to live in the root
 `src/` (raster I/O, CRS, aggregator, encoding, Parquet, PMTiles, transcode), plus two
 modules added for the multi-engine split:
 
-- [`columnar`](../../crates/raster-h3-core/src/columnar/mod.rs): an Arrow-shaped
+- [`columnar`](../../crates/dggs-stream-core/src/columnar/mod.rs): an Arrow-shaped
   `RecordBatch` model, streaming batch readers, the Arrow C Data / C Stream interface,
   and the `RH3IPC01` / NDJSON serializers.
-- [`scalar_ops`](../../crates/raster-h3-core/src/scalar_ops.rs): the H3 scalar helpers
+- [`scalar_ops`](../../crates/dggs-stream-core/src/scalar_ops.rs): the H3 scalar helpers
   and parameter parsers that all adapters share.
 
 See [Module Architecture](../module-architecture.md) for a file-by-file map of the
@@ -20,7 +20,7 @@ eviction and memory budgets.
 
 ```toml
 [dependencies]
-raster-h3-core = { path = "crates/raster-h3-core" }
+dggs-stream-core = { path = "crates/dggs-stream-core" }
 ```
 
 ## Pipeline
@@ -191,8 +191,8 @@ probed pixels per window, scaled by the share of pixels indexed; when the estima
 exceeds the kernel's measured time only the `crs_transform` : `grid_index` ratio is
 reported. `sample` and `overlay` report the kernel whole.
 
-The same report is available as `raster-h3 ... --profile` (stderr), Python
-`raster_h3.profile_raster(...)`, DuckDB `profile := true` (stderr, and
+The same report is available as `dggs-stream ... --profile` (stderr), Python
+`dggs_stream.profile_raster(...)`, DuckDB `profile := true` (stderr, and
 `run_profile::last_report()` for embedders) and `with_profile(...)` on the DataFusion /
 Sedona table providers.
 
@@ -200,7 +200,7 @@ Prefer local profiling on stable hardware for performance comparisons. Run the
 hotspot harness with:
 
 ```bash
-cargo run --locked --release -p raster-h3-core --example profile_hotspots -- --quick --json profile.json
+cargo run --locked --release -p dggs-stream-core --example profile_hotspots -- --quick --json profile.json
 ```
 
 Omit `--quick` for the full profile. Record the commit SHA, hardware, thread count,
@@ -269,7 +269,7 @@ The `worker_scaling` example measures how wall time splits between the parallel
 kernel waves and the serial horizon merge as `aggregation_workers` grows:
 
 ```bash
-cargo run --locked --release -p raster-h3-core --example worker_scaling -- --workers 1,2,4,8 --json scaling.json
+cargo run --locked --release -p dggs-stream-core --example worker_scaling -- --workers 1,2,4,8 --json scaling.json
 ```
 
 It streams synthetic rasters through six workloads: resolution 9, coarse (7), fine
@@ -290,7 +290,7 @@ of decoding for a single GeoTIFF or a mosaic. Its Rust configuration is separate
 from aggregation and decoded-buffer budgets (it is not a total-process RAM cap):
 
 ```rust
-use raster_h3_core::raster::remote_prefetch::{RemoteChunkPrefetchQueue, RemotePrefetchConfig};
+use dggs_stream_core::raster::remote_prefetch::{RemoteChunkPrefetchQueue, RemotePrefetchConfig};
 
 let config = RemotePrefetchConfig {
     max_buffered_bytes: 16 * 1024 * 1024, // default: 32 MiB
@@ -360,7 +360,7 @@ A server that ignores `Range` returns the whole file, which is held in memory. T
 built-in transport accepts such a body only up to 1 GiB
 (`http_range::DEFAULT_MAX_FULL_BODY_BYTES`) and fails at open beyond that, before
 reading past the limit; a larger announced `Content-Length` fails without reading.
-Raise the limit with `RASTER_H3_MAX_FULL_BODY_BYTES` (bytes; invalid or zero values
+Raise the limit with `DGGS_STREAM_MAX_FULL_BODY_BYTES` (bytes; invalid or zero values
 keep the default) or `HttpTransport::with_max_full_body_bytes`.
 
 Reads that do not come from the prefetch queue (the TIFF header, and chunks the
@@ -388,14 +388,14 @@ where it may go:
 
 | Variable | Sent as | Sent to |
 | :--- | :--- | :--- |
-| `RASTER_H3_AUTH_TOKEN` | `Authorization: Bearer <token>` | Only hosts listed in `RASTER_H3_AUTH_HOSTS`, over `https://` (or to a loopback host). |
-| `RASTER_H3_AUTH_HOSTS` | — | Comma-separated hosts allowed to receive the token. An entry is an exact host (`data.example.com`) or, with a leading `.` or `*.`, a domain and its subdomains (`.example.com`). Unset or empty sends the token nowhere. |
-| `AWS_SESSION_TOKEN` | `x-amz-security-token` | Only S3 endpoints (`*.amazonaws.com`, `*.amazonaws.com.cn`, or the host of `AWS_ENDPOINT_URL` / `AWS_S3_ENDPOINT`), over `https://` (or to a loopback host). Ignored when `RASTER_H3_AUTH_TOKEN` is set. |
+| `DGGS_STREAM_AUTH_TOKEN` | `Authorization: Bearer <token>` | Only hosts listed in `DGGS_STREAM_AUTH_HOSTS`, over `https://` (or to a loopback host). |
+| `DGGS_STREAM_AUTH_HOSTS` | — | Comma-separated hosts allowed to receive the token. An entry is an exact host (`data.example.com`) or, with a leading `.` or `*.`, a domain and its subdomains (`.example.com`). Unset or empty sends the token nowhere. |
+| `AWS_SESSION_TOKEN` | `x-amz-security-token` | Only S3 endpoints (`*.amazonaws.com`, `*.amazonaws.com.cn`, or the host of `AWS_ENDPOINT_URL` / `AWS_S3_ENDPOINT`), over `https://` (or to a loopback host). Ignored when `DGGS_STREAM_AUTH_TOKEN` is set. |
 | `AWS_REQUEST_PAYER=requester` | `x-amz-request-payer: requester` | Every request (not a credential). |
 
 Requests are not signed, so `s3://` paths work for public objects and presigned URLs
 only. When a server answers 401 or 403 and a configured token was not sent, the error
-says why (`RASTER_H3_AUTH_TOKEN was not sent: ...`). The scope is resolved for each
+says why (`DGGS_STREAM_AUTH_TOKEN was not sent: ...`). The scope is resolved for each
 request from the transport's current URL. `Authorization` is dropped on any redirect;
 `x-amz-security-token` is not, so it can follow a redirect issued by an S3 endpoint.
 
@@ -506,7 +506,7 @@ Ratios within a few percent of 1.0 are run-to-run noise on that machine. The mer
 milliseconds (under 3 ms for about 35,000 boundary cells at resolution 10).
 
 ```bash
-cargo run --release -p raster-h3-core --example partition_overhead -- [--quick] [--json out.json]
+cargo run --release -p dggs-stream-core --example partition_overhead -- [--quick] [--json out.json]
 ```
 
 Child compaction cannot be combined with a partition (sibling groups may span
@@ -525,9 +525,9 @@ refused so partials cannot be dropped silently.
 ### Batch readers
 
 ```rust
-use raster_h3_core::aggregator::multi_horizon::MultiResolutionConfig;
-use raster_h3_core::columnar::{CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader};
-use raster_h3_core::raster::mosaic::resolve_raster_sources;
+use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream_core::columnar::{CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader};
+use dggs_stream_core::raster::mosaic::resolve_raster_sources;
 
 let paths = resolve_raster_sources("dem.tif")?;
 let mut config = MultiResolutionConfig::new(vec![7, 8]);
@@ -566,7 +566,7 @@ let cat = CategoricalBatchReader::open(&paths, &config, CategoricalFormat::Long,
 
 #### Public long-format cursor
 
-`raster_h3_core::aggregator::multi_horizon::{CategoricalLongCursor, CategoricalLongRow}`
+`dggs_stream_core::aggregator::multi_horizon::{CategoricalLongCursor, CategoricalLongRow}`
 provides the incremental expansion shared by the core and DuckDB long readers:
 
 - `CategoricalLongCursor::new(with_entropy)` controls per-cell entropy computation.
@@ -600,7 +600,7 @@ are counted in the exact zero bucket. Data spanning many orders of magnitude kee
 about 115 buckets per decade per sign. When `min == max` exactly, every quantile is
 `min`. NaN, infinite and non-positive weights are ignored by `update`.
 
-`raster_h3_core::aggregator::multi_horizon::QuantilePlan` builds on it for
+`dggs_stream_core::aggregator::multi_horizon::QuantilePlan` builds on it for
 `QuantileTarget` lists: `QuantilePlan::new(&targets)` deduplicates the probabilities
 (IQR shares p25/p75 with any explicit targets), and
 `evaluate_into(&H3Accumulator, &mut Vec<f64>)` writes one value per target, equal to
@@ -615,7 +615,7 @@ microbenchmarks, not whole-raster throughput measurements.
 
 ### Arrow C Data / C Stream interface
 
-[`columnar/arrow_c.rs`](../../crates/raster-h3-core/src/columnar/arrow_c.rs) implements the
+[`columnar/arrow_c.rs`](../../crates/dggs-stream-core/src/columnar/arrow_c.rs) implements the
 `#[repr(C)]` `ArrowSchema`, `ArrowArray` and `ArrowArrayStream` structs from the Arrow
 [C Data](https://arrow.apache.org/docs/format/CDataInterface.html) and
 [C Stream](https://arrow.apache.org/docs/format/CStreamInterface.html) specifications,
@@ -635,7 +635,7 @@ DataFusion adapter returns from `ExecutionPlan::execute_arrow_c_stream`.
 
 ### `RH3IPC01` stream and NDJSON
 
-[`columnar/ipc.rs`](../../crates/raster-h3-core/src/columnar/ipc.rs) provides a small,
+[`columnar/ipc.rs`](../../crates/dggs-stream-core/src/columnar/ipc.rs) provides a small,
 dependency-free binary format for piping batches between processes. **It is not the Apache
 Arrow IPC format**; read it with `read_ipc_stream` (Rust) or a reader written against the
 layout below.
@@ -689,7 +689,7 @@ floats become `null`; binary columns (`wkb`) are lowercase hex strings.
 
 ## Errors
 
-All fallible APIs return `raster_h3_core::error::Result<T>` with `RasterH3Error`
+All fallible APIs return `dggs_stream_core::error::Result<T>` with `RasterH3Error`
 (`StreamFailed`, `Io`, `Tiff`, `InvalidMetadata`, `CrsNotDetected`, `CrsProjectionFailed`,
 `CrsError`, `UnsupportedEpsg`, `Proj`, `H3Error`, `InvalidParameter`, `DuckDbError`).
 `safe_panic_payload_to_string` turns a caught panic payload into a message without letting

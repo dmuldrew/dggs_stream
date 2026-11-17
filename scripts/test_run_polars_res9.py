@@ -21,7 +21,7 @@ class BenchmarkTest(unittest.TestCase):
         )
         output = io.StringIO()
         with (
-            patch.dict(sys.modules, raster_h3=module),
+            patch.dict(sys.modules, dggs_stream=module),
             patch.object(sys, "argv", ["run_polars_res9.py", *args]),
             patch("time.perf_counter", side_effect=[10.0, 12.5]),
             patch("time.time", side_effect=AssertionError("Use a monotonic timer")),

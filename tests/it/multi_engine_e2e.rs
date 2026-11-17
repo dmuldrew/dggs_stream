@@ -1,19 +1,19 @@
 //! End-to-End Multi-Engine Integration & Parity Test Suite
 //!
-//! Exercises the engine crates (`raster-h3-core`, `raster-h3-cli`, `raster-h3-duckdb`,
-//! `raster-h3-python`, and `raster-h3-pg`) on identical synthetic
+//! Exercises the engine crates (`dggs-stream-core`, `dggs-stream-cli`, `dggs-stream-duckdb`,
+//! `dggs-stream-python`, and `dggs-stream-pg`) on identical synthetic
 //! continuous and categorical GeoTIFFs and verifies bit-for-bit / numerical parity across:
-//! 1. `raster-h3-core`: `ContinuousBatchReader`, `CategoricalBatchReader`, `ArrowArrayStream` C Data Interface.
-//! 2. `raster-h3-cli`: Real subprocess execution of `raster-h3` (`ipc`, `jsonl`, `parquet`, `pmtiles`).
-//! 3. (The DataFusion engine lives in the separate `raster-h3-sedona` workspace, whose
+//! 1. `dggs-stream-core`: `ContinuousBatchReader`, `CategoricalBatchReader`, `ArrowArrayStream` C Data Interface.
+//! 2. `dggs-stream-cli`: Real subprocess execution of `dggs-stream` (`ipc`, `jsonl`, `parquet`, `pmtiles`).
+//! 3. (The DataFusion engine lives in the separate `dggs-stream-sedona` workspace, whose
 //!    `scan` tests check its providers against the core batch readers.)
-//! 4. `raster-h3-python`: Real Python subprocess loading `libraster_h3_python`, testing
+//! 4. `dggs-stream-python`: Real Python subprocess loading `libdggs_stream_python`, testing
 //!    `RasterH3ArrowStream` (`to_dict()`, `__arrow_c_schema__()`, `__arrow_c_stream__()` C-ABI consumption),
 //!    `raster_to_parquet()`, `raster_to_pmtiles()`, and scalar H3 ops.
-//! 5. `raster-h3-pg`: `PgContinuousSrf` and `PgCategoricalSrf` Set-Returning Functions (both Rust & C-ABI) +
+//! 5. `dggs-stream-pg`: `PgContinuousSrf` and `PgCategoricalSrf` Set-Returning Functions (both Rust & C-ABI) +
 //!    Postgres V1 `fmgr` scalar C-ABI functions (`pg_h3_to_lat`, `pg_h3_to_lng`, `pg_h3_get_resolution`,
 //!    `pg_h3_is_valid`, `pg_h3_cell_to_parent`, `pg_scalar_*`).
-//! 6. `raster-h3-duckdb`: Real DuckDB CLI execution (when `duckdb` binary is present on PATH) +
+//! 6. `dggs-stream-duckdb`: Real DuckDB CLI execution (when `duckdb` binary is present on PATH) +
 //!    `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate` SQL parity.
 
 use crate::helpers;
@@ -27,12 +27,12 @@ use std::sync::{Mutex, OnceLock};
 
 use h3o::{CellIndex, LatLng};
 use helpers::TestGeoTiffBuilder;
-use raster_h3::core::aggregator::multi_horizon::MultiResolutionConfig;
-use raster_h3::core::columnar::ipc::read_ipc_stream;
-use raster_h3::core::columnar::{
+use dggs_stream::core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream::core::columnar::ipc::read_ipc_stream;
+use dggs_stream::core::columnar::{
     ArrowArrayStream, CategoricalBatchReader, CategoricalFormat, ColumnArray, ContinuousBatchReader,
 };
-use raster_h3_pg::{
+use dggs_stream_pg::{
     datum_to_float8, datum_to_int64, int64_to_datum, pg_h3_cell_to_parent, pg_h3_get_resolution,
     pg_h3_is_valid, pg_h3_to_lat, pg_h3_to_lng, pg_scalar_h3_to_string, pg_scalar_h3_to_wkb_u64,
     pg_scalar_string_to_h3, pg_srf_continuous_close, pg_srf_continuous_next,
@@ -157,7 +157,7 @@ fn assert_categorical_maps_equal(
 }
 
 fn collect_continuous_from_batches(
-    batches: &[raster_h3::core::columnar::RecordBatch],
+    batches: &[dggs_stream::core::columnar::RecordBatch],
 ) -> BTreeMap<u64, ContinuousCellSummary> {
     let mut map = BTreeMap::new();
     for batch in batches {
@@ -207,7 +207,7 @@ fn collect_continuous_from_batches(
 }
 
 fn collect_categorical_from_batches(
-    batches: &[raster_h3::core::columnar::RecordBatch],
+    batches: &[dggs_stream::core::columnar::RecordBatch],
 ) -> BTreeMap<u64, CategoricalCellSummary> {
     let mut map = BTreeMap::new();
     for batch in batches {
@@ -341,7 +341,7 @@ fn run_continuous_parity(
         .join(",");
 
     // =========================================================================
-    // Engine 1: raster-h3-core (ContinuousBatchReader + ArrowArrayStream C-ABI)
+    // Engine 1: dggs-stream-core (ContinuousBatchReader + ArrowArrayStream C-ABI)
     // =========================================================================
     let mut cfg = MultiResolutionConfig::new(resolutions.to_vec());
     cfg.custom_crs = Some(crs.to_string());
@@ -358,7 +358,7 @@ fn run_continuous_parity(
     );
 
     // =========================================================================
-    // Engine 2: raster-h3-cli (Real subprocess for `ipc`, `jsonl`, `parquet`, `pmtiles`)
+    // Engine 2: dggs-stream-cli (Real subprocess for `ipc`, `jsonl`, `parquet`, `pmtiles`)
     // =========================================================================
     let cli_bin = env!("CARGO_BIN_EXE_raster-h3");
 
@@ -373,16 +373,16 @@ fn run_continuous_parity(
             crs,
         ])
         .output()
-        .expect("run raster-h3 ipc");
+        .expect("run dggs-stream ipc");
     assert!(
         ipc_out.status.success(),
-        "raster-h3 ipc failed: {}",
+        "dggs-stream ipc failed: {}",
         String::from_utf8_lossy(&ipc_out.stderr)
     );
     let mut cursor = Cursor::new(&ipc_out.stdout);
     let (_cli_schema, cli_ipc_batches) = read_ipc_stream(&mut cursor).unwrap();
     let cli_ipc_map = collect_continuous_from_batches(&cli_ipc_batches);
-    assert_continuous_maps_equal("raster-h3-cli (ipc)", &core_map, &cli_ipc_map);
+    assert_continuous_maps_equal("dggs-stream-cli (ipc)", &core_map, &cli_ipc_map);
 
     // 2b. Subprocess `jsonl` streaming over stdout
     let jsonl_out = Command::new(cli_bin)
@@ -397,10 +397,10 @@ fn run_continuous_parity(
             "h3_index,mean,count,min,max,sum,resolution",
         ])
         .output()
-        .expect("run raster-h3 jsonl");
+        .expect("run dggs-stream jsonl");
     assert!(
         jsonl_out.status.success(),
-        "raster-h3 jsonl failed: {}",
+        "dggs-stream jsonl failed: {}",
         String::from_utf8_lossy(&jsonl_out.stderr)
     );
     let mut cli_jsonl_map = BTreeMap::new();
@@ -418,7 +418,7 @@ fn run_continuous_parity(
             },
         );
     }
-    assert_continuous_maps_equal("raster-h3-cli (jsonl)", &core_map, &cli_jsonl_map);
+    assert_continuous_maps_equal("dggs-stream-cli (jsonl)", &core_map, &cli_jsonl_map);
 
     // 2c. Subprocess `parquet` & `pmtiles` exports
     let tmp_dir = tempfile::tempdir().unwrap();
@@ -454,16 +454,16 @@ fn run_continuous_parity(
     assert!(pm_status.success() && &std::fs::read(&cli_pm).unwrap()[..7] == b"PMTiles");
 
     // =========================================================================
-    // Engine 4: raster-h3-python (Real Python subprocess + PyCapsule C Stream)
+    // Engine 4: dggs-stream-python (Real Python subprocess + PyCapsule C Stream)
     // =========================================================================
-    let py_lib = ensure_cdylib_built("raster-h3-python", "raster_h3_python");
-    let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/raster-h3-python/python");
+    let py_lib = ensure_cdylib_built("dggs-stream-python", "dggs_stream_python");
+    let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/dggs-stream-python/python");
     let py_pq = tmp_dir.path().join("py_out.parquet");
     let py_pm = tmp_dir.path().join("py_out.pmtiles");
 
     let py_script = r#"
 import ctypes, json, os, sys
-import raster_h3
+import dggs_stream
 
 tif_path = sys.argv[1]
 pq_path = sys.argv[2]
@@ -473,7 +473,7 @@ resolutions = [int(r) for r in sys.argv[5].split(",")]
 resolution_arg = ",".join(str(r) for r in resolutions)
 
 # 1. Stream via RasterH3ArrowStream.to_dict()
-stream = raster_h3.RasterH3ArrowStream(tif_path, resolutions=resolutions, crs=crs)
+stream = dggs_stream.RasterH3ArrowStream(tif_path, resolutions=resolutions, crs=crs)
 d = stream.to_dict()
 
 # 2. Verify __arrow_c_schema__() and __arrow_c_stream__() PyCapsules and consume C stream
@@ -536,16 +536,16 @@ assert total_c_rows == len(d["h3_index"]), f"C stream rows {total_c_rows} != dic
 
 # 3. Verify scalar functions on every emitted cell
 for idx, hex_s, res in zip(d["h3_index"], d["h3_hex"], d["resolution"]):
-    assert raster_h3.h3_is_valid(idx)
-    assert raster_h3.h3_to_string(idx) == hex_s
-    assert raster_h3.string_to_h3(hex_s) == idx
-    assert raster_h3.h3_get_resolution(idx) == res
-    wkb = raster_h3.h3_to_wkb(idx)
+    assert dggs_stream.h3_is_valid(idx)
+    assert dggs_stream.h3_to_string(idx) == hex_s
+    assert dggs_stream.string_to_h3(hex_s) == idx
+    assert dggs_stream.h3_get_resolution(idx) == res
+    wkb = dggs_stream.h3_to_wkb(idx)
     assert wkb is not None and len(wkb) == 125
 
 # 4. Verify direct Parquet and PMTiles exporters from Python
-pq_count = raster_h3.raster_to_parquet(tif_path, pq_path, resolutions=resolution_arg, crs=crs)
-pm_count = raster_h3.raster_to_pmtiles(tif_path, pm_path, resolutions=resolution_arg, crs=crs)
+pq_count = dggs_stream.raster_to_parquet(tif_path, pq_path, resolutions=resolution_arg, crs=crs)
+pm_count = dggs_stream.raster_to_pmtiles(tif_path, pm_path, resolutions=resolution_arg, crs=crs)
 assert pq_count == len(d["h3_index"])
 assert pm_count == len(d["h3_index"])
 
@@ -554,7 +554,7 @@ print(json.dumps(d))
 
     let py_out = Command::new(python_exe())
         .env("PYTHONPATH", &py_pkg_dir)
-        .env("RASTER_H3_PYTHON_LIB", &py_lib)
+        .env("DGGS_STREAM_PYTHON_LIB", &py_lib)
         .args([
             "-c",
             py_script,
@@ -588,10 +588,10 @@ print(json.dumps(d))
             },
         );
     }
-    assert_continuous_maps_equal("raster-h3-python", &core_map, &py_map);
+    assert_continuous_maps_equal("dggs-stream-python", &core_map, &py_map);
 
     // =========================================================================
-    // Engine 5: raster-h3-pg (C-ABI SRF + Postgres V1 fmgr C-ABI scalars)
+    // Engine 5: dggs-stream-pg (C-ABI SRF + Postgres V1 fmgr C-ABI scalars)
     // =========================================================================
     let mut pg_map = BTreeMap::new();
     // SAFETY: string arguments are live CStrings (or null), the SRF handle is used only between
@@ -625,7 +625,7 @@ print(json.dumps(d))
             sum: 0.0,
             resolution: 0,
             wkb_len: 0,
-            wkb: [0u8; raster_h3_core::encoding::WKB_BUF_LEN],
+            wkb: [0u8; dggs_stream_core::encoding::WKB_BUF_LEN],
         };
         while pg_srf_continuous_next(srf_ptr, &mut c_row) == 1 {
             let cell_u64 = c_row.h3_index as u64;
@@ -664,7 +664,7 @@ print(json.dumps(d))
             let parent_d = pg_h3_cell_to_parent(&mut fc_parent);
             assert!(!fc_parent.isnull && parent_d != 0);
 
-            // Also verify string and WKB helpers exported by raster_h3_pg
+            // Also verify string and WKB helpers exported by dggs_stream_pg
             let hex_s = pg_scalar_h3_to_string(cell_u64).unwrap();
             assert_eq!(pg_scalar_string_to_h3(&hex_s), cell_u64);
             let wkb = pg_scalar_h3_to_wkb_u64(cell_u64).unwrap();
@@ -684,20 +684,20 @@ print(json.dumps(d))
         }
         pg_srf_continuous_close(srf_ptr);
     }
-    assert_continuous_maps_equal("raster-h3-pg", &core_map, &pg_map);
+    assert_continuous_maps_equal("dggs-stream-pg", &core_map, &pg_map);
 
     // =========================================================================
-    // Engine 6: raster-h3-duckdb (Real DuckDB CLI when available on PATH)
+    // Engine 6: dggs-stream-duckdb (Real DuckDB CLI when available on PATH)
     // =========================================================================
     if let Ok(ver_out) = Command::new("duckdb").arg("--version").output() {
         if ver_out.status.success() {
-            let dylib = ensure_cdylib_built("raster_h3", "raster_h3");
+            let dylib = ensure_cdylib_built("dggs_stream", "dggs_stream");
             let platform_out = Command::new("duckdb")
                 .args(["-batch", "-csv", "-noheader", "-c", "PRAGMA platform"])
                 .output()
                 .unwrap();
             let platform = String::from_utf8(platform_out.stdout).unwrap();
-            let ext_path = tmp_dir.path().join("raster_h3.duckdb_extension");
+            let ext_path = tmp_dir.path().join("dggs_stream.duckdb_extension");
             let pkg_status = Command::new(env!("CARGO_BIN_EXE_package_extension"))
                 .arg("-i")
                 .arg(&dylib)
@@ -744,7 +744,7 @@ print(json.dumps(d))
                     },
                 );
             }
-            assert_continuous_maps_equal("raster-h3-duckdb (DuckDB CLI)", &core_map, &duck_map);
+            assert_continuous_maps_equal("dggs-stream-duckdb (DuckDB CLI)", &core_map, &duck_map);
         }
     }
     core_map
@@ -811,7 +811,7 @@ fn test_cross_engine_categorical_e2e_parity() {
             _ => 40.0f32,
         });
 
-    // 1. raster-h3-core CategoricalBatchReader
+    // 1. dggs-stream-core CategoricalBatchReader
     let cfg = MultiResolutionConfig::new(vec![8]);
     let reader = CategoricalBatchReader::open(
         std::slice::from_ref(&tif_path),
@@ -826,7 +826,7 @@ fn test_cross_engine_categorical_e2e_parity() {
     let core_map = collect_categorical_from_batches(&core_batches);
     assert!(!core_map.is_empty());
 
-    // 2. raster-h3-cli subprocess (`ipc` categorical wide)
+    // 2. dggs-stream-cli subprocess (`ipc` categorical wide)
     let cli_bin = env!("CARGO_BIN_EXE_raster-h3");
     let ipc_out = Command::new(cli_bin)
         .args([
@@ -846,17 +846,17 @@ fn test_cross_engine_categorical_e2e_parity() {
     let mut cursor = Cursor::new(&ipc_out.stdout);
     let (_s, cli_batches) = read_ipc_stream(&mut cursor).unwrap();
     let cli_map = collect_categorical_from_batches(&cli_batches);
-    assert_categorical_maps_equal("raster-h3-cli (categorical ipc)", &core_map, &cli_map);
+    assert_categorical_maps_equal("dggs-stream-cli (categorical ipc)", &core_map, &cli_map);
 
-    // 4. raster-h3-python subprocess (`RasterH3ArrowStream(..., categorical=True)`)
-    let py_lib = ensure_cdylib_built("raster-h3-python", "raster_h3_python");
-    let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/raster-h3-python/python");
+    // 4. dggs-stream-python subprocess (`RasterH3ArrowStream(..., categorical=True)`)
+    let py_lib = ensure_cdylib_built("dggs-stream-python", "dggs_stream_python");
+    let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/dggs-stream-python/python");
     let py_out = Command::new(python_exe())
         .env("PYTHONPATH", &py_pkg_dir)
-        .env("RASTER_H3_PYTHON_LIB", &py_lib)
+        .env("DGGS_STREAM_PYTHON_LIB", &py_lib)
         .args([
             "-c",
-            "import json, sys, raster_h3; s = raster_h3.RasterH3ArrowStream(sys.argv[1], resolutions=8, categorical=True, format='wide', crs='EPSG:4326'); print(json.dumps(s.to_dict()))",
+            "import json, sys, dggs_stream; s = dggs_stream.RasterH3ArrowStream(sys.argv[1], resolutions=8, categorical=True, format='wide', crs='EPSG:4326'); print(json.dumps(s.to_dict()))",
             tif_path.to_str().unwrap(),
         ])
         .output()
@@ -878,9 +878,9 @@ fn test_cross_engine_categorical_e2e_parity() {
             },
         );
     }
-    assert_categorical_maps_equal("raster-h3-python (categorical)", &core_map, &py_map);
+    assert_categorical_maps_equal("dggs-stream-python (categorical)", &core_map, &py_map);
 
-    // 5. raster-h3-pg (`PgCategoricalSrf`)
+    // 5. dggs-stream-pg (`PgCategoricalSrf`)
     let pg_srf = PgCategoricalSrf::open(
         tif_path.to_str().unwrap(),
         vec![8],
@@ -904,19 +904,19 @@ fn test_cross_engine_categorical_e2e_parity() {
             },
         );
     }
-    assert_categorical_maps_equal("raster-h3-pg (categorical)", &core_map, &pg_map);
+    assert_categorical_maps_equal("dggs-stream-pg (categorical)", &core_map, &pg_map);
 
-    // 6. raster-h3-duckdb (`h3_raster_categorical_aggregate` in real DuckDB CLI)
+    // 6. dggs-stream-duckdb (`h3_raster_categorical_aggregate` in real DuckDB CLI)
     if let Ok(ver_out) = Command::new("duckdb").arg("--version").output() {
         if ver_out.status.success() {
             let tmp_dir = tempfile::tempdir().unwrap();
-            let dylib = ensure_cdylib_built("raster_h3", "raster_h3");
+            let dylib = ensure_cdylib_built("dggs_stream", "dggs_stream");
             let platform_out = Command::new("duckdb")
                 .args(["-batch", "-csv", "-noheader", "-c", "PRAGMA platform"])
                 .output()
                 .unwrap();
             let platform = String::from_utf8(platform_out.stdout).unwrap();
-            let ext_path = tmp_dir.path().join("raster_h3.duckdb_extension");
+            let ext_path = tmp_dir.path().join("dggs_stream.duckdb_extension");
             let pkg_status = Command::new(env!("CARGO_BIN_EXE_package_extension"))
                 .arg("-i")
                 .arg(&dylib)
@@ -962,7 +962,7 @@ fn test_cross_engine_categorical_e2e_parity() {
                 );
             }
             assert_categorical_maps_equal(
-                "raster-h3-duckdb (categorical DuckDB CLI)",
+                "dggs-stream-duckdb (categorical DuckDB CLI)",
                 &core_map,
                 &duck_map,
             );
@@ -973,7 +973,7 @@ fn test_cross_engine_categorical_e2e_parity() {
 #[test]
 fn test_h3_polygon_to_cells_cross_engine_parity() {
     use h3o::geom::ContainmentMode;
-    use raster_h3::core::scalar_ops::h3_polygon_to_cells_wkb;
+    use dggs_stream::core::scalar_ops::h3_polygon_to_cells_wkb;
 
     let outer: [(f64, f64); 5] = [
         (-122.49, 37.71),
@@ -1013,27 +1013,27 @@ fn test_h3_polygon_to_cells_cross_engine_parity() {
         core_results.insert(name, cells);
     }
 
-    let py_lib = ensure_cdylib_built("raster-h3-python", "raster_h3_python");
-    let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/raster-h3-python/python");
+    let py_lib = ensure_cdylib_built("dggs-stream-python", "dggs_stream_python");
+    let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/dggs-stream-python/python");
     let py_script = r#"
 import json, sys
-import raster_h3
+import dggs_stream
 
 wkb = bytes.fromhex(sys.argv[1])
 modes = ["contains_centroid", "contains_boundary", "intersects_boundary", "covers"]
-cells = {mode: raster_h3.h3_polygon_to_cells(wkb, 8, mode) for mode in modes}
+cells = {mode: dggs_stream.h3_polygon_to_cells(wkb, 8, mode) for mode in modes}
 aliases = {
     "center": "contains_centroid",
     "full": "contains_boundary",
     "overlapping": "covers",
 }
 for alias, canonical in aliases.items():
-    assert raster_h3.h3_polygon_to_cells(wkb, 8, alias) == cells[canonical]
+    assert dggs_stream.h3_polygon_to_cells(wkb, 8, alias) == cells[canonical]
 print(json.dumps(cells, sort_keys=True))
 "#;
     let py_out = Command::new(python_exe())
         .env("PYTHONPATH", &py_pkg_dir)
-        .env("RASTER_H3_PYTHON_LIB", &py_lib)
+        .env("DGGS_STREAM_PYTHON_LIB", &py_lib)
         .args(["-c", py_script, &wkb_hex])
         .output()
         .expect("run Python polygon parity test");
@@ -1058,7 +1058,7 @@ print(json.dumps(cells, sort_keys=True))
     if let Ok(version_output) = Command::new(&duckdb).arg("--version").output() {
         if version_output.status.success() {
             let temp = tempfile::tempdir().unwrap();
-            let library = ensure_cdylib_built("raster_h3", "raster_h3");
+            let library = ensure_cdylib_built("dggs_stream", "dggs_stream");
             let platform_output = Command::new(&duckdb)
                 .args(["-batch", "-csv", "-noheader", "-c", "PRAGMA platform"])
                 .output()
@@ -1069,7 +1069,7 @@ print(json.dumps(cells, sort_keys=True))
                 String::from_utf8_lossy(&platform_output.stderr)
             );
             let platform = String::from_utf8(platform_output.stdout).unwrap();
-            let extension = temp.path().join("raster_h3.duckdb_extension");
+            let extension = temp.path().join("dggs_stream.duckdb_extension");
             let duckdb_version =
                 std::env::var("DUCKDB_VERSION").unwrap_or_else(|_| "v1.2.0".into());
             let package_output = Command::new(env!("CARGO_BIN_EXE_package_extension"))

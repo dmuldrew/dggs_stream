@@ -3,9 +3,9 @@
 //! Example usage:
 //!   cargo run --release --example raster_to_pmtiles -- --input data/sample.tif --output data/sample.pmtiles --resolutions 7,8,9
 
-use raster_h3::aggregator::multi_horizon::MultiResolutionConfig;
-use raster_h3::aggregator::sampling::SamplingPattern;
-use raster_h3::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream::aggregator::sampling::SamplingPattern;
+use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
 use std::env;
 use std::fs::File;
 use std::time::Instant;
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
             "--help" | "-h" => {
-                println!("raster_h3 PMTiles v3 Generator");
+                println!("dggs_stream PMTiles v3 Generator");
                 println!("Usage:");
                 println!("  raster_to_pmtiles --input <path> --output <path> [--resolutions 7,8,9] [--sampling center]");
                 return Ok(());
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     println!("===========================================================");
-    println!("  raster_h3: Pure-Rust GeoTIFF -> PMTiles v3 Generator");
+    println!("  dggs_stream: Pure-Rust GeoTIFF -> PMTiles v3 Generator");
     println!("===========================================================");
     println!("  Input GeoTIFF   : {}", input_path);
     println!("  Output PMTiles  : {}", output_path);

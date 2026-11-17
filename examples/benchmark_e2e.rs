@@ -16,11 +16,11 @@ use tiff::encoder::colortype::Gray32Float;
 use tiff::encoder::TiffEncoder;
 use tiff::tags::Tag;
 
-use raster_h3::aggregator::sampling::SamplingPattern;
-use raster_h3::aggregator::{
+use dggs_stream::aggregator::sampling::SamplingPattern;
+use dggs_stream::aggregator::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 
 fn generate_e2e_geotiff(width: usize, height: usize) -> NamedTempFile {
     let temp_file = NamedTempFile::new().expect("Failed to create temporary GeoTIFF");
@@ -72,7 +72,7 @@ fn main() {
         "========================================================================================="
     );
     println!(
-        "                       raster_h3 Complete End-to-End Benchmark Suite                     "
+        "                       dggs_stream Complete End-to-End Benchmark Suite                     "
     );
     println!(
         "========================================================================================="

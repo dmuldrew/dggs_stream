@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use raster_h3_core::raster::http_range::{parse_content_range, validate_range_response};
+use dggs_stream_core::raster::http_range::{parse_content_range, validate_range_response};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {

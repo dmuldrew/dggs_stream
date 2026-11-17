@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
-use raster_h3_core::columnar::{
+use dggs_stream_core::columnar::{
     ArrowArray, ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch,
 };
 

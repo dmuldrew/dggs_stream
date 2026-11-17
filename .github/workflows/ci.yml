@@ -42,7 +42,7 @@ jobs:
               - '!assets/**'
               - '!LICENSE'
             wheel_readme:
-              - 'crates/raster-h3-python/README.md'
+              - 'crates/dggs-stream-python/README.md'
 
   lint:
     name: Format, Clippy & Docs
@@ -53,7 +53,7 @@ jobs:
       contents: read
     env:
       # Compiles the feature-gated PostgreSQL module without a local server install.
-      RASTER_H3_PG_MAJOR: 16
+      DGGS_STREAM_PG_MAJOR: 16
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,10 +78,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Clippy (root facade, all adapter features)
-        run: cargo clippy -p raster_h3 --features full --all-targets --locked -- -D warnings
+        run: cargo clippy -p dggs_stream --features full --all-targets --locked -- -D warnings
 
       - name: Clippy (pg-extension)
-        run: cargo clippy -p raster-h3-pg --features pg-extension --all-targets --locked -- -D warnings
+        run: cargo clippy -p dggs-stream-pg --features pg-extension --all-targets --locked -- -D warnings
 
       - name: Rustdoc
         env:
@@ -123,7 +123,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             # DuckDB v1.2 tags its glibc x86_64 builds linux_amd64_gcc4; v1.3+ and v2.0+ use linux_amd64 (both are packaged below)
             platform: linux_amd64_gcc4
-            lib_file: libraster_h3.so
+            lib_file: libdggs_stream.so
             cli_arch: linux-amd64
             cli_sha256: 5221744caf224994bf563bff8e8bd039a9b63437ef05ccfdcc14d2c1cece8d3e
             cli_v156_sha256: 6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f
@@ -131,7 +131,7 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            lib_file: libraster_h3.so
+            lib_file: libdggs_stream.so
             cli_arch: linux-aarch64
             cli_sha256: 324bd819153c685b7e8153e73d34cbd590b48e096680fd68c8b16a7035206323
             cli_v156_sha256: c544e92c9b7c31fc53c2139802cabd8e2d1b2b3e3f933117f31611239c1402db
@@ -139,7 +139,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: osx_arm64
-            lib_file: libraster_h3.dylib
+            lib_file: libdggs_stream.dylib
             cli_arch: osx-universal
             cli_sha256: 09c57c5065decc254f64e51e7b1de94d262ec13fcd8d1a96a16f08f67ee2ed9f
             cli_v156_sha256: 80a80c68736bd7dea53e8b02447e9759db0c8596ea156476ba396c44f54c5810
@@ -147,7 +147,7 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: osx_amd64
-            lib_file: libraster_h3.dylib
+            lib_file: libdggs_stream.dylib
             cli_arch: osx-universal
             cli_sha256: 09c57c5065decc254f64e51e7b1de94d262ec13fcd8d1a96a16f08f67ee2ed9f
             cli_v156_sha256: 80a80c68736bd7dea53e8b02447e9759db0c8596ea156476ba396c44f54c5810
@@ -157,7 +157,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows_amd64
-            lib_file: raster_h3.dll
+            lib_file: dggs_stream.dll
             cli_arch: windows-amd64
             cli_sha256: 3f3194799c1f289ff570cef9191168ea5d6743202d4445dd6d5ee669a8586435
             cli_v156_sha256: 798eae475d07c645ff3b914f7b0e676d06502b5412dd7552638fafed81f9e916
@@ -207,13 +207,13 @@ jobs:
       # Root (cross-engine/packaging), core and DuckDB integration binaries plus
       # their unit tests; each crate links a single tests/it binary.
       - name: Run Tests
-        run: cargo test --locked --release --no-fail-fast -p raster_h3 -p raster-h3-core -p raster-h3-duckdb
+        run: cargo test --locked --release --no-fail-fast -p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb
 
       - name: Test hotspot harness ownership sampling
-        run: cargo test --locked --release -p raster-h3-core --example profile_hotspots
+        run: cargo test --locked --release -p dggs-stream-core --example profile_hotspots
 
       - name: Test worker-scaling benchmark output equality
-        run: cargo test --locked --release -p raster-h3-core --example worker_scaling
+        run: cargo test --locked --release -p dggs-stream-core --example worker_scaling
 
       - name: Build Dynamic Library & Binaries
         run: cargo build --locked --release --target ${{ matrix.target }}
@@ -225,46 +225,46 @@ jobs:
         run: |
           cargo run --locked --release --bin package_extension -- \
             --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-            --output target/${{ matrix.target }}/release/raster_h3.duckdb_extension \
+            --output target/${{ matrix.target }}/release/dggs_stream.duckdb_extension \
             --platform ${{ matrix.platform }} \
             --duckdb-version v1.2.0
 
           cargo run --locked --release --bin package_extension -- \
             --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-            --output target/${{ matrix.target }}/release/raster_h3.duckdb_extension.gz \
+            --output target/${{ matrix.target }}/release/dggs_stream.duckdb_extension.gz \
             --platform ${{ matrix.platform }} \
             --duckdb-version v1.2.0 \
             --gzip
 
           # Create platform-tagged files for direct release asset downloads
-          cp target/${{ matrix.target }}/release/raster_h3.duckdb_extension target/${{ matrix.target }}/release/raster_h3-${{ matrix.platform }}.duckdb_extension
-          cp target/${{ matrix.target }}/release/raster_h3.duckdb_extension.gz target/${{ matrix.target }}/release/raster_h3-${{ matrix.platform }}.duckdb_extension.gz
+          cp target/${{ matrix.target }}/release/dggs_stream.duckdb_extension target/${{ matrix.target }}/release/dggs_stream-${{ matrix.platform }}.duckdb_extension
+          cp target/${{ matrix.target }}/release/dggs_stream.duckdb_extension.gz target/${{ matrix.target }}/release/dggs_stream-${{ matrix.platform }}.duckdb_extension.gz
 
-          # Stage repository layout: dist/v1.2.0/<platform>/raster_h3.duckdb_extension[.gz]
+          # Stage repository layout: dist/v1.2.0/<platform>/dggs_stream.duckdb_extension[.gz]
           mkdir -p dist/v1.2.0/${{ matrix.platform }}
-          cp target/${{ matrix.target }}/release/raster_h3.duckdb_extension dist/v1.2.0/${{ matrix.platform }}/
-          cp target/${{ matrix.target }}/release/raster_h3.duckdb_extension.gz dist/v1.2.0/${{ matrix.platform }}/
+          cp target/${{ matrix.target }}/release/dggs_stream.duckdb_extension dist/v1.2.0/${{ matrix.platform }}/
+          cp target/${{ matrix.target }}/release/dggs_stream.duckdb_extension.gz dist/v1.2.0/${{ matrix.platform }}/
 
           # On Linux x86_64, also package under the `linux_amd64` platform tag used by DuckDB v1.3+ and v2.0+
           if [[ "${{ matrix.platform }}" == "linux_amd64_gcc4" ]]; then
             mkdir -p dist/v1.2.0/linux_amd64
             cargo run --locked --release --bin package_extension -- \
               --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-              --output dist/v1.2.0/linux_amd64/raster_h3.duckdb_extension \
+              --output dist/v1.2.0/linux_amd64/dggs_stream.duckdb_extension \
               --platform linux_amd64 \
               --duckdb-version v1.2.0
             cargo run --locked --release --bin package_extension -- \
               --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-              --output dist/v1.2.0/linux_amd64/raster_h3.duckdb_extension.gz \
+              --output dist/v1.2.0/linux_amd64/dggs_stream.duckdb_extension.gz \
               --platform linux_amd64 \
               --duckdb-version v1.2.0 \
               --gzip
-            cp dist/v1.2.0/linux_amd64/raster_h3.duckdb_extension target/${{ matrix.target }}/release/raster_h3-linux_amd64.duckdb_extension
-            cp dist/v1.2.0/linux_amd64/raster_h3.duckdb_extension.gz target/${{ matrix.target }}/release/raster_h3-linux_amd64.duckdb_extension.gz
+            cp dist/v1.2.0/linux_amd64/dggs_stream.duckdb_extension target/${{ matrix.target }}/release/dggs_stream-linux_amd64.duckdb_extension
+            cp dist/v1.2.0/linux_amd64/dggs_stream.duckdb_extension.gz target/${{ matrix.target }}/release/dggs_stream-linux_amd64.duckdb_extension.gz
           fi
 
           # DuckDB requests `<prefix>/<its own version>/<platform>/...` from a repository, so DuckDB 2.0
-          # (`INSTALL raster_h3 FROM <repo>`) needs a v2.0.0 tree. Its Linux x86_64 tag is linux_amd64.
+          # (`INSTALL dggs_stream FROM <repo>`) needs a v2.0.0 tree. Its Linux x86_64 tag is linux_amd64.
           # The v2.0.0 tree ships a separate build against the v1.5.6 C extension API, enabling
           # DuckDB file-system access, COPY output, session options and scalar bind/init.
           V2_PLATFORM="${{ matrix.platform }}"
@@ -274,24 +274,24 @@ jobs:
           mkdir -p "dist/v2.0.0/$V2_PLATFORM"
 
           CARGO_TARGET_DIR=target-v156 cargo build --locked --release --target ${{ matrix.target }} \
-            -p raster_h3 --lib --features duckdb-api-v1_5_6
+            -p dggs_stream --lib --features duckdb-api-v1_5_6
 
           cargo run --locked --release --bin package_extension -- \
             --input target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-            --output "dist/v2.0.0/$V2_PLATFORM/raster_h3.duckdb_extension" \
+            --output "dist/v2.0.0/$V2_PLATFORM/dggs_stream.duckdb_extension" \
             --platform "$V2_PLATFORM" \
             --duckdb-version v1.5.6
 
           cargo run --locked --release --bin package_extension -- \
             --input target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-            --output "dist/v2.0.0/$V2_PLATFORM/raster_h3.duckdb_extension.gz" \
+            --output "dist/v2.0.0/$V2_PLATFORM/dggs_stream.duckdb_extension.gz" \
             --platform "$V2_PLATFORM" \
             --duckdb-version v1.5.6 \
             --gzip
 
           # Signed builds must verify before they are uploaded for release
           if [[ -n "${DUCKDB_EXTENSION_SIGNING_KEY:-}" ]]; then
-            for ext in dist/v*/*/raster_h3.duckdb_extension*; do
+            for ext in dist/v*/*/dggs_stream.duckdb_extension*; do
               cargo run --locked --release --bin package_extension -- --verify "$ext"
             done
           fi
@@ -307,7 +307,7 @@ jobs:
           unzip -o -q "duckdb_cli-${{ matrix.cli_arch }}.zip"
           
           DUCKDB_BIN="./duckdb"
-          EXT_PATH="$(pwd)/target/${{ matrix.target }}/release/raster_h3.duckdb_extension"
+          EXT_PATH="$(pwd)/target/${{ matrix.target }}/release/dggs_stream.duckdb_extension"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             DUCKDB_BIN="./duckdb.exe"
             cp target/duckdb_lib/duckdb.dll . || true
@@ -334,7 +334,7 @@ jobs:
           fi
           export DUCKDB_BIN
           cargo build --locked --release --lib
-          cargo test --locked --release -p raster_h3 --test it duckdb_sql_smoke -- --ignored
+          cargo test --locked --release -p dggs_stream --test it duckdb_sql_smoke -- --ignored
 
       - name: Run DuckDB 1.5.6 SQL Smoke Test
         if: matrix.cli_arch != ''
@@ -358,7 +358,7 @@ jobs:
           export DUCKDB_BIN
           export DUCKDB_VERSION=v1.2.0
           chmod +x "$DUCKDB_BIN" || true
-          cargo test --locked --release -p raster_h3 --test it duckdb_sql_smoke -- --ignored
+          cargo test --locked --release -p dggs_stream --test it duckdb_sql_smoke -- --ignored
 
       - name: Run DuckDB 2.0.0 SQL Smoke Test
         if: matrix.cli_arch != ''
@@ -395,22 +395,22 @@ jobs:
             DUCKDB_PLATFORM=linux_amd64
           fi
           export DUCKDB_VERSION=v1.5.6
-          export RASTER_H3_LIBRARY="$(pwd)/target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }}"
+          export DGGS_STREAM_LIBRARY="$(pwd)/target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }}"
           chmod +x "$DUCKDB_BIN" || true
-          cargo test --locked --release -p raster_h3 --test it duckdb_sql_smoke -- --ignored
+          cargo test --locked --release -p dggs_stream --test it duckdb_sql_smoke -- --ignored
           # Signed install/load through CREATE EXTENSION REPOSITORY (no -unsigned), plus
           # rejection of unsigned and wrong-key extensions
-          cargo test --locked --release -p raster_h3 --test it duckdb_trusted_repository -- --ignored
+          cargo test --locked --release -p dggs_stream --test it duckdb_trusted_repository -- --ignored
 
       - name: Upload Extension Artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: duckdb-extension-${{ matrix.platform }}
           path: |
-            target/${{ matrix.target }}/release/raster_h3.duckdb_extension
-            target/${{ matrix.target }}/release/raster_h3.duckdb_extension.gz
-            target/${{ matrix.target }}/release/raster_h3-*.duckdb_extension
-            target/${{ matrix.target }}/release/raster_h3-*.duckdb_extension.gz
+            target/${{ matrix.target }}/release/dggs_stream.duckdb_extension
+            target/${{ matrix.target }}/release/dggs_stream.duckdb_extension.gz
+            target/${{ matrix.target }}/release/dggs_stream-*.duckdb_extension
+            target/${{ matrix.target }}/release/dggs_stream-*.duckdb_extension.gz
             dist/**/*
           if-no-files-found: error
 
@@ -445,7 +445,7 @@ jobs:
 
       # extension-ci-tools skips tests on linux_amd64, so invoke its runner directly.
       - name: Run test/sql
-        run: ./configure/venv/bin/python3 -m duckdb_sqllogictest --test-dir test/sql --external-extension build/release/raster_h3.duckdb_extension
+        run: ./configure/venv/bin/python3 -m duckdb_sqllogictest --test-dir test/sql --external-extension build/release/dggs_stream.duckdb_extension
 
   # The build matrix tests the root, core and DuckDB crates; this covers the remaining
   # workspace crates on Linux, including the pg fmgr suites behind `pg-extension`.
@@ -458,7 +458,7 @@ jobs:
       contents: read
     env:
       # The pg fmgr suites need a target major; they run against in-process stand-ins.
-      RASTER_H3_PG_MAJOR: '16'
+      DGGS_STREAM_PG_MAJOR: '16'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -469,13 +469,13 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run tests
-        run: cargo test --locked --release --no-fail-fast -p raster-h3-cli -p raster-h3-python -p raster-h3-pg
+        run: cargo test --locked --release --no-fail-fast -p dggs-stream-cli -p dggs-stream-python -p dggs-stream-pg
 
       - name: Run pg-extension tests
-        run: cargo test --locked --release --no-fail-fast -p raster-h3-pg --features pg-extension
+        run: cargo test --locked --release --no-fail-fast -p dggs-stream-pg --features pg-extension
 
   # The Rust suites above drive the Python crate's C ABI. This runs the package itself,
-  # `python/raster_h3`, against real Polars and PyArrow, loading the in-tree package with
+  # `python/dggs_stream`, against real Polars and PyArrow, loading the in-tree package with
   # a freshly built cdylib (not an installed wheel; the wheel jobs smoke-test that).
   # Dependency sets match the `python-polars` engine of manual-tests.yml: the declared
   # minimums (pyproject: polars>=1.0, pyarrow>=14.0; pyarrow 14 needs numpy 1.x), the first
@@ -529,14 +529,14 @@ jobs:
           python -m pip list | grep -iE '^(polars|pyarrow|numpy|h3|pytest) '
 
       - name: Build the Python cdylib
-        run: cargo build --locked --release -p raster-h3-python --lib
+        run: cargo build --locked --release -p dggs-stream-python --lib
 
       - name: Run pytest
         run: |
-          export RASTER_H3_PYTHON_LIB="$PWD/target/release/libraster_h3_python.so"
-          python -m pytest crates/raster-h3-python/tests/pytest -ra -p no:cacheprovider
+          export DGGS_STREAM_PYTHON_LIB="$PWD/target/release/libdggs_stream_python.so"
+          python -m pytest crates/dggs-stream-python/tests/pytest -ra -p no:cacheprovider
 
-  # raster-h3-sedona is a standalone workspace (DataFusion pinned to SedonaDB's version, plus
+  # dggs-stream-sedona is a standalone workspace (DataFusion pinned to SedonaDB's version, plus
   # its Python bindings), so the --workspace jobs above never see it. The `sedona-e2e` suite is left to manual runs:
   # it compiles SedonaDB from git.
   sedona-adapter:
@@ -548,7 +548,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: crates/raster-h3-sedona
+        working-directory: crates/dggs-stream-sedona
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -560,7 +560,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: crates/raster-h3-sedona
+          workspaces: crates/dggs-stream-sedona
 
       - name: Format
         run: cargo fmt -- --check
@@ -573,10 +573,10 @@ jobs:
 
       # The SedonaDB Python bindings: build the abi3 module and scan it from the sedonadb wheel.
       - name: Clippy (Python bindings)
-        run: cargo clippy -p raster-h3-sedona-python --all-targets --locked -- -D warnings
+        run: cargo clippy -p dggs-stream-sedona-python --all-targets --locked -- -D warnings
 
       - name: Test Python bindings against sedonadb
-        working-directory: crates/raster-h3-sedona/python
+        working-directory: crates/dggs-stream-sedona/python
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip maturin
@@ -599,24 +599,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build the sedona image
-        run: docker build -f Dockerfile.sedona -t raster_h3-sedona:ci .
+        run: docker build -f Dockerfile.sedona -t dggs_stream-sedona:ci .
 
       - name: Run the Spark tests
         run: |
-          docker run --rm -e SPARK_MASTER=local[2] raster_h3-sedona:ci sh -c \
+          docker run --rm -e SPARK_MASTER=local[2] dggs_stream-sedona:ci sh -c \
             "pip3 install --no-cache-dir --break-system-packages pytest \
-             && python3 -m pytest -v -p no:cacheprovider /opt/raster_h3/examples/tests"
+             && python3 -m pytest -v -p no:cacheprovider /opt/dggs_stream/examples/tests"
 
-      # Filter pushdown in raster_h3.spark needs Spark 4.1+, newer than the image's Spark 4.0:
+      # Filter pushdown in dggs_stream.spark needs Spark 4.1+, newer than the image's Spark 4.0:
       # install PySpark 4.1 (with its own Spark jars) beside it for these tests only.
       - name: Run the Spark 4.1 filter-pushdown tests
         run: |
           docker run --rm -e SPARK_MASTER=local[2] -e PYTHONDONTWRITEBYTECODE=1 \
-            -v "$PWD:/repo:ro" raster_h3-sedona:ci sh -c \
+            -v "$PWD:/repo:ro" dggs_stream-sedona:ci sh -c \
             "pip3 install --no-cache-dir --break-system-packages pytest \
              && pip3 install --no-cache-dir --break-system-packages --target /tmp/ps41 'pyspark==4.1.*' \
              && env -u SPARK_HOME PYTHONPATH=/tmp/ps41 \
-                python3 -m pytest -v -p no:cacheprovider /repo/crates/raster-h3-python/tests/spark"
+                python3 -m pytest -v -p no:cacheprovider /repo/crates/dggs-stream-python/tests/spark"
 
   # All supply-chain checks are blocking; exceptions belong in deny.toml with a reason.
   deny:
@@ -662,7 +662,7 @@ jobs:
         with:
           toolchain: '1.97.1'
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo package --locked -p raster-h3-core
+      - run: cargo package --locked -p dggs-stream-core
 
   wheel-validation:
     needs: [changes]
@@ -723,9 +723,9 @@ jobs:
           mkdir -p duckdb-repository
 
           # Copy flat release binaries (both uncompressed and gzipped)
-          find all-artifacts -name "raster_h3-*.duckdb_extension*" -exec cp {} release-assets/ \;
+          find all-artifacts -name "dggs_stream-*.duckdb_extension*" -exec cp {} release-assets/ \;
 
-          # Assemble repository layout: <duckdb_version>/<platform>/raster_h3.duckdb_extension[.gz]
+          # Assemble repository layout: <duckdb_version>/<platform>/dggs_stream.duckdb_extension[.gz]
           # (v1.2.0 for custom_extension_repository on DuckDB 1.2, v2.0.0 for CREATE EXTENSION REPOSITORY)
           find all-artifacts -path "*/dist/v*/*" -type f | while read -r file; do
             plat=$(basename "$(dirname "$file")")

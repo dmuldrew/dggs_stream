@@ -1,0 +1,8 @@
+# raster_h3: the dggs_stream PostgreSQL extension under its former name, kept so
+# `CREATE EXTENSION raster_h3` and upgrades of existing installs keep working.
+# Install either raster_h3 or dggs_stream in a database, not both.
+comment = 'High-performance GeoTIFF/COG to H3 hexagonal aggregation and PMTiles/GeoParquet export'
+default_version = '0.7.0'
+module_pathname = '$libdir/dggs_stream_pg'
+relocatable = true
+superuser = true

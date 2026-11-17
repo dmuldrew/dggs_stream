@@ -1,33 +1,33 @@
-# DataFusion & SedonaDB: `raster-h3-sedona`
+# DataFusion & SedonaDB: `dggs-stream-sedona`
 
 [← Engines Overview](README.md) · [← Back to README](../../README.md)
 
-[`crates/raster-h3-sedona`](../../crates/raster-h3-sedona) is the Apache DataFusion adapter:
+[`crates/dggs-stream-sedona`](../../crates/dggs-stream-sedona) is the Apache DataFusion adapter:
 real DataFusion `TableProvider`s, table functions and scalar UDFs that register into a plain
 `SessionContext` or into SedonaDB. It is a standalone workspace with DataFusion pinned to
 SedonaDB's version. [Using with Apache DataFusion and SedonaDB](#using-with-apache-datafusion-and-sedonadb)
 covers registering it, SQL, PMTiles output, partitioned scans and SedonaDB's Python API.
 
-Underneath, its `scan` module (`raster_h3_sedona::scan`) plans and runs the raster scans and
-H3 scalar functions on `raster_h3_core::columnar` types (`ColumnSchema`, `RecordBatch`,
+Underneath, its `scan` module (`dggs_stream_sedona::scan`) plans and runs the raster scans and
+H3 scalar functions on `dggs_stream_core::columnar` types (`ColumnSchema`, `RecordBatch`,
 `ColumnArray`) without DataFusion. The sections up to [Recipes](#recipes) describe that layer;
 DataFusion code normally reaches it through the adapter instead. Its traits are deliberately not
 named like DataFusion's: `RasterScan` (implemented by the two table providers),
 `RasterScanExec` (their execution plans) and `H3ScalarFn` (the scalar functions).
 
-> Previously this layer was the separate `raster-h3-datafusion` crate, which used DataFusion's
-> trait names without depending on DataFusion. It moved into `raster-h3-sedona`, its only
+> Previously this layer was the separate `dggs-stream-datafusion` crate, which used DataFusion's
+> trait names without depending on DataFusion. It moved into `dggs-stream-sedona`, its only
 > user; see the [CHANGELOG](../../CHANGELOG.md).
 
 ```toml
 [dependencies]
-raster-h3-sedona = { path = "crates/raster-h3-sedona" }
+dggs-stream-sedona = { path = "crates/dggs-stream-sedona" }
 ```
 
 ## Quick Start
 
 ```rust
-use raster_h3_sedona::scan::{ContinuousRasterTableProvider, FilterPredicate, RasterScan};
+use dggs_stream_sedona::scan::{ContinuousRasterTableProvider, FilterPredicate, RasterScan};
 
 let provider = ContinuousRasterTableProvider::try_new("dem.tif", vec![7, 8])?
     .with_crs("EPSG:4326")
@@ -143,10 +143,10 @@ The scan emits the full compacted table instead.
 | `H3CellToParentUdf` | `h3_cell_to_parent(UInt64, Int64) -> UInt64`, `(Utf8, Int64) -> Utf8` | |
 
 `default_scalar_udfs()` lists them all, and `find_scalar_udf(name)` finds one by name or alias
-(ignoring ASCII case). In DataFusion they are registered by `raster_h3_sedona::scalar_udfs()`.
+(ignoring ASCII case). In DataFusion they are registered by `dggs_stream_sedona::scalar_udfs()`.
 
 ```rust
-use raster_h3_sedona::scan::{find_scalar_udf, ColumnArray};
+use dggs_stream_sedona::scan::{find_scalar_udf, ColumnArray};
 
 let cells = ColumnArray::UInt64 { values: vec![0x8828308281fffff], validity: None };
 let hex = find_scalar_udf("h3_to_string").expect("default UDF").invoke(&[cells])?;
@@ -156,18 +156,18 @@ let hex = find_scalar_udf("h3_to_string").expect("default UDF").invoke(&[cells])
 
 These mirror the [DuckDB SQL recipes](duckdb.md#sql-usage--recipes) as Rust builder calls.
 The option types (`SamplingPattern`, `SpectralFormula`, `QuantileTarget`, `OverlapRule`,
-`CategoryRemapper`) live in `raster-h3-core`, so add it as a dependency next to
-`raster-h3-sedona`. The snippets assume a function returning
-`raster_h3_core::error::Result<()>`.
+`CategoryRemapper`) live in `dggs-stream-core`, so add it as a dependency next to
+`dggs-stream-sedona`. The snippets assume a function returning
+`dggs_stream_core::error::Result<()>`.
 
 ```rust
 use std::sync::Arc;
 
-use raster_h3_core::aggregator::multi_horizon::{QuantileTarget, SpectralFormula};
-use raster_h3_core::aggregator::remap::CategoryRemapper;
-use raster_h3_core::aggregator::sampling::SamplingPattern;
-use raster_h3_core::raster::mosaic::OverlapRule;
-use raster_h3_sedona::scan::{
+use dggs_stream_core::aggregator::multi_horizon::{QuantileTarget, SpectralFormula};
+use dggs_stream_core::aggregator::remap::CategoryRemapper;
+use dggs_stream_core::aggregator::sampling::SamplingPattern;
+use dggs_stream_core::raster::mosaic::OverlapRule;
+use dggs_stream_sedona::scan::{
     find_scalar_udf, CategoricalFormat, CategoricalRasterTableProvider, ColumnArray,
     ContinuousRasterTableProvider, FilterPredicate, RasterScan,
 };
@@ -267,19 +267,19 @@ for batch in plan.execute()? {
 The `scan` layer has no file writers. For Parquet/GeoParquet or PMTiles, use
 the core exporters (`H3ParquetWriter`, `H3PmtilesTiler`, see [Core](core.md#file-exporters))
 with the same `MultiResolutionConfig`, or write the Arrow stream with any Arrow-based writer.
-In real DataFusion and SedonaDB, `raster-h3-sedona` adds `COPY ... TO '*.pmtiles'`; see
+In real DataFusion and SedonaDB, `dggs-stream-sedona` adds `COPY ... TO '*.pmtiles'`; see
 [PMTiles output](#pmtiles-output-copy--to-pmtiles).
 
 ## Using with Apache DataFusion and SedonaDB
 
-[`crates/raster-h3-sedona`](../../crates/raster-h3-sedona) is the real DataFusion adapter.
+[`crates/dggs-stream-sedona`](../../crates/dggs-stream-sedona) is the real DataFusion adapter.
 It depends on `datafusion`/`arrow` at the versions [SedonaDB](https://github.com/apache/sedona-db)
 pins (currently DataFusion `=54.1.0`, arrow `58`), so the same objects register into a plain
 `SessionContext` or into `SedonaContext::ctx`:
 
 ```rust
 let ctx = sedona::context::SedonaContext::new_local_interactive().await?;
-raster_h3_sedona::register_all(&ctx.ctx); // or a plain datafusion SessionContext
+dggs_stream_sedona::register_all(&ctx.ctx); // or a plain datafusion SessionContext
 
 ctx.sql(
     "SELECT h3_index, mean FROM h3_raster_continuous_aggregate('dem.tif', 8)
@@ -339,7 +339,7 @@ registered `s3://` (or other) store works as a destination. `COPY` returns the n
 features written. `PARTITIONED BY`, a directory destination and file compression are
 refused, unknown options are errors, and PMTiles cannot be read back as a table.
 
-From Rust, `raster_h3_sedona::write_pmtiles(df, "cells.pmtiles", PmtilesWriteOptions::default())`
+From Rust, `dggs_stream_sedona::write_pmtiles(df, "cells.pmtiles", PmtilesWriteOptions::default())`
 writes a `DataFrame` through the same sink, and `write_record_batches` writes any iterator
 of `RecordBatch`es to a local file.
 
@@ -349,7 +349,7 @@ of `RecordBatch`es to a local file.
 scans one partition and adds a nullable `partial_state` column; merge the partial rows of
 all partitions with `merge_partial_batches`. Partitioned scans push down only
 `resolution` filters: value thresholds would drop partial rows, and a bbox would change
-the planned layout. In SQL (`raster_h3_sedona::register_all`):
+the planned layout. In SQL (`dggs_stream_sedona::register_all`):
 
 ```sql
 SELECT partition_index, spec FROM h3_raster_plan_partitions('dem.tif', 256);
@@ -367,15 +367,15 @@ parallel. See [Partitioned scans](core.md#partitioned-scans).
 
 ### From SedonaDB's Python API
 
-[`crates/raster-h3-sedona/python`](../../crates/raster-h3-sedona/python) builds the
-`raster_h3_sedona` Python module (maturin, abi3). Its `RasterH3Table` implements
+[`crates/dggs-stream-sedona/python`](../../crates/dggs-stream-sedona/python) builds the
+`dggs_stream_sedona` Python module (maturin, abi3). Its `RasterH3Table` implements
 `__sedonadb_table_provider__`, returning a `sedonadb_table_provider` capsule that wraps
 `RasterH3Table` in `sedona_extension::ExportedTableProvider`. Filters reach the scan
 through SedonaDB's extension ABI, so the pushdown above applies unchanged:
 
 ```python
 import sedonadb
-from raster_h3_sedona import RasterH3Table
+from dggs_stream_sedona import RasterH3Table
 
 sd = sedonadb.connect()
 sd.create_data_frame(RasterH3Table.continuous("dem.tif", [7, 8], crs="EPSG:4326")).to_view("dem")
@@ -384,7 +384,7 @@ sd.sql("SELECT h3_index, mean FROM dem WHERE ST_DWithin(wkb, ST_SetSRID(ST_Point
 
 `RasterH3Table.continuous(source, resolutions=8, *, crs, nodata, band, bbox)` and
 `RasterH3Table.categorical(source, resolutions=8, *, crs, nodata, bbox)` take the common
-options. `raster_h3_sedona.scalar_functions()` exports the scalar UDFs above, under every
+options. `dggs_stream_sedona.scalar_functions()` exports the scalar UDFs above, under every
 name and alias, as `sedonadb_scalar_kernel` capsules; `sd.register(...)` installs them all
 (`__sedonadb_extension__`), or register single entries by iterating. Geometry arguments
 must be planar lon/lat or have no CRS, and `h3_to_wkb` returns `OGC:CRS84` geometry, so
@@ -397,7 +397,7 @@ on hex ids instead, as the DuckDB and Polars versions do, polyfill the polygons 
 when the polyfilled polygons are reused across queries:
 
 ```python
-sd.register(raster_h3_sedona.scalar_functions())
+sd.register(dggs_stream_sedona.scalar_functions())
 sd.read_pyogrio("tracts.geojson").to_view("tracts")
 sd.sql("""
     SELECT t.name, AVG(d.mean) AS mean_elevation
@@ -409,7 +409,7 @@ sd.sql("""
 ```
 
 SedonaDB's extension ABI registers table providers and functions but not file formats, so
-in Python `COPY ... TO '*.pmtiles'` is replaced by `raster_h3_sedona.write_pmtiles(data,
+in Python `COPY ... TO '*.pmtiles'` is replaced by `dggs_stream_sedona.write_pmtiles(data,
 path, *, h3_column=None, min_zoom=None, max_zoom=None, memory_budget_mb=None)`. It takes
 anything exposing `__arrow_c_stream__` (a SedonaDB DataFrame, a PyArrow table, a Polars
 DataFrame), applies the same rules and options as the SQL format, writes the archive
@@ -417,7 +417,7 @@ atomically and returns the number of features:
 
 ```python
 cells = sd.sql("SELECT h3_index, mean FROM dem WHERE count >= 4")
-raster_h3_sedona.write_pmtiles(cells, "dem.pmtiles", min_zoom=5)
+dggs_stream_sedona.write_pmtiles(cells, "dem.pmtiles", min_zoom=5)
 ```
 
 Invalid H3 values and bad options raise `ValueError`, and a file-system error raises
@@ -428,10 +428,10 @@ Invalid H3 values and bad options raise `ValueError`, and a file-system error ra
 
 ```bash
 # DataFusion / SedonaDB adapter, including the `scan` layer (standalone workspace)
-cargo test --manifest-path crates/raster-h3-sedona/Cargo.toml
-cargo test --manifest-path crates/raster-h3-sedona/Cargo.toml --features sedona-e2e  # inside a real SedonaContext
+cargo test --manifest-path crates/dggs-stream-sedona/Cargo.toml
+cargo test --manifest-path crates/dggs-stream-sedona/Cargo.toml --features sedona-e2e  # inside a real SedonaContext
 # SedonaDB Python bindings
-(cd crates/raster-h3-sedona/python && maturin develop --release --extras test && pytest)
+(cd crates/dggs-stream-sedona/python && maturin develop --release --extras test && pytest)
 ```
 
 The `scan` tests (unit tests in `src/scan` and the `tests/scan` binary) cover projection,

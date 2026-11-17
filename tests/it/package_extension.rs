@@ -147,11 +147,11 @@ fn test_duckdb_extension_signing_verification_and_repo_manifest() {
     let dummy_payload: Vec<u8> = (0..payload_len)
         .map(|i| ((i * 31 + 17) & 0xFF) as u8)
         .collect();
-    let dummy_so_path = dir.path().join("libraster_h3.so");
+    let dummy_so_path = dir.path().join("libdggs_stream.so");
     fs::write(&dummy_so_path, &dummy_payload).unwrap();
 
-    let signed_ext_path = dir.path().join("raster_h3.duckdb_extension");
-    let signed_gz_path = dir.path().join("raster_h3.duckdb_extension.gz");
+    let signed_ext_path = dir.path().join("dggs_stream.duckdb_extension");
+    let signed_gz_path = dir.path().join("dggs_stream.duckdb_extension.gz");
     let manifest_path = dir
         .path()
         .join(".well-known")

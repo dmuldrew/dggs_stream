@@ -1,4 +1,4 @@
-#[path = "../../crates/raster-h3-core/tests/it/helpers.rs"]
+#[path = "../../crates/dggs-stream-core/tests/it/helpers.rs"]
 mod helpers;
 
 use std::fs;
@@ -57,8 +57,8 @@ fn main() -> std::io::Result<()> {
 
     // A minimal valid IPC stream: one Utf8 column, two rows.
     {
-        use raster_h3_core::columnar::ipc::write_ipc_stream;
-        use raster_h3_core::columnar::{
+        use dggs_stream_core::columnar::ipc::write_ipc_stream;
+        use dggs_stream_core::columnar::{
             ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch,
         };
         use std::sync::Arc;
@@ -97,8 +97,8 @@ fn main() -> std::io::Result<()> {
     fs::write(corpus.join("content_range/basic"), "bytes 0-9/100")?;
 
     {
-        use raster_h3_core::aggregator::multi_horizon::encode_partial_state;
-        use raster_h3_core::aggregator::{CategoricalAccumulator, H3Accumulator};
+        use dggs_stream_core::aggregator::multi_horizon::encode_partial_state;
+        use dggs_stream_core::aggregator::{CategoricalAccumulator, H3Accumulator};
         let mut continuous = H3Accumulator::with_quantiles();
         for v in [-3.5, 0.0, 2.0, 1e-9, 4096.0] {
             continuous.update_weighted(v, 0.5);

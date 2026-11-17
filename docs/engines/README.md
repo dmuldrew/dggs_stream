@@ -2,7 +2,7 @@
 
 [← Back to README](../../README.md)
 
-dggs_stream is a Cargo workspace. One pure-Rust engine (`raster-h3-core`) does all raster
+dggs_stream is a Cargo workspace. One pure-Rust engine (`dggs-stream-core`) does all raster
 decoding, CRS transformation, H3 aggregation and file export; five thin adapter crates
 expose it to different query engines and runtimes. Every adapter drives the same
 streamers, so the same raster and parameters produce the same cells and statistics
@@ -10,13 +10,13 @@ in every engine.
 
 ```mermaid
 flowchart TD
-    CORE["raster-h3-core<br/>GeoTIFF/COG I/O · CRS · scanline H3 aggregation<br/>RecordBatch · Arrow C Stream · IPC/JSONL · Parquet · PMTiles"]
-    DUCK["raster-h3-duckdb<br/>DuckDB C-API extension"]
-    SED["raster-h3-sedona (standalone workspace)<br/>Apache DataFusion / SedonaDB adapter + scan layer"]
-    PY["raster-h3-python<br/>ctypes C-ABI + Arrow PyCapsules + Polars IO source"]
-    PG["raster-h3-pg<br/>PostgreSQL V1 fmgr extension"]
-    CLI["raster-h3-cli<br/>ipc · jsonl · parquet · pmtiles"]
-    ROOT["raster_h3 (root crate)<br/>facade + libraster_h3 cdylib (DuckDB)"]
+    CORE["dggs-stream-core<br/>GeoTIFF/COG I/O · CRS · scanline H3 aggregation<br/>RecordBatch · Arrow C Stream · IPC/JSONL · Parquet · PMTiles"]
+    DUCK["dggs-stream-duckdb<br/>DuckDB C-API extension"]
+    SED["dggs-stream-sedona (standalone workspace)<br/>Apache DataFusion / SedonaDB adapter + scan layer"]
+    PY["dggs-stream-python<br/>ctypes C-ABI + Arrow PyCapsules + Polars IO source"]
+    PG["dggs-stream-pg<br/>PostgreSQL V1 fmgr extension"]
+    CLI["dggs-stream-cli<br/>ipc · jsonl · parquet · pmtiles"]
+    ROOT["dggs_stream (root crate)<br/>facade + libdggs_stream cdylib (DuckDB)"]
     CORE --> DUCK & SED & PY & PG & CLI
     DUCK & PY & PG & CLI --> ROOT
 ```
@@ -25,20 +25,20 @@ flowchart TD
 
 | Crate | Path | Artifact | Deep Dive |
 | :--- | :--- | :--- | :--- |
-| `raster-h3-core` | [`crates/raster-h3-core`](../../crates/raster-h3-core) | `rlib` | [Core Engine](core.md) |
-| `raster-h3-duckdb` | [`crates/raster-h3-duckdb`](../../crates/raster-h3-duckdb) | `rlib`, linked into `libraster_h3.{so,dylib,dll}` by the root crate | [DuckDB](duckdb.md) |
-| `raster-h3-sedona` | [`crates/raster-h3-sedona`](../../crates/raster-h3-sedona) | `rlib`, standalone workspace (DataFusion version pinned to SedonaDB's) | [DataFusion & SedonaDB](datafusion.md) |
-| `raster-h3-python` | [`crates/raster-h3-python`](../../crates/raster-h3-python) | `cdylib` + `raster-h3` wheel | [Python & Polars](python-polars.md), [Spark & Apache Sedona](spark.md) |
-| `raster-h3-pg` | [`crates/raster-h3-pg`](../../crates/raster-h3-pg) | `cdylib` (`raster_h3_pg.so` with `--features pg-extension`) | [PostgreSQL](postgresql.md) |
-| `raster-h3-cli` | [`crates/raster-h3-cli`](../../crates/raster-h3-cli) | `raster-h3-cli` executable (also built as `raster-h3` from the root crate) | [CLI](cli.md) |
-| `raster_h3` | [`.`](../../) | `cdylib` + `rlib` facade | — |
+| `dggs-stream-core` | [`crates/dggs-stream-core`](../../crates/dggs-stream-core) | `rlib` | [Core Engine](core.md) |
+| `dggs-stream-duckdb` | [`crates/dggs-stream-duckdb`](../../crates/dggs-stream-duckdb) | `rlib`, linked into `libdggs_stream.{so,dylib,dll}` by the root crate | [DuckDB](duckdb.md) |
+| `dggs-stream-sedona` | [`crates/dggs-stream-sedona`](../../crates/dggs-stream-sedona) | `rlib`, standalone workspace (DataFusion version pinned to SedonaDB's) | [DataFusion & SedonaDB](datafusion.md) |
+| `dggs-stream-python` | [`crates/dggs-stream-python`](../../crates/dggs-stream-python) | `cdylib` + `dggs-stream` wheel | [Python & Polars](python-polars.md), [Spark & Apache Sedona](spark.md) |
+| `dggs-stream-pg` | [`crates/dggs-stream-pg`](../../crates/dggs-stream-pg) | `cdylib` (`dggs_stream_pg.so` with `--features pg-extension`) | [PostgreSQL](postgresql.md) |
+| `dggs-stream-cli` | [`crates/dggs-stream-cli`](../../crates/dggs-stream-cli) | `dggs-stream-cli` executable (also built as `dggs-stream` from the root crate) | [CLI](cli.md) |
+| `dggs_stream` | [`.`](../../) | `cdylib` + `rlib` facade | — |
 
-The root `raster_h3` crate re-exports each member under a short name
-(`raster_h3::core`, `::cli`, `::duckdb`, `::datafusion`, `::python`, `::pg`) and
-glob-re-exports `raster_h3_duckdb::*`, so existing `raster_h3::...` paths and the DuckDB
-extension entry points (`raster_h3_init`, `raster_h3_init_c_api`, `raster_h3_version`)
+The root `dggs_stream` crate re-exports each member under a short name
+(`dggs_stream::core`, `::cli`, `::duckdb`, `::datafusion`, `::python`, `::pg`) and
+glob-re-exports `dggs_stream_duckdb::*`, so existing `dggs_stream::...` paths and the DuckDB
+extension entry points (`dggs_stream_init`, `dggs_stream_init_c_api`, `dggs_stream_version`, plus `raster_h3_*` aliases of all three)
 keep working. `cargo build --release` at the root still produces
-`target/release/libraster_h3.{so,dylib,dll}`, the loadable DuckDB extension.
+`target/release/libdggs_stream.{so,dylib,dll}`, the loadable DuckDB extension.
 
 ## Engine Capability Matrix
 
@@ -69,15 +69,15 @@ Each deep dive has a recipes section covering the same tasks. The core calls, si
 
 | Task | DuckDB | Python / Polars | PostgreSQL | CLI | DataFusion |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Continuous scan | `h3_raster_continuous_aggregate('dem.tif', resolution := 8)` | `scan_raster_h3("dem.tif", 8)` | `h3_raster_continuous_aggregate('/data/dem.tif', 8)` | `raster-h3-cli jsonl dem.tif -r 8` | `ContinuousRasterTableProvider::try_new("dem.tif", vec![8])?` |
+| Continuous scan | `h3_raster_continuous_aggregate('dem.tif', resolution := 8)` | `scan_raster_h3("dem.tif", 8)` | `h3_raster_continuous_aggregate('/data/dem.tif', 8)` | `dggs-stream-cli jsonl dem.tif -r 8` | `ContinuousRasterTableProvider::try_new("dem.tif", vec![8])?` |
 | Categorical scan | `h3_raster_categorical_aggregate(..., format := 'long')` | `scan_raster_h3(..., categorical=True, format="long")` | `h3_raster_categorical_aggregate(...)` (wide only) | `jsonl ... -c --format long` | `CategoricalRasterTableProvider::try_new(..)?.with_format(Long)` |
 | Several resolutions | `resolutions := '7,8'` | `[7, 8]` | one call per resolution | `-r 7,8` | `vec![7, 8]` |
 | CRS / NoData / bbox | `source_crs :=`, `nodata :=`, `bbox :=` | `crs=`, `nodata=`, `bbox=` | `source_crs =>`, `nodata =>`, `bbox =>` | `--crs`, `--nodata`, `--bbox` | `with_crs`, `with_nodata`, `with_bbox` |
 | Band scale/offset | `scale_offset := false` opts out | always applied | always applied | `--raw-values` opts out | `with_scale_offset(false)` opts out |
 | Fail on dropped samples | `strict_transforms := true` | `strict_transforms=True` | — (`WARNING` only) | — (stderr warning only) | `with_strict_transforms(true)` |
-| GeoParquet export | `h3_raster_to_parquet(...)` | `raster_to_parquet(...)` | — (`COPY` to CSV) | `raster-h3-cli parquet ... -o` | — (core `H3ParquetWriter`) |
-| PMTiles export | `h3_raster_to_pmtiles(...)` | `raster_to_pmtiles(...)` | — | `raster-h3-cli pmtiles ... -o` | `COPY (query) TO 'out.pmtiles'` (`raster-h3-sedona`) |
-| Parquet → PMTiles | `h3_parquet_to_pmtiles(...)` | `parquet_to_pmtiles(...)` | — | `raster-h3-cli parquet-to-pmtiles ... -o` | — (core `process_parquet_to_pmtiles`) |
+| GeoParquet export | `h3_raster_to_parquet(...)` | `raster_to_parquet(...)` | — (`COPY` to CSV) | `dggs-stream-cli parquet ... -o` | — (core `H3ParquetWriter`) |
+| PMTiles export | `h3_raster_to_pmtiles(...)` | `raster_to_pmtiles(...)` | — | `dggs-stream-cli pmtiles ... -o` | `COPY (query) TO 'out.pmtiles'` (`dggs-stream-sedona`) |
+| Parquet → PMTiles | `h3_parquet_to_pmtiles(...)` | `parquet_to_pmtiles(...)` | — | `dggs-stream-cli parquet-to-pmtiles ... -o` | — (core `process_parquet_to_pmtiles`) |
 | Recipes | [DuckDB](duckdb.md#sql-usage--recipes) | [Python](python-polars.md#recipes) | [PostgreSQL](postgresql.md#recipes) | [CLI](cli.md#recipes) | [DataFusion](datafusion.md#recipes) |
 
 Mosaics (globs, comma-separated lists, VRT) are accepted by every adapter through
@@ -88,7 +88,7 @@ exposes it via `with_overlap_rule`; PostgreSQL and the CLI always use `cutline`.
 
 ### Output schemas
 
-All engines derive their columns from `raster_h3_core::columnar::ColumnSchema`:
+All engines derive their columns from `dggs_stream_core::columnar::ColumnSchema`:
 
 | Schema | Columns |
 | :--- | :--- |
@@ -110,7 +110,7 @@ The DuckDB table functions keep their own historical column sets (documented in 
 
 ### Scalar helpers
 
-The H3 helpers live once in [`raster_h3_core::scalar_ops`](../../crates/raster-h3-core/src/scalar_ops.rs)
+The H3 helpers live once in [`dggs_stream_core::scalar_ops`](../../crates/dggs-stream-core/src/scalar_ops.rs)
 and each adapter wraps them. Core behaviour on invalid input, with the adapter
 differences that remain:
 
@@ -136,9 +136,9 @@ For the full test inventory, see [Test Coverage](../testing.md).
 
 | Test | What it checks | How to run |
 | :--- | :--- | :--- |
-| [`root/multi_engine_e2e.rs`](../../tests/it/multi_engine_e2e.rs) | Generates synthetic continuous and categorical GeoTIFFs and compares per-cell results from the core batch readers and Arrow C stream, the CLI (subprocess: `ipc`, `jsonl`, `parquet`, `pmtiles`), DataFusion (scan, pushdown, scalar UDFs), Python (a `python3` subprocess loading `libraster_h3_python`), the PostgreSQL SRFs and fmgr scalars in-process, and DuckDB when a `duckdb` binary is on `PATH`. | `cargo test -p raster_h3 --test it multi_engine_e2e` |
-| [`root/pg_extension_e2e.rs`](../../tests/it/pg_extension_e2e.rs) | Builds the real PostgreSQL module in Docker, installs it into `postgres:<major>` containers and compares `psql` output to the in-process SRFs. | `cargo test -p raster_h3 --test it pg_extension_e2e -- --ignored --nocapture` |
-| [`crates/raster-h3-python/tests/wheel_smoke.py`](../../crates/raster-h3-python/tests/wheel_smoke.py) | Installs a built wheel and exercises the Python API and the bundled `raster-h3-cli`. | Run by `cibuildwheel` in [`wheels.yml`](../../.github/workflows/wheels.yml) |
+| [`root/multi_engine_e2e.rs`](../../tests/it/multi_engine_e2e.rs) | Generates synthetic continuous and categorical GeoTIFFs and compares per-cell results from the core batch readers and Arrow C stream, the CLI (subprocess: `ipc`, `jsonl`, `parquet`, `pmtiles`), DataFusion (scan, pushdown, scalar UDFs), Python (a `python3` subprocess loading `libdggs_stream_python`), the PostgreSQL SRFs and fmgr scalars in-process, and DuckDB when a `duckdb` binary is on `PATH`. | `cargo test -p dggs_stream --test it multi_engine_e2e` |
+| [`root/pg_extension_e2e.rs`](../../tests/it/pg_extension_e2e.rs) | Builds the real PostgreSQL module in Docker, installs it into `postgres:<major>` containers and compares `psql` output to the in-process SRFs. | `cargo test -p dggs_stream --test it pg_extension_e2e -- --ignored --nocapture` |
+| [`crates/dggs-stream-python/tests/wheel_smoke.py`](../../crates/dggs-stream-python/tests/wheel_smoke.py) | Installs a built wheel and exercises the Python API and the bundled `dggs-stream-cli`. | Run by `cibuildwheel` in [`wheels.yml`](../../.github/workflows/wheels.yml) |
 
 ## Choosing an Engine
 

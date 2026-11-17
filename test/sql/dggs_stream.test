@@ -1,0 +1,15 @@
+# name: test/sql/dggs_stream.test
+# description: smoke test for the dggs_stream loadable extension
+# group: [dggs_stream]
+
+statement error
+SELECT h3_to_string(599686042433355775);
+----
+Catalog Error
+
+require dggs_stream
+
+query T
+SELECT h3_to_string(599686042433355775);
+----
+85283473fffffff

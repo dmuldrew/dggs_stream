@@ -1,5 +1,5 @@
 //! Guards the C symbols exported by the root cdylib, which CI packages as
-//! `raster_h3.duckdb_extension`. Only the DuckDB entry points belong there; the
+//! `dggs_stream.duckdb_extension`. Only the DuckDB entry points belong there; the
 //! Python and PostgreSQL adapters are opt-in features precisely so their
 //! `#[no_mangle]` functions are not exported from the DuckDB extension.
 
@@ -7,7 +7,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// The exact set of non-underscore-prefixed dynamic symbols the extension defines.
-const DUCKDB_ENTRY_POINTS: [&str; 3] = [
+/// Sorted, as the test compares against the sorted `nm` output.
+const DUCKDB_ENTRY_POINTS: [&str; 6] = [
+    "dggs_stream_init",
+    "dggs_stream_init_c_api",
+    "dggs_stream_version",
+    // Former-name aliases, so `raster_h3.duckdb_extension` still loads.
     "raster_h3_init",
     "raster_h3_init_c_api",
     "raster_h3_version",
@@ -19,7 +24,7 @@ fn cdylib_path() -> PathBuf {
     // the `deps/` copy is the one built by the current invocation.
     let exe = std::env::current_exe().unwrap();
     exe.parent().unwrap().join(format!(
-        "{}raster_h3{}",
+        "{}dggs_stream{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     ))

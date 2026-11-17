@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use raster_h3_core::aggregator::multi_horizon::{decode_partial_state, encode_partial_state};
-use raster_h3_core::aggregator::{CategoricalAccumulator, H3Accumulator};
+use dggs_stream_core::aggregator::multi_horizon::{decode_partial_state, encode_partial_state};
+use dggs_stream_core::aggregator::{CategoricalAccumulator, H3Accumulator};
 
 /// Byte budget handed to the decoder, as the aggregation budget would be.
 const LIMIT: usize = 1 << 20;
