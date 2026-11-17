@@ -220,6 +220,8 @@ mod tests {
         ] {
             let ctx = WalkContext {
                 chunk: &chunk,
+                grid: crate::grid::GridKind::H3,
+                resolution_u8s: &[],
                 resolutions: &resolutions,
                 crs: &crs,
                 gt: &gt,
@@ -270,6 +272,8 @@ mod tests {
         let sampling = SamplingPattern::center();
         let ctx = WalkContext {
             chunk: &chunk,
+            grid: crate::grid::GridKind::H3,
+            resolution_u8s: &[],
             resolutions: &resolutions,
             crs: &crs,
             gt: &gt,

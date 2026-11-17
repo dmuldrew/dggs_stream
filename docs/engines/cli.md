@@ -33,7 +33,8 @@ raster-h3-cli merge   <part>... [options]      Combine partitioned `ipc` outputs
 
 | Option | Applies to | Meaning |
 | :--- | :--- | :--- |
-| `-r, --resolutions <LIST>` (alias `--resolution`) | all | H3 resolutions, e.g. `8` or `7,8,9` (default `8`) |
+| `--grid <h3\|a5\|s2\|healpix>` | all | Grid to index onto (default `h3`); the index columns are `{grid}_index` / `{grid}_hex` |
+| `-r, --resolutions <LIST>` (alias `--resolution`) | all | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29 |
 | `-c, --categorical` | all | Categorical aggregation |
 | `--format <wide\|long>` | `ipc`, `jsonl` | Categorical layout (default `wide`) |
 | `--crs <CRS>` (alias `--source-crs`) | all | Source CRS override, e.g. `EPSG:4326` |
