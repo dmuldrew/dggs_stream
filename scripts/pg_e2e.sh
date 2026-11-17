@@ -54,6 +54,8 @@ docker cp "$repo/crates/dggs-stream-pg/sql/dggs_stream--0.7.0.sql" "$container:$
 # The same extension under its former name, raster_h3.
 docker cp "$repo/crates/dggs-stream-pg/raster_h3.control" "$container:$sharedir/extension/"
 docker cp "$repo/crates/dggs-stream-pg/sql/raster_h3--0.7.0.sql" "$container:$sharedir/extension/"
+# Functions of existing raster_h3 installations reference $libdir/raster_h3_pg.
+docker exec "$container" ln -sf dggs_stream_pg.so "$libdir/raster_h3_pg.so"
 
 # The entrypoint restarts the server once after initdb; wait for the final instance.
 for _ in $(seq 1 60); do

@@ -95,6 +95,8 @@ impl RasterTable for ContinuousTable {
         "h3_raster_continuous_aggregate",
         "h3_raster_continuous",
         "dggs_stream",
+        // Former name of the `dggs_stream` alias, kept so existing queries bind.
+        "raster_h3",
     ];
     const FUNCTION: &'static str = "h3_raster_continuous_aggregate";
     const MISSING_BIND_DATA: &'static str = "Missing bind data in init";

@@ -44,9 +44,6 @@ the suffix your server expects). Then:
 CREATE EXTENSION dggs_stream;
 ```
 
-A database with 0.4.0 or later installed upgrades in place with `ALTER EXTENSION dggs_stream UPDATE;`
-through the `dggs_stream--<old>--<new>.sql` scripts; the SQL definitions are unchanged since 0.4.0.
-
 [`dggs_stream.control`](../../crates/dggs-stream-pg/dggs_stream.control) declares version `0.7.0`,
 `module_pathname = '$libdir/dggs_stream_pg'`, `relocatable = true` and `superuser = true`.
 
@@ -60,6 +57,27 @@ GRANT pg_read_server_files TO analyst;
 
 The module requires a little-endian, 64-bit target (pass-by-value `float8`/`int8` Datums);
 other targets fail to compile.
+
+### Databases with the extension under its former name, `raster_h3`
+
+The extension used to be called `raster_h3`, with the library `raster_h3_pg`.
+[`raster_h3.control`](../../crates/dggs-stream-pg/raster_h3.control) and the `raster_h3--*.sql`
+scripts still ship, so a database with 0.4.0 or later installed keeps working and upgrades in place
+with `ALTER EXTENSION raster_h3 UPDATE;`; the SQL definitions are unchanged since 0.4.0. Install
+either `raster_h3` or `dggs_stream` in a database, not both.
+
+PostgreSQL records the library path of each C function when the function is created, so functions
+of an existing `raster_h3` installation keep loading `$libdir/raster_h3_pg` after an upgrade.
+Install the library under that name as well, as a symlink, so they run the current build:
+
+```bash
+cp crates/dggs-stream-pg/raster_h3.control "$(pg_config --sharedir)/extension/"
+cp crates/dggs-stream-pg/sql/raster_h3--*.sql "$(pg_config --sharedir)/extension/"
+ln -sf dggs_stream_pg.so "$(pg_config --pkglibdir)/raster_h3_pg.so"
+```
+
+Without the symlink these functions keep running an old `raster_h3_pg.so` left in place, or fail
+with `could not access file "$libdir/raster_h3_pg"` once it is removed.
 
 ## SQL API
 
