@@ -10,7 +10,7 @@ version receives fixes.
 Please **do not** open a public issue for security problems.
 
 Report privately through GitHub's
-[private vulnerability reporting](https://github.com/dmuldrew/raster_h3/security/advisories/new)
+[private vulnerability reporting](https://github.com/dmuldrew/dggs_stream/security/advisories/new)
 (Security tab → "Report a vulnerability"). Include:
 
 - the affected engine (DuckDB, PostgreSQL, Python/Polars, DataFusion, CLI) and version;

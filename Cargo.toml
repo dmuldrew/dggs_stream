@@ -15,8 +15,8 @@ version = "0.7.0"
 edition = "2021"
 authors = ["dggs_stream contributors"]
 license = "MIT"
-repository = "https://github.com/dmuldrew/raster_h3"
-homepage = "https://github.com/dmuldrew/raster_h3"
+repository = "https://github.com/dmuldrew/dggs_stream"
+homepage = "https://github.com/dmuldrew/dggs_stream"
 # Floor set by dependencies (h3o 0.11 const float math); checked by the `msrv` CI job.
 rust-version = "1.94"
 

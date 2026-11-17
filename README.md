@@ -332,7 +332,7 @@ returns the same cells and statistics for the same input.
 
 | Engine | Crate | Get it | Docs |
 | :--- | :--- | :--- | :--- |
-| **DuckDB** | `dggs-stream-duckdb` | Pre-built `.duckdb_extension` from [Releases](https://github.com/dmuldrew/raster_h3/releases), Docker, or `cargo build --release` → `libdggs_stream.{so,dylib,dll}` | [DuckDB deep dive](docs/engines/duckdb.md) · [SQL API Reference](docs/sql-api-reference.md) |
+| **DuckDB** | `dggs-stream-duckdb` | Pre-built `.duckdb_extension` from [Releases](https://github.com/dmuldrew/dggs_stream/releases), Docker, or `cargo build --release` → `libdggs_stream.{so,dylib,dll}` | [DuckDB deep dive](docs/engines/duckdb.md) · [SQL API Reference](docs/sql-api-reference.md) |
 | **Python / Polars** | `dggs-stream-python` | `pip install ./crates/dggs-stream-python` (wheels are built in CI; not yet on PyPI) | [Python & Polars](docs/engines/python-polars.md) · [Polars API Reference](docs/polars-api-reference.md) |
 | **PostgreSQL 13–18** | `dggs-stream-pg` | `cargo build -p dggs-stream-pg --features pg-extension` | [PostgreSQL](docs/engines/postgresql.md) |
 | **Apache DataFusion / SedonaDB** | `dggs-stream-sedona` | Cargo dependency (DataFusion pinned to SedonaDB's version); SedonaDB Python: `maturin build` in `crates/dggs-stream-sedona/python` | [DataFusion & SedonaDB](docs/engines/datafusion.md#using-with-apache-datafusion-and-sedonadb) |

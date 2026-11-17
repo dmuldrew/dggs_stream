@@ -309,7 +309,7 @@ Open a GitHub Issue describing:
    and GitHub artifact attestations. After downloading assets, verify:
    ```bash
    sha256sum --check SHA256SUMS
-   gh attestation verify <downloaded-asset> --repo dmuldrew/raster_h3
+   gh attestation verify <downloaded-asset> --repo dmuldrew/dggs_stream
    ```
    Checksums detect corruption; attestations establish the publishing workflow's identity,
    not a guarantee of correctness. PyPI/crates.io publication remains a separate decision.

@@ -11,7 +11,7 @@ extension:
     - dmuldrew
 
 repo:
-  github: dmuldrew/raster_h3
+  github: dmuldrew/dggs_stream
   ref: 25ec308af4db4bdbf29050c00eae79c2b1685d84
 
 docs:

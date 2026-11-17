@@ -44,7 +44,7 @@ Pre-compiled extensions are published for all major platforms:
 SET allow_unsigned_extensions = true;
 
 -- Replace <platform> with your platform identifier (e.g. osx_arm64, linux_amd64)
-INSTALL 'https://github.com/dmuldrew/raster_h3/releases/latest/download/dggs_stream-<platform>.duckdb_extension.gz';
+INSTALL 'https://github.com/dmuldrew/dggs_stream/releases/latest/download/dggs_stream-<platform>.duckdb_extension.gz';
 LOAD 'dggs_stream';
 
 SELECT raster_h3_version();
@@ -71,14 +71,14 @@ Later sessions only need `LOAD dggs_stream FROM raster_h3_repo;` (no opt-in). A 
 
 ```sql
 SET allow_unsigned_extensions = true;
-SET custom_extension_repository = 'https://github.com/dmuldrew/raster_h3/releases/latest/download';
+SET custom_extension_repository = 'https://github.com/dmuldrew/dggs_stream/releases/latest/download';
 INSTALL dggs_stream;
 LOAD dggs_stream;
 ```
 
 #### Option C: Manual download & local load
 
-Download from [Releases](https://github.com/dmuldrew/raster_h3/releases), then:
+Download from [Releases](https://github.com/dmuldrew/dggs_stream/releases), then:
 
 ```sql
 LOAD '/path/to/dggs_stream-<platform>.duckdb_extension';

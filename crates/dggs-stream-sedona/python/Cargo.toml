@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.94"
 authors = ["dggs_stream contributors"]
 license = "MIT"
-repository = "https://github.com/dmuldrew/raster_h3"
+repository = "https://github.com/dmuldrew/dggs_stream"
 description = "SedonaDB Python bindings for dggs_stream: table provider and scalar function capsules"
 
 [lib]
