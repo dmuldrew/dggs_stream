@@ -172,11 +172,11 @@ fn grid_shift_datums_are_rejected_clearly() {
 #[test]
 fn raster_cell_assignment_uses_independent_proj_datum_references() {
     use crate::helpers::TestGeoTiffBuilder;
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::aggregator::multi_horizon::{
         MultiResolutionConfig, MultiScanHorizonStreamer,
     };
     use dggs_stream_core::raster::GeoTiffStreamReader;
+    use h3o::{LatLng, Resolution};
     use std::collections::HashMap;
 
     for r in REFERENCES {

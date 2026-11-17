@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 
-use h3o::{LatLng, Resolution};
 use dggs_stream_core::aggregator::multi_horizon::coordinates::eviction_north_bound;
 use dggs_stream_core::aggregator::multi_horizon::{
     continuous_streamer::ContinuousKernel, MultiHorizonStreamer, MultiResolutionConfig,
@@ -14,6 +13,7 @@ use dggs_stream_core::crs::transformer::CrsTransformer;
 use dggs_stream_core::raster::{
     geotiff::GeoTiffStreamReader, geotransform::GeoTransform, RasterChunk,
 };
+use h3o::{LatLng, Resolution};
 
 fn create_projected_fixture(
     epsg: u16,

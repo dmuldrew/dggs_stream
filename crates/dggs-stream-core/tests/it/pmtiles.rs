@@ -3,13 +3,13 @@
 //! Validates Hilbert curve tile ID addressing, directory structures, MVT protobuf serialization,
 //! selective property filtering, parent zoom aggregation, and GeoTIFF/Parquet-to-PMTiles pipelines.
 
-use flate2::read::GzDecoder;
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::pmtiles::mvt::{
     FeatureProperties, MercatorPoint, MvtLayer, MvtValue, PropertyFilter,
 };
 use dggs_stream_core::pmtiles::tiler::H3PmtilesTiler;
 use dggs_stream_core::pmtiles::writer::{zxy_to_tile_id, PmtilesWriter};
+use flate2::read::GzDecoder;
 use std::fs::File;
 use std::io::Read;
 use tempfile::NamedTempFile;
@@ -833,8 +833,8 @@ fn test_geotiff_to_pmtiles_selective_properties() {
 
 #[test]
 fn test_cell_to_tile_coordinate_mapping() {
-    use h3o::{CellIndex, LatLng};
     use dggs_stream_core::pmtiles::tiler::lon_lat_to_tile_xy;
+    use h3o::{CellIndex, LatLng};
 
     let cell_u64 = 0x83464efffffffffu64;
     let cell = CellIndex::try_from(cell_u64).expect("valid cell index");
@@ -911,8 +911,8 @@ fn pmtiles_writer_accepts_distinct_tile_ids() {
 
 #[test]
 fn test_mvt_class_iii_pentagon_10_vertices_preserved() {
-    use h3o::CellIndex;
     use dggs_stream_core::pmtiles::pyramid::cell_boundary_mercator;
+    use h3o::CellIndex;
 
     // Resolution 7 pentagon has 10 vertices due to Class III icosahedron face crossings
     let pentagon_res7 = CellIndex::try_from(0x870800000ffffffu64).unwrap();
@@ -960,9 +960,9 @@ fn test_mvt_class_iii_pentagon_10_vertices_preserved() {
 
 #[test]
 fn test_pmtiles_antimeridian_straddling_cell_tile_range_and_unwrap() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::pmtiles::mvt::{MercatorPoint, MvtFeature};
     use dggs_stream_core::pmtiles::pyramid::{cell_boundary_mercator, for_each_cell_tile_mercator};
+    use h3o::{LatLng, Resolution};
 
     let cell = LatLng::new(-18.0, 180.0).unwrap().to_cell(Resolution::Five);
     let center: LatLng = cell.into();
@@ -1017,12 +1017,12 @@ fn test_pmtiles_antimeridian_straddling_cell_tile_range_and_unwrap() {
 
 #[test]
 fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
-    use h3o::{CellIndex, LatLng, Resolution};
     use dggs_stream_core::aggregator::accumulator::H3Accumulator;
     use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
     use dggs_stream_core::aggregator::multi_horizon::{
         MultiCategoricalRecord, MultiContinuousRecord, RecordStreamer,
     };
+    use h3o::{CellIndex, LatLng, Resolution};
 
     struct VecStreamer<R> {
         records: std::vec::IntoIter<R>,
@@ -1670,10 +1670,10 @@ fn preindexed_export_fills_every_zoom_between_resolutions() {
 
 #[test]
 fn parquet_zoom_bands_span_row_groups_with_32_bit_indexes() {
+    use dggs_stream_core::grid::healpix_encode;
     use parquet::data_type::Int32Type;
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::parser::parse_message_type;
-    use dggs_stream_core::grid::healpix_encode;
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();

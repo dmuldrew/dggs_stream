@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use dggs_stream_core::columnar::ipc::{read_ipc_stream, write_ipc_stream};
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let Ok((schema, batches)) = read_ipc_stream(&mut std::io::Cursor::new(data)) else {

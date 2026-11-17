@@ -68,7 +68,6 @@ use datafusion::object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, WriteMul
 use datafusion::physical_expr::LexRequirement;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion::prelude::SessionContext;
-use futures::StreamExt;
 use dggs_stream_core::encoding::parse_hex_u64;
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::pmtiles::features::H3Feature;
@@ -79,6 +78,7 @@ use dggs_stream_core::pmtiles::pyramid::h3_res_to_zoom;
 use dggs_stream_core::pmtiles::{
     ExternalFeatureExport, PmtilesExportSummary, DEFAULT_EXPORT_MEMORY_BUDGET,
 };
+use futures::StreamExt;
 
 /// The file extension, and the name `STORED AS` takes (case-insensitive).
 pub const PMTILES_EXTENSION: &str = "pmtiles";

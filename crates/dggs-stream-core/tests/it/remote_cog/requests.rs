@@ -425,7 +425,10 @@ fn refused_request_reports_a_withheld_auth_token() {
     std::env::remove_var("DGGS_STREAM_AUTH_HOSTS");
 
     assert!(without_token.contains("HTTP 403"), "{without_token}");
-    assert!(!without_token.contains("DGGS_STREAM_AUTH"), "{without_token}");
+    assert!(
+        !without_token.contains("DGGS_STREAM_AUTH"),
+        "{without_token}"
+    );
     assert!(
         withheld.contains("DGGS_STREAM_AUTH_TOKEN was not sent")
             && withheld.contains("DGGS_STREAM_AUTH_HOSTS"),

@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::{
@@ -112,7 +114,8 @@ fn auto_picks_the_area_matched_resolution_on_every_grid() {
 
         // A scan at the auto resolution has about one pixel per cell.
         let config = MultiResolutionConfig::single(matched).with_grid(grid);
-        let reader = dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open(&paths[0]).unwrap();
+        let reader =
+            dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open(&paths[0]).unwrap();
         let mut streamer = MultiScanHorizonStreamer::new(reader, &config).unwrap();
         let (mut cells, mut pixels) = (0usize, 0.0);
         while streamer

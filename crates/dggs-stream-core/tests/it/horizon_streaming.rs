@@ -2,13 +2,13 @@
 
 use crate::helpers;
 use crate::helpers::{create_constant_f32_geotiff, TestGeoTiffBuilder};
-use h3o::{LatLng, Resolution};
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::crs::CrsTransformer;
 use dggs_stream_core::error::RasterH3Error;
 use dggs_stream_core::raster::GeoTiffStreamReader;
+use h3o::{LatLng, Resolution};
 use std::path::Path;
 use tempfile::NamedTempFile;
 

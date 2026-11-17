@@ -2,12 +2,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
-use h3o::{LatLng, Resolution};
 use dggs_stream_core::aggregator::accumulator::H3Accumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::horizon_streamer::compute_cell_south_lat;
 use dggs_stream_core::aggregator::multi_horizon::spill::SpillAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{get_shard, ShardedResolutionMap, NUM_SHARDS};
+use h3o::{LatLng, Resolution};
 
 fn global_cells(res: Resolution) -> HashSet<u64> {
     (-75..75)

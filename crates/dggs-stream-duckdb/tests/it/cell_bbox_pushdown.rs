@@ -1,14 +1,16 @@
 //! H3 cell WGS84 bbox pushdown (`cell_wgs84_bbox`) soundness at high latitudes and the antimeridian.
 
 use crate::helpers;
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 
 #[test]
 fn test_h3_cell_and_hex_bbox_pushdown_high_latitude_and_antimeridian() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::aggregator::multi_horizon::coordinates::is_point_in_bbox;
     use dggs_stream_duckdb::functions::bind_utils::cell_wgs84_bbox;
+    use h3o::{LatLng, Resolution};
 
     // Check high-latitude, polar, and antimeridian-straddling cells across resolutions
     let test_points = [
@@ -87,8 +89,8 @@ fn test_h3_cell_and_hex_bbox_pushdown_high_latitude_and_antimeridian() {
 
 #[test]
 fn cell_bbox_pushdown_preserves_raster_samples() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_duckdb::functions::bind_utils::cell_wgs84_bbox;
+    use h3o::{LatLng, Resolution};
     for (lat, lon) in [(72.5, -156.0), (-18.0, 180.0)] {
         let cell = LatLng::new(lat, lon).unwrap().to_cell(Resolution::Five);
         let (_file, path) = helpers::TestGeoTiffBuilder::new(200, 200)

@@ -4,11 +4,11 @@
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
-use h3o::{CellIndex, LatLng, Resolution};
 use dggs_stream_python::{
     raster_h3_py_free_string, raster_h3_py_h3_cell_to_parent_str,
     raster_h3_py_h3_cell_to_parent_u64, raster_h3_py_h3_is_valid_str, raster_h3_py_h3_is_valid_u64,
 };
+use h3o::{CellIndex, LatLng, Resolution};
 
 fn is_valid(s: &str) -> i32 {
     let c = CString::new(s).unwrap();

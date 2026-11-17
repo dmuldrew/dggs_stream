@@ -8,8 +8,8 @@
 //! - Face-crossing Class III boundary cells
 //! - Multi-resolution dense sampling regression oracle (1000 points per edge)
 
-use h3o::{CellIndex, LatLng, Resolution};
 use dggs_stream_core::aggregator::horizon_streamer::compute_cell_south_lat;
+use h3o::{CellIndex, LatLng, Resolution};
 
 /// Independent 1000-point numerical densification oracle for geodesic boundary arcs.
 fn independent_dense_oracle_south_lat(cell: CellIndex) -> f64 {

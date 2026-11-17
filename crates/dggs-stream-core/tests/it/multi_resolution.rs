@@ -9,9 +9,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use tempfile::NamedTempFile;
 
-use helpers::create_wave_test_geotiff as create_test_geotiff;
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::RowAccessor;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiContinuousRecord, MultiResolutionConfig,
     MultiScanHorizonStreamer,
@@ -19,6 +16,9 @@ use dggs_stream_core::aggregator::multi_horizon::{
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use helpers::create_wave_test_geotiff as create_test_geotiff;
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::RowAccessor;
 
 #[test]
 fn test_multi_resolution_direct_ground_truth_exact_match() {

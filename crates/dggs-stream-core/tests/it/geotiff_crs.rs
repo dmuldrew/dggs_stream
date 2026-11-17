@@ -1,7 +1,9 @@
 //! GeoTransform math, CRS reprojection and parsing, and CRS detection when opening GeoTIFF files.
 
 use crate::helpers::TestGeoTiffBuilder;
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::crs::transformer::CrsTransformer;
 use dggs_stream_core::error::RasterH3Error;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;

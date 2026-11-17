@@ -25,8 +25,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-use h3o::{CellIndex, LatLng};
-use helpers::TestGeoTiffBuilder;
 use dggs_stream::core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream::core::columnar::ipc::read_ipc_stream;
 use dggs_stream::core::columnar::{
@@ -39,6 +37,8 @@ use dggs_stream_pg::{
     pg_srf_continuous_open, FunctionCallInfoBaseData, NullableDatum, PgCContinuousRow,
     PgCategoricalSrf,
 };
+use h3o::{CellIndex, LatLng};
+use helpers::TestGeoTiffBuilder;
 
 #[derive(Debug, Clone)]
 struct ContinuousCellSummary {
@@ -972,8 +972,8 @@ fn test_cross_engine_categorical_e2e_parity() {
 
 #[test]
 fn test_h3_polygon_to_cells_cross_engine_parity() {
-    use h3o::geom::ContainmentMode;
     use dggs_stream::core::scalar_ops::h3_polygon_to_cells_wkb;
+    use h3o::geom::ContainmentMode;
 
     let outer: [(f64, f64); 5] = [
         (-122.49, 37.71),

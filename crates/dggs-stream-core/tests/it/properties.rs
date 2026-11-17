@@ -2,15 +2,17 @@
 
 use std::collections::HashSet;
 
-use h3o::{LatLng, Resolution};
-use proptest::prelude::*;
 use dggs_stream_core::aggregator::accumulator::H3Accumulator;
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::aggregator::quantiles::QuantileSketch;
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::crs::transformer::CrsTransformer;
 use dggs_stream_core::encoding::{cell_to_wkb, wkb_reader::wkb_to_multipolygon, WKB_BUF_LEN};
 use dggs_stream_core::raster::{geotiff::GeoTiffStreamReader, geotransform::GeoTransform};
+use h3o::{LatLng, Resolution};
+use proptest::prelude::*;
 
 use crate::helpers::TestGeoTiffBuilder;
 

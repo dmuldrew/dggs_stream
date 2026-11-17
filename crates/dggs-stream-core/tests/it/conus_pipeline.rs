@@ -9,11 +9,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::helpers;
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use dggs_stream_core::pmtiles::H3PmtilesTiler;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use tempfile::TempDir;
 
 use helpers::create_constant_f32_geotiff as create_test_geotiff;

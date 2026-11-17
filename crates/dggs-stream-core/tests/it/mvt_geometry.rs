@@ -2,9 +2,9 @@
 //! §4.3.4.4), dateline cells stay intact, and pole cells are polar caps that
 //! reach the map edge instead of rings jumping across the tile.
 
-use h3o::{CellIndex, LatLng, Resolution};
 use dggs_stream_core::pmtiles::mvt::{MercatorPoint, MvtLayer, MvtValue};
 use dggs_stream_core::pmtiles::pyramid::{for_each_cell_tile_mercator, tile_xy_to_bbox};
+use h3o::{CellIndex, LatLng, Resolution};
 use std::borrow::Cow;
 
 use crate::pmtiles::mvt_decode as mvt_support;

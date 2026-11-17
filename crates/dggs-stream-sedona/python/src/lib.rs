@@ -34,11 +34,11 @@ use datafusion::arrow::array::RecordBatchReader;
 use datafusion::arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
+use dggs_stream_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
+use dggs_stream_sedona::{GridKind, NodataPolicy, OutputPolicy, ResolutionSpec, TransferMode};
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
-use dggs_stream_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
-use dggs_stream_sedona::{GridKind, NodataPolicy, OutputPolicy, ResolutionSpec, TransferMode};
 use sedona_extension::extension::SedonaCTableProvider;
 use sedona_extension::runtime::RuntimeHandle;
 use sedona_extension::table_provider::ExportedTableProvider;
@@ -257,9 +257,9 @@ impl PyRasterH3Table {
             provider = provider.with_bbox(bbox);
         }
         Ok(Self {
-            inner: Arc::new(sedona_table(dggs_stream_sedona::RasterH3Table::categorical(
-                provider,
-            ))),
+            inner: Arc::new(sedona_table(
+                dggs_stream_sedona::RasterH3Table::categorical(provider),
+            )),
             description: match grid {
                 GridKind::H3 => format!("RasterH3Table.categorical({source:?})"),
                 grid => format!(

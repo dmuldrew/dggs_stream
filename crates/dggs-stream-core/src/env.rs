@@ -52,7 +52,10 @@ mod tests {
         };
         assert_eq!(var_with("DGGS_STREAM_X", both).as_deref(), Some("new"));
         let legacy_only = |n: &str| (n == "RASTER_H3_X").then(|| "old".to_owned());
-        assert_eq!(var_with("DGGS_STREAM_X", legacy_only).as_deref(), Some("old"));
+        assert_eq!(
+            var_with("DGGS_STREAM_X", legacy_only).as_deref(),
+            Some("old")
+        );
         assert_eq!(var_with("DGGS_STREAM_X", |_| None), None);
         // Names outside the prefix have no fallback.
         let other = |n: &str| (n == "RASTER_H3_Y").then(|| "old".to_owned());

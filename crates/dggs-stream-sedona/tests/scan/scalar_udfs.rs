@@ -2,11 +2,11 @@
 
 use std::str::FromStr;
 
-use h3o::{CellIndex, LatLng, Resolution};
 use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
 use dggs_stream_core::error::{RasterH3Error, Result};
 use dggs_stream_core::scalar_ops;
 use dggs_stream_sedona::scan::{find_scalar_udf, H3ScalarFn, StringToH3Udf};
+use h3o::{CellIndex, LatLng, Resolution};
 
 fn invoke_scalar(name: &str, args: &[ColumnArray]) -> Result<ColumnArray> {
     find_scalar_udf(name)

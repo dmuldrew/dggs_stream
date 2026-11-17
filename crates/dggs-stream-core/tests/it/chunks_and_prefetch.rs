@@ -1,7 +1,9 @@
 //! Chunk layout, NoData chunk detection, bbox chunk pruning, and prefetched chunk readers.
 
 use crate::helpers::{create_constant_f32_geotiff, TestGeoTiffBuilder};
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::aggregator::{chunk_intersects_bbox, is_chunk_all_nodata};
 use dggs_stream_core::crs::CrsTransformer;
 use dggs_stream_core::raster::{

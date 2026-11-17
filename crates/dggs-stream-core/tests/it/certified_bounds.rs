@@ -4,12 +4,12 @@
 //! rectangles, scale-independent affine inversion, and rejection of invalid
 //! affines when a GeoTIFF is opened.
 
-use proptest::prelude::*;
 use dggs_stream_core::aggregator::chunk_intersects_bbox;
 use dggs_stream_core::aggregator::multi_horizon::coordinates::eviction_north_bound;
 use dggs_stream_core::crs::transformer::{wrap_lon, CrsTransformer};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::{GeoTransform, RasterChunk};
+use proptest::prelude::*;
 use std::fs::File;
 use std::io::BufWriter;
 use tiff::encoder::{colortype, TiffEncoder};

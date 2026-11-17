@@ -35,7 +35,10 @@ fn run_ok(args: &[&str]) -> Output {
 fn run_err(args: &[&str], needle: &str) {
     let out = run(args);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "dggs-stream-cli {args:?} should fail");
+    assert!(
+        !out.status.success(),
+        "dggs-stream-cli {args:?} should fail"
+    );
     assert!(
         stderr.contains(needle),
         "stderr of {args:?} should mention '{needle}':\n{stderr}"

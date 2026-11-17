@@ -2,14 +2,14 @@
 //! extend past 180 degrees, must keep every sample that falls inside the bbox.
 
 use crate::helpers;
-use h3o::{LatLng, Resolution};
-use helpers::TestGeoTiffBuilder;
 use dggs_stream_core::aggregator::compute_cell_south_lat;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use h3o::{LatLng, Resolution};
+use helpers::TestGeoTiffBuilder;
 use std::fs::File;
 use std::io::BufWriter;
 use tempfile::NamedTempFile;

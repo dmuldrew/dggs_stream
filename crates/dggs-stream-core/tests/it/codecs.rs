@@ -868,10 +868,10 @@ fn test_deflate_buffer_auto_resizing_hardening() {
 
 #[test]
 fn cropped_edge_tiles_match_reference_in_both_streaming_paths() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::aggregator::multi_horizon::{
         MultiResolutionConfig, MultiScanHorizonStreamer,
     };
+    use h3o::{LatLng, Resolution};
     use std::collections::HashMap;
     let file = NamedTempFile::new().unwrap();
     let (width, height) = (29u32, 23u32);

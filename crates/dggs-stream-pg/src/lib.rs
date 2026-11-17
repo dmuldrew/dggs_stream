@@ -28,7 +28,9 @@ use dggs_stream_core::aggregator::multi_horizon::{
 pub use dggs_stream_core::aggregator::output_policy::NodataPolicy;
 use dggs_stream_core::aggregator::output_policy::OutputPolicy;
 use dggs_stream_core::encoding::{cell_index_to_wkb, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
-use dggs_stream_core::error::{catch_unwind_or, safe_panic_payload_to_string, RasterH3Error, Result};
+use dggs_stream_core::error::{
+    catch_unwind_or, safe_panic_payload_to_string, RasterH3Error, Result,
+};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use dggs_stream_core::scalar_ops::{

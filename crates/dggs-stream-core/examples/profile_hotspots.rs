@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
 use serde_json::{json, Value};

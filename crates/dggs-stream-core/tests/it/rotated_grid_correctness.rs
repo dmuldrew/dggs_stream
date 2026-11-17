@@ -13,14 +13,14 @@
 
 use crate::helpers;
 
-use h3o::{LatLng, Resolution};
-use helpers::TestGeoTiffBuilder;
 use dggs_stream_core::aggregator::accumulator::H3Accumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use h3o::{LatLng, Resolution};
+use helpers::TestGeoTiffBuilder;
 use std::collections::HashMap;
 
 fn pattern_value(col: u32, row: u32) -> f32 {

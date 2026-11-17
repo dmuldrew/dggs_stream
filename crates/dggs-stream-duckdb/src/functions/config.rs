@@ -329,7 +329,10 @@ unsafe fn apply_options_impl(
 
 #[cfg(feature = "duckdb-api-v1_5_6")]
 fn env_i64(name: &str) -> Option<i64> {
-    dggs_stream_core::env::var(name)?.parse().ok().filter(|&v| v > 0)
+    dggs_stream_core::env::var(name)?
+        .parse()
+        .ok()
+        .filter(|&v| v > 0)
 }
 
 /// DuckDB's `temp_directory` setting, for spill files. Not created here:

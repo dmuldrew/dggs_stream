@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::path::Path;
 
-use h3o::{CellIndex, LatLng, Resolution};
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::scalar_ops::h3_to_wkb_u64;
 use dggs_stream_pg::fmgr::{
@@ -22,6 +21,7 @@ use dggs_stream_pg::fmgr::{
 use dggs_stream_pg::{
     int64_to_datum, Datum, FunctionCallInfoBaseData, NullableDatum, PgContinuousSrf,
 };
+use h3o::{CellIndex, LatLng, Resolution};
 
 use self::server::{FmgrInfo, ReturnSetInfo, EXPR_END_RESULT, EXPR_MULTIPLE_RESULT, SERVER};
 use crate::srf::{classes_tif, core_categorical, f, gradient_tif, pg_categorical};

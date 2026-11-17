@@ -1,7 +1,7 @@
+use dggs_stream_core::scalar_ops::h3_polygon_to_cells_wkb;
 use geo_types::{Coord, LineString, MultiPolygon, Polygon};
 use h3o::geom::{ContainmentMode, TilerBuilder};
 use h3o::Resolution;
-use dggs_stream_core::scalar_ops::h3_polygon_to_cells_wkb;
 
 enum TestGeometry {
     Polygon(Polygon<f64>),

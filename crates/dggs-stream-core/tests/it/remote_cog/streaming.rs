@@ -371,9 +371,9 @@ fn test_remote_cog_to_parquet_streaming_pipeline() {
         return;
     }
 
-    use parquet::file::reader::{FileReader, SerializedFileReader};
     use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
     use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+    use parquet::file::reader::{FileReader, SerializedFileReader};
 
     let local_path = helpers::data_path("CFL_HI.tif");
     if !local_path.exists() {

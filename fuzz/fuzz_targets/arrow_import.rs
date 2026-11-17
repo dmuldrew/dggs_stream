@@ -3,10 +3,10 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use libfuzzer_sys::fuzz_target;
 use dggs_stream_core::columnar::{
     ArrowArray, ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch,
 };
+use libfuzzer_sys::fuzz_target;
 
 /// Point child `i`'s buffer `slot` at `p`, returning the previous pointer.
 ///

@@ -46,17 +46,17 @@ use std::sync::Arc;
 use datafusion::prelude::SessionContext;
 
 pub use convert::{geometry_field, GEOARROW_WKB_EXTENSION, GEOARROW_WKB_METADATA};
+pub use dggs_stream_core::aggregator::{NodataPolicy, OutputPolicy};
+pub use dggs_stream_core::grid::GridKind;
+pub use dggs_stream_core::resolution::ResolutionSpec;
+pub use dggs_stream_core::run_profile::{ProfileReport, RunProfile};
+pub use dggs_stream_core::transfer::{SampleMethod, TransferMode};
 pub use merge::{merge_udafs, MergePartials};
 pub use pmtiles::{
     register_pmtiles_format, write_pmtiles, write_record_batches, PmtilesFormatFactory,
     PmtilesWriteOptions,
 };
 pub use polyfill::H3PolygonToCells;
-pub use dggs_stream_core::aggregator::{NodataPolicy, OutputPolicy};
-pub use dggs_stream_core::grid::GridKind;
-pub use dggs_stream_core::resolution::ResolutionSpec;
-pub use dggs_stream_core::run_profile::{ProfileReport, RunProfile};
-pub use dggs_stream_core::transfer::{SampleMethod, TransferMode};
 pub use table::{RasterH3Table, TableKind};
 pub use udf::{scalar_udfs, LonLatToCell, RasterH3ScalarUdf};
 pub use udtf::{

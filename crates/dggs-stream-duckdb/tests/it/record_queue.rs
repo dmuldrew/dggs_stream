@@ -3,7 +3,9 @@
 use std::sync::Mutex;
 
 use crate::helpers::corrupt_strip_geotiff as corrupt_payload;
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_duckdb::functions::bind_utils::ConcurrentRecordQueue;
 

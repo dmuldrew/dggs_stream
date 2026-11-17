@@ -14,7 +14,8 @@ use super::MockConnection;
 fn test_extension_init_and_registration_completeness() {
     install_mock_api();
     // SAFETY: `dggs_stream_version` returns a static NUL-terminated literal.
-    let ver = unsafe { CStr::from_ptr(dggs_stream_duckdb::dggs_stream_version()).to_string_lossy() };
+    let ver =
+        unsafe { CStr::from_ptr(dggs_stream_duckdb::dggs_stream_version()).to_string_lossy() };
     assert_eq!(ver, "v0.0.1");
 
     let mut dummy_db = 1usize;

@@ -7,14 +7,14 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::Field;
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::columnar::ipc::read_ipc_stream;
 use dggs_stream_core::columnar::{
     CategoricalBatchReader, CategoricalFormat, ColumnArray, ContinuousBatchReader, RecordBatch,
 };
 use dggs_stream_core::pmtiles::H3PmtilesTiler;
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::Field;
 use tempfile::NamedTempFile;
 
 use crate::helpers::{corrupt_strip_geotiff, TestGeoTiffBuilder};

@@ -224,7 +224,9 @@ pub unsafe extern "C" fn init_MultiFuncCall(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn per_MultiFuncCall(fcinfo: dggs_stream_pg::pg_func_call_info) -> *mut c_void {
+pub unsafe extern "C" fn per_MultiFuncCall(
+    fcinfo: dggs_stream_pg::pg_func_call_info,
+) -> *mut c_void {
     // SAFETY: test stand-in for the PostgreSQL backend, called by the extension on this
     // test's thread: `fcinfo` is the test's live call info, whose `flinfo` points to the
     // test's `FmgrInfo`.

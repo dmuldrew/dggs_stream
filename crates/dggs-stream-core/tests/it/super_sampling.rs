@@ -4,17 +4,17 @@
 //! and grid patterns under geographic (EPSG:4326) and projected (UTM) coordinate reference systems.
 
 use crate::helpers;
-use helpers::{create_fn_f32_geotiff as create_test_geotiff, TestGeoTiffBuilder};
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::raster::GeoTiffStreamReader;
+use helpers::{create_fn_f32_geotiff as create_test_geotiff, TestGeoTiffBuilder};
 
 #[test]
 fn web_mercator_samples_match_exact_projection() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::crs::transformer::CrsTransformer;
+    use h3o::{LatLng, Resolution};
     use std::collections::HashMap;
 
     // Large high-latitude pixels expose nonlinear latitude errors; small
@@ -389,8 +389,8 @@ fn test_projected_utm_jacobian_supersampling_conservation() {
 
 #[test]
 fn test_projected_utm_gradient_exact_cell_assignment() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::crs::transformer::CrsTransformer;
+    use h3o::{LatLng, Resolution};
     use std::collections::HashMap;
 
     let width = 32u32;
@@ -469,8 +469,8 @@ fn test_projected_utm_gradient_exact_cell_assignment() {
 
 #[test]
 fn custom_single_samples_preserve_offsets_and_weights() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::aggregator::sampling::SamplePoint;
+    use h3o::{LatLng, Resolution};
     use std::collections::HashMap;
     let (_file, path) = TestGeoTiffBuilder::new(16, 4)
         .origin(-122.0, 38.0)
@@ -566,7 +566,6 @@ fn benchmark_supersampling() {
 
 #[test]
 fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
-    use h3o::{LatLng, Resolution};
     use dggs_stream_core::aggregator::cell_hash::H3BuildHasher;
     use dggs_stream_core::aggregator::multi_horizon::{
         categorical::process_categorical_chunk_payload_into,
@@ -579,6 +578,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
     };
     use dggs_stream_core::crs::CrsTransformer;
     use dggs_stream_core::raster::{geotransform::GeoTransform, RasterChunk};
+    use h3o::{LatLng, Resolution};
     use std::collections::HashMap;
     use tiff::decoder::DecodingResult;
     let chunk = RasterChunk {

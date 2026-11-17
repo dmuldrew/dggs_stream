@@ -11,8 +11,12 @@ use std::collections::HashSet;
 use std::fs::File;
 use tempfile::TempDir;
 
-use dggs_stream_core::aggregator::horizon_streamer::{chunk_intersects_bbox, compute_cell_south_lat};
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::horizon_streamer::{
+    chunk_intersects_bbox, compute_cell_south_lat,
+};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::crs::transformer::CrsTransformer;
 use dggs_stream_core::pmtiles::pyramid::max_hex_radius_deg;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;

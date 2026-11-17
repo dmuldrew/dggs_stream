@@ -19,17 +19,17 @@ pub mod scalar;
 
 use std::sync::Arc;
 
-pub use provider::{
-    CategoricalRasterExec, CategoricalRasterTableProvider, ContinuousRasterExec,
-    ContinuousRasterTableProvider, FilterPredicate, FilterPushdownStatus, PartitionedRasterExec,
-    RasterScan, RasterScanExec, TableStatistics,
-};
 pub use dggs_stream_core::aggregator::multi_horizon::ScanPartition;
 pub use dggs_stream_core::columnar::{
     merge_partial_batches, ArrowArray, ArrowArrayStream, ArrowDataType, ArrowSchema,
     CategoricalFormat, ColumnArray, ColumnField, ColumnSchema, RecordBatch, PARTIAL_STATE_COLUMN,
 };
 pub use dggs_stream_core::grid::GridKind;
+pub use provider::{
+    CategoricalRasterExec, CategoricalRasterTableProvider, ContinuousRasterExec,
+    ContinuousRasterTableProvider, FilterPredicate, FilterPushdownStatus, PartitionedRasterExec,
+    RasterScan, RasterScanExec, TableStatistics,
+};
 pub use scalar::{
     GridScalarFn, GridScalarOp, H3CellToParentUdf, H3GetResolutionUdf, H3IsValidUdf, H3ScalarFn,
     H3ToLatUdf, H3ToLngUdf, H3ToStringUdf, H3ToWkbUdf, StringToH3Udf,
@@ -264,7 +264,10 @@ mod tests {
         )
         .unwrap();
         if let ColumnArray::UInt64 { values, .. } = parent_col {
-            assert_eq!(dggs_stream_core::scalar_ops::h3_get_resolution(values[0]), 5);
+            assert_eq!(
+                dggs_stream_core::scalar_ops::h3_get_resolution(values[0]),
+                5
+            );
         }
     }
 }

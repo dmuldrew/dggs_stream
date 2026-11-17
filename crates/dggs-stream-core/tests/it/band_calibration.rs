@@ -16,7 +16,9 @@ use dggs_stream_core::aggregator::multi_horizon::{
     QuantileTarget, SpectralFormula,
 };
 use dggs_stream_core::aggregator::H3Accumulator;
-use dggs_stream_core::columnar::{CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader};
+use dggs_stream_core::columnar::{
+    CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader,
+};
 use dggs_stream_core::error::RasterH3Error;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};

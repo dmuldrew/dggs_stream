@@ -8,13 +8,13 @@ use crate::helpers;
 use std::fs::File;
 use tempfile::NamedTempFile;
 
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::RowAccessor;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::RowAccessor;
 
 fn create_test_geotiff(width: usize, height: usize) -> NamedTempFile {
     helpers::create_wave_test_geotiff_with_scale(width, height, 0.001)

@@ -12,13 +12,13 @@ use tiff::decoder::DecodingResult;
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 
-use h3o::{LatLng, Resolution};
 use dggs_stream_core::aggregator::categorical::INLINE_CAPACITY;
 use dggs_stream_core::aggregator::multi_horizon::{
     continuous_streamer::ContinuousKernel, MultiCategoricalHorizonStreamer, MultiHorizonStreamer,
     MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget,
 };
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use h3o::{LatLng, Resolution};
 
 use crate::helpers::TestGeoTiffBuilder;
 

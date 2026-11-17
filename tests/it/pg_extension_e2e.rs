@@ -172,7 +172,9 @@ fn continuous_rows(
         bbox,
     )
     .unwrap();
-    let mut rows: Vec<_> = srf.collect::<dggs_stream::core::error::Result<_>>().unwrap();
+    let mut rows: Vec<_> = srf
+        .collect::<dggs_stream::core::error::Result<_>>()
+        .unwrap();
     rows.sort_by_key(|r| r.h3_index);
     rows
 }
@@ -186,7 +188,9 @@ fn categorical_rows(path: &Path) -> Vec<PgCategoricalRow> {
         None,
     )
     .unwrap();
-    let mut rows: Vec<_> = srf.collect::<dggs_stream::core::error::Result<_>>().unwrap();
+    let mut rows: Vec<_> = srf
+        .collect::<dggs_stream::core::error::Result<_>>()
+        .unwrap();
     rows.sort_by_key(|r| r.h3_index);
     rows
 }

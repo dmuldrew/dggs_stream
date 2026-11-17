@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use h3o::{LatLng, Resolution};
 use dggs_stream_core::aggregator::accumulator::H3Accumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::sharded_map::ShardedResolutionMap;
@@ -26,6 +25,7 @@ use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::remote_prefetch::{
     coalesce_chunk_ranges, ChunkLocation, RemoteChunkPrefetchQueue, RemotePrefetchConfig,
 };
+use h3o::{LatLng, Resolution};
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 

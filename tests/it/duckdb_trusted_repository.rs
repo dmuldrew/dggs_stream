@@ -246,7 +246,9 @@ fn duckdb_trusted_repository_installs_signed_extension() {
 
     // 2. A later session loads from the pinned repository without opting in again
     //    and without allow_unsigned_extensions; the signature is re-checked on LOAD.
-    let out = h.run(&format!("LOAD dggs_stream FROM dggs_stream_repo; {PROBE_SQL}"));
+    let out = h.run(&format!(
+        "LOAD dggs_stream FROM dggs_stream_repo; {PROBE_SQL}"
+    ));
     let text = output_text(&out);
     assert!(
         out.status.success(),

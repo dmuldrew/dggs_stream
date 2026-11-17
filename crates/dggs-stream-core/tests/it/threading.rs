@@ -5,7 +5,9 @@
 
 use crate::helpers;
 use dggs_stream_core::aggregator::accumulator::H3Accumulator;
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::error::Result;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use std::collections::HashMap;

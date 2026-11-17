@@ -6,13 +6,13 @@ use std::collections::HashMap;
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 
-use h3o::CellIndex;
 use dggs_stream_core::aggregator::horizon_streamer::compute_cell_south_lat;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::pmtiles::tiler::H3PmtilesTiler;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use h3o::CellIndex;
 
 const NODATA: f32 = -9999.0;
 

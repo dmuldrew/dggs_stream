@@ -3,11 +3,11 @@
 //! Validates OGC-compliant WKB hexagon generation across all H3 resolutions, DuckDB version detection,
 //! projection pushdown column indices, and error handling for invalid cells.
 
-use h3o::{LatLng, Resolution};
 use dggs_stream_duckdb::ffi::{is_duckdb_version_at_least, parse_version_string};
 use dggs_stream_duckdb::functions::fast_hex::parse_hex_u64;
 use dggs_stream_duckdb::functions::fast_hex_u64;
 use dggs_stream_duckdb::functions::wkb::{cell_to_wkb, h3_index_to_wkb, WkbBuf, WKB_BUF_LEN};
+use h3o::{LatLng, Resolution};
 
 #[test]
 fn test_duckdb_version_parsing_logic() {

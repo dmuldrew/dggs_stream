@@ -3,7 +3,9 @@
 //! Operates directly on [`ColumnArray`] batches with full null-validity propagation.
 
 use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
-use dggs_stream_core::encoding::{fast_hex_u64, h3_index_to_wkb, parse_hex_u64, WkbBuf, WKB_BUF_LEN};
+use dggs_stream_core::encoding::{
+    fast_hex_u64, h3_index_to_wkb, parse_hex_u64, WkbBuf, WKB_BUF_LEN,
+};
 use dggs_stream_core::error::{RasterH3Error, Result};
 use dggs_stream_core::scalar_ops::{
     h3_cell_to_parent_str, h3_cell_to_parent_u64, h3_get_resolution, h3_is_valid_str,

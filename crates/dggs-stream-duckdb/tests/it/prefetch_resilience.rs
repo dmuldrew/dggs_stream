@@ -269,9 +269,11 @@ fn test_ordered_prefetch_queue_worker_panic_latches_error() {
         // return type and `if let Err(..)` would be irrefutable.
         if let Some(payload) = res.err() {
             let msg = dggs_stream_duckdb::ffi::panic_payload_to_string(payload);
-            q.fail(Err(dggs_stream_core::error::RasterH3Error::InvalidParameter(
-                format!("Decode worker panicked: {msg}"),
-            )));
+            q.fail(Err(
+                dggs_stream_core::error::RasterH3Error::InvalidParameter(format!(
+                    "Decode worker panicked: {msg}"
+                )),
+            ));
         }
     });
 

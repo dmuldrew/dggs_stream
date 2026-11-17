@@ -4,11 +4,11 @@
 
 use std::collections::BTreeSet;
 
-use h3o::CellIndex;
 use dggs_stream_sedona::scan::{
     CategoricalRasterTableProvider, ContinuousRasterTableProvider, FilterPredicate,
     FilterPushdownStatus, RasterScan,
 };
+use h3o::CellIndex;
 
 use crate::helpers::TestGeoTiffBuilder;
 use crate::rows::{column_text, plan_table, Row};

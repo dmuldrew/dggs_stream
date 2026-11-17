@@ -4,7 +4,6 @@
 //! and average overlap handling, and multi-worker concurrent prefetched mosaic reading.
 
 use crate::helpers;
-use helpers::{create_constant_gray8_geotiff as create_test_geotiff, TestGeoTiffBuilder};
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
@@ -13,6 +12,7 @@ use dggs_stream_core::raster::mosaic::{
     glob_match, resolve_raster_sources, MosaicReader, OverlapRule,
 };
 use dggs_stream_core::raster::prefetch::{PrefetchedMosaicReader, MAX_OPEN_DECODERS_PER_WORKER};
+use helpers::{create_constant_gray8_geotiff as create_test_geotiff, TestGeoTiffBuilder};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

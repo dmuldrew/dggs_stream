@@ -17,7 +17,9 @@ use tempfile::TempDir;
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::crs::transformer::CrsTransformer;
 use dggs_stream_core::encoding::{cell_to_wkb, WkbBuf, WKB_BUF_LEN};

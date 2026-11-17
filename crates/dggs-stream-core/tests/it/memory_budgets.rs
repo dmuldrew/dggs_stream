@@ -5,9 +5,11 @@ use std::collections::HashMap;
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 
-use h3o::CellIndex;
-use dggs_stream_core::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream_core::aggregator::multi_horizon::{
+    MultiResolutionConfig, MultiScanHorizonStreamer,
+};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use h3o::CellIndex;
 
 const NODATA: f32 = -9999.0;
 const WIDTH: u32 = 300;
