@@ -316,7 +316,7 @@ scan one spec per task (`mapInArrow`), then `repartition("h3_index")` the partia
 merge each group with `mapInArrow` as well. On Spark 4.0+, `dggs_stream.spark` wraps all of
 this as a data source (`spark.read.format("dggs_stream")`); see
 [Spark & Apache Sedona](spark.md). The Apache Sedona demo,
-[`examples/sedona_spark/raster_h3_spark_demo.py`](../../examples/sedona_spark/raster_h3_spark_demo.py),
+[`examples/sedona_spark/dggs_stream_spark_demo.py`](../../examples/sedona_spark/dggs_stream_spark_demo.py),
 is a complete pipeline; its tests in `examples/sedona_spark/tests/` run it on real Spark in
 the `sedona` image (CI job `sedona-spark`):
 

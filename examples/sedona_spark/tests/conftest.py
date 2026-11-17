@@ -28,7 +28,7 @@ for module in ("pyspark", "sedona.spark", "dggs_stream", "numpy"):
 sys.path.insert(0, str(DEMO_DIR))
 os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(DEMO_DIR), os.environ.get("PYTHONPATH")]))
 
-import raster_h3_spark_demo as demo  # noqa: E402
+import dggs_stream_spark_demo as demo  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -38,7 +38,7 @@ def sedona():
     spark = demo.sedona_session(os.environ.get("SPARK_MASTER", "local[2]"), shuffle_partitions=4)
     spark.sparkContext.setLogLevel("ERROR")
     # Executors in other containers or machines import the demo's mapInArrow functions.
-    spark.sparkContext.addPyFile(str(DEMO_DIR / "raster_h3_spark_demo.py"))
+    spark.sparkContext.addPyFile(str(DEMO_DIR / "dggs_stream_spark_demo.py"))
     yield spark
     spark.stop()
 

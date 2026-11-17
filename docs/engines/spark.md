@@ -53,7 +53,7 @@ PySpark, Sedona and JupyterLab) with the locally built `dggs-stream` wheel:
 
 ```bash
 docker compose up --build sedona     # JupyterLab on http://localhost:8888, Spark UI on :8090
-docker compose exec sedona python3 /opt/dggs_stream/examples/raster_h3_spark_demo.py --verify
+docker compose exec sedona python3 /opt/dggs_stream/examples/dggs_stream_spark_demo.py --verify
 ```
 
 `./data` is mounted at `/data`. `SEDONA_DRIVER_MEM` and `SEDONA_EXECUTOR_MEM` (default
@@ -129,7 +129,7 @@ and merged as one raster).
 
 On Spark 3, or to control each step, write the pipeline with `mapInArrow`. The complete
 pipeline is
-[`examples/sedona_spark/raster_h3_spark_demo.py`](../../examples/sedona_spark/raster_h3_spark_demo.py).
+[`examples/sedona_spark/dggs_stream_spark_demo.py`](../../examples/sedona_spark/dggs_stream_spark_demo.py).
 Its steps are importable (`plan`, `distributed_cells`, `register_cells`, `verify`); the
 core of it is:
 

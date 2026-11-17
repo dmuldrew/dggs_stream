@@ -12,8 +12,8 @@ The union is exactly what one scan of each raster produces (`--verify` checks th
 
 Inside the `sedona` compose service:
 
-    docker compose exec sedona python3 /opt/dggs_stream/examples/raster_h3_spark_demo.py --verify
-    docker compose exec sedona python3 /opt/dggs_stream/examples/raster_h3_spark_demo.py \\
+    docker compose exec sedona python3 /opt/dggs_stream/examples/dggs_stream_spark_demo.py --verify
+    docker compose exec sedona python3 /opt/dggs_stream/examples/dggs_stream_spark_demo.py \\
         '/data/tiles/*.tif' --resolutions 7 --target-chunks 256
 
 Without paths, a tiled synthetic raster is generated (2048 x 2048 px in 64 tiles of 256 px).

@@ -28,7 +28,7 @@ if not spark_ds._PUSHDOWN:
 
 # The tiled terrain writer from the Apache Sedona demo.
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "examples" / "sedona_spark"))
-import raster_h3_spark_demo as demo  # noqa: E402
+import dggs_stream_spark_demo as demo  # noqa: E402
 
 
 @pytest.fixture(scope="session")

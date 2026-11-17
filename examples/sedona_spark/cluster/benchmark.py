@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import raster_h3_spark_demo as demo  # noqa: E402
+import dggs_stream_spark_demo as demo  # noqa: E402
 
 
 def main() -> None:

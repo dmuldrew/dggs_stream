@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 import pytest
-import raster_h3_spark_demo as demo
+import dggs_stream_spark_demo as demo
 
 
 def run(sedona, paths, resolutions, target_chunks):
