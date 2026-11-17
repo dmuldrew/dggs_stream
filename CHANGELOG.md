@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- README: the canopy worked example is replaced by four examples that each pair an engine with the grid that suits the question: wetland loss inside vs. outside protected areas (Python / Polars on A5, equal-area totals), flood depth at parcels and Overture roads from S3 (DuckDB on H3), snowpack per sub-basin rolled up to the basin (SedonaDB on S2, spatial pushdown and exact nesting) and land temperature by latitude band (CLI on HEALPix). The section is now titled "Raster Meets Table: Worked Examples".
 - A5 cells within 0.001 degrees of a pole are indexed without the `a5` crate's last-cell shortcut. That shortcut returned whichever polar cell was looked up previously for a point within about 1e-5 degrees of a pole, even a cell at the opposite pole, so the cell of such a pixel depended on the pixel before it.
 - PostgreSQL: the aggregate SRFs take three more optional arguments (`nodata_policy`, `emit_nodata_value`, `decimals`), and the install script defines the A5 / S2 / HEALPix functions and `{grid}_auto_resolution`. Databases that already installed extension version 0.7.0 need these definitions from an upgrade script at the next version; the shared library still serves the five-argument SRFs they have.
 - The missing-column error of `parquet_to_pmtiles` reads "Cell column '...' not found" (it was "H3 column").

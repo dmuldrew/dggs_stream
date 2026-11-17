@@ -222,8 +222,8 @@ joined = (
 )
 ```
 
-See the README's [worked example](../../README.md#raster-meets-table-a-worked-example) for a
-full raster × census-tract join in Polars.
+See the README's [worked examples](../../README.md#raster-meets-table-worked-examples) for a
+full two-year raster × protected-area join in Polars on the A5 grid.
 
 ### Export to Parquet / GeoParquet
 
