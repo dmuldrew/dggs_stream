@@ -2,12 +2,12 @@
 
 [← Back to README](../README.md)
 
-This document details the architectural principles that enable raster_dggs to aggregate multi-gigabyte rasters into H3 hexagonal grids in parallel across CPU cores, with configurable aggregation memory budgets and disk spilling.
+This document details the architectural principles that enable dggs_stream to aggregate multi-gigabyte rasters into H3 hexagonal grids in parallel across CPU cores, with configurable aggregation memory budgets and disk spilling.
 
 > [!NOTE]
 > Performance benchmarks, timing metrics, and micro-architectural numbers cited in this document reflect native release builds evaluated on an Apple M-series workstation (8 performance cores, 16 GB Unified Memory) and modern x86_64 processors with AVX2/SSE2 support.
 
-raster_dggs's throughput and memory profile come from seven principles:
+dggs_stream's throughput and memory profile come from seven principles:
 
 | # | Engineering Pillar | Description & Impact |
 | :---: | :--- | :--- |
@@ -163,7 +163,7 @@ Exporting aggregated hexagonal grids to standard GIS formats traditionally requi
 
 ## Geodetic Tolerances and Semantics
 
-This section outlines fundamental geodetic assumptions, error budgets, and numerical precision considerations across the raster_dggs processing pipeline.
+This section outlines fundamental geodetic assumptions, error budgets, and numerical precision considerations across the dggs_stream processing pipeline.
 
 ### Pixel Counts vs. Physical Ground Area
 The `count` and `sum` statistics emitted by all aggregators represent discrete counts of sampled raster pixels (or fractional sample weights when supersampling is enabled), **not physical surface areas** in square meters:

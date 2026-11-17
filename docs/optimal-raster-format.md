@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [CRS & Projections](crs-and-projection.md)
 
-While raster_dggs can ingest arbitrary GeoTIFF files in any projected Coordinate Reference System (Albers, UTM, Lambert Conformal Conic, etc.), the physical layout and coordinate reference system of the source file drastically impacts processing throughput.
+While dggs_stream can ingest arbitrary GeoTIFF files in any projected Coordinate Reference System (Albers, UTM, Lambert Conformal Conic, etc.), the physical layout and coordinate reference system of the source file drastically impacts processing throughput.
 
 By formatting your rasters into an optimal layout, you can achieve **up to 4.5×–6× faster ingestion** while reducing storage footprints.
 

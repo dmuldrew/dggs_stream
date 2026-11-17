@@ -1,6 +1,6 @@
 # Examples
 
-Example binaries demonstrating the raster_dggs library capabilities. Run any example with:
+Example binaries demonstrating the dggs_stream library capabilities. Run any example with:
 
 ```bash
 cargo run --example <name> --release

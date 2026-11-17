@@ -2,7 +2,7 @@
 
 [← Back to Engine Overview](README.md) · [Python & Polars](python-polars.md) · [Core Engine](core.md#partitioned-scans)
 
-raster_dggs runs on Apache Spark through its Python package. There is no Spark plugin or JVM
+dggs_stream runs on Apache Spark through its Python package. There is no Spark plugin or JVM
 code: each Spark task opens the raster with the `raster_h3` native library and hands Arrow
 batches to Spark. On Spark 4.0+, `raster_h3.spark` registers a `raster_h3` data source
 (`spark.read.format("raster_h3")`); on any Spark version the same steps can be written with
@@ -11,7 +11,7 @@ strips, so many executors read one raster in parallel without reading any pixel 
 the result is identical to a single scan (up to floating-point summation order).
 
 Apache Sedona adds spatial SQL on top: the cells' WKB loads as Sedona geometry, and
-Sedona's H3 functions (h3-java) use the same 64-bit cell ids as raster_dggs, so they join
+Sedona's H3 functions (h3-java) use the same 64-bit cell ids as dggs_stream, so they join
 directly onto the aggregated cells.
 
 Apache Sedona on Spark is separate from **SedonaDB**, the single-node DataFusion engine,
@@ -45,7 +45,7 @@ flowchart LR
 
 Every executor needs the `raster_h3` Python package (with its native library) and
 `pyarrow>=15`, and must be able to open the raster path: a file system that all executors
-mount at the same path, or an `http(s)://` / `s3://` URL that raster_dggs reads directly
+mount at the same path, or an `http(s)://` / `s3://` URL that dggs_stream reads directly
 (see [Remote COG & S3 streaming](python-polars.md#remote-cog--s3-streaming)).
 
 The quickest start is the `sedona` Docker image, Apache Sedona 1.9.1 (Spark standalone,
@@ -193,12 +193,12 @@ Points that matter:
 - **Not with partitions:** `limit`, the long categorical format and child compaction. A
   projection must keep `h3_index` and `resolution`.
 
-All partitions of one scan must run the same raster_dggs release: the partial-state
+All partitions of one scan must run the same dggs_stream release: the partial-state
 encoding is versioned, and a worker refuses states from another version.
 
 ## Spatial SQL with Sedona
 
-Register the cells with a geometry column built from raster_dggs's WKB (cell boundaries in
+Register the cells with a geometry column built from dggs_stream's WKB (cell boundaries in
 lon/lat, WGS84):
 
 ```python
@@ -225,11 +225,11 @@ WHERE c.resolution = 9;
 
 The test suite checks this agreement on every cell: `ST_H3CellIDs` of each cell's centroid
 returns that cell, and `ST_H3ToGeom` gives a polygon whose centroid is within 1e-9° of
-raster_dggs's.
+dggs_stream's.
 
 ## Performance
 
-Partitioning adds no measurable CPU inside raster_dggs (0.97×–1.02× total CPU in the
+Partitioning adds no measurable CPU inside dggs_stream (0.97×–1.02× total CPU in the
 `partition_overhead` benchmark, see [Partitioned scans](core.md#partitioned-scans)). What
 Spark adds is per-job and per-task overhead: scheduling, a Python worker per task, Arrow
 transfer to the JVM and the shuffle of the merge.
@@ -245,8 +245,8 @@ warm-up (November 2026):
 
 | Setup | Partitions | Wall time | Speedup |
 | :--- | ---: | ---: | ---: |
-| raster_dggs alone, one process, 2 CPUs | — | 4.78 s | — |
-| raster_dggs alone, one process, 10 CPUs | — | 2.15 s | — |
+| dggs_stream alone, one process, 2 CPUs | — | 4.78 s | — |
+| dggs_stream alone, one process, 10 CPUs | — | 2.15 s | — |
 | Spark, 1 worker (2 cores) | 2 | 5.61 s | 1.00× |
 | Spark, 2 workers (4 cores) | 4 | 3.39 s | 1.65× |
 | Spark, 3 workers (6 cores) | 7 | 2.81 s | 2.00× |
@@ -266,7 +266,7 @@ What this shows, and what it does not:
   `1.2 s + 4.4 s / workers` matches 1 and 2 workers; at 3 and 4 the planner's grid gave
   one more partition than slots (a second wave), and 8 worker CPUs plus the driver nearly
   fill Docker's 10.
-- **On one machine, Spark does not beat raster_dggs alone** (2.63 s on 8 cores against
+- **On one machine, Spark does not beat dggs_stream alone** (2.63 s on 8 cores against
   2.15 s for one process on 10): all workers share one machine's CPUs, memory bandwidth and
   disk. The gain comes from more machines, each with its own CPUs and storage path; this
   cluster cannot measure that.
@@ -275,7 +275,7 @@ What this shows, and what it does not:
 
 ### Tuning
 
-Each task also runs raster_dggs's own parallel decode and aggregation: aggregation uses
+Each task also runs dggs_stream's own parallel decode and aggregation: aggregation uses
 Rayon's thread count, capped at 8, and decoding sizes itself from the cores the container
 or machine allows. With several tasks per executor on large machines, give each task more
 cores (`spark.task.cpus`) or cap Rayon on the executors

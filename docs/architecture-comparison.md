@@ -2,11 +2,11 @@
 
 [← Back to README](../README.md)
 
-This document compares the architectural design and performance characteristics of raster_dggs against alternative geospatial processing approaches (Python, PostGIS, and GDAL), examines trade-offs across execution environments (local workstations, cloud servers, and containers), and details empirical streaming benchmarks.
+This document compares the architectural design and performance characteristics of dggs_stream against alternative geospatial processing approaches (Python, PostGIS, and GDAL), examines trade-offs across execution environments (local workstations, cloud servers, and containers), and details empirical streaming benchmarks.
 
 ## Structural Trade-Off Matrix
 
-| Dimension | Python (`rasterio` + `h3-py` + `pyproj`) | PostGIS (`raster2pgsql` + `ST_H3_Polyfill`) | GDAL CLI (`gdal_polygonize` + `ogr2ogr`) | raster_dggs (Native DuckDB) |
+| Dimension | Python (`rasterio` + `h3-py` + `pyproj`) | PostGIS (`raster2pgsql` + `ST_H3_Polyfill`) | GDAL CLI (`gdal_polygonize` + `ogr2ogr`) | dggs_stream (Native DuckDB) |
 | :--- | :--- | :--- | :--- | :--- |
 | **Execution Environment** | Python interpreter with C-extension FFI | PostgreSQL database daemon | External CLI toolchain | **Embedded inside DuckDB query engine** |
 | **Memory Architecture** | Allocates full 2D coordinate meshgrids in RAM | Subject to PostgreSQL shared buffer limits | Allocates intermediate polygon geometries | **Budgeted accumulators with disk spilling** |
@@ -36,7 +36,7 @@ This document compares the architectural design and performance characteristics 
 
 ## Execution Environments: Local Native vs. Cloud vs. Containerized
 
-raster_dggs is architected to saturate hardware across all platforms, but throughput varies significantly depending on how the runtime interacts with the CPU vector engine, memory hierarchy, and OS kernel:
+dggs_stream is architected to saturate hardware across all platforms, but throughput varies significantly depending on how the runtime interacts with the CPU vector engine, memory hierarchy, and OS kernel:
 
 | Dimension | Local Native Workstation | High-Core Cloud Server | Desktop Container (Docker) |
 | :--- | :--- | :--- | :--- |

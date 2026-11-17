@@ -22,7 +22,7 @@ GitHub Security Advisory and credit you unless you prefer otherwise.
 
 ## Scope
 
-raster_dggs is loaded into host processes (DuckDB, PostgreSQL backends, Python) and parses
+dggs_stream is loaded into host processes (DuckDB, PostgreSQL backends, Python) and parses
 untrusted input: GeoTIFF/COG files, remote HTTP range responses, WKB geometries and SQL
 arguments. Bugs that let such input crash the host, read or write memory out of bounds,
 or reach files or URLs the caller did not request are in scope.

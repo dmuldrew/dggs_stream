@@ -1,4 +1,4 @@
-# raster_dggs: High-Performance Raster Aggregation onto Discrete Global Grids
+# dggs_stream: High-Performance Raster Aggregation onto Discrete Global Grids
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021_Edition-orange.svg)](https://www.rust-lang.org)
@@ -6,13 +6,13 @@
 [![Python / Polars](https://img.shields.io/badge/Python-Polars_%7C_Arrow-3776AB.svg)](docs/engines/python-polars.md)
 [![PostgreSQL 13–18](https://img.shields.io/badge/PostgreSQL-13–18-336791.svg)](docs/engines/postgresql.md)
 
-A pure-Rust engine that aggregates multi-gigabyte geospatial rasters (GeoTIFF, Cloud-Optimized GeoTIFFs) into the cells of a **Discrete Global Grid System (DGGS)**: [Uber H3](https://h3geo.org/) hexagons, [A5](https://a5geo.org/) pentagons, [Google S2](https://s2geometry.io/) cells or [HEALPix](https://healpix.sourceforge.io/) cells. It also generates cloud-native **PMTiles v3** vector pyramids for instant web visualization. Aggregation runs in a [bounded memory budget](docs/engineering.md#1-southernmost-scan-line-horizon-eviction) and spills to disk when needed. The same engine ships as a native DuckDB extension, DataFusion-style table providers, a Python/Polars package, a PostgreSQL extension and a command-line tool (see [Engines](#engines)).
+A pure-Rust engine that streams multi-gigabyte geospatial raster files (GeoTIFF, Cloud-Optimized GeoTIFFs) in a single pass and aggregates them into the cells of a **Discrete Global Grid System (DGGS)**: [Uber H3](https://h3geo.org/) hexagons, [A5](https://a5geo.org/) pentagons, [Google S2](https://s2geometry.io/) cells or [HEALPix](https://healpix.sourceforge.io/) cells. It also generates cloud-native **PMTiles v3** vector pyramids for instant web visualization. Aggregation runs in a [bounded memory budget](docs/engineering.md#1-southernmost-scan-line-horizon-eviction) and spills to disk when needed. The same engine ships as a native DuckDB extension, DataFusion-style table providers, a Python/Polars package, a PostgreSQL extension and a command-line tool (see [Engines](#engines)).
 
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
 Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
-> **About the name.** This documentation calls the project raster_dggs. The packages, crates, extension and functions keep their `raster_h3` / `raster-h3` names: `LOAD raster_h3`, `import raster_h3`, `pip install raster-h3`, `raster-h3-cli`, and SQL functions such as `h3_raster_continuous_aggregate` (each also takes `grid :=`, and `a5_`, `s2_` and `healpix_` versions exist).
+> **About the name.** This documentation calls the project dggs_stream: it streams raster files onto a DGGS in one pass (it is not a real-time event-stream system). The packages, crates, extension and functions keep their `raster_h3` / `raster-h3` names: `LOAD raster_h3`, `import raster_h3`, `pip install raster-h3`, `raster-h3-cli`, and SQL functions such as `h3_raster_continuous_aggregate` (each also takes `grid :=`, and `a5_`, `s2_` and `healpix_` versions exist).
 
 | Output | Use Case | Available In |
 | :--- | :--- | :--- |
@@ -92,7 +92,7 @@ A city planning department has two datasets:
 
 **The question**: *Which low-income, densely populated neighborhoods have the least tree canopy coverage?*
 
-Without a shared spatial index, answering this requires an expensive GIS overlay: reprojecting rasters, clipping polygons, rasterizing geometries, and managing gigabytes of temporary scratch files. With raster_dggs, both datasets meet on the H3 hexagonal grid. In DuckDB:
+Without a shared spatial index, answering this requires an expensive GIS overlay: reprojecting rasters, clipping polygons, rasterizing geometries, and managing gigabytes of temporary scratch files. With dggs_stream, both datasets meet on the H3 hexagonal grid. In DuckDB:
 
 ```sql
 -- Reading and polyfilling the tracts uses DuckDB's spatial extension alongside raster_h3:
@@ -252,7 +252,7 @@ Materializing both raster and vector datasets into intermediate cell tables (or 
 
 ### From Query to Web Map in One Step
 
-raster_dggs can export results directly to a **PMTiles v3** single-file vector tile archive — a multi-resolution pyramid ready for MapLibre, Kepler.gl, or Felt with zero intermediate files and zero tile servers:
+dggs_stream can export results directly to a **PMTiles v3** single-file vector tile archive — a multi-resolution pyramid ready for MapLibre, Kepler.gl, or Felt with zero intermediate files and zero tile servers:
 
 ```bash
 raster-h3-cli pmtiles nlcd_landcover_2021.tif -c -r 5,6,7,8 -o landcover_canopy.pmtiles
@@ -272,7 +272,7 @@ SELECT * FROM h3_raster_to_pmtiles(
 
 Upload `landcover_canopy.pmtiles` to S3, R2, or GitHub Pages, open it in MapLibre GL JS, and zoom from state level to city block.
 
-A web map needs tiles at every zoom level — from hemispheric overview down to street-level detail. raster_dggs builds this entire multi-resolution pyramid in a single pass over the raster, aggregating pixels simultaneously across all requested H3 resolutions. See [PMTiles & Multi-Resolution](docs/pmtiles.md) for the full deep dive.
+A web map needs tiles at every zoom level — from hemispheric overview down to street-level detail. dggs_stream builds this entire multi-resolution pyramid in a single pass over the raster, aggregating pixels simultaneously across all requested H3 resolutions. See [PMTiles & Multi-Resolution](docs/pmtiles.md) for the full deep dive.
 
 ### Design Principles
 
@@ -299,7 +299,7 @@ whole file into memory, so such downloads are capped at 1 GiB; raise the cap wit
 
 ## How It Works
 
-raster_dggs reads a raster like a document scanner: one strip at a time, from north to south.
+dggs_stream reads a raster like a document scanner: one strip at a time, from north to south.
 
 - **Finished cells leave early.** Once the scan has passed a cell's southern
   edge, no later row can touch it, so its statistics are final and it is sent on and
@@ -491,7 +491,7 @@ In Rust the same steps are `plan_partitions`, `MultiResolutionConfig::partition`
 
 ## Core Engineering Architecture
 
-raster_dggs's throughput and memory profile come from seven principles, shared by every engine:
+dggs_stream's throughput and memory profile come from seven principles, shared by every engine:
 
 | # | Engineering Pillar | Impact |
 | :---: | :--- | :--- |
@@ -605,7 +605,7 @@ deep dive's troubleshooting section: [DuckDB](docs/engines/duckdb.md#troubleshoo
 
 ### Missing or Non-Standard CRS
 
-If a GeoTIFF lacks embedded projection tags, raster_dggs halts with:
+If a GeoTIFF lacks embedded projection tags, dggs_stream halts with:
 ```
 CRS transformation error: No CRS detected in raster metadata. A CRS must be specified explicitly.
 ```
@@ -643,7 +643,7 @@ Python and PostgreSQL always calibrate. See [Band calibration and validity](docs
 
 ### Antimeridian Crossing
 
-For datasets spanning ±180° longitude, raster_dggs automatically wraps coordinates. For ROI bounding box filters across the antimeridian, split into two queries (e.g., `[170.0, 180.0]` and `[-180.0, -170.0]`).
+For datasets spanning ±180° longitude, dggs_stream automatically wraps coordinates. For ROI bounding box filters across the antimeridian, split into two queries (e.g., `[170.0, 180.0]` and `[-180.0, -170.0]`).
 
 ### BigTIFF & Codec Compatibility
 
@@ -657,7 +657,7 @@ For maximum ingestion throughput (up to 6× faster) and optimal L2 cache residen
 
 ### Container Memory Mapping
 
-raster_dggs uses `memmap2` for virtual memory mapping. Ensure container runtimes allow `mmap` system calls.
+dggs_stream uses `memmap2` for virtual memory mapping. Ensure container runtimes allow `mmap` system calls.
 
 ---
 
