@@ -147,8 +147,8 @@ byte-for-byte the same whether or not it spilled.
 A table can hold any mix of resolutions, so its exports give each resolution present a band of
 zooms instead of one zoom (`pyramid::zoom_bands_for_resolutions`). A band starts where the
 resolution's band in the raster tilers starts (`zooms_for_h3_res`) and runs to the zoom before
-the next finer resolution present starts; the finest resolution fills its whole band. Every zoom
-between the coarsest and finest band therefore has tiles:
+the next finer resolution present starts. The finest resolution fills its whole band. The bands
+cover every zoom between the coarsest and finest resolution:
 
 | Resolutions present | Bands |
 | :--- | :--- |
@@ -173,11 +173,9 @@ A pole cell's vertices span every longitude, so at fine zooms its tile range is 
 width of the map (millions of tiles per cell). Tiling skips a cell at any zoom where it would
 cover more than 65,536 tiles (`pyramid::MAX_TILE_OPS_PER_CELL_ZOOM`); it stays present at
 coarser zooms. `pyramid::for_each_cell_tile_mercator` returns the number of tiles it emitted,
-`0` for a skipped cell. The continuous and categorical tilers record the skipped
-`(cell, zoom)` pairs, overview parents included, as `h3_cells_over_tile_cap` in the archive
-metadata (omitted when nothing was skipped). The Parquet transcoder and
-`ExternalFeatureExport` count them in `TilePyramidAccumulator::capped_cells` but do not
-write the count to metadata.
+`0` for a skipped cell. Raster and table exporters record skipped `(cell, zoom)` pairs as
+`h3_cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
+gap between resolutions can also trigger the cap for nonpolar cells and leave a zoom empty.
 
 ## PMTiles v3 Leaf Directory Architecture
 

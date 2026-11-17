@@ -31,8 +31,8 @@ use crate::pmtiles::features::{
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
 use crate::pmtiles::pyramid::{
-    cell_boundary_mercator_for, max_cell_radius_deg, zoom_bands_for_grid_resolutions,
-    Wgs84BoundsAccumulator,
+    cell_boundary_mercator_for, max_cell_radius_deg, zoom_band_extent,
+    zoom_bands_for_grid_resolutions, Wgs84BoundsAccumulator,
 };
 use crate::pmtiles::writer::PmtilesWriter;
 
@@ -305,7 +305,7 @@ impl ExternalFeatureExport {
             .collect()
     }
 
-    /// Configure the spatial grid system (`GridKind::H3` by default).
+    /// Configure the spatial grid system (H3, A5, S2 or HEALPix). Defaults to H3.
     pub fn with_grid(mut self, grid: GridKind) -> Self {
         self.grid = grid;
         self
@@ -411,10 +411,16 @@ impl ExternalFeatureExport {
                 serde_json::Value::Object(map) => map,
                 _ => serde_json::Map::new(),
             },
-            GridKind::A5 => {
+            grid => {
                 let mut map = serde_json::Map::new();
-                map.insert("a5_index".to_string(), serde_json::json!("Number"));
-                map.insert("a5_hex".to_string(), serde_json::json!("String"));
+                map.insert(
+                    grid.index_column_name().to_string(),
+                    serde_json::json!("Number"),
+                );
+                map.insert(
+                    grid.hex_column_name().to_string(),
+                    serde_json::json!("String"),
+                );
                 map.insert("resolution".to_string(), serde_json::json!("Number"));
                 map
             }
@@ -430,23 +436,8 @@ impl ExternalFeatureExport {
         // Every resolution is known before the merge starts, so each one gets a
         // gap-free zoom band (see `zoom_bands_for_grid_resolutions`).
         let zoom_bands = self.zoom_bands();
-        let (min_zoom, max_zoom) = zoom_bands
-            .iter()
-            .flatten()
-            .copied()
-            .reduce(|(lo, hi), (a, b)| (lo.min(a), hi.max(b)))
-            .unwrap_or((0, 0));
+        let (min_zoom, max_zoom) = zoom_band_extent(&zoom_bands).unwrap_or((0, 0));
         let bbox = self.bounds.finish([-180.0, -85.0, 180.0, 85.0]);
-        let metadata = build_pmtiles_metadata(
-            "h3_pmtiles_export",
-            "H3 vector hexagon tile pyramid exported by raster_h3",
-            min_zoom,
-            max_zoom,
-            "h3_hexagons",
-            "H3 hexagonal vector polygons with attributes",
-            self.fields_metadata(),
-            None,
-        );
         // Spill once more before choosing the writer's directory, so a merge
         // that needs `spill_dir` has already created it.
         if !self.runs.is_empty() {
@@ -454,7 +445,7 @@ impl ExternalFeatureExport {
         }
         let writer_dir = self.spill_dir.as_deref().filter(|d| d.is_dir());
         let mut writer =
-            PmtilesWriter::new_in(min_zoom, max_zoom, bbox, metadata.to_string(), writer_dir)?;
+            PmtilesWriter::new_in(min_zoom, max_zoom, bbox, String::new(), writer_dir)?;
 
         // A cell reaches at most its radius north of its center, so a tile is
         // final once its south edge is that far north of the merge position.
@@ -503,7 +494,24 @@ impl ExternalFeatureExport {
                 add(record, &mut writer)?;
             }
         }
+        let capped_cells = accumulator.capped_cells;
         accumulator.flush_all(&mut writer)?;
+        let metadata = build_pmtiles_metadata(
+            "h3_pmtiles_export",
+            "H3 vector hexagon tile pyramid exported by raster_h3",
+            min_zoom,
+            max_zoom,
+            "h3_hexagons",
+            "H3 hexagonal vector polygons with attributes",
+            self.fields_metadata(),
+            (capped_cells > 0).then(|| {
+                serde_json::Map::from_iter([(
+                    "h3_cells_over_tile_cap".to_string(),
+                    serde_json::json!(capped_cells),
+                )])
+            }),
+        );
+        writer.set_metadata(bbox, metadata.to_string());
 
         let summary = PmtilesExportSummary {
             total_features: self.total_features,
@@ -527,13 +535,16 @@ fn add_record(
     record: SortRecord,
 ) {
     // Only valid cells are buffered (checked in `push`).
+    let Some(res) = grid.resolution(record.h3_index) else {
+        return;
+    };
+    let Some(zooms) = zoom_bands[usize::from(res)] else {
+        return;
+    };
     let Some((c_lat, c_lng)) = grid.center_lat_lng(record.h3_index) else {
         return;
     };
     let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, record.h3_index) else {
-        return;
-    };
-    let Some(res) = grid.resolution(record.h3_index) else {
         return;
     };
     let center_merc = MercatorPoint::from_lat_lng(c_lat, c_lng);
@@ -557,10 +568,6 @@ fn add_record(
     if !properties.iter().any(|(k, _)| k == "resolution") {
         properties.push((Cow::Borrowed("resolution"), MvtValue::UInt(u64::from(res))));
     }
-    // `push` recorded every buffered resolution, so its band exists.
-    let Some(zooms) = zoom_bands[usize::from(res)] else {
-        return;
-    };
     acc.add_hexagon_mercator_zooms(
         record.h3_index,
         center_merc,

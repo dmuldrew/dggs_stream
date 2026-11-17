@@ -1667,3 +1667,78 @@ fn preindexed_export_fills_every_zoom_between_resolutions() {
     let zooms = tiles_per_zoom(&archive);
     assert_eq!(zooms.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
 }
+
+#[test]
+fn parquet_zoom_bands_span_row_groups_with_32_bit_indexes() {
+    use parquet::data_type::Int32Type;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::parser::parse_message_type;
+    use raster_h3_core::grid::healpix_encode;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let parquet_path = dir.path().join("cells.parquet");
+    let pmtiles_path = dir.path().join("cells.pmtiles");
+
+    for (annotation, coarse, fine) in [("", 2, 5), (" (UINT_32)", 12, 14)] {
+        let schema = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{ REQUIRED INT32 healpix_index{annotation}; }}"
+            ))
+            .unwrap(),
+        );
+        let mut writer = SerializedFileWriter::new(
+            File::create(&parquet_path).unwrap(),
+            schema,
+            Default::default(),
+        )
+        .unwrap();
+
+        for depth in [fine, coarse] {
+            // Equatorial base pixel 6. At depth 14 this exercises the sign bit
+            // of the physical INT32 backing the unsigned Parquet column.
+            let cell = healpix_encode(depth, 6 << (2 * depth));
+            let mut row_group = writer.next_row_group().unwrap();
+            let mut column = row_group.next_column().unwrap().unwrap();
+            column
+                .typed::<Int32Type>()
+                .write_batch(&[cell as i32], None, None)
+                .unwrap();
+            column.close().unwrap();
+            row_group.close().unwrap();
+        }
+        writer.close().unwrap();
+
+        let summary =
+            H3PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
+        assert_eq!(summary.total_features, 2);
+        assert_eq!(summary.valid_features, 2);
+        assert_eq!((summary.min_zoom, summary.max_zoom), (coarse, fine));
+        let zooms = tiles_per_zoom(&std::fs::read(&pmtiles_path).unwrap());
+        assert_eq!(
+            zooms.keys().copied().collect::<Vec<_>>(),
+            (coarse..=fine).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn preindexed_export_reports_capped_cells_in_sparse_bands() {
+    use raster_h3_core::pmtiles::{ExternalFeatureExport, H3Feature};
+
+    let point = h3o::LatLng::new(0.0, 0.0).unwrap();
+    let mut exporter =
+        ExternalFeatureExport::new(1 << 20, None).with_zoom_limits(Some(22), Some(23));
+    for res in [h3o::Resolution::Zero, h3o::Resolution::Fifteen] {
+        exporter
+            .push(H3Feature::new(
+                point.to_cell(res).into(),
+                Vec::<(&str, MvtValue)>::new(),
+            ))
+            .unwrap();
+    }
+    let path = NamedTempFile::new().unwrap().into_temp_path();
+    exporter.finish(&path).unwrap();
+    let metadata = read_pmtiles_metadata(path.to_str().unwrap());
+    assert_eq!(metadata["h3_cells_over_tile_cap"], 1);
+}

@@ -214,7 +214,7 @@ pub fn cell_boundary_mercator_for(
             let cell = CellIndex::try_from(cell_u64).ok()?;
             Some(cell_boundary_mercator(cell))
         }
-        GridKind::A5 => {
+        _ => {
             let mut verts = [(0.0, 0.0); 10];
             let count = grid.boundary_lng_lat(cell_u64, &mut verts);
             if count == 0 {
@@ -321,7 +321,7 @@ impl Wgs84BoundsAccumulator {
                     self.record_cell(cell);
                 }
             }
-            GridKind::A5 => {
+            _ => {
                 let Some((c_lat, c_lng)) = grid.center_lat_lng(cell_u64) else {
                     return;
                 };
@@ -331,9 +331,9 @@ impl Wgs84BoundsAccumulator {
                     return;
                 }
                 self.count += 1;
-                let [north_pole, south_pole] = crate::grid::a5_pole_cells();
-                let is_north_pole = cell_u64 == north_pole;
-                let is_south_pole = cell_u64 == south_pole;
+                let pole = grid.interior_pole(cell_u64);
+                let is_north_pole = pole == Some(true);
+                let is_south_pole = pole == Some(false);
                 if is_north_pole {
                     self.max_lat = 90.0;
                     self.full_lon = true;
@@ -509,7 +509,7 @@ pub fn zoom_bands_for_resolutions(resolutions: u16) -> [Option<(u8, u8)>; 16] {
 /// resolution `r` of `grid` as present (bits above the grid's finest resolution
 /// are ignored), bands start at [`zooms_for_grid_res`], and the result is indexed
 /// by resolution (`grid.max_resolution() + 1` entries). Where two present
-/// resolutions start at the same zoom (A5 above 24), each keeps that one zoom.
+/// resolutions start at the same zoom (non-H3 resolutions 24 and above), each keeps that one zoom.
 pub fn zoom_bands_for_grid_resolutions(grid: GridKind, resolutions: u32) -> Vec<Option<(u8, u8)>> {
     let max_res = grid.max_resolution();
     let standard = |res: u8| zooms_for_grid_res(grid, res, u8::MAX);
@@ -577,7 +577,8 @@ pub fn max_hex_radius_deg(res: u8) -> f64 {
 pub fn grid_res_to_zoom(grid: GridKind, res: u8) -> u8 {
     match grid {
         GridKind::H3 => h3_res_to_zoom(res),
-        GridKind::A5 => res.min(24),
+        // One zoom per level: a tile then holds roughly 6 (S2) to 15 (A5) cells.
+        _ => res.min(24),
     }
 }
 
@@ -585,7 +586,7 @@ pub fn grid_res_to_zoom(grid: GridKind, res: u8) -> u8 {
 pub fn grid_res_for_zoom(grid: GridKind, zoom: u8) -> u8 {
     match grid {
         GridKind::H3 => h3_res_for_zoom(zoom),
-        GridKind::A5 => zoom.min(30),
+        _ => zoom.min(grid.max_resolution()),
     }
 }
 
@@ -593,7 +594,7 @@ pub fn grid_res_for_zoom(grid: GridKind, zoom: u8) -> u8 {
 pub fn zooms_for_grid_res(grid: GridKind, res: u8, min_res: u8) -> Vec<u8> {
     match grid {
         GridKind::H3 => zooms_for_h3_res(res, min_res),
-        GridKind::A5 => {
+        _ => {
             let z = res.min(24);
             if res == min_res {
                 (0..=z).collect()
@@ -614,6 +615,11 @@ pub fn max_cell_radius_deg(grid: GridKind, res: u8) -> f64 {
             1 => 23.0,
             r => 12.5 * 0.5_f64.powi(i32::from(r - 2)),
         },
+        // S2's maximum cell diagonal is 2.44 rad / 2^level; half of it is 70 degrees.
+        GridKind::S2 => 70.0 * 0.5_f64.powi(i32::from(res)),
+        // A polar base cell reaches 48 degrees from its centre; cells halve per depth
+        // but stretch near the polar-cap boundary.
+        GridKind::Healpix => 60.0 * 0.5_f64.powi(i32::from(res)),
     }
 }
 

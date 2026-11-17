@@ -248,7 +248,7 @@ Materializing both raster and vector datasets into intermediate H3 tables (or Pa
 #### 3. Benefits for Spatial Joining & Visualization
 * **$O(1)$ Hash Joins vs $O(N \times M)$ Geometry Math**: Converting both raster pixels and vector polygons to 64-bit integer H3 cells replaces expensive topological intersection algorithms with hardware-speed **integer equality hash joins** (`JOIN ON c.h3_index = t.h3_index`).
 * **Universal Lingua Franca**: Any number of disparate rasters (elevation, temperature, canopy) and vector layers (demographics, parcels, sensor points) can be joined together in a single multi-way query—eliminating projection mismatches, resolution differences, and resampling errors.
-* **Direct PMTiles from Vector Parquet**: Intermediate H3 vector tables stored in Parquet can be transcoded directly into multi-zoom web map pyramids (DuckDB `h3_parquet_to_pmtiles`) without Tippecanoe, GDAL, or GeoJSON scratch files. Every zoom between the table's resolutions gets tiles; `COPY ... (min_zoom, max_zoom)` (Rust: `ExternalFeatureExport::with_zoom_limits`) clips the range.
+* **Direct PMTiles from Vector Parquet**: Intermediate H3 vector tables stored in Parquet can be transcoded directly into multi-zoom web map pyramids (DuckDB `h3_parquet_to_pmtiles`) without Tippecanoe, GDAL, or GeoJSON scratch files. Zoom bands span the table's resolutions, and `COPY ... (min_zoom, max_zoom)` (Rust: `ExternalFeatureExport::with_zoom_limits`) clips the range.
 
 ### From Query to Web Map in One Step
 
@@ -339,6 +339,13 @@ returns the same cells and statistics for the same input.
 | **Apache Spark / Apache Sedona** | `raster-h3-python` (on every executor) | The `raster-h3` wheel (`raster_h3.spark` data source on Spark 4.0+); or `docker compose up --build sedona` (Apache Sedona 1.9.1, Spark 4.0) | [Spark & Apache Sedona](docs/engines/spark.md) |
 | **CLI** | `raster-h3-cli` | `cargo build --release -p raster-h3-cli` (also in the Python wheel) | [CLI](docs/engines/cli.md) |
 | **Rust library** | `raster-h3-core` | Cargo dependency | [Core Engine](docs/engines/core.md) |
+
+**Grids.** Besides Uber H3 (resolutions 0–15), DuckDB, the CLI and the Rust library index
+pixels onto A5 pentagons (0–30), Google S2 cells (levels 0–30, 64-bit cell ids) and HEALPix
+cells (nested scheme, depths 0–29, NUNIQ ids `4 * 4^depth + pixel`). Each grid has its own
+SQL functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...; or
+`grid := 's2'` on the H3 ones) and output columns (`s2_index`, `s2_hex`); the CLI takes
+`--grid h3|a5|s2|healpix`. See the [DuckDB registered functions](docs/engines/duckdb.md#registered-functions).
 
 Feature coverage differs per engine: DuckDB exposes every parameter (sampling, bands,
 spectral formulas, quantiles, remapping, budgets), DataFusion exposes most of them through

@@ -4,6 +4,7 @@
 //! multi-zoom PMTiles v3 vector hexagon archive with streaming latitude
 //! horizon eviction to maintain a bounded memory footprint.
 
+use parquet::basic::ConvertedType;
 use parquet::file::reader::{FileReader, RowGroupReader, SerializedFileReader};
 use serde_json::json;
 use std::borrow::Cow;
@@ -17,8 +18,8 @@ use crate::pmtiles::features::{
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
 use crate::pmtiles::pyramid::{
-    cell_boundary_mercator_for, max_cell_radius_deg, zoom_bands_for_grid_resolutions,
-    zoom_extent_for_grid_resolutions, Wgs84BoundsAccumulator,
+    cell_boundary_mercator_for, max_cell_radius_deg, zoom_band_extent,
+    zoom_bands_for_grid_resolutions, zoom_extent_for_grid_resolutions, Wgs84BoundsAccumulator,
 };
 use crate::pmtiles::writer::PmtilesWriter;
 
@@ -33,7 +34,7 @@ pub struct RowGroupExtent {
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub min_res: u8,
-    /// Bit `r` set when the row group holds cells at H3 resolution `r`.
+    /// Bit `r` set when the row group holds cells at grid resolution `r`.
     pub resolutions: u32,
     pub bounds: Wgs84BoundsAccumulator,
 }
@@ -93,6 +94,8 @@ pub fn scan_row_group_grid_extent(
             }
         }
         parquet::column::reader::ColumnReader::Int32ColumnReader(mut r) => {
+            let unsigned = rg.metadata().schema_descr().column(h3_idx).converted_type()
+                == ConvertedType::UINT_32;
             let mut vals = Vec::with_capacity(8192);
             loop {
                 vals.clear();
@@ -102,7 +105,11 @@ pub fn scan_row_group_grid_extent(
                     break;
                 }
                 for &v in &vals {
-                    process_h3(v as u64);
+                    process_h3(if unsigned {
+                        u64::from(v as u32)
+                    } else {
+                        v as u64
+                    });
                 }
             }
         }
@@ -202,22 +209,16 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
             .columns()
             .iter()
             .position(|field| {
-                matches!(
-                    field.name().to_ascii_lowercase().as_str(),
-                    "h3_index" | "h3_hex" | "h3" | "a5_index" | "a5_hex" | "a5" | "cell" | "hex"
-                )
+                GridKind::from_cell_column_name(field.name()).is_some()
+                    || matches!(field.name().to_ascii_lowercase().as_str(), "cell" | "hex")
             })
             .unwrap_or(0)
     };
-    let grid = match schema
+    let grid = schema
         .columns()
         .get(h3_idx)
-        .map(|f| f.name().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("a5_index" | "a5_hex" | "a5") => GridKind::A5,
-        _ => GridKind::H3,
-    };
+        .and_then(|f| GridKind::from_cell_column_name(f.name()))
+        .unwrap_or(GridKind::H3);
 
     // Pre-scan row group extents to compute global bounds and row group horizons
     let mut rg_extents = Vec::with_capacity(num_rgs);
@@ -262,8 +263,7 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
     // zoom between the coarsest and finest band has tiles.
     let all_resolutions = rg_extents.iter().fold(0u32, |m, e| m | e.resolutions);
     let zoom_bands = zoom_bands_for_grid_resolutions(grid, all_resolutions);
-    let (min_zoom, max_zoom) =
-        zoom_extent_for_grid_resolutions(grid, all_resolutions).unwrap_or((0, 0));
+    let (min_zoom, max_zoom) = zoom_band_extent(&zoom_bands).unwrap_or((0, 0));
     let min_res = rg_extents.iter().map(|e| e.min_res).min().unwrap_or(0);
     let max_cell_radius = max_cell_radius_deg(grid, min_res);
     let safety_margin = 2.5 * max_cell_radius;
@@ -305,18 +305,7 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
         fields_map.insert(col.name().to_string(), json!(type_str));
     }
 
-    let metadata = build_pmtiles_metadata(
-        "h3_pmtiles_export",
-        "H3 vector hexagon tile pyramid exported by raster_h3",
-        min_zoom,
-        max_zoom,
-        "h3_hexagons",
-        "H3 hexagonal vector polygons with attributes",
-        serde_json::Value::Object(fields_map),
-        None,
-    );
-
-    let mut writer = PmtilesWriter::new(min_zoom, max_zoom, global_bbox, metadata.to_string())?;
+    let mut writer = PmtilesWriter::new(min_zoom, max_zoom, global_bbox, String::new())?;
 
     let mut accumulator = TilePyramidAccumulator::new(safety_margin);
 
@@ -350,6 +339,12 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
                 match field_val {
                     parquet::record::Field::ULong(u) => h3_val_u64 = Some(*u),
                     parquet::record::Field::Long(i) => h3_val_u64 = Some(*i as u64),
+                    parquet::record::Field::UInt(u) => h3_val_u64 = Some(u64::from(*u)),
+                    parquet::record::Field::Int(i) => h3_val_u64 = Some(*i as u64),
+                    parquet::record::Field::UShort(u) => h3_val_u64 = Some(u64::from(*u)),
+                    parquet::record::Field::Short(i) => h3_val_u64 = Some(*i as u64),
+                    parquet::record::Field::UByte(u) => h3_val_u64 = Some(u64::from(*u)),
+                    parquet::record::Field::Byte(i) => h3_val_u64 = Some(*i as u64),
                     parquet::record::Field::Str(s) => {
                         h3_val_u64 = parse_hex_u64(s);
                     }
@@ -441,8 +436,26 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
         accumulator.evict_and_write_tiles(lat_horizon, &mut writer)?;
     }
 
-    let total_tiles = writer.tile_count() + accumulator.active_tile_count();
+    let capped_cells = accumulator.capped_cells;
     accumulator.flush_all(&mut writer)?;
+    let metadata = build_pmtiles_metadata(
+        "h3_pmtiles_export",
+        "H3 vector hexagon tile pyramid exported by raster_h3",
+        min_zoom,
+        max_zoom,
+        "h3_hexagons",
+        "H3 hexagonal vector polygons with attributes",
+        serde_json::Value::Object(fields_map),
+        (capped_cells > 0).then(|| {
+            serde_json::Map::from_iter([(
+                "h3_cells_over_tile_cap".to_string(),
+                json!(capped_cells),
+            )])
+        }),
+    );
+
+    writer.set_metadata(global_bbox, metadata.to_string());
+    let total_tiles = writer.tile_count();
     writer.finish(pmtiles_path)?;
 
     Ok(PmtilesExportSummary {
