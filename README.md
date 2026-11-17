@@ -122,24 +122,24 @@ such as `bbox := '...'`.
 
 A tract-level join answers "which tracts", but a resident feels the trees on their own street.
 Overture's building footprints narrow the question to *how much canopy lies within 100 m of each
-home*. Buffering each home by 100 m and polyfilling the buffer with `'covers'` returns the
-hexagon the home sits in plus its neighbours out to 100 m (roughly the first one or two rings
-around it), so each home is scored on its own
-neighbourhood of hexagons, not on its tract's average. Resolution-10 hexagons (about 15,000 m²,
-roughly 17 NLCD pixels) keep that neighbourhood local.
+home*. Each home is buffered by 100 m and the buffer is filled with resolution-11 hexagons
+(about 50 m across, 2–3 NLCD pixels each): the home's own hexagon and its neighbours out to
+100 m, roughly 15 cells. Each home is then scored on its own neighbourhood, not on its tract's
+average.
 
 ```sql
 -- Overture is read straight from S3: INSTALL httpfs; LOAD httpfs; SET s3_region = 'us-west-2';
 
--- 4. Forest share of every resolution-10 hexagon. In the long layout each class
---    in a hexagon is its own row, so the three forest classes add up.
+-- 4. Forest share of every resolution-11 hexagon. In the long layout each class in a
+--    hexagon is its own row; summing over all of them keeps hexagons with no forest (0).
 CREATE TABLE forest_h3 AS
-SELECT h3_index, sum(fraction) AS forest_share
+SELECT h3_index,
+       sum(CASE WHEN category IN (41, 42, 43)     -- deciduous, evergreen, mixed forest
+                THEN fraction ELSE 0 END) AS forest_share
 FROM h3_raster_categorical_aggregate(
-    'nlcd_landcover_2021.tif', resolution := 10, format := 'long',
+    'nlcd_landcover_2021.tif', resolution := 11, format := 'long',
     bbox := '-90.32,38.53,-90.12,38.77'          -- the city's bounding box
 )
-WHERE category IN (41, 42, 43)                    -- deciduous, evergreen, mixed forest
 GROUP BY h3_index;
 
 -- 5. Homes in the low-income, dense tracts, from Overture's buildings theme
@@ -156,21 +156,23 @@ WHERE t.tract_name IN (SELECT tract_name FROM census_tracts_h3
   AND b.bbox.xmin > -90.32 AND b.bbox.xmax < -90.12
   AND b.bbox.ymin >  38.53 AND b.bbox.ymax <  38.77;
 
--- 6. Each home's neighbourhood: buffer 100 m in metres (EPSG:5070), back to lon/lat,
---    then every resolution-10 hexagon the buffer touches
+-- 6. Each home's neighbourhood: buffer 100 m in metres (EPSG:5070), back to lon/lat, then
+--    every resolution-11 hexagon whose centre is inside the buffer. 'contains_centroid'
+--    (the default) lets edge hexagons fall in or out, so the errors roughly cancel;
+--    'covers' would keep every hexagon the buffer touches and overshoot 100 m.
 CREATE TABLE home_hexes AS
 SELECT id, tract_name,
        unnest(h3_polygon_to_cells(ST_AsWKB(ST_Transform(
            ST_Buffer(ST_Transform(geometry, 'EPSG:4326', 'EPSG:5070', always_xy := true), 100),
-           'EPSG:5070', 'EPSG:4326', always_xy := true)), 10, 'covers')) AS h3_index
+           'EPSG:5070', 'EPSG:4326', always_xy := true)), 11, 'contains_centroid')) AS h3_index
 FROM homes;
 
--- 7. Canopy near each home, then per tract. A hexagon with no forest has no row
---    in forest_h3, so the LEFT JOIN counts it as 0.
+-- 7. Canopy near each home, then per tract. The inner join drops any hexagon that
+--    no pixel centre fell in, rather than counting it as treeless.
 WITH per_home AS (
-    SELECT h.id, h.tract_name, avg(coalesce(f.forest_share, 0)) AS canopy_near_home
+    SELECT h.id, h.tract_name, avg(f.forest_share) AS canopy_near_home
     FROM home_hexes AS h
-    LEFT JOIN forest_h3 AS f USING (h3_index)
+    JOIN forest_h3 AS f USING (h3_index)
     GROUP BY h.id, h.tract_name
 )
 SELECT tract_name,
@@ -183,7 +185,11 @@ ORDER BY avg_canopy_near_home;
 ```
 
 The averages in step 7 count every hexagon the same; H3 cells next to each other are almost
-exactly the same size, so within 100 m that is effectively area-weighted. The NLCD
+exactly the same size, so within 100 m that is effectively area-weighted. The remaining error is
+at the edge of the buffer, where a hexagon is either wholly in or wholly out. For an exact
+answer, weight each hexagon by `ST_Area(ST_Intersection(cell, buffer))`; it is slower and rarely
+changes the ranking. Going finer than resolution 11 doesn't help: cells smaller than NLCD's 30 m
+pixels start to come back empty. The NLCD
 [Tree Canopy Cover](https://www.mrlc.gov/data) product (percent canopy per pixel) is a more
 direct measure than forest classes: aggregate it with `h3_raster_continuous_aggregate` and use
 `mean` in place of `forest_share`.
