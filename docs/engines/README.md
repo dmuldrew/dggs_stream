@@ -2,7 +2,7 @@
 
 [← Back to README](../../README.md)
 
-`raster_h3` is a Cargo workspace. One pure-Rust engine (`raster-h3-core`) does all raster
+raster_dggs is a Cargo workspace. One pure-Rust engine (`raster-h3-core`) does all raster
 decoding, CRS transformation, H3 aggregation and file export; five thin adapter crates
 expose it to different query engines and runtimes. Every adapter drives the same
 streamers, so the same raster and parameters produce the same cells and statistics

@@ -1,4 +1,4 @@
-# Contributing to raster_h3
+# Contributing to raster_dggs
 
 Thank you for your interest in contributing! This guide will help you get started.
 

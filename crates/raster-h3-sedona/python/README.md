@@ -1,9 +1,9 @@
 # raster-h3-sedona (Python)
 
-`raster_h3` rasters as [SedonaDB](https://github.com/apache/sedona-db) tables.
+raster_dggs rasters as [SedonaDB](https://github.com/apache/sedona-db) tables.
 `RasterH3Table` implements SedonaDB's `__sedonadb_table_provider__` protocol, so
 `create_data_frame` scans it directly, with projection, `LIMIT`, threshold and
-spatial filter pushdown. `scalar_functions()` exports the raster_h3 SQL functions
+spatial filter pushdown. `scalar_functions()` exports the raster_dggs SQL functions
 (`h3_polygon_to_cells`, `h3_to_wkb`, `h3_cell_to_parent`, ...) as native SedonaDB kernels.
 `write_pmtiles()` writes query results (or any Arrow stream) as a PMTiles v3 archive of
 H3 hexagons.

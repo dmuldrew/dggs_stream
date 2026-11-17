@@ -16,7 +16,7 @@ data, either on a shared cell id or on cell shapes.
 | [Land temperature by latitude band](#4-land-temperature-by-latitude-band--cli-on-healpix) | CLI | HEALPix | Equal-area cells laid out in rings of constant latitude |
 
 Without a shared spatial index, each of these needs a GIS overlay: reprojecting rasters, clipping
-polygons, rasterizing geometries and managing gigabytes of scratch files. With `raster_h3`, the
+polygons, rasterizing geometries and managing gigabytes of scratch files. With raster_dggs, the
 raster becomes a table of cells and the rest is a join.
 
 ## 1. Wetland loss inside vs. outside protected areas — Polars on A5

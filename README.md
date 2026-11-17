@@ -1,4 +1,4 @@
-# raster_h3: High-Performance GeoTIFF-to-H3 Hexagonal Aggregation
+# raster_dggs: High-Performance Raster Aggregation onto Discrete Global Grids
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021_Edition-orange.svg)](https://www.rust-lang.org)
@@ -6,15 +6,17 @@
 [![Python / Polars](https://img.shields.io/badge/Python-Polars_%7C_Arrow-3776AB.svg)](docs/engines/python-polars.md)
 [![PostgreSQL 13–18](https://img.shields.io/badge/PostgreSQL-13–18-336791.svg)](docs/engines/postgresql.md)
 
-A pure-Rust engine that aggregates multi-gigabyte geospatial rasters (GeoTIFF, Cloud-Optimized GeoTIFFs) into [Uber H3](https://h3geo.org/) hexagonal grid cells — and generates cloud-native **PMTiles v3** vector pyramids for instant web visualization. Aggregation runs in a [bounded memory budget](docs/engineering.md#1-southernmost-scan-line-horizon-eviction) and spills to disk when needed. The same engine ships as a native DuckDB extension, DataFusion-style table providers, a Python/Polars package, a PostgreSQL extension and a command-line tool (see [Engines](#engines)).
+A pure-Rust engine that aggregates multi-gigabyte geospatial rasters (GeoTIFF, Cloud-Optimized GeoTIFFs) into the cells of a **Discrete Global Grid System (DGGS)**: [Uber H3](https://h3geo.org/) hexagons, [A5](https://a5geo.org/) pentagons, [Google S2](https://s2geometry.io/) cells or [HEALPix](https://healpix.sourceforge.io/) cells. It also generates cloud-native **PMTiles v3** vector pyramids for instant web visualization. Aggregation runs in a [bounded memory budget](docs/engineering.md#1-southernmost-scan-line-horizon-eviction) and spills to disk when needed. The same engine ships as a native DuckDB extension, DataFusion-style table providers, a Python/Polars package, a PostgreSQL extension and a command-line tool (see [Engines](#engines)).
 
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
 Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
+> **About the name.** This documentation calls the project raster_dggs. The packages, crates, extension and functions keep their `raster_h3` / `raster-h3` names: `LOAD raster_h3`, `import raster_h3`, `pip install raster-h3`, `raster-h3-cli`, and SQL functions such as `h3_raster_continuous_aggregate` (each also takes `grid :=`, and `a5_`, `s2_` and `healpix_` versions exist).
+
 | Output | Use Case | Available In |
 | :--- | :--- | :--- |
-| **H3 table / Arrow stream** | SQL analytics, JOINs, DataFrames | DuckDB, Python/Polars, PostgreSQL, DataFusion, CLI (NDJSON / `RH3IPC01`) |
+| **Cell table / Arrow stream** | SQL analytics, JOINs, DataFrames | DuckDB, Python/Polars, PostgreSQL, DataFusion, CLI (NDJSON / `RH3IPC01`) |
 | **PMTiles v3** | Web maps — zero servers, one file | DuckDB, Python, CLI |
 | **GeoParquet 1.1** | GIS interchange (QGIS, GeoPandas, BigQuery) | DuckDB, Python, CLI |
 
@@ -23,6 +25,7 @@ Statistics use pixel contributions, not ground-area weights. CRS projection tole
 ## 📖 Table of Contents
 
 - [Motivation & Project Goals](#motivation--project-goals)
+  - [Choosing a grid](#choosing-a-grid)
 - [How It Works](#how-it-works)
 - [Engines](#engines)
 - [Core Engineering Architecture](#core-engineering-architecture)
@@ -46,17 +49,39 @@ Geospatial data exists in two incompatible formats:
 
 Joining raster values (elevation, temperature, land cover) with business entities (customers, routes, parcels) has traditionally required complex, slow, memory-intensive ETL pipelines.
 
-### The Solution: Uber H3 Discrete Global Grid System
+### The Solution: Discrete Global Grid Systems
 
-The **Uber H3 Spatial Index** divides the Earth into a hierarchical grid of invariant hexagons across 16 resolution levels. Unlike square grids, hexagons have identical distances to all six neighbors and minimal area distortion across global latitudes.
+A **Discrete Global Grid System** divides the whole Earth into cells at a series of resolutions, from continent-sized down to centimetres, and gives every cell a compact integer id. Raster pixels and vector features can both be expressed as cells, so the grid becomes a shared key between them.
 
-Aggregating rasters into H3 solves four fundamental challenges of working with raw imagery:
-* **Normalizes Disparate Resolutions & Projections**: Rasters arrive with differing pixel sizes (10m Sentinel, 30m Landsat, 1km climate grids) and incompatible local projections. H3 maps them all into a single, standardized global grid without manual grid resampling.
-* **Drastic 50×–100× Data Reduction**: An H3 Resolution 8 cell aggregates roughly 800 thirty-meter pixels into a single summary row, shrinking a multi-gigabyte raster by orders of magnitude on disk.
+Aggregating rasters into DGGS cells solves four fundamental challenges of working with raw imagery:
+* **Normalizes Disparate Resolutions & Projections**: Rasters arrive with differing pixel sizes (10m Sentinel, 30m Landsat, 1km climate grids) and incompatible local projections. A global grid maps them all onto one standard set of cells without manual resampling.
+* **Drastic 50×–100× Data Reduction**: A cell of about 0.7 km² (H3 resolution 8, for example) aggregates roughly 800 thirty-meter pixels into a single summary row, shrinking a multi-gigabyte raster by orders of magnitude on disk.
 * **Preserves Rich Surface Distributions**: Rather than losing nuance to a simple average, the engine captures the full distribution per cell—including mean, variance/ruggedness, and min/max for continuous terrain, plus class purity and Shannon entropy (landscape fragmentation) for categorical maps.
-* **Unlocks Relational Joins**: Every hexagon is addressed by a compact 64-bit integer (`UBIGINT` / `UInt64` / hex string). Once pixels become H3 cells, rigid 2D raster matrices become standard relational tables joinable directly with tabular business data: `JOIN ON r.h3_index = v.h3_index`.
+* **Unlocks Relational Joins**: Every cell is addressed by a 64-bit integer (`UBIGINT` / `UInt64` / hex string). Once pixels become cells, rigid 2D raster matrices become standard relational tables joinable directly with tabular business data: `JOIN ON r.h3_index = v.h3_index` (or `a5_index`, `s2_index`, `healpix_index`).
 
-For more details on the grid system and its mathematical design, see the [official H3 documentation](https://h3geo.org/docs/) and the [Uber engineering blog](https://www.uber.com/blog/h3/).
+### Choosing a grid
+
+Every engine supports all four grids, so the choice depends on the question, not the engine. Changing grids changes one argument (`grid := 's2'` in SQL, `grid="s2"` in Python, `--grid s2` on the CLI) and the name of the cell column.
+
+| | H3 | A5 | S2 | HEALPix |
+| :--- | :--- | :--- | :--- | :--- |
+| **Cell shape** | Hexagon (plus 12 pentagons per resolution) | Pentagon | Quadrilateral on a cube face | Quadrilateral ("diamond") |
+| **Resolutions** | 0–15 | 0–30 | 0–30 | 0–29 |
+| **Equal area** | No: cell area varies by about 2× across the globe | Yes, exactly | No: about 2.1× | Yes, exactly |
+| **Children tile the parent** | Approximately (7 children) | No: the parent overlaps its children but doesn't cover them exactly | Exactly (4 children) | Exactly (4 children) |
+| **Neighbours** | 6, all the same distance away | 5 sharing an edge | 4 sharing an edge, 4 sharing a corner | 4 sharing an edge, 4 sharing a corner |
+| **Best known for** | Wide tool support, neighbourhood and movement analysis | Unbiased area totals | Region coverings, exact roll-ups, Hilbert-curve ordering | Latitude rings, global science (astronomy, climate) |
+
+**Which one should I use?**
+
+- **H3: the default.** Use it when you'll join with data that is already H3-indexed, since Databricks, Snowflake, Apache Sedona and DuckDB's `h3` extension all speak it. Use it too when neighbours matter, such as distance bands, flows or "the cells around this one", because all six neighbours are the same distance away.
+- **A5: totals and densities that must be unbiased.** Hectares of forest, people per km², tonnes of carbon. Every cell at a resolution has the same area, so a cell count times one constant is an area and maps of per-cell values aren't skewed by cell size. Rolling A5 cells up to a parent is approximate, as it is with H3.
+- **S2: exact hierarchies and region coverings.** Fine cells roll up into coarse ones with no gaps or overlaps, and cell ids follow a Hilbert curve, so a region becomes a few contiguous id ranges. Cell area varies about 2.1×, so it isn't the grid for area totals.
+- **HEALPix: global and latitude-dependent analysis.** Cells are equal-area and arranged in rings of constant latitude, which makes zonal (latitude-band) averages exact and suits whole-globe climate and astronomy data. It also nests exactly. Cells are less compact near the poles and toward the corners of its base cells.
+
+**Picking a resolution.** Aim for cells a little larger than the raster's pixels; much smaller cells come back empty. `resolutions := 'auto'` in DuckDB (Python `resolutions="auto"`, CLI `-r auto`) picks the resolution whose cells are closest in area to the pixels, and `auto+1` / `auto-1` step finer or coarser.
+
+[Worked Examples](docs/worked-examples.md) shows each grid on a question that suits it. For the grids' own documentation, see [H3](https://h3geo.org/docs/), [A5](https://a5geo.org/), [S2](https://s2geometry.io/devguide/s2cell_hierarchy) and [HEALPix](https://healpix.sourceforge.io/).
 
 ### Raster Meets Table: A Worked Example
 
@@ -67,7 +92,7 @@ A city planning department has two datasets:
 
 **The question**: *Which low-income, densely populated neighborhoods have the least tree canopy coverage?*
 
-Without a shared spatial index, answering this requires an expensive GIS overlay: reprojecting rasters, clipping polygons, rasterizing geometries, and managing gigabytes of temporary scratch files. With `raster_h3`, both datasets meet on the H3 hexagonal grid. In DuckDB:
+Without a shared spatial index, answering this requires an expensive GIS overlay: reprojecting rasters, clipping polygons, rasterizing geometries, and managing gigabytes of temporary scratch files. With raster_dggs, both datasets meet on the H3 hexagonal grid. In DuckDB:
 
 ```sql
 -- Reading and polyfilling the tracts uses DuckDB's spatial extension alongside raster_h3:
@@ -207,27 +232,27 @@ direct measure than forest classes: aggregate it with `h3_raster_continuous_aggr
 
 > No GDAL. No intermediate files. The raster *becomes* a queryable table source — a SQL table function in DuckDB, a `LazyFrame` in Polars, a table provider in SedonaDB, a file in one command from the CLI — on whichever grid fits the question.
 
-### Why Intermediate H3 Aggregations Change Everything
+### Why Intermediate Cell Aggregations Change Everything
 
-Materializing both raster and vector datasets into intermediate H3 tables (or Parquet files) provides fundamental architectural advantages over traditional GIS workflows:
+Materializing both raster and vector datasets into intermediate cell tables (or Parquet files) provides fundamental architectural advantages over traditional GIS workflows:
 
 #### 1. Benefits for Vector Datasets
-* **Polyfill Once, Eliminate Geometry Math**: Administrative boundaries (census tracts, voting precincts, parcel lots) often contain thousands of vertices. Evaluating spatial containment (`ST_Contains`, `ST_Intersects`) across millions of records is computationally brutal. Polyfilling vector polygons into H3 cells once eliminates all downstream polygonal math.
-* **Decoupled Update Cycles**: Demographic tables, property boundaries, and customer records update frequently (daily, monthly, or annually), while foundational rasters (elevation DEMs, land cover) change rarely. Pre-indexing vectors into H3 lets you incorporate updated vector tables with a 50ms hash join—without re-reading a 50 GB raster.
+* **Polyfill Once, Eliminate Geometry Math**: Administrative boundaries (census tracts, voting precincts, parcel lots) often contain thousands of vertices. Evaluating spatial containment (`ST_Contains`, `ST_Intersects`) across millions of records is computationally brutal. Polyfilling vector polygons into grid cells once eliminates all downstream polygonal math.
+* **Decoupled Update Cycles**: Demographic tables, property boundaries, and customer records update frequently (daily, monthly, or annually), while foundational rasters (elevation DEMs, land cover) change rarely. Pre-indexing vectors into grid cells lets you incorporate updated vector tables with a 50ms hash join—without re-reading a 50 GB raster.
 * **Standardizing Irregular Shapes (MAUP Mitigation)**: Census tracts and zip codes vary radically in area—a rural tract can be 1,000× larger than an urban one, severely distorting statistical comparisons. Polyfilling vectors into uniform cells discretizes irregular boundaries into near-equal spatial units (exactly equal-area on the A5 and HEALPix grids).
 
 #### 2. Benefits for Raster Ingestion
 * **Scan Once, Query Everywhere**: Decompressing and processing an 8–50 GB GeoTIFF (billions of pixels) is an intensive operation you only want to do once. Once aggregated into `canopy_h3` or exported to Parquet, downstream analyses query in milliseconds without touching raw raster pixels again.
-* **Drastic Storage Reduction**: A multi-gigabyte raster compresses into a compact, columnar H3 table that is 50×–100× smaller on disk. You can easily version-control it, store it in your cloud data lake (S3/R2), or query it from DuckDB, Polars, PostgreSQL, Snowflake, or BigQuery.
+* **Drastic Storage Reduction**: A multi-gigabyte raster compresses into a compact, columnar cell table that is 50×–100× smaller on disk. You can easily version-control it, store it in your cloud data lake (S3/R2), or query it from DuckDB, Polars, PostgreSQL, Snowflake, or BigQuery.
 
 #### 3. Benefits for Spatial Joining & Visualization
-* **$O(1)$ Hash Joins vs $O(N \times M)$ Geometry Math**: Converting both raster pixels and vector polygons to 64-bit integer H3 cells replaces expensive topological intersection algorithms with hardware-speed **integer equality hash joins** (`JOIN ON c.h3_index = t.h3_index`).
+* **$O(1)$ Hash Joins vs $O(N \times M)$ Geometry Math**: Converting both raster pixels and vector polygons to 64-bit integer cell ids replaces expensive topological intersection algorithms with hardware-speed **integer equality hash joins** (`JOIN ON c.h3_index = t.h3_index`).
 * **Universal Lingua Franca**: Any number of disparate rasters (elevation, temperature, canopy) and vector layers (demographics, parcels, sensor points) can be joined together in a single multi-way query—eliminating projection mismatches, resolution differences, and resampling errors.
-* **Direct PMTiles from Vector Parquet**: Intermediate H3 vector tables stored in Parquet can be transcoded directly into multi-zoom web map pyramids (DuckDB `h3_parquet_to_pmtiles`) without Tippecanoe, GDAL, or GeoJSON scratch files. Zoom bands span the table's resolutions, and `COPY ... (min_zoom, max_zoom)` (Rust: `ExternalFeatureExport::with_zoom_limits`) clips the range.
+* **Direct PMTiles from Vector Parquet**: Intermediate cell tables stored in Parquet can be transcoded directly into multi-zoom web map pyramids (DuckDB `h3_parquet_to_pmtiles`) without Tippecanoe, GDAL, or GeoJSON scratch files. Zoom bands span the table's resolutions, and `COPY ... (min_zoom, max_zoom)` (Rust: `ExternalFeatureExport::with_zoom_limits`) clips the range.
 
 ### From Query to Web Map in One Step
 
-`raster_h3` can export results directly to a **PMTiles v3** single-file vector tile archive — a multi-resolution pyramid ready for MapLibre, Kepler.gl, or Felt with zero intermediate files and zero tile servers:
+raster_dggs can export results directly to a **PMTiles v3** single-file vector tile archive — a multi-resolution pyramid ready for MapLibre, Kepler.gl, or Felt with zero intermediate files and zero tile servers:
 
 ```bash
 raster-h3-cli pmtiles nlcd_landcover_2021.tif -c -r 5,6,7,8 -o landcover_canopy.pmtiles
@@ -247,7 +272,7 @@ SELECT * FROM h3_raster_to_pmtiles(
 
 Upload `landcover_canopy.pmtiles` to S3, R2, or GitHub Pages, open it in MapLibre GL JS, and zoom from state level to city block.
 
-A web map needs tiles at every zoom level — from hemispheric overview down to street-level detail. `raster_h3` builds this entire multi-resolution pyramid in a single pass over the raster, aggregating pixels simultaneously across all requested H3 resolutions. See [PMTiles & Multi-Resolution](docs/pmtiles.md) for the full deep dive.
+A web map needs tiles at every zoom level — from hemispheric overview down to street-level detail. raster_dggs builds this entire multi-resolution pyramid in a single pass over the raster, aggregating pixels simultaneously across all requested H3 resolutions. See [PMTiles & Multi-Resolution](docs/pmtiles.md) for the full deep dive.
 
 ### Design Principles
 
@@ -274,24 +299,24 @@ whole file into memory, so such downloads are capped at 1 GiB; raise the cap wit
 
 ## How It Works
 
-`raster_h3` reads a raster like a document scanner: one strip at a time, from north to south.
+raster_dggs reads a raster like a document scanner: one strip at a time, from north to south.
 
-- **Finished hexagons leave early.** Once the scan has passed a hexagon's southern
+- **Finished cells leave early.** Once the scan has passed a cell's southern
   edge, no later row can touch it, so its statistics are final and it is sent on and
-  freed. Memory holds only the band of hexagons under the scanner, not the whole raster.
+  freed. Memory holds only the band of cells under the scanner, not the whole raster.
 - **Results stream into your tool.** Cells arrive in DuckDB, Polars, PostgreSQL,
   DataFusion or the CLI as they finish, so joins and exports can start before the raster
   is fully read, and a `LIMIT` can stop the scan early.
-- **Memory stays within a budget.** If the active hexagons outgrow the aggregation
+- **Memory stays within a budget.** If the active cells outgrow the aggregation
   budget (64 MiB by default), partial results spill to temporary files on disk and are
   merged at the end.
 - **Some inputs wait for the end.** After a spill, and for projections whose chunk bounds
   can't be certified (many PROJ-string projections, Albers chunks near the cone apex), the scanner
-  can't prove a hexagon is finished, so cells are held until the whole file is read.
+  can't prove a cell is finished, so cells are held until the whole file is read.
   See [Bounding boxes and pruning](docs/crs-and-projection.md#bounding-boxes-and-pruning)
   for which projections are certified.
 - **One pass, every resolution.** Each pixel is located once and counted at every
-  requested H3 resolution, which is how a multi-zoom PMTiles pyramid comes from a
+  requested resolution, which is how a multi-zoom PMTiles pyramid comes from a
   single read.
 
 See [Core Engineering Architecture](#core-engineering-architecture) for how each step is
@@ -315,9 +340,9 @@ returns the same cells and statistics for the same input.
 | **CLI** | `raster-h3-cli` | `cargo build --release -p raster-h3-cli` (also in the Python wheel) | [CLI](docs/engines/cli.md) |
 | **Rust library** | `raster-h3-core` | Cargo dependency | [Core Engine](docs/engines/core.md) |
 
-**Grids.** Besides Uber H3 (resolutions 0–15), every engine indexes pixels onto A5
+**Grids.** Every engine indexes pixels onto Uber H3 hexagons (resolutions 0–15, the default), A5
 pentagons (0–30), Google S2 cells (levels 0–30, 64-bit cell ids) and HEALPix
-cells (nested scheme, depths 0–29, NUNIQ ids `4 * 4^depth + pixel`). Each grid has its own
+cells (nested scheme, depths 0–29, NUNIQ ids `4 * 4^depth + pixel`); see [Choosing a grid](#choosing-a-grid). Each grid has its own
 SQL functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...; or
 `grid := 's2'` on the H3 ones) and output columns (`s2_index`, `s2_hex`); the CLI takes
 `--grid h3|a5|s2|healpix`, Python and SedonaDB a `grid` option, and PostgreSQL has
@@ -466,7 +491,7 @@ In Rust the same steps are `plan_partitions`, `MultiResolutionConfig::partition`
 
 ## Core Engineering Architecture
 
-`raster_h3`'s throughput and memory profile come from seven principles, shared by every engine:
+raster_dggs's throughput and memory profile come from seven principles, shared by every engine:
 
 | # | Engineering Pillar | Impact |
 | :---: | :--- | :--- |
@@ -580,7 +605,7 @@ deep dive's troubleshooting section: [DuckDB](docs/engines/duckdb.md#troubleshoo
 
 ### Missing or Non-Standard CRS
 
-If a GeoTIFF lacks embedded projection tags, `raster_h3` halts with:
+If a GeoTIFF lacks embedded projection tags, raster_dggs halts with:
 ```
 CRS transformation error: No CRS detected in raster metadata. A CRS must be specified explicitly.
 ```
@@ -618,7 +643,7 @@ Python and PostgreSQL always calibrate. See [Band calibration and validity](docs
 
 ### Antimeridian Crossing
 
-For datasets spanning ±180° longitude, `raster_h3` automatically wraps coordinates. For ROI bounding box filters across the antimeridian, split into two queries (e.g., `[170.0, 180.0]` and `[-180.0, -170.0]`).
+For datasets spanning ±180° longitude, raster_dggs automatically wraps coordinates. For ROI bounding box filters across the antimeridian, split into two queries (e.g., `[170.0, 180.0]` and `[-180.0, -170.0]`).
 
 ### BigTIFF & Codec Compatibility
 
@@ -632,7 +657,7 @@ For maximum ingestion throughput (up to 6× faster) and optimal L2 cache residen
 
 ### Container Memory Mapping
 
-`raster_h3` uses `memmap2` for virtual memory mapping. Ensure container runtimes allow `mmap` system calls.
+raster_dggs uses `memmap2` for virtual memory mapping. Ensure container runtimes allow `mmap` system calls.
 
 ---
 
