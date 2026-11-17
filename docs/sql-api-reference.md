@@ -342,13 +342,13 @@ TO 's3://my-bucket/census.pmtiles' (FORMAT pmtiles);
 | First | `UBIGINT`, `BIGINT` or hex `VARCHAR` | The H3 cell. Rows where it is `NULL` are skipped. Any other value that is not a valid H3 cell (a negative `BIGINT`, unparsable hex, or an invalid index) fails the `COPY`. |
 | Every other | `UBIGINT`, `BIGINT`, `UINTEGER`, `INTEGER`, `USMALLINT`, `SMALLINT`, `UTINYINT`, `TINYINT`, `DOUBLE`, `FLOAT`, `BOOLEAN`, `VARCHAR` | A feature property. The stable C API does not expose column names, so the property is named `column_<n>`, where `n` is the column's 1-based position (the first property column is `column_2`). `NULL` values and columns of other types are left out of the feature. |
 
-Every feature also gets `h3_index`, `h3_hex` and `resolution` properties, like the other PMTiles exports. Cells go in the `h3_hexagons` layer at the zoom given by their resolution (see [zoom mapping](pmtiles.md#h3-resolution-to-pmtiles-zoom-level-mapping)).
+Every feature also gets `h3_index`, `h3_hex` and `resolution` properties, like the other PMTiles exports. Cells go in the `h3_hexagons` layer. Each resolution present fills a band of zooms, so there are no empty zooms between resolutions (see [zoom bands for H3 tables](pmtiles.md#zoom-bands-for-h3-tables)).
 
 ### Options
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `min_zoom` | integer 0–255 | `None` | Drop rows whose cell's tile zoom is below this. |
-| `max_zoom` | integer 0–255 | `None` | Drop rows whose cell's tile zoom is above this. Must be ≥ `min_zoom`. |
+| `min_zoom` | integer 0–255 | `None` | Drop rows whose cell's tile zoom (`h3_res_to_zoom`) is below this, and write no tile below this zoom. |
+| `max_zoom` | integer 0–255 | `None` | Drop rows whose cell's tile zoom (`h3_res_to_zoom`) is above this, and write no tile above this zoom. Must be ≥ `min_zoom`. |
 | `memory_budget_mb` | integer 1–1048576 | `256` | Approximate memory for buffered input rows, in MiB. Beyond it, rows are sorted into temporary files and merged at the end, so inputs larger than memory work. The archive bytes do not depend on the budget. |
 
 Option names are case-insensitive. Any other option is rejected with an error naming the supported ones.

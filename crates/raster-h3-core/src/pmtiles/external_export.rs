@@ -31,7 +31,8 @@ use crate::pmtiles::features::{
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
 use crate::pmtiles::pyramid::{
-    cell_boundary_mercator_for, grid_res_to_zoom, max_cell_radius_deg, Wgs84BoundsAccumulator,
+    cell_boundary_mercator_for, max_cell_radius_deg, zoom_band_extent,
+    zoom_bands_for_grid_resolutions, Wgs84BoundsAccumulator,
 };
 use crate::pmtiles::writer::PmtilesWriter;
 
@@ -222,8 +223,10 @@ pub struct ExternalFeatureExport {
     keys: Vec<Cow<'static, str>>,
     key_ids: HashMap<Cow<'static, str>, u16>,
     bounds: Wgs84BoundsAccumulator,
-    min_zoom: u8,
-    max_zoom: u8,
+    /// Bit `r` set once a cell at H3 resolution `r` has been pushed.
+    resolutions: u32,
+    /// Optional `(min, max)` zoom clamp applied to every resolution's band.
+    zoom_limits: (Option<u8>, Option<u8>),
     coarsest_res: u8,
     total_features: usize,
     valid_features: usize,
@@ -252,8 +255,8 @@ impl ExternalFeatureExport {
             keys: Vec::new(),
             key_ids: HashMap::new(),
             bounds: Wgs84BoundsAccumulator::new(),
-            min_zoom: u8::MAX,
-            max_zoom: 0,
+            resolutions: 0,
+            zoom_limits: (None, None),
             coarsest_res: u8::MAX,
             total_features: 0,
             valid_features: 0,
@@ -278,7 +281,31 @@ impl ExternalFeatureExport {
         self
     }
 
-    /// Configure the spatial grid system (H3, A5, S2 or HEALPix).
+    /// Keep tiles within `min_zoom..=max_zoom`. Each resolution normally fills a
+    /// band of zooms (see [`zoom_bands_for_grid_resolutions`]); this clips the bands so an
+    /// archive filtered with `COPY ... (min_zoom, max_zoom)` holds no tile outside
+    /// the requested range. A resolution whose band falls wholly outside is not
+    /// tiled at all.
+    pub fn with_zoom_limits(mut self, min_zoom: Option<u8>, max_zoom: Option<u8>) -> Self {
+        self.zoom_limits = (min_zoom, max_zoom);
+        self
+    }
+
+    /// Zoom bands for the resolutions pushed so far, clipped to the zoom limits.
+    fn zoom_bands(&self) -> Vec<Option<(u8, u8)>> {
+        let (min_limit, max_limit) = self.zoom_limits;
+        zoom_bands_for_grid_resolutions(self.grid, self.resolutions)
+            .into_iter()
+            .map(|band| {
+                let (lo, hi) = band?;
+                let lo = min_limit.map_or(lo, |m| lo.max(m));
+                let hi = max_limit.map_or(hi, |m| hi.min(m));
+                (lo <= hi).then_some((lo, hi))
+            })
+            .collect()
+    }
+
+    /// Configure the spatial grid system (H3, A5, S2 or HEALPix). Defaults to H3.
     pub fn with_grid(mut self, grid: GridKind) -> Self {
         self.grid = grid;
         self
@@ -301,9 +328,7 @@ impl ExternalFeatureExport {
         };
         self.valid_features += 1;
         self.bounds.record_cell_for(self.grid, feature.h3_index);
-        let zoom = grid_res_to_zoom(self.grid, res);
-        self.min_zoom = self.min_zoom.min(zoom);
-        self.max_zoom = self.max_zoom.max(zoom);
+        self.resolutions |= 1u32 << res;
         self.coarsest_res = self.coarsest_res.min(res);
 
         let mut properties = Vec::with_capacity(feature.properties.len());
@@ -408,22 +433,11 @@ impl ExternalFeatureExport {
 
     /// Merge everything into a ready-to-finish writer.
     fn build(mut self) -> io::Result<(PmtilesExportSummary, PmtilesWriter)> {
-        let (min_zoom, max_zoom) = if self.valid_features == 0 {
-            (0, 0)
-        } else {
-            (self.min_zoom, self.max_zoom)
-        };
+        // Every resolution is known before the merge starts, so each one gets a
+        // gap-free zoom band (see `zoom_bands_for_grid_resolutions`).
+        let zoom_bands = self.zoom_bands();
+        let (min_zoom, max_zoom) = zoom_band_extent(&zoom_bands).unwrap_or((0, 0));
         let bbox = self.bounds.finish([-180.0, -85.0, 180.0, 85.0]);
-        let metadata = build_pmtiles_metadata(
-            "h3_pmtiles_export",
-            "H3 vector hexagon tile pyramid exported by raster_h3",
-            min_zoom,
-            max_zoom,
-            "h3_hexagons",
-            "H3 hexagonal vector polygons with attributes",
-            self.fields_metadata(),
-            None,
-        );
         // Spill once more before choosing the writer's directory, so a merge
         // that needs `spill_dir` has already created it.
         if !self.runs.is_empty() {
@@ -431,7 +445,7 @@ impl ExternalFeatureExport {
         }
         let writer_dir = self.spill_dir.as_deref().filter(|d| d.is_dir());
         let mut writer =
-            PmtilesWriter::new_in(min_zoom, max_zoom, bbox, metadata.to_string(), writer_dir)?;
+            PmtilesWriter::new_in(min_zoom, max_zoom, bbox, String::new(), writer_dir)?;
 
         // A cell reaches at most its radius north of its center, so a tile is
         // final once its south edge is that far north of the merge position.
@@ -449,7 +463,7 @@ impl ExternalFeatureExport {
         let mut merged = 0usize;
         let mut add = |record: SortRecord, writer: &mut PmtilesWriter| -> io::Result<()> {
             let lat = record.lat;
-            add_record(&mut accumulator, grid, &keys, record);
+            add_record(&mut accumulator, grid, &keys, &zoom_bands, record);
             merged += 1;
             if merged.is_multiple_of(evict_every) {
                 accumulator.evict_and_write_tiles(lat, writer)?;
@@ -480,7 +494,24 @@ impl ExternalFeatureExport {
                 add(record, &mut writer)?;
             }
         }
+        let capped_cells = accumulator.capped_cells;
         accumulator.flush_all(&mut writer)?;
+        let metadata = build_pmtiles_metadata(
+            "h3_pmtiles_export",
+            "H3 vector hexagon tile pyramid exported by raster_h3",
+            min_zoom,
+            max_zoom,
+            "h3_hexagons",
+            "H3 hexagonal vector polygons with attributes",
+            self.fields_metadata(),
+            (capped_cells > 0).then(|| {
+                serde_json::Map::from_iter([(
+                    "h3_cells_over_tile_cap".to_string(),
+                    serde_json::json!(capped_cells),
+                )])
+            }),
+        );
+        writer.set_metadata(bbox, metadata.to_string());
 
         let summary = PmtilesExportSummary {
             total_features: self.total_features,
@@ -500,16 +531,20 @@ fn add_record(
     acc: &mut TilePyramidAccumulator,
     grid: GridKind,
     keys: &[Cow<'static, str>],
+    zoom_bands: &[Option<(u8, u8)>],
     record: SortRecord,
 ) {
     // Only valid cells are buffered (checked in `push`).
+    let Some(res) = grid.resolution(record.h3_index) else {
+        return;
+    };
+    let Some(zooms) = zoom_bands[usize::from(res)] else {
+        return;
+    };
     let Some((c_lat, c_lng)) = grid.center_lat_lng(record.h3_index) else {
         return;
     };
     let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, record.h3_index) else {
-        return;
-    };
-    let Some(res) = grid.resolution(record.h3_index) else {
         return;
     };
     let center_merc = MercatorPoint::from_lat_lng(c_lat, c_lng);
@@ -533,11 +568,11 @@ fn add_record(
     if !properties.iter().any(|(k, _)| k == "resolution") {
         properties.push((Cow::Borrowed("resolution"), MvtValue::UInt(u64::from(res))));
     }
-    acc.add_hexagon_mercator(
+    acc.add_hexagon_mercator_zooms(
         record.h3_index,
         center_merc,
         &v_merc[..v_count],
-        grid_res_to_zoom(grid, res),
+        zooms,
         properties,
     );
 }
@@ -655,6 +690,8 @@ mod tests {
         let mut acc = TilePyramidAccumulator::new(0.0);
         let mut keys = Vec::new();
         let mut key_ids = HashMap::new();
+        // The sample holds res-5 and res-8 cells.
+        let zoom_bands = crate::pmtiles::pyramid::zoom_bands_for_resolutions((1 << 5) | (1 << 8));
         for f in sample_features() {
             let Ok(cell) = CellIndex::try_from(f.h3_index) else {
                 continue;
@@ -675,11 +712,67 @@ mod tests {
                 h3_index: f.h3_index,
                 properties,
             };
-            add_record(&mut acc, GridKind::H3, &keys, record);
+            add_record(&mut acc, GridKind::H3, &keys, &zoom_bands, record);
         }
         let legacy_tiles = acc.active_tile_count();
         let (summary, _, _) = export(4 << 10);
         assert_eq!(summary.total_tiles, legacy_tiles);
+    }
+
+    /// One cell at each of `resolutions`, all ancestors of one res-8 cell.
+    fn chain(resolutions: &[u8]) -> Vec<H3Feature> {
+        let leaf = CellIndex::try_from(0x8828308281fffff_u64).unwrap();
+        resolutions
+            .iter()
+            .map(|&r| {
+                let res = h3o::Resolution::try_from(r).unwrap();
+                H3Feature::new(
+                    u64::from(leaf.parent(res).unwrap()),
+                    vec![("r", MvtValue::UInt(u64::from(r)))],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_zoom_between_resolutions_gets_tiles() {
+        let mut exporter = ExternalFeatureExport::new(1 << 20, None);
+        for f in chain(&[0, 1, 2, 3, 4, 5]) {
+            exporter.push(f).unwrap();
+        }
+        let bands = exporter.zoom_bands();
+        assert_eq!(
+            bands[..6],
+            [
+                Some((0, 1)),
+                Some((2, 3)),
+                Some((4, 4)),
+                Some((5, 5)),
+                Some((6, 7)),
+                Some((8, 9))
+            ]
+        );
+        let mut out = Vec::new();
+        let summary = exporter.finish_into(&mut out).unwrap();
+        assert_eq!((summary.min_zoom, summary.max_zoom), (0, 9));
+        // One cell per resolution: at least one tile at each of the ten zooms.
+        assert!(summary.total_tiles >= 10, "{} tiles", summary.total_tiles);
+    }
+
+    #[test]
+    fn zoom_limits_clip_bands() {
+        let mut exporter =
+            ExternalFeatureExport::new(1 << 20, None).with_zoom_limits(Some(7), Some(8));
+        for f in chain(&[3, 4, 5]) {
+            exporter.push(f).unwrap();
+        }
+        let bands = exporter.zoom_bands();
+        assert_eq!(bands[3], None, "res 3 (z5) lies below the limit");
+        assert_eq!(bands[4], Some((7, 7)));
+        assert_eq!(bands[5], Some((8, 8)));
+        let mut out = Vec::new();
+        let summary = exporter.finish_into(&mut out).unwrap();
+        assert_eq!((summary.min_zoom, summary.max_zoom), (7, 8));
     }
 
     #[test]

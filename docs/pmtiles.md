@@ -142,6 +142,25 @@ has passed it. Memory therefore stays near the budget plus one latitude band of 
 whatever the input size. The sort order is fixed (latitude, then H3 index), so the archive is
 byte-for-byte the same whether or not it spilled.
 
+### Zoom bands for H3 tables
+
+A table can hold any mix of resolutions, so its exports give each resolution present a band of
+zooms instead of one zoom (`pyramid::zoom_bands_for_resolutions`). A band starts where the
+resolution's band in the raster tilers starts (`zooms_for_h3_res`) and runs to the zoom before
+the next finer resolution present starts. The finest resolution fills its whole band. The bands
+cover every zoom between the coarsest and finest resolution:
+
+| Resolutions present | Bands |
+| :--- | :--- |
+| 0–5 | res 0: z0–1, res 1: z2–3, res 2: z4, res 3: z5, res 4: z6–7, res 5: z8–9 (the raster tilers' bands) |
+| 2, 4, 8 | res 2: z4–5, res 4: z6–12, res 8: z13 |
+| 8 | res 8: z13 |
+
+Zooms below the coarsest resolution's band are left empty: a table's properties are arbitrary,
+so there is nothing to aggregate into parent cells the way the raster tilers do. A cell is
+written once per zoom in its band, so archives grow with the band widths. `COPY`'s `min_zoom` and
+`max_zoom` clip the bands as well as filtering rows.
+
 ## Cell Geometry in Vector Tiles
 
 Each feature's exterior ring has positive area in tile coordinates, as MVT 2.1 requires.
@@ -154,11 +173,9 @@ A pole cell's vertices span every longitude, so at fine zooms its tile range is 
 width of the map (millions of tiles per cell). Tiling skips a cell at any zoom where it would
 cover more than 65,536 tiles (`pyramid::MAX_TILE_OPS_PER_CELL_ZOOM`); it stays present at
 coarser zooms. `pyramid::for_each_cell_tile_mercator` returns the number of tiles it emitted,
-`0` for a skipped cell. The continuous and categorical tilers record the skipped
-`(cell, zoom)` pairs, overview parents included, as `h3_cells_over_tile_cap` in the archive
-metadata (omitted when nothing was skipped). The Parquet transcoder and
-`ExternalFeatureExport` count them in `TilePyramidAccumulator::capped_cells` but do not
-write the count to metadata.
+`0` for a skipped cell. Raster and table exporters record skipped `(cell, zoom)` pairs as
+`h3_cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
+gap between resolutions can also trigger the cap for nonpolar cells and leave a zoom empty.
 
 ## PMTiles v3 Leaf Directory Architecture
 
