@@ -125,6 +125,13 @@ SELECT * FROM raster_h3_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
 The path is one `raster_h3` source: a file, URL, VRT or glob mosaic (a mosaic is planned
 and merged as one raster).
 
+The data source and its merge are H3-only for now: they key partial cells on `h3_index`,
+so the `grid` option and the other grids ([Grids](../grids.md)) are not available through
+`raster_h3.spark`. A partitioned scan of another grid can use the Python package directly
+(`plan_partitions`, `RasterH3ArrowStream(..., grid=..., partition=...)` and
+`merge_partials(..., grid=...)`), as in the `mapInArrow` pipeline below. Transfer modes and
+histograms are not available in partitioned scans on any engine.
+
 ## A partitioned scan with `mapInArrow`
 
 On Spark 3, or to control each step, write the pipeline with `mapInArrow`. The complete

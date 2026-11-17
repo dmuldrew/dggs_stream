@@ -34,11 +34,22 @@ raster-h3-cli merge   <part>... [options]      Combine partitioned `ipc` outputs
 | Option | Applies to | Meaning |
 | :--- | :--- | :--- |
 | `--grid <h3\|a5\|s2\|healpix>` | all | Grid to index onto (default `h3`); the index columns are `{grid}_index` / `{grid}_hex` |
-| `-r, --resolutions <LIST>` (alias `--resolution`) | all | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29 |
+| `-r, --resolutions <LIST>` (alias `--resolution`) | all | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29. `auto`, `auto+N`, `auto-N`: the resolution whose cells match the pixel size ([Grids](../grids.md#automatic-resolution)) |
 | `-c, --categorical` | all | Categorical aggregation |
 | `--format <wide\|long>` | `ipc`, `jsonl` | Categorical layout (default `wide`) |
 | `--crs <CRS>` (alias `--source-crs`) | all | Source CRS override, e.g. `EPSG:4326` |
 | `--nodata <FLOAT>` | all | NoData override |
+| `--nodata-policy <omit\|emit>` | all | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
+| `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
+| `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
+| `--transfer <assign_centers\|sample\|overlay>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)) |
+| `--sample-method <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer sample` | Interpolation (default `bilinear`) |
+| `--overlay-weighted <true\|false>` | `--transfer overlay` | `false` counts every touched pixel once |
+| `--mass-preserve` | `--transfer overlay` | Normalise each pixel's weights so `sum` adds up to the raster's total |
+| `--histogram <values\|N:min:max\|e0,e1,...>` | `ipc`, `jsonl` | Structured per-cell histogram (implies `-c`) |
+| `--histogram-weight <count\|area>` | with `--histogram` | `area` weights by overlap and runs `--transfer overlay` |
+| `--histogram-normalize <none\|fraction\|density>` | with `--histogram` | `density` needs bins |
+| `--profile` | all | Print a runtime profile on stderr ([Scan Options](../scan-options.md#runtime-profile)) |
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl` | Column projection, in the given order |
@@ -46,11 +57,11 @@ raster-h3-cli merge   <part>... [options]      Combine partitioned `ipc` outputs
 | `--partition <SPEC\|@FILE>` | `ipc` | Scan one partition (see [Partitioned scans](#partitioned-scans)) |
 | `--partition-index <K>` | `ipc` | Line `K` of the plan file given as `--partition @FILE` |
 | `-o, --output <PATH\|->` | all | Output file; `-` or omitted means stdout (required for `parquet`, `pmtiles` and `parquet-to-pmtiles`, which cannot write to stdout) |
-| `--h3-column <NAME>` (alias `--h3-col`) | `parquet-to-pmtiles` | H3 column, integer or hex string, matched case-insensitively (default: the first of `h3_index`, `h3_hex`, `h3`, `cell`, `hex`) |
+| `--h3-column <NAME>` (alias `--h3-col`) | `parquet-to-pmtiles` | Cell column, integer or hex string, matched case-insensitively (default: the first `{grid}_index` / `{grid}_hex` column, else `h3`, `cell` or `hex`). The grid is read from the column's name (`s2_index`, `healpix_hex`, ...), H3 otherwise |
 | `-h, --help` | | Help |
 
 Arguments are validated strictly: unknown flags, missing values, resolutions outside
-`0..=15`, malformed numbers, a bbox without exactly four numbers, an unknown column name
+the grid's range, malformed numbers, a bbox without exactly four numbers, an unknown column name
 and a second positional input are all errors. Errors go to stderr with exit status `1`.
 Every subcommand also prints a warning to stderr when valid samples were dropped because
 their coordinate transform failed (see [transform-failure diagnostics](core.md#transform-failure-diagnostics)).
@@ -133,6 +144,27 @@ raster-h3-cli jsonl temperature_global.tif -r 9 \
 ```bash
 raster-h3-cli jsonl elevation.tif -r 6,7,8 --columns resolution,h3_hex,mean \
   | jq -c 'select(.resolution == 8)'
+```
+
+### Other grids and pixel-sized cells
+
+```bash
+raster-h3-cli jsonl elevation.tif --grid s2 -r 15 --columns s2_index,mean
+raster-h3-cli jsonl elevation.tif --grid healpix -r auto      # cells about one pixel in size
+raster-h3-cli parquet elevation.tif --grid a5 -r auto-1 -o a5.parquet
+```
+
+### Fine cells, area weighting, histograms and empty cells
+
+```bash
+# Cells finer than the pixels: interpolate a value at each cell centre
+raster-h3-cli jsonl elevation.tif -r auto+2 --transfer sample --sample-method bicubic
+# Population counts: split each pixel across the cells it overlaps, keeping the total
+raster-h3-cli parquet population.tif -r 7 --transfer overlay --mass-preserve -o pop.parquet
+# Per-cell histogram of a continuous raster in four bins, as fractions
+raster-h3-cli jsonl elevation.tif -r 8 --histogram 4:0:2000 --histogram-normalize fraction
+# Keep all-NoData cells (count 0), round statistics, and see where the time went
+raster-h3-cli jsonl elevation.tif -r 8 --nodata-policy emit --decimals 2 --profile
 ```
 
 ### Sampling the output

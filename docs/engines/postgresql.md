@@ -73,7 +73,10 @@ h3_raster_continuous_aggregate(
     h3_res      integer          DEFAULT 8,
     source_crs  text             DEFAULT NULL,
     nodata      double precision DEFAULT NULL,
-    bbox        text             DEFAULT NULL   -- 'min_lon,min_lat,max_lon,max_lat'
+    bbox        text             DEFAULT NULL,  -- 'min_lon,min_lat,max_lon,max_lat'
+    nodata_policy     text             DEFAULT 'omit',
+    emit_nodata_value double precision DEFAULT NULL,
+    decimals          integer          DEFAULT NULL
 ) RETURNS TABLE (...)
 
 h3_raster_categorical_aggregate(same arguments) RETURNS TABLE (...)
@@ -86,6 +89,15 @@ are raised as PostgreSQL `ERROR`s:
   overlaps use the `cutline` rule).
 - `h3_res` must be in `0..=15`; `NULL` means 8.
 - An empty `source_crs` or `bbox` string is treated as `NULL`; a malformed `bbox` is an error.
+- `nodata_policy => 'emit'` returns every cell a pixel falls in; a cell without a valid
+  sample has `count` 0 and `mean` / `min` / `max` (or `majority_class`) equal to
+  `emit_nodata_value`, or `NULL` when that is `NULL`. `decimals` (0–15) rounds the
+  floating-point statistics. See [Scan Options](../scan-options.md#nodata-policy-and-rounding).
+
+Databases that installed extension version 0.7.0 before these three arguments were added
+need an upgrade script at the next version to get them; the shared library still serves the
+five-argument functions they have. Transfer modes, histograms and the runtime profile are
+not exposed in PostgreSQL.
 
 `raster_path` is opened **by the server process**, so it must be readable by the
 PostgreSQL OS user on the database host (or be an HTTP(S)/S3 URL the server can reach).
