@@ -1577,3 +1577,168 @@ fn test_tile_cap_metadata_absent_without_polar_cells() {
         "{metadata}"
     );
 }
+
+/// Tiles per zoom in a PMTiles archive whose entries all sit in the root directory.
+fn tiles_per_zoom(archive: &[u8]) -> std::collections::BTreeMap<u8, usize> {
+    use raster_h3_core::pmtiles::writer::tile_id_to_zxy;
+    let field = |at: usize| u64::from_le_bytes(archive[at..at + 8].try_into().unwrap()) as usize;
+    let (offset, len) = (field(8), field(16));
+    let mut dir = Vec::new();
+    GzDecoder::new(&archive[offset..offset + len])
+        .read_to_end(&mut dir)
+        .unwrap();
+    let mut pos = 0;
+    let mut varint = || {
+        let (mut value, mut shift) = (0u64, 0);
+        loop {
+            let byte = dir[pos];
+            pos += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte < 0x80 {
+                return value;
+            }
+            shift += 7;
+        }
+    };
+    let n = varint() as usize;
+    let mut ids = Vec::with_capacity(n);
+    let mut id = 0;
+    for _ in 0..n {
+        id += varint();
+        ids.push(id);
+    }
+    let mut zooms = std::collections::BTreeMap::new();
+    for id in ids {
+        let run = varint();
+        assert!(
+            run > 0,
+            "a leaf directory: the archive is larger than expected"
+        );
+        for i in 0..run {
+            *zooms.entry(tile_id_to_zxy(id + i).0).or_insert(0) += 1;
+        }
+    }
+    zooms
+}
+
+#[test]
+fn preindexed_export_fills_every_zoom_between_resolutions() {
+    use raster_h3_core::pmtiles::mvt::MvtValue;
+    use raster_h3_core::pmtiles::tiler::H3Feature;
+    use raster_h3_core::pmtiles::ExternalFeatureExport;
+
+    // One cell at each of resolutions 0..=5, all ancestors of one res-8 cell.
+    let leaf = h3o::CellIndex::try_from(0x8828308281fffff_u64).unwrap();
+    let chain = |resolutions: std::ops::RangeInclusive<u8>| {
+        resolutions
+            .map(|r| {
+                let res = h3o::Resolution::try_from(r).unwrap();
+                H3Feature::new(
+                    u64::from(leaf.parent(res).unwrap()),
+                    vec![("r", MvtValue::UInt(u64::from(r)))],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut exporter = ExternalFeatureExport::new(1 << 20, None);
+    for f in chain(0..=5) {
+        exporter.push(f).unwrap();
+    }
+    let mut archive = Vec::new();
+    let summary = exporter.finish_into(&mut archive).unwrap();
+    assert_eq!((summary.min_zoom, summary.max_zoom), (0, 9));
+    let zooms = tiles_per_zoom(&archive);
+    assert_eq!(
+        zooms.keys().copied().collect::<Vec<_>>(),
+        (0..=9).collect::<Vec<_>>(),
+        "every zoom of the bands holds a tile: {zooms:?}"
+    );
+    assert_eq!(zooms.values().sum::<usize>(), summary.total_tiles);
+
+    // Zoom limits clip the bands: nothing outside 7..=8, and both zooms filled.
+    let mut clipped = ExternalFeatureExport::new(1 << 20, None).with_zoom_limits(Some(7), Some(8));
+    for f in chain(3..=5) {
+        clipped.push(f).unwrap();
+    }
+    let mut archive = Vec::new();
+    let summary = clipped.finish_into(&mut archive).unwrap();
+    assert_eq!((summary.min_zoom, summary.max_zoom), (7, 8));
+    let zooms = tiles_per_zoom(&archive);
+    assert_eq!(zooms.keys().copied().collect::<Vec<_>>(), vec![7, 8]);
+}
+
+#[test]
+fn parquet_zoom_bands_span_row_groups_with_32_bit_indexes() {
+    use parquet::data_type::Int32Type;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::parser::parse_message_type;
+    use raster_h3_core::grid::healpix_encode;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let parquet_path = dir.path().join("cells.parquet");
+    let pmtiles_path = dir.path().join("cells.pmtiles");
+
+    for (annotation, coarse, fine) in [("", 2, 5), (" (UINT_32)", 12, 14)] {
+        let schema = Arc::new(
+            parse_message_type(&format!(
+                "message schema {{ REQUIRED INT32 healpix_index{annotation}; }}"
+            ))
+            .unwrap(),
+        );
+        let mut writer = SerializedFileWriter::new(
+            File::create(&parquet_path).unwrap(),
+            schema,
+            Default::default(),
+        )
+        .unwrap();
+
+        for depth in [fine, coarse] {
+            // Equatorial base pixel 6. At depth 14 this exercises the sign bit
+            // of the physical INT32 backing the unsigned Parquet column.
+            let cell = healpix_encode(depth, 6 << (2 * depth));
+            let mut row_group = writer.next_row_group().unwrap();
+            let mut column = row_group.next_column().unwrap().unwrap();
+            column
+                .typed::<Int32Type>()
+                .write_batch(&[cell as i32], None, None)
+                .unwrap();
+            column.close().unwrap();
+            row_group.close().unwrap();
+        }
+        writer.close().unwrap();
+
+        let summary =
+            H3PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
+        assert_eq!(summary.total_features, 2);
+        assert_eq!(summary.valid_features, 2);
+        assert_eq!((summary.min_zoom, summary.max_zoom), (coarse, fine));
+        let zooms = tiles_per_zoom(&std::fs::read(&pmtiles_path).unwrap());
+        assert_eq!(
+            zooms.keys().copied().collect::<Vec<_>>(),
+            (coarse..=fine).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn preindexed_export_reports_capped_cells_in_sparse_bands() {
+    use raster_h3_core::pmtiles::{ExternalFeatureExport, H3Feature};
+
+    let point = h3o::LatLng::new(0.0, 0.0).unwrap();
+    let mut exporter =
+        ExternalFeatureExport::new(1 << 20, None).with_zoom_limits(Some(22), Some(23));
+    for res in [h3o::Resolution::Zero, h3o::Resolution::Fifteen] {
+        exporter
+            .push(H3Feature::new(
+                point.to_cell(res).into(),
+                Vec::<(&str, MvtValue)>::new(),
+            ))
+            .unwrap();
+    }
+    let path = NamedTempFile::new().unwrap().into_temp_path();
+    exporter.finish(&path).unwrap();
+    let metadata = read_pmtiles_metadata(path.to_str().unwrap());
+    assert_eq!(metadata["h3_cells_over_tile_cap"], 1);
+}

@@ -469,6 +469,70 @@ pub fn zooms_for_h3_res(res: u8, min_res: u8) -> Vec<u8> {
     }
 }
 
+/// Gap-free zoom bands for the H3 resolutions present in a pre-indexed table.
+///
+/// Bit `r` of `resolutions` marks resolution `r` as present (bits above 15 are
+/// ignored). Each present resolution covers the zooms from the start of its
+/// standard band in [`zooms_for_h3_res`] up to the zoom before the next finer
+/// present resolution starts; the finest present resolution covers its whole
+/// standard band. With every resolution from 0 to 5 present this reproduces the
+/// raster tilers' bands (z0-1, z2-3, z4, z5, z6-7, z8-9); with gaps such as
+/// resolutions 2 and 4 only, resolution 2 stretches to z4-5 so z5 is not empty.
+///
+/// Zooms coarser than the coarsest present resolution's band stay empty: a
+/// table carries arbitrary properties, so unlike the raster tilers there is
+/// nothing to aggregate into parent cells, and pushing fine cells into
+/// low-zoom tiles would make those tiles enormous.
+pub fn zoom_bands_for_resolutions(resolutions: u16) -> [Option<(u8, u8)>; 16] {
+    let bands = zoom_bands_for_grid_resolutions(GridKind::H3, u32::from(resolutions));
+    core::array::from_fn(|r| bands[r])
+}
+
+/// [`zoom_bands_for_resolutions`] on any grid: bit `r` of `resolutions` marks
+/// resolution `r` of `grid` as present (bits above the grid's finest resolution
+/// are ignored), bands start at [`zooms_for_grid_res`], and the result is indexed
+/// by resolution (`grid.max_resolution() + 1` entries). Where two present
+/// resolutions start at the same zoom (non-H3 resolutions 24 and above), each keeps that one zoom.
+pub fn zoom_bands_for_grid_resolutions(grid: GridKind, resolutions: u32) -> Vec<Option<(u8, u8)>> {
+    let max_res = grid.max_resolution();
+    let standard = |res: u8| zooms_for_grid_res(grid, res, u8::MAX);
+    let mut bands = vec![None; usize::from(max_res) + 1];
+    let present: Vec<u8> = (0..=max_res)
+        .filter(|&r| resolutions & (1u32 << r) != 0)
+        .collect();
+    for (i, &res) in present.iter().enumerate() {
+        let zooms = standard(res);
+        let start = zooms[0];
+        let end = match present.get(i + 1) {
+            Some(&finer) => standard(finer)[0].saturating_sub(1),
+            None => *zooms.last().unwrap_or(&start),
+        };
+        bands[usize::from(res)] = Some((start, end.max(start)));
+    }
+    bands
+}
+
+/// Overall `(min_zoom, max_zoom)` of [`zoom_bands_for_resolutions`], or `None`
+/// when no resolution is present.
+pub fn zoom_extent_for_resolutions(resolutions: u16) -> Option<(u8, u8)> {
+    zoom_extent_for_grid_resolutions(GridKind::H3, u32::from(resolutions))
+}
+
+/// Overall `(min_zoom, max_zoom)` of [`zoom_bands_for_grid_resolutions`], or
+/// `None` when no resolution is present.
+pub fn zoom_extent_for_grid_resolutions(grid: GridKind, resolutions: u32) -> Option<(u8, u8)> {
+    zoom_band_extent(&zoom_bands_for_grid_resolutions(grid, resolutions))
+}
+
+/// Overall `(min_zoom, max_zoom)` of a set of bands.
+pub fn zoom_band_extent(bands: &[Option<(u8, u8)>]) -> Option<(u8, u8)> {
+    let mut it = bands.iter().flatten();
+    let &(first_lo, first_hi) = it.next()?;
+    Some(it.fold((first_lo, first_hi), |(lo, hi), &(a, b)| {
+        (lo.min(a), hi.max(b))
+    }))
+}
+
 /// Estimate maximum radius (in WGS84 degrees) of an H3 hexagon at resolution res.
 /// Provides >= 8% headroom over empirical max(center_lat - true_south_lat) for h3o.
 pub fn max_hex_radius_deg(res: u8) -> f64 {
@@ -517,6 +581,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grid_zoom_bands_follow_each_grid() {
+        // H3 through the generic function matches the H3 one.
+        let mask = (1 << 2) | (1 << 4) | (1 << 8);
+        let generic = zoom_bands_for_grid_resolutions(GridKind::H3, mask);
+        assert_eq!(generic.len(), 16);
+        assert_eq!(generic[..], zoom_bands_for_resolutions(mask as u16)[..]);
+        // A5: one zoom per resolution, so gaps stretch the coarser band.
+        let a5 = zoom_bands_for_grid_resolutions(GridKind::A5, (1 << 3) | (1 << 5) | (1 << 26));
+        assert_eq!(a5.len(), 31);
+        assert_eq!(
+            (a5[3], a5[5], a5[26]),
+            (Some((3, 4)), Some((5, 23)), Some((24, 24)))
+        );
+        assert_eq!(
+            zoom_extent_for_grid_resolutions(GridKind::A5, (1 << 3) | (1 << 26)),
+            Some((3, 24))
+        );
+        assert_eq!(zoom_extent_for_grid_resolutions(GridKind::A5, 0), None);
+    }
+
+    #[test]
     fn test_lon_lat_to_tile_xy() {
         let (x, y) = lon_lat_to_tile_xy(0.0, 0.0, 0);
         assert_eq!((x, y), (0, 0));
@@ -532,6 +617,47 @@ mod tests {
         assert_eq!(bbox[2], 180.0);
         assert!((bbox[1] - (-85.05112878)).abs() < 1e-4);
         assert!((bbox[3] - 85.05112878).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_bands_match_raster_bands_for_contiguous_resolutions() {
+        let bands = zoom_bands_for_resolutions(0b11_1111); // res 0..=5
+        assert_eq!(
+            bands[..6],
+            [
+                Some((0, 1)),
+                Some((2, 3)),
+                Some((4, 4)),
+                Some((5, 5)),
+                Some((6, 7)),
+                Some((8, 9))
+            ]
+        );
+        assert!(bands[6..].iter().all(Option::is_none));
+        // Every zoom in the extent belongs to exactly one band, and each band
+        // agrees with the raster tilers' `h3_res_for_zoom`.
+        for z in 0..=9u8 {
+            let owners: Vec<usize> = (0..16)
+                .filter(|&r| bands[r].is_some_and(|(lo, hi)| (lo..=hi).contains(&z)))
+                .collect();
+            assert_eq!(owners, vec![usize::from(h3_res_for_zoom(z))], "zoom {z}");
+        }
+        assert_eq!(zoom_extent_for_resolutions(0b11_1111), Some((0, 9)));
+    }
+
+    #[test]
+    fn zoom_bands_fill_gaps_between_sparse_resolutions() {
+        let bands = zoom_bands_for_resolutions((1 << 2) | (1 << 4) | (1 << 8));
+        assert_eq!(bands[2], Some((4, 5)));
+        assert_eq!(bands[4], Some((6, 12)));
+        assert_eq!(bands[8], Some((13, 13)));
+        // Nothing below the coarsest resolution's own band.
+        assert_eq!(
+            zoom_extent_for_resolutions((1 << 2) | (1 << 4) | (1 << 8)),
+            Some((4, 13))
+        );
+        assert_eq!(zoom_bands_for_resolutions(1 << 15)[15], Some((23, 24)));
+        assert_eq!(zoom_extent_for_resolutions(0), None);
     }
 
     #[test]

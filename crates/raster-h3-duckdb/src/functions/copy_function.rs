@@ -303,7 +303,8 @@ unsafe extern "C" fn pmtiles_copy_global_init(info: duckdb_copy_function_global_
             let budget = options
                 .memory_budget_mb
                 .map_or(DEFAULT_EXPORT_MEMORY_BUDGET, |mb| (mb as usize) << 20);
-            let exporter = ExternalFeatureExport::new(budget, spill_dir.as_deref());
+            let exporter = ExternalFeatureExport::new(budget, spill_dir.as_deref())
+                .with_zoom_limits(options.min_zoom, options.max_zoom);
             let mut writer = None;
             if let Some(fs) = fs_opt.as_ref() {
                 match fs.open_write(&file_path) {
