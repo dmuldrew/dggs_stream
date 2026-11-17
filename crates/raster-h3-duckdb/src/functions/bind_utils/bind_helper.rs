@@ -1,3 +1,5 @@
+use raster_h3_core::aggregator::output_policy::{NodataPolicy, OutputPolicy};
+use raster_h3_core::transfer::TransferMode;
 use std::ffi::CString;
 use std::path::PathBuf;
 
@@ -22,82 +24,10 @@ pub fn cell_wgs84_bbox(cell: h3o::CellIndex) -> [f64; 4] {
     cell_wgs84_bbox_for(GridKind::H3, u64::from(cell)).unwrap_or([-180.0, -90.0, 180.0, 90.0])
 }
 
-/// Conservative WGS84 bounding box `[min_lon, min_lat, max_lon, max_lat]` for a cell on `grid`.
+/// Conservative WGS84 bounding box `[min_lon, min_lat, max_lon, max_lat]` for a cell on `grid`
+/// ([`GridKind::wgs84_bbox`]).
 pub fn cell_wgs84_bbox_for(grid: GridKind, cell_u64: u64) -> Option<[f64; 4]> {
-    let res = grid.resolution(cell_u64)?;
-    let pole = grid.interior_pole(cell_u64);
-    let (is_north_pole, is_south_pole) = (pole == Some(true), pole == Some(false));
-    let mut verts = [(0.0, 0.0); 10];
-    let n = grid.boundary_lng_lat(cell_u64, &mut verts);
-    if n == 0 {
-        return Some([-180.0, -90.0, 180.0, 90.0]);
-    }
-
-    let south_lat = crate::aggregator::horizon_streamer::compute_cell_south_lat_for(grid, cell_u64);
-    // By symmetry, great-circle edges in the northern hemisphere can bulge northward by at most
-    // (|delta_lat| + |delta_lon|) / 2 relative to their endpoints.
-    let mut north_lat = if is_north_pole { 90.0 } else { -90.0_f64 };
-    if !is_north_pole {
-        for i in 0..n {
-            let (p_lng, p_lat) = verts[i];
-            let (q_lng, q_lat) = verts[(i + 1) % n];
-            let mut edge_north = p_lat.max(q_lat).next_up();
-            // A HEALPix cell's north vertex is its northernmost point: no padding. A5
-            // edges are not great-circle arcs: pad them in both hemispheres.
-            if grid != GridKind::Healpix
-                && (!grid.has_geodesic_edges() || p_lat >= 0.0 || q_lat >= 0.0)
-            {
-                let direct = (p_lng - q_lng).abs();
-                let delta_lon = direct.min(360.0 - direct);
-                let delta_lat = (p_lat - q_lat).abs();
-                edge_north = (edge_north + 0.5 * (delta_lat + delta_lon)).next_up();
-            }
-            north_lat = north_lat.max(edge_north);
-        }
-        north_lat = north_lat.min(90.0);
-    }
-
-    if is_north_pole || is_south_pole || north_lat >= 89.5 || south_lat <= -89.5 {
-        return Some([-180.0, south_lat, 180.0, north_lat]);
-    }
-
-    // Unwrap boundary vertex longitudes around vertex 0 so antimeridian-crossing
-    // cells form a tight continuous interval instead of [-180, 180].
-    let mut lngs = [0.0f64; 10];
-    lngs[0] = verts[0].0;
-    let mut min_u = lngs[0];
-    let mut max_u = lngs[0];
-    for i in 1..n {
-        let mut lng = verts[i].0;
-        while lng - lngs[i - 1] > 180.0 {
-            lng -= 360.0;
-        }
-        while lng - lngs[i - 1] < -180.0 {
-            lng += 360.0;
-        }
-        lngs[i] = lng;
-        min_u = min_u.min(lng);
-        max_u = max_u.max(lng);
-    }
-
-    // Pad longitude by a small geodesic safety margin scaled by sec(lat).
-    let max_abs_lat = south_lat.abs().max(north_lat.abs()).min(89.0);
-    let r = crate::pmtiles::tiler::max_cell_radius_deg(grid, res);
-    let pad_lon = (r * 0.25 / max_abs_lat.to_radians().cos()).max(1e-5);
-    let lo = min_u - pad_lon;
-    let hi = max_u + pad_lon;
-    if hi - lo >= 360.0 {
-        return Some([-180.0, south_lat, 180.0, north_lat]);
-    }
-
-    let wrap = crate::crs::transformer::wrap_lon;
-    let (min_lon, max_lon) = if lo >= -180.0 && hi <= 180.0 {
-        (lo, hi)
-    } else {
-        (wrap(lo), wrap(hi))
-    };
-
-    Some([min_lon, south_lat, max_lon, north_lat])
+    grid.wgs84_bbox(cell_u64)
 }
 
 /// RAII guard ensuring DuckDB allocated value handle is destroyed
@@ -322,6 +252,40 @@ impl BindHelper {
         self.parse_resolutions_for(GridKind::H3, default_res, positional_idx)
     }
 
+    /// [`Self::parse_resolutions_for`], also accepting `resolutions := 'auto'` (or
+    /// `'auto+1'`, `'auto-2'`, ...): the resolution of `grid` whose cells are closest in
+    /// area to the pixels of the raster at `file_path`. Reports a malformed `auto` or an
+    /// unreadable raster as a binding error and returns `None`.
+    pub fn resolve_resolutions_for(
+        &self,
+        grid: GridKind,
+        default_res: u8,
+        positional_idx: Option<usize>,
+        file_path: &str,
+        source_crs: Option<&str>,
+    ) -> Option<Vec<u8>> {
+        let auto = self
+            .get_named_string("resolutions")
+            .and_then(|s| raster_h3_core::resolution::ResolutionSpec::parse_auto(&s));
+        let Some(spec) = auto else {
+            return Some(self.parse_resolutions_for(grid, default_res, positional_idx));
+        };
+        // SAFETY: `self.info` is the live bind handle (struct invariant).
+        let factory =
+            unsafe { crate::functions::config::raster_source_factory_for_bind(self.info) };
+        let resolved = spec.and_then(|spec| {
+            let paths = crate::raster::mosaic::resolve_raster_sources(file_path)?;
+            spec.resolve_paths_with(grid, &paths, source_crs, factory.as_ref())
+        });
+        match resolved {
+            Ok(resolutions) => Some(resolutions),
+            Err(e) => {
+                self.set_error(&format!("resolutions: {e}"));
+                None
+            }
+        }
+    }
+
     /// Parse target resolutions for `grid` across all supported conventions.
     pub fn parse_resolutions_for(
         &self,
@@ -457,6 +421,46 @@ impl BindHelper {
         self.get_named_bool("scale_offset").unwrap_or(true)
     }
 
+    /// Parse the output options: `nodata_policy` (`'omit'` or `'emit'`),
+    /// `emit_nodata_value` and `decimals`. Invalid values are binding errors.
+    pub fn parse_output_policy(&self) -> Option<OutputPolicy> {
+        let mut policy = OutputPolicy::default();
+        if let Some(name) = self.get_named_string("nodata_policy") {
+            match NodataPolicy::parse(&name) {
+                Some(nodata) => policy.nodata = nodata,
+                None => {
+                    self.set_error(&format!(
+                        "nodata_policy must be {}, got '{name}'",
+                        NodataPolicy::EXPECTED
+                    ));
+                    return None;
+                }
+            }
+        }
+        if let Some(value) = self.get_named_double("emit_nodata_value") {
+            if !value.is_finite() {
+                self.set_error("emit_nodata_value must be finite; leave it unset for NULL");
+                return None;
+            }
+            if !policy.emits_nodata() {
+                self.set_error("emit_nodata_value needs nodata_policy := 'emit'");
+                return None;
+            }
+            policy.nodata_value = Some(value);
+        }
+        if let Some(decimals) = self.get_named_int("decimals") {
+            let max = i64::from(raster_h3_core::aggregator::output_policy::MAX_DECIMALS);
+            if !(0..=max).contains(&decimals) {
+                self.set_error(&format!(
+                    "decimals must be between 0 and {max}, got {decimals}"
+                ));
+                return None;
+            }
+            policy.decimals = Some(decimals as u8);
+        }
+        Some(policy)
+    }
+
     /// Parse execution limits: `workers`/`threads` (aggregation),
     /// `decode_workers`, `fetch_workers`, `decode_budget_mb` and
     /// `compaction_budget_mb`, plus `strict_transforms`.
@@ -474,7 +478,23 @@ impl BindHelper {
             }
             Ok(None)
         };
+        let output = self.parse_output_policy()?;
+        let transfer = match TransferMode::from_options(
+            self.get_named_string("transfer").as_deref(),
+            self.get_named_string("sample_method").as_deref(),
+            self.get_named_bool("overlay_weighted"),
+            self.get_named_bool("mass_preserve"),
+        ) {
+            Ok(transfer) => transfer,
+            Err(e) => {
+                self.set_error(&e.to_string());
+                return None;
+            }
+        };
         let mut execution = ExecutionParams {
+            output,
+            transfer,
+            profile: self.get_named_bool("profile").unwrap_or(false),
             aggregation_workers: positive(&["workers", "threads"]).ok()?,
             decode_workers: positive(&["decode_workers"]).ok()?,
             fetch_workers: positive(&["fetch_workers"]).ok()?,
@@ -518,8 +538,9 @@ impl BindHelper {
         };
 
         let grid = self.parse_grid(default_grid)?;
-        let resolutions = self.parse_resolutions_for(grid, 8, Some(1));
         let source_crs = self.parse_source_crs();
+        let resolutions =
+            self.resolve_resolutions_for(grid, 8, Some(1), &file_path, source_crs.as_deref())?;
         let nodata = self.get_named_double("nodata");
         let scale_offset = self.parse_scale_offset();
         let chunk_size = self
@@ -597,8 +618,17 @@ pub struct CommonRasterParams {
 }
 
 /// SQL execution limits and options. Each `None` keeps the streamer default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ExecutionParams {
+    /// `nodata_policy`, `emit_nodata_value` and `decimals`: what all-NoData cells and
+    /// output precision look like.
+    pub output: OutputPolicy,
+    /// `transfer`, `sample_method`, `overlay_weighted` and `mass_preserve`: how pixels
+    /// map onto cells.
+    pub transfer: TransferMode,
+    /// `profile`: print where the scan's time went on stderr when it ends, and keep the
+    /// report as `raster_h3_core::run_profile::last_report()`.
+    pub profile: bool,
     /// `workers` / `threads`: dedicated aggregation pool size.
     pub aggregation_workers: Option<usize>,
     /// `decode_workers`: chunk decoding threads.
@@ -633,6 +663,13 @@ impl ExecutionParams {
             config.compaction_budget_bytes = Some(mb.saturating_mul(1024 * 1024));
         }
         config.strict_transforms = self.strict_transforms;
+        config.nodata_policy = self.output.nodata;
+        config.emit_nodata_value = self.output.nodata_value;
+        config.decimals = self.output.decimals;
+        config.transfer = self.transfer;
+        if self.profile {
+            config.profile = Some(raster_h3_core::run_profile::RunProfile::announcing());
+        }
     }
 }
 
@@ -685,6 +722,7 @@ mod tests {
             decode_budget_mb: Some(32),
             compaction_budget_mb: Some(8),
             strict_transforms: true,
+            ..Default::default()
         }
         .apply(&mut config);
         assert_eq!(config.aggregation_workers, Some(3));

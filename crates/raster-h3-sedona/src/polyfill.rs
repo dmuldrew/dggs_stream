@@ -1,4 +1,5 @@
-//! `h3_polygon_to_cells(geometry, resolution [, containment])`: fill a polygon with H3 cells.
+//! `{grid}_polygon_to_cells(geometry, resolution [, containment])`: fill a polygon with the
+//! cells of a grid (`h3_`, `a5_`, `s2_`, `healpix_`).
 
 use std::sync::Arc;
 
@@ -9,16 +10,15 @@ use datafusion::error::Result;
 use datafusion::logical_expr::{
     ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::scalar_ops::{
-    h3_polygon_to_cells_wkb, parse_containment_mode, ContainmentMode, PolygonToCellsError,
+    grid_polygon_to_cells_wkb_into, parse_containment_mode, ContainmentMode, PolygonToCellsError,
     H3_CONTAINMENT_MODES,
 };
 use rayon::prelude::*;
 
 use crate::convert::GEOARROW_WKB_EXTENSION;
 use crate::spatial::is_planar_lnglat;
-
-const NAME: &str = "h3_polygon_to_cells";
 
 /// `h3_polygon_to_cells(geometry, resolution [, containment])` -> `List<UInt64>`.
 ///
@@ -28,18 +28,42 @@ const NAME: &str = "h3_polygon_to_cells";
 /// name. `containment` is one of `raster_h3_core::scalar_ops::H3_CONTAINMENT_MODES`
 /// (default `contains_centroid`; `covers` keeps every cell that overlaps the polygon).
 /// NULLs and errors follow DuckDB: a NULL argument, a geometry that is not a valid
-/// `POLYGON` / `MULTIPOLYGON`, or a resolution outside `0..=15` gives NULL; an unknown
-/// containment name or a polygon above the 10,000,000-cell limit fails the query.
+/// `POLYGON` / `MULTIPOLYGON`, or a resolution outside the grid's range gives NULL; an
+/// unknown containment name or a polygon above the 10,000,000-cell limit fails the query.
+///
+/// [`H3PolygonToCells::for_grid`] gives the same function for another grid
+/// (`a5_polygon_to_cells`, `s2_polygon_to_cells`, `healpix_polygon_to_cells`).
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct H3PolygonToCells {
     signature: Signature,
+    grid: GridKind,
+    name: &'static str,
 }
 
 impl Default for H3PolygonToCells {
     fn default() -> Self {
+        Self::for_grid(GridKind::H3)
+    }
+}
+
+impl H3PolygonToCells {
+    /// `{grid}_polygon_to_cells`.
+    pub fn for_grid(grid: GridKind) -> Self {
         Self {
             signature: Signature::user_defined(Volatility::Immutable),
+            grid,
+            name: match grid {
+                GridKind::H3 => "h3_polygon_to_cells",
+                GridKind::A5 => "a5_polygon_to_cells",
+                GridKind::S2 => "s2_polygon_to_cells",
+                GridKind::Healpix => "healpix_polygon_to_cells",
+            },
         }
+    }
+
+    /// The grid whose cells this function returns.
+    pub fn grid(&self) -> GridKind {
+        self.grid
     }
 }
 
@@ -49,7 +73,7 @@ fn list_type() -> DataType {
 
 impl ScalarUDFImpl for H3PolygonToCells {
     fn name(&self) -> &str {
-        NAME
+        self.name
     }
 
     fn signature(&self) -> &Signature {
@@ -57,9 +81,10 @@ impl ScalarUDFImpl for H3PolygonToCells {
     }
 
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        let name = self.name;
         let usage = "expects (geometry, resolution [, containment])";
         if !(2..=3).contains(&arg_types.len()) {
-            return plan_err!("{NAME} {usage}");
+            return plan_err!("{name} {usage}");
         }
         arg_types
             .iter()
@@ -75,7 +100,7 @@ impl ScalarUDFImpl for H3PolygonToCells {
                 (2, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View) => {
                     Ok(DataType::Utf8)
                 }
-                (_, t) => plan_err!("{NAME} {usage}, got {t} for argument {}", i + 1),
+                (_, t) => plan_err!("{name} {usage}, got {t} for argument {}", i + 1),
             })
             .collect()
     }
@@ -85,6 +110,7 @@ impl ScalarUDFImpl for H3PolygonToCells {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs<'_>) -> Result<FieldRef> {
+        let name = self.name;
         // A geometry tagged with another CRS would be filled in the wrong coordinates.
         if let Some(geometry) = args.arg_fields.first() {
             let metadata = geometry.metadata();
@@ -96,16 +122,17 @@ impl ScalarUDFImpl for H3PolygonToCells {
                     .map_or("", String::as_str);
                 if !crs.is_empty() && crs != "{}" && !is_planar_lnglat(crs) {
                     return plan_err!(
-                        "{NAME}: geometry must be lon/lat (OGC:CRS84 / EPSG:4326) with planar \
+                        "{name}: geometry must be lon/lat (OGC:CRS84 / EPSG:4326) with planar \
                          edges, got {crs}"
                     );
                 }
             }
         }
-        Ok(Arc::new(Field::new(NAME, list_type(), true)))
+        Ok(Arc::new(Field::new(name, list_type(), true)))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let (name, grid) = (self.name, self.grid);
         let all_scalar = args
             .args
             .iter()
@@ -128,21 +155,28 @@ impl ScalarUDFImpl for H3PolygonToCells {
                 Some(m) => parse_containment_mode(m.value(i)).ok_or_else(|| {
                     let names: Vec<_> = H3_CONTAINMENT_MODES.iter().map(|(n, _)| *n).collect();
                     DataFusionError::Execution(format!(
-                        "{NAME}: unknown containment mode '{}' (expected one of {})",
+                        "{name}: unknown containment mode '{}' (expected one of {})",
                         m.value(i),
                         names.join(", ")
                     ))
                 })?,
             };
-            match h3_polygon_to_cells_wkb(geometry.value(i), resolution.value(i), containment) {
-                Ok(cells) => Ok(Some(cells)),
+            let mut cells = Vec::new();
+            match grid_polygon_to_cells_wkb_into(
+                grid,
+                geometry.value(i),
+                resolution.value(i),
+                containment,
+                &mut cells,
+            ) {
+                Ok(()) => Ok(Some(cells)),
                 // As in DuckDB: a row that is not a polygon, or an out-of-range resolution,
                 // gives NULL; only the cell limit fails the query.
                 Err(
                     PolygonToCellsError::InvalidGeometry(_)
                     | PolygonToCellsError::InvalidResolution(_),
                 ) => Ok(None),
-                Err(e) => exec_err!("{NAME}: {e}"),
+                Err(e) => exec_err!("{name}: {e}"),
             }
         };
         let rows: Vec<Result<Option<Vec<u64>>>> = if geometry.len() > 1 {

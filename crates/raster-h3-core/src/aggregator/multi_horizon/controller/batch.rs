@@ -99,6 +99,9 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             sampling,
             bbox,
             apply_scale_offset,
+            emit_nodata,
+            histogram_bins,
+            run_profile,
             nodata,
             eviction_space,
             resolution_shards,
@@ -114,6 +117,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             finished_sets,
             ..
         } = self;
+        let run_profile = run_profile.as_deref();
         let (kernel, mosaic, grid, resolutions, resolution_u8s, sampling, eviction_space) = (
             &*kernel,
             mosaic,
@@ -132,6 +136,8 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             let (tile_idx, chunk, samples, stride, overlap) = &job;
             let tile = &mosaic.tiles[*tile_idx];
             let scope = super::super::profile::WorkerScope::new();
+            // Telemetry is per window: one check here, clock reads only when asked for.
+            let timer = run_profile.map(|_| crate::run_profile::PhaseTimer::start());
             let start = std::time::Instant::now();
             let window = WalkContext {
                 chunk,
@@ -151,6 +157,8 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                     &[]
                 },
                 alpha_sample: tile.reader.metadata.alpha_sample,
+                emit_nodata: *emit_nodata,
+                histogram_bins: histogram_bins.as_deref(),
             };
             kernel.process_window(
                 &window,
@@ -159,6 +167,18 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                 maps,
             );
             active.fetch_sub(1, Ordering::Relaxed);
+            if let (Some(profile), Some(timer)) = (run_profile, timer) {
+                use crate::run_profile::{Counter, Phase};
+                timer.stop(profile, Phase::Kernel);
+                let pixels = u64::from(chunk.width) * u64::from(chunk.height);
+                profile.count(Counter::PixelsRead, pixels);
+                if !cfg!(feature = "stream-profile") {
+                    let samples = pixels * sampling.points.len() as u64;
+                    let (crs_ns, index_ns) = estimate_sample_costs(&window);
+                    profile.add(Phase::KernelCrs, (crs_ns * samples as f64) as u64, None);
+                    profile.add(Phase::KernelIndex, (index_ns * samples as f64) as u64, None);
+                }
+            }
             (scope.snapshot(), start.elapsed().as_nanos() as u64)
         };
         let compute_keys = |cells: &[(usize, u64)]| -> Vec<CellKeys> {
@@ -303,4 +323,49 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         }
         Ok(())
     }
+}
+
+/// Nanoseconds one sample of `window` costs to transform to WGS84 and to index at every
+/// resolution, timed on a few pixel centres spread over the window. Only run for a scan
+/// with a runtime profile; the scan itself often does better per sample (row caches,
+/// runs of pixels sharing a cell), so these are upper estimates.
+fn estimate_sample_costs(window: &WalkContext<'_>) -> (f64, f64) {
+    const PROBES: u32 = 16;
+    let chunk = window.chunk;
+    let mut located = [(0.0f64, 0.0f64); PROBES as usize];
+    let mut found = 0usize;
+    // One untimed pass first: the scan's own samples run with warm caches.
+    for i in 0..PROBES {
+        let t = (f64::from(i) + 0.5) / f64::from(PROBES);
+        let col = f64::from(chunk.col_offset) + t * f64::from(chunk.width);
+        let row = f64::from(chunk.row_offset) + t * f64::from(chunk.height);
+        let (x, y) = window.gt.pixel_to_coord(col, row);
+        if let Ok((lon, lat)) = window.crs.transform_point(x, y) {
+            for &res in window.resolution_u8s {
+                std::hint::black_box(window.grid.cell_at(lat, lon, res));
+            }
+        }
+    }
+    let start = std::time::Instant::now();
+    for i in 0..PROBES {
+        let t = (f64::from(i) + 0.5) / f64::from(PROBES);
+        let col = f64::from(chunk.col_offset) + t * f64::from(chunk.width);
+        let row = f64::from(chunk.row_offset) + t * f64::from(chunk.height);
+        let (x, y) = window.gt.pixel_to_coord(col, row);
+        if let Ok((lon, lat)) = window.crs.transform_point(x, y) {
+            located[found] = (lon, lat);
+            found += 1;
+        }
+    }
+    let crs_ns = start.elapsed().as_nanos() as f64 / f64::from(PROBES);
+    if found == 0 {
+        return (crs_ns, 0.0);
+    }
+    let start = std::time::Instant::now();
+    for &(lon, lat) in &located[..found] {
+        for &res in window.resolution_u8s {
+            std::hint::black_box(window.grid.cell_at(lat, lon, res));
+        }
+    }
+    (crs_ns, start.elapsed().as_nanos() as f64 / found as f64)
 }

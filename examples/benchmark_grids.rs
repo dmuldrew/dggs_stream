@@ -14,6 +14,7 @@ use raster_h3::core::aggregator::multi_horizon::{
 };
 use raster_h3::core::grid::GridKind;
 use raster_h3::core::raster::geotiff::GeoTiffStreamReader;
+use raster_h3::core::resolution::area_matched_resolution;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -22,16 +23,6 @@ const DATASETS: [(&str, &str, bool); 2] = [
     ("CFL (continuous)", "data/CFL_HI.tif", false),
     ("FBFM40 (categorical)", "data/LF2024_FBFM40_HI.tif", true),
 ];
-
-/// The resolution of `grid` whose mean cell area is closest (in ratio) to `area_m2`.
-fn area_matched_resolution(grid: GridKind, area_m2: f64) -> u8 {
-    (0..=grid.max_resolution())
-        .min_by(|&a, &b| {
-            let off = |r: u8| (grid.area_m2(r) / area_m2).ln().abs();
-            off(a).total_cmp(&off(b))
-        })
-        .unwrap()
-}
 
 /// Peak resident set size of this process in bytes.
 #[cfg(unix)]

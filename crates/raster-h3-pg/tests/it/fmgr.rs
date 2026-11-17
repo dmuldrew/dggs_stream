@@ -2,6 +2,7 @@
 //! stand-ins in [`server`]: text/bytea scalars and the categorical/continuous
 //! value-per-call SRFs, compared with `h3o` and core readers.
 
+mod grids;
 mod server;
 
 use std::collections::BTreeMap;

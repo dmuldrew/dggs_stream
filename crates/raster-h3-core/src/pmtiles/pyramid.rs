@@ -1,6 +1,6 @@
 //! Web Mercator tile pyramid coordinate math and bounding boxes for PMTiles v3.
 
-use crate::grid::GridKind;
+use crate::grid::{GridKind, ZoomModel};
 use crate::pmtiles::mvt::MercatorPoint;
 use h3o::{CellIndex, LatLng};
 
@@ -209,24 +209,16 @@ pub fn cell_boundary_mercator_for(
     grid: GridKind,
     cell_u64: u64,
 ) -> Option<([MercatorPoint; 10], usize)> {
-    match grid {
-        GridKind::H3 => {
-            let cell = CellIndex::try_from(cell_u64).ok()?;
-            Some(cell_boundary_mercator(cell))
-        }
-        _ => {
-            let mut verts = [(0.0, 0.0); 10];
-            let count = grid.boundary_lng_lat(cell_u64, &mut verts);
-            if count == 0 {
-                return None;
-            }
-            let mut arr = [MercatorPoint { x: 0.0, y: 0.0 }; 10];
-            for (i, &(lng, lat)) in verts[..count].iter().enumerate() {
-                arr[i] = MercatorPoint::from_lat_lng(lat, lng);
-            }
-            Some((arr, count))
-        }
+    let mut verts = [(0.0, 0.0); 10];
+    let count = grid.boundary_lng_lat(cell_u64, &mut verts);
+    if count == 0 {
+        return None;
     }
+    let mut arr = [MercatorPoint { x: 0.0, y: 0.0 }; 10];
+    for (i, &(lng, lat)) in verts[..count].iter().enumerate() {
+        arr[i] = MercatorPoint::from_lat_lng(lat, lng);
+    }
+    Some((arr, count))
 }
 
 /// Accumulates exact WGS84 vertex bounds across H3 cells with polar and antimeridian awareness.
@@ -315,45 +307,36 @@ impl Wgs84BoundsAccumulator {
     /// Record a cell's center and boundary vertices for `grid`.
     #[inline]
     pub fn record_cell_for(&mut self, grid: GridKind, cell_u64: u64) {
-        match grid {
-            GridKind::H3 => {
-                if let Ok(cell) = CellIndex::try_from(cell_u64) {
-                    self.record_cell(cell);
-                }
-            }
-            _ => {
-                let Some((c_lat, c_lng)) = grid.center_lat_lng(cell_u64) else {
-                    return;
-                };
-                let mut verts = [(0.0, 0.0); 10];
-                let count = grid.boundary_lng_lat(cell_u64, &mut verts);
-                if count == 0 {
-                    return;
-                }
-                self.count += 1;
-                let pole = grid.interior_pole(cell_u64);
-                let is_north_pole = pole == Some(true);
-                let is_south_pole = pole == Some(false);
-                if is_north_pole {
-                    self.max_lat = 90.0;
-                    self.full_lon = true;
-                }
-                if is_south_pole {
-                    self.min_lat = -90.0;
-                    self.full_lon = true;
-                }
-                self.observe_point(c_lng, c_lat);
-                let mut cell_min_lng = f64::INFINITY;
-                let mut cell_max_lng = f64::NEG_INFINITY;
-                for &(lng, lat) in &verts[..count] {
-                    self.observe_point(lng, lat);
-                    cell_min_lng = cell_min_lng.min(lng);
-                    cell_max_lng = cell_max_lng.max(lng);
-                }
-                if !is_north_pole && !is_south_pole && (cell_max_lng - cell_min_lng > 180.0) {
-                    self.crosses_antimeridian = true;
-                }
-            }
+        let Some((c_lat, c_lng)) = grid.center_lat_lng(cell_u64) else {
+            return;
+        };
+        let mut verts = [(0.0, 0.0); 10];
+        let count = grid.boundary_lng_lat(cell_u64, &mut verts);
+        if count == 0 {
+            return;
+        }
+        self.count += 1;
+        let pole = grid.interior_pole(cell_u64);
+        let is_north_pole = pole == Some(true);
+        let is_south_pole = pole == Some(false);
+        if is_north_pole {
+            self.max_lat = 90.0;
+            self.full_lon = true;
+        }
+        if is_south_pole {
+            self.min_lat = -90.0;
+            self.full_lon = true;
+        }
+        self.observe_point(c_lng, c_lat);
+        let mut cell_min_lng = f64::INFINITY;
+        let mut cell_max_lng = f64::NEG_INFINITY;
+        for &(lng, lat) in &verts[..count] {
+            self.observe_point(lng, lat);
+            cell_min_lng = cell_min_lng.min(lng);
+            cell_max_lng = cell_max_lng.max(lng);
+        }
+        if !is_north_pole && !is_south_pole && (cell_max_lng - cell_min_lng > 180.0) {
+            self.crosses_antimeridian = true;
         }
     }
 
@@ -553,49 +536,31 @@ pub fn zoom_band_extent(bands: &[Option<(u8, u8)>]) -> Option<(u8, u8)> {
 /// Estimate maximum radius (in WGS84 degrees) of an H3 hexagon at resolution res.
 /// Provides >= 8% headroom over empirical max(center_lat - true_south_lat) for h3o.
 pub fn max_hex_radius_deg(res: u8) -> f64 {
-    match res {
-        0 => 13.5,
-        1 => 5.2,
-        2 => 1.95,
-        3 => 0.74,
-        4 => 0.28,
-        5 => 0.106,
-        6 => 0.04,
-        7 => 0.015,
-        8 => 0.006,
-        9 => 0.0025,
-        10 => 0.001,
-        11 => 0.0004,
-        12 => 0.00015,
-        13 => 0.00006,
-        14 => 0.000025,
-        _ => 0.00001,
-    }
+    max_cell_radius_deg(GridKind::H3, res.min(GridKind::H3.max_resolution()))
 }
 
 /// Default mapping from grid resolution to Web Mercator zoom level
 pub fn grid_res_to_zoom(grid: GridKind, res: u8) -> u8 {
-    match grid {
-        GridKind::H3 => h3_res_to_zoom(res),
-        // One zoom per level: a tile then holds roughly 6 (S2) to 15 (A5) cells.
-        _ => res.min(24),
+    match grid.spec().zoom {
+        ZoomModel::Aperture7Table => h3_res_to_zoom(res),
+        ZoomModel::OnePerLevel { max_zoom } => res.min(max_zoom),
     }
 }
 
 /// Determine the optimal grid resolution for a given Web Mercator zoom level
 pub fn grid_res_for_zoom(grid: GridKind, zoom: u8) -> u8 {
-    match grid {
-        GridKind::H3 => h3_res_for_zoom(zoom),
-        _ => zoom.min(grid.max_resolution()),
+    match grid.spec().zoom {
+        ZoomModel::Aperture7Table => h3_res_for_zoom(zoom),
+        ZoomModel::OnePerLevel { .. } => zoom.min(grid.max_resolution()),
     }
 }
 
 /// Map a grid resolution to the continuous range of Web Mercator zoom levels it covers
 pub fn zooms_for_grid_res(grid: GridKind, res: u8, min_res: u8) -> Vec<u8> {
-    match grid {
-        GridKind::H3 => zooms_for_h3_res(res, min_res),
-        _ => {
-            let z = res.min(24);
+    match grid.spec().zoom {
+        ZoomModel::Aperture7Table => zooms_for_h3_res(res, min_res),
+        ZoomModel::OnePerLevel { max_zoom } => {
+            let z = res.min(max_zoom);
             if res == min_res {
                 (0..=z).collect()
             } else {
@@ -605,22 +570,10 @@ pub fn zooms_for_grid_res(grid: GridKind, res: u8, min_res: u8) -> Vec<u8> {
     }
 }
 
-/// Estimate maximum radius (in WGS84 degrees) of a cell on `grid` at resolution `res`.
+/// Estimate maximum radius (in WGS84 degrees) of a cell on `grid` at resolution `res`:
+/// a bound on how far north or south of its centre the cell reaches.
 pub fn max_cell_radius_deg(grid: GridKind, res: u8) -> f64 {
-    match grid {
-        GridKind::H3 => max_hex_radius_deg(res),
-        GridKind::A5 => match res {
-            // Measured extents are 37.5, 21.5 and 11.5 degrees, then halve per level.
-            0 => 42.0,
-            1 => 23.0,
-            r => 12.5 * 0.5_f64.powi(i32::from(r - 2)),
-        },
-        // S2's maximum cell diagonal is 2.44 rad / 2^level; half of it is 70 degrees.
-        GridKind::S2 => 70.0 * 0.5_f64.powi(i32::from(res)),
-        // A polar base cell reaches 48 degrees from its centre; cells halve per depth
-        // but stretch near the polar-cap boundary.
-        GridKind::Healpix => 60.0 * 0.5_f64.powi(i32::from(res)),
-    }
+    grid.spec().max_cell_radius_deg(res)
 }
 
 #[cfg(test)]

@@ -139,6 +139,17 @@ pub trait RecordStreamer {
     fn grid(&self) -> GridKind {
         GridKind::H3
     }
+
+    /// How serializers turn this stream's cells into output values (NoData policy and
+    /// value, decimal rounding).
+    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        crate::aggregator::output_policy::OutputPolicy::default()
+    }
+
+    /// The runtime profile serializers of this stream report into, if any.
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        None
+    }
 }
 
 /// Generic single-pass streaming aggregator across multiple grid resolutions
@@ -151,6 +162,16 @@ pub struct MultiHorizonStreamer<K: HorizonStreamKernel> {
     resolution_u8s: Vec<u8>,
     nodata: Option<f64>,
     apply_scale_offset: bool,
+    /// `NodataPolicy::Emit`: the kernels also walk NoData pixels.
+    emit_nodata: bool,
+    /// Bins of a binned histogram scan (see `WalkContext::histogram_bins`).
+    histogram_bins: Option<Arc<crate::histogram::HistogramBins>>,
+    /// NoData policy, NoData value and rounding for serializers of this stream.
+    output_policy: crate::aggregator::output_policy::OutputPolicy,
+    /// Runtime telemetry of this scan, if asked for.
+    run_profile: Option<Arc<crate::run_profile::RunProfile>>,
+    /// Whether the stage totals have been copied into `run_profile`.
+    profile_published: bool,
     /// Shared total that transform failures are also added to.
     transform_failure_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// Fail on the first wave that drops a sample to a transform failure.
@@ -231,6 +252,11 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         self.grid
     }
 
+    /// How serializers turn this stream's cells into output values.
+    pub fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.output_policy
+    }
+
     /// Target resolution integer levels
     pub fn resolution_u8s(&self) -> &[u8] {
         &self.resolution_u8s
@@ -255,6 +281,59 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
     /// Stage timings and counters for this stream
     pub fn metrics(&self) -> &super::profile::StreamProfile {
         &self.metrics
+    }
+
+    /// The runtime profile this stream reports into, if any.
+    pub fn run_profile(&self) -> Option<&Arc<crate::run_profile::RunProfile>> {
+        self.run_profile.as_ref()
+    }
+
+    /// Copy the stream's stage totals into its runtime profile. Called when the scan
+    /// ends (and by the stream wrappers when dropped early); later calls do nothing.
+    pub(crate) fn publish_profile(&mut self) {
+        use crate::run_profile::{Counter, Phase};
+        let Some(profile) = &self.run_profile else {
+            return;
+        };
+        if std::mem::replace(&mut self.profile_published, true) {
+            return;
+        }
+        let m = &self.metrics;
+        // Kernel wall time (and CPU, pixels and the split estimate) is added per
+        // window by the workers; the rest is known only here.
+        profile.add(Phase::Horizon, m.merge_ns, None);
+        profile.add(Phase::Spill, m.spill_ns, None);
+        profile.add(Phase::Stall, m.prefetch_wait_ns, None);
+        profile.count(Counter::Windows, m.jobs);
+        profile.count(Counter::TransformFailures, m.worker.transform_failures);
+        profile.count(
+            Counter::SpillRuns,
+            self.spill_runs.iter().map(|r| r.runs_written).sum(),
+        );
+        profile.count(
+            Counter::ForcedCompactionFlushes,
+            m.forced_compaction_flushes,
+        );
+        profile.peak(Counter::PeakActiveBytes, self.peak_active_bytes as u64);
+        profile.peak(Counter::PeakDecodedBytes, m.peak_decoded_bytes as u64);
+        profile.peak(Counter::PeakCompactionBytes, m.peak_compaction_bytes as u64);
+        if cfg!(feature = "stream-profile") {
+            // Exact per-sample timers replace the sampled estimates.
+            profile.mark_exact_kernel_split();
+            profile.add(Phase::KernelCrs, m.worker.transform_ns, None);
+            profile.add(Phase::KernelIndex, m.worker.h3_ns, None);
+        }
+    }
+
+    /// Stop reading chunks ahead. For a stream that will not be drained through the
+    /// horizon kernel (the transfer modes read the raster themselves).
+    pub(crate) fn stop_prefetch(&mut self) {
+        self.prefetcher.take();
+    }
+
+    /// The mosaic this stream reads, shared.
+    pub(crate) fn mosaic_arc(&self) -> Arc<MosaicReader> {
+        Arc::clone(&self.mosaic)
     }
 
     /// Drop the prefetcher as if it ended early, for failure-path tests.
@@ -417,6 +496,15 @@ impl<K: HorizonStreamKernel> RecordStreamer for MultiHorizonStreamer<K> {
     #[inline(always)]
     fn grid(&self) -> GridKind {
         self.grid
+    }
+
+    #[inline(always)]
+    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.output_policy
+    }
+
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        self.run_profile.clone()
     }
 }
 

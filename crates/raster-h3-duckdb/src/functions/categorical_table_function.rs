@@ -18,6 +18,7 @@ use crate::functions::partition_functions::{
 use crate::functions::raster_table::{self, add_geom_column, RasterTable, ScanContext};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
+use raster_h3_core::aggregator::output_policy::OutputPolicy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategoricalOutputFormat {
@@ -31,6 +32,9 @@ pub struct RasterH3CategoricalBindData {
     pub min_count: Option<f64>,
     pub min_majority_fraction: Option<f64>,
     pub remapper: Option<Arc<CategoryRemapper>>,
+    /// `histogram`, `histogram_weight` and `histogram_normalize`: what the `histogram`
+    /// column holds (see `raster_h3_core::histogram`).
+    pub histogram: Option<raster_h3_core::histogram::HistogramSpec>,
     /// `partition`: scan one partition of a plan (wide format), adding `partial_state`.
     pub partition: Option<ScanPartition>,
 }
@@ -46,6 +50,10 @@ pub struct RasterH3CategoricalGlobalData {
     pub emit_geom: bool,
     /// Column index of `partial_state` for a partitioned scan.
     pub partial_state_column: Option<usize>,
+    /// NoData policy and value, and decimal rounding, of the values written.
+    pub policy: OutputPolicy,
+    /// The histogram asked for; `None` writes the default JSON of class fractions.
+    pub histogram: Option<raster_h3_core::histogram::HistogramSpec>,
 }
 
 pub type RasterH3CategoricalLocalData = TableFunctionLocalData;
@@ -72,6 +80,11 @@ impl RasterTable for CategoricalTable {
             add_named_parameter(tf, "min_majority_fraction", DuckDBType::Double);
             add_named_parameter(tf, "geom", DuckDBType::Boolean);
             add_named_parameter(tf, "remap", DuckDBType::Varchar);
+            // The `histogram` column as a histogram spec asks: `values`, `N:min:max`
+            // or bin edges; `count` or `area` weights; `none`, `fraction` or `density`.
+            add_named_parameter(tf, "histogram", DuckDBType::Varchar);
+            add_named_parameter(tf, "histogram_weight", DuckDBType::Varchar);
+            add_named_parameter(tf, "histogram_normalize", DuckDBType::Varchar);
             add_named_parameter(tf, "partition", DuckDBType::Varchar);
         }
     }
@@ -99,6 +112,18 @@ impl RasterTable for CategoricalTable {
                 }
             },
             None => None,
+        };
+
+        let histogram = match raster_h3_core::histogram::HistogramSpec::from_options(
+            bind.get_named_string("histogram").as_deref(),
+            bind.get_named_string("histogram_weight").as_deref(),
+            bind.get_named_string("histogram_normalize").as_deref(),
+        ) {
+            Ok(histogram) => histogram,
+            Err(e) => {
+                bind.set_error(&e.to_string());
+                return None;
+            }
         };
 
         let partition = match parse_partition_param(bind) {
@@ -160,6 +185,7 @@ impl RasterTable for CategoricalTable {
             min_count,
             min_majority_fraction,
             remapper,
+            histogram,
             partition,
         })
     }
@@ -178,6 +204,12 @@ impl RasterTable for CategoricalTable {
         config.min_majority_fraction = bind.min_majority_fraction;
         config.remapper = bind.remapper.clone();
         config.partition = bind.partition.clone();
+        if let Some(histogram) = &bind.histogram {
+            config
+                .set_histogram(histogram.clone())
+                .map_err(|e| e.to_string())?;
+        }
+        let policy = config.output_policy();
 
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)
             .map_err(|e| format!("Failed to initialize categorical streamer: {}", e))?;
@@ -185,6 +217,8 @@ impl RasterTable for CategoricalTable {
         // Long-format columns 7/8 are the entropy aliases.
         let with_entropy = projected_columns.iter().any(|&c| c == 7 || c == 8);
         Ok(RasterH3CategoricalGlobalData {
+            policy,
+            histogram: bind.histogram.clone(),
             grid: bind.common.grid,
             streamer: Mutex::new(streamer),
             record_queue: ConcurrentRecordQueue::new(),
@@ -279,8 +313,14 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
                 ),
                 7 => {
                     let mut hist_buf = String::with_capacity(256);
+                    let mut entries = Vec::new();
                     for (i, rec) in batch.iter().enumerate() {
-                        rec.accumulator.histogram_json_into(&mut hist_buf);
+                        match &global.histogram {
+                            Some(spec) => {
+                                spec.json_into(&rec.accumulator, &mut entries, &mut hist_buf)
+                            }
+                            None => rec.accumulator.histogram_json_into(&mut hist_buf),
+                        }
                         writer.set_string_bytes(out_idx, i, hist_buf.as_bytes());
                     }
                 }
@@ -297,15 +337,22 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
 
         if out_maj_cls.is_some() || out_maj_frac.is_some() || out_maj_cnt.is_some() {
             for (i, rec) in batch.iter().enumerate() {
-                let (maj_cls, maj_cnt, maj_frac) = rec.accumulator.majority();
+                let stats = global.policy.categorical(&rec.accumulator);
                 if let Some(col) = out_maj_cls {
-                    writer.set_int64(col, i, maj_cls);
+                    // A cell without samples: the NoData class, or NULL.
+                    match stats.majority_class {
+                        Some(class) => writer.set_int64(col, i, class),
+                        None => {
+                            writer.set_int64(col, i, 0);
+                            writer.set_null(col, i);
+                        }
+                    }
                 }
                 if let Some(col) = out_maj_frac {
-                    writer.set_double(col, i, maj_frac);
+                    writer.set_double(col, i, stats.majority_fraction);
                 }
                 if let Some(col) = out_maj_cnt {
-                    writer.set_double(col, i, maj_cnt);
+                    writer.set_double(col, i, stats.majority_count);
                 }
             }
         }
@@ -324,7 +371,7 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
 
         if out_shannon.is_some() || out_entropy.is_some() {
             for (i, rec) in batch.iter().enumerate() {
-                let ent = rec.accumulator.shannon_entropy();
+                let ent = global.policy.round(rec.accumulator.shannon_entropy());
                 if let Some(col) = out_shannon {
                     writer.set_double(col, i, ent);
                 }
@@ -434,10 +481,18 @@ unsafe fn scan_long(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
                 }
                 2 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.category)),
                 3 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.count)),
-                4 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.fraction)),
+                4 => writer.fill_column(
+                    out_idx,
+                    num_taken,
+                    rows.iter().map(|r| global.policy.round(r.fraction)),
+                ),
                 5 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.total_count)),
                 6 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.resolution)),
-                7 | 8 => writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.entropy)),
+                7 | 8 => writer.fill_column(
+                    out_idx,
+                    num_taken,
+                    rows.iter().map(|r| global.policy.round(r.entropy)),
+                ),
                 9 | 10 => {
                     writer.fill_column(out_idx, num_taken, rows.iter().map(|r| r.distinct_classes))
                 }

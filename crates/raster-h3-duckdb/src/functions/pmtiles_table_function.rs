@@ -130,9 +130,13 @@ unsafe fn pmtiles_bind_for<const GRID: u8>(info: duckdb_bind_info) {
             let Some(grid) = bind.parse_grid(default_grid) else {
                 return;
             };
-            let resolutions = bind.parse_resolutions_for(grid, 8, None);
             let band = bind.get_named_int("band").unwrap_or(1).max(1) as usize;
             let source_crs = bind.parse_source_crs();
+            let Some(resolutions) =
+                bind.resolve_resolutions_for(grid, 8, None, &file_path, source_crs.as_deref())
+            else {
+                return;
+            };
             let custom_nodata = bind.get_named_double("nodata");
             let scale_offset = bind.parse_scale_offset();
             let Some(sampling) = bind.parse_sampling() else {

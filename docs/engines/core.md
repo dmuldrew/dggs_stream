@@ -138,6 +138,64 @@ The subtype counters are disjoint subsets of `waves`. Serial execution and the
 helper-thread bridge avoid Rayon work-stealing deadlocks when callers hold locks.
 `stream-profile` additionally enables hot-path per-sample worker counters and timers.
 
+### Histograms
+
+`MultiResolutionConfig::set_histogram(HistogramSpec)` asks a categorical scan for a
+structured per-cell histogram. `HistogramBins::Values` keeps one class per pixel value;
+`HistogramBins::uniform(n, min, max)` and `HistogramBins::edges(...)` bin the calibrated
+values of a continuous raster, and the scan's classes are then bin indices (so
+`majority_class` is the fullest bin). A bin holds `lower <= v < upper`, the last one
+also its upper edge; values outside the edges are not counted. `HistogramWeight::Area`
+weights each pixel by the area of the cell it covers, in pixels, and runs the `overlay`
+transfer mode; `HistogramNormalize` scales a cell's weights to fractions or densities.
+
+```rust
+let mut config = MultiResolutionConfig::single(8);
+config.set_histogram(HistogramSpec {
+    bins: HistogramBins::uniform(10, 0.0, 100.0)?,
+    weight: HistogramWeight::Count,
+    normalize: HistogramNormalize::Fraction,
+})?;
+let reader = CategoricalBatchReader::open(&paths, &config, CategoricalFormat::Wide, None, 8192, None)?;
+// reader.schema(): `histogram` is `ArrowDataType::BinHistogram`,
+// List<Struct<lower, upper, weight>>, exported as such through the Arrow C interface.
+```
+
+`HistogramSpec::entries(&record.accumulator)` gives the same entries from a streamer's
+records. Occupied bins are counters in the horizon maps like classes are, so memory
+stays bounded by the cells open at once; a spec takes at most 4096 bins. Histograms are
+not combinable with partitions, or (when binned) with a category remap.
+
+### Runtime profile
+
+`MultiResolutionConfig::profile` takes an `Arc<run_profile::RunProfile>`; it needs no
+Cargo feature and works in release builds. A scan given one records, per chunk, window
+and batch (never per pixel), wall time summed over worker threads and thread CPU time
+where the platform has per-thread clocks, for `fetch`, `tiff_decode`, `kernel`,
+`horizon` (with `spill`), `stall` (the calling thread waiting for decoded chunks) and
+`serialize` (Parquet / PMTiles writers), plus pixels read, samples indexed, cells,
+chunks, spill runs, forced compaction flushes and peak bytes. A scan without a profile
+reads no clocks for it.
+
+```rust
+let profile = RunProfile::new();
+config.profile = Some(Arc::clone(&profile));
+// ... run the stream to its end ...
+let report = profile.report();          // also `report.to_json()`, `report.phase("kernel")`
+eprintln!("{report}");
+```
+
+On the pixel-centre path the kernel's time is split into `crs_transform`, `grid_index`
+and `accumulate`. Without `stream-profile` the split is an upper estimate from a few
+probed pixels per window, scaled by the share of pixels indexed; when the estimate
+exceeds the kernel's measured time only the `crs_transform` : `grid_index` ratio is
+reported. `sample` and `overlay` report the kernel whole.
+
+The same report is available as `raster-h3 ... --profile` (stderr), Python
+`raster_h3.profile_raster(...)`, DuckDB `profile := true` (stderr, and
+`run_profile::last_report()` for embedders) and `with_profile(...)` on the DataFusion /
+Sedona table providers.
+
 Prefer local profiling on stable hardware for performance comparisons. Run the
 hotspot harness with:
 

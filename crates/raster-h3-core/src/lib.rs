@@ -16,6 +16,7 @@ pub mod encoding;
 pub mod error;
 /// Configurable DGGS grid backends (H3, A5, S2 and HEALPix).
 pub mod grid;
+pub mod histogram;
 /// Native Parquet and GeoParquet streaming export.
 pub mod parquet;
 /// Direct PMTiles v3 vector tile export with MVT encoding.
@@ -24,14 +25,21 @@ pub mod pmtiles;
 mod polygon_fill;
 /// GeoTIFF file decoding, metadata extraction, and chunked raster I/O.
 pub mod raster;
+/// Resolution selection, including `auto` (cells matched to the pixel size).
+pub mod resolution;
+/// Opt-in runtime telemetry of a scan, by pipeline phase.
+pub mod run_profile;
 /// Engine-neutral grid scalar and utility operations (H3, A5, S2, HEALPix).
 pub mod scalar_ops;
 /// Cross-format dataset transcoding pipelines (e.g. Parquet to PMTiles).
 pub mod transcode;
+/// Transfer modes: how pixels map onto cells (`assign_centers`, `sample`, `overlay`).
+pub mod transfer;
 
 pub use a5;
-pub use grid::{GridBackend, GridKind, MAX_GRID_RESOLUTIONS};
+pub use grid::{GridBackend, GridKind, GridSpec, MAX_GRID_RESOLUTIONS};
 pub use h3o;
 pub use h3o::{CellIndex, LatLng, Resolution};
 pub use healpix;
+pub use resolution::ResolutionSpec;
 pub use s2;

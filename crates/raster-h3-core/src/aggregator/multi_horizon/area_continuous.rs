@@ -220,8 +220,6 @@ mod tests {
         ] {
             let ctx = WalkContext {
                 chunk: &chunk,
-                grid: crate::grid::GridKind::H3,
-                resolution_u8s: &[],
                 resolutions: &resolutions,
                 crs: &crs,
                 gt: &gt,
@@ -232,6 +230,10 @@ mod tests {
                 owner: None,
                 band_scaling: &[],
                 alpha_sample: None,
+                emit_nodata: false,
+                histogram_bins: None,
+                grid: crate::grid::GridKind::H3,
+                resolution_u8s: &[],
             };
             let maps = aggregate_wgs84_area_window(&ctx, &[10.0_f64, 30.0], None, 4326).unwrap();
             for map in &maps {
@@ -272,8 +274,6 @@ mod tests {
         let sampling = SamplingPattern::center();
         let ctx = WalkContext {
             chunk: &chunk,
-            grid: crate::grid::GridKind::H3,
-            resolution_u8s: &[],
             resolutions: &resolutions,
             crs: &crs,
             gt: &gt,
@@ -284,6 +284,10 @@ mod tests {
             owner: None,
             band_scaling: &[],
             alpha_sample: None,
+            emit_nodata: false,
+            histogram_bins: None,
+            grid: crate::grid::GridKind::H3,
+            resolution_u8s: &[],
         };
         assert!(aggregate_wgs84_area_window(&ctx, &[1.0_f64], None, 4269).is_err());
         assert!(aggregate_wgs84_area_window::<f64>(&ctx, &[], None, 4326).is_err());

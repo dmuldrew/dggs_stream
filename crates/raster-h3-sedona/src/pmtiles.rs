@@ -11,16 +11,20 @@
 //! ) TO 'dem.pmtiles' OPTIONS (min_zoom 5, max_zoom 11);
 //! ```
 //!
-//! - The H3 column is `h3_column` if given, else the first of `h3_index`, `h3_hex`, `h3`,
+//! - Cells of every grid are written: the grid is the `grid` option if given, else the one
+//!   the cell column is named for (`a5_index`, `s2_hex`, `healpix_index`, ...), else H3.
+//! - The cell column is `cell_column` (or `h3_column`) if given, else the first of
+//!   `{h3,a5,s2,healpix}_{index,hex}`, a bare grid name,
 //!   `cell` or `hex`, else the first column. It may be `UInt64`, `Int64` (the same 64 bits,
 //!   as PostgreSQL and Spark store it) or a hex string. Rows where it is NULL are skipped;
-//!   any other value that is not a valid H3 cell fails the write.
+//!   any other value that is not a valid cell of the grid fails the write.
 //! - Every other column becomes a feature property under its own name. Integers, floats,
 //!   booleans and strings are written natively; binary columns (such as the `wkb`
 //!   geometry) are left out, since the feature already is the cell's polygon; other types
 //!   (dates, decimals, ...) are written as their string form. NULL values are omitted.
-//! - Options: `h3_column`, `min_zoom` / `max_zoom` (keep only cells whose PMTiles zoom,
-//!   derived from their H3 resolution, is in range) and `memory_budget_mb` (default 256).
+//! - Options: `cell_column` (or `h3_column`), `grid`, `min_zoom` / `max_zoom` (keep only
+//!   cells whose PMTiles zoom, derived from their resolution, is in range) and
+//!   `memory_budget_mb` (default 256).
 //!
 //! Rows go through [`ExternalFeatureExport`], which buffers up to the memory budget and
 //! external-sorts beyond it, so any number of rows in any order is written with bounded
@@ -65,19 +69,40 @@ use datafusion::physical_expr::LexRequirement;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use futures::StreamExt;
+use raster_h3_core::encoding::parse_hex_u64;
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::pmtiles::features::H3Feature;
 use raster_h3_core::pmtiles::mvt::MvtValue;
+use raster_h3_core::pmtiles::pyramid::grid_res_to_zoom;
+#[cfg(test)]
 use raster_h3_core::pmtiles::pyramid::h3_res_to_zoom;
 use raster_h3_core::pmtiles::{
     ExternalFeatureExport, PmtilesExportSummary, DEFAULT_EXPORT_MEMORY_BUDGET,
 };
-use raster_h3_core::scalar_ops::{h3_get_resolution, h3_is_valid_u64, string_to_h3};
 
 /// The file extension, and the name `STORED AS` takes (case-insensitive).
 pub const PMTILES_EXTENSION: &str = "pmtiles";
 
-/// Column names tried, in order, when no `h3_column` is given.
-const H3_COLUMN_NAMES: [&str; 5] = ["h3_index", "h3_hex", "h3", "cell", "hex"];
+/// Grid-neutral column names tried, after every grid's own, when no cell column is given.
+const NEUTRAL_COLUMN_NAMES: [&str; 2] = ["cell", "hex"];
+
+/// The cell column of `fields` when none is named: the first of `{grid}_index`,
+/// `{grid}_hex` and `{grid}` of `grids` (in that order of grids), then `cell` or `hex`.
+fn detect_cell_column(fields: &arrow::datatypes::Fields, grids: &[GridKind]) -> Option<usize> {
+    let position = |name: &str| {
+        fields
+            .iter()
+            .position(|f| f.name().eq_ignore_ascii_case(name))
+    };
+    grids
+        .iter()
+        .find_map(|g| {
+            [g.index_column_name(), g.hex_column_name(), g.as_str()]
+                .into_iter()
+                .find_map(position)
+        })
+        .or_else(|| NEUTRAL_COLUMN_NAMES.into_iter().find_map(position))
+}
 
 /// Largest accepted `memory_budget_mb` (1 TiB), so the byte count cannot overflow.
 const MAX_MEMORY_BUDGET_MB: usize = 1 << 20;
@@ -91,10 +116,14 @@ const UPLOAD_CHUNK_BYTES: usize = 16 << 20;
 /// Options of a PMTiles write. `COPY ... OPTIONS (...)` sets them by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmtilesWriteOptions {
-    /// The H3 column; `None` picks the first of `h3_index`, `h3_hex`, `h3`, `cell`, `hex`,
-    /// or the first column.
+    /// The cell column (of any grid, despite the name; the `cell_column` option sets it
+    /// too). `None` picks the first of `{h3,a5,s2,healpix}_{index,hex}`, a bare grid name,
+    /// `cell`, `hex`, or the first column.
     pub h3_column: Option<String>,
-    /// Drop cells whose PMTiles zoom (from their H3 resolution) is below this.
+    /// The grid the cells belong to. `None` takes it from the cell column's name
+    /// (`s2_index`, `healpix_hex`, ...), H3 if the name does not say.
+    pub grid: Option<GridKind>,
+    /// Drop cells whose PMTiles zoom (from their resolution) is below this.
     pub min_zoom: Option<u8>,
     /// Drop cells whose PMTiles zoom is above this.
     pub max_zoom: Option<u8>,
@@ -106,6 +135,7 @@ impl Default for PmtilesWriteOptions {
     fn default() -> Self {
         Self {
             h3_column: None,
+            grid: None,
             min_zoom: None,
             max_zoom: None,
             memory_budget_bytes: DEFAULT_EXPORT_MEMORY_BUDGET,
@@ -114,7 +144,8 @@ impl Default for PmtilesWriteOptions {
 }
 
 impl PmtilesWriteOptions {
-    /// Parse `COPY` options: `format.h3_column`, `format.min_zoom`, `format.max_zoom` and
+    /// Parse `COPY` options: `format.cell_column` (or `h3_column`), `format.grid`,
+    /// `format.min_zoom`, `format.max_zoom` and
     /// `format.memory_budget_mb` (DataFusion adds the `format.` prefix to un-namespaced
     /// keys). Other namespaces (such as `execution.`) belong to DataFusion and are ignored;
     /// unknown `format.` keys are refused.
@@ -137,7 +168,17 @@ impl PmtilesWriteOptions {
                     })
             };
             match name {
-                "h3_column" | "h3_col" => out.h3_column = Some(value.to_string()),
+                "h3_column" | "h3_col" | "cell_column" | "cell_col" => {
+                    out.h3_column = Some(value.to_string())
+                }
+                "grid" => {
+                    out.grid = Some(GridKind::parse(value).ok_or_else(|| {
+                        DataFusionError::Configuration(format!(
+                            "PMTiles option 'grid' must be {}, got '{value}'",
+                            GridKind::EXPECTED
+                        ))
+                    })?)
+                }
                 "min_zoom" => out.min_zoom = Some(number(MAX_ZOOM_OPTION.into())? as u8),
                 "max_zoom" => out.max_zoom = Some(number(MAX_ZOOM_OPTION.into())? as u8),
                 "memory_budget_mb" => {
@@ -149,7 +190,7 @@ impl PmtilesWriteOptions {
                 }
                 _ => {
                     return config_err!(
-                        "Unknown PMTiles option '{name}'; expected h3_column, min_zoom, max_zoom or memory_budget_mb"
+                        "Unknown PMTiles option '{name}'; expected cell_column (or h3_column), grid, min_zoom, max_zoom or memory_budget_mb"
                     )
                 }
             }
@@ -234,12 +275,18 @@ pub struct FeatureEncoder {
     h3_index: usize,
     h3_kind: H3Kind,
     h3_name: String,
+    grid: GridKind,
     properties: Vec<(usize, Cow<'static, str>, PropKind)>,
     options: PmtilesWriteOptions,
 }
 
 impl FeatureEncoder {
-    /// Resolve the H3 column and the property columns of `schema`.
+    /// The grid the cells are read as.
+    pub fn grid(&self) -> GridKind {
+        self.grid
+    }
+
+    /// Resolve the cell column, its grid and the property columns of `schema`.
     pub fn try_new(schema: &Schema, options: PmtilesWriteOptions) -> Result<Self> {
         options.validate()?;
         let fields = schema.fields();
@@ -262,15 +309,18 @@ impl FeatureEncoder {
                         names.join(", ")
                     ))
                 })?,
-            None => H3_COLUMN_NAMES
-                .iter()
-                .find_map(|candidate| {
-                    fields
-                        .iter()
-                        .position(|f| f.name().eq_ignore_ascii_case(candidate))
-                })
-                .unwrap_or(0),
+            // A given grid's own columns come first; otherwise any grid's, H3 first.
+            None => match options.grid {
+                Some(grid) => detect_cell_column(fields, &[grid]),
+                None => None,
+            }
+            .or_else(|| detect_cell_column(fields, &GridKind::ALL))
+            .unwrap_or(0),
         };
+        let grid = options
+            .grid
+            .or_else(|| GridKind::from_cell_column_name(fields[h3_index].name()))
+            .unwrap_or(GridKind::H3);
         let h3_field = &fields[h3_index];
         let h3_kind = match h3_field.data_type() {
             DataType::UInt64 => H3Kind::UInt64,
@@ -304,6 +354,7 @@ impl FeatureEncoder {
             h3_index,
             h3_kind,
             h3_name: h3_field.name().clone(),
+            grid,
             properties,
             options,
         })
@@ -375,7 +426,10 @@ impl FeatureEncoder {
             let Some(cell) = self.cell_at(h3_col, row)? else {
                 continue;
             };
-            let zoom = h3_res_to_zoom(h3_get_resolution(cell) as u8);
+            let Some(res) = self.grid.resolution(cell) else {
+                continue;
+            };
+            let zoom = grid_res_to_zoom(self.grid, res);
             if !self.options.keeps_zoom(zoom) {
                 continue;
             }
@@ -410,15 +464,16 @@ impl FeatureEncoder {
             }
             H3Kind::Hex => {
                 let s = string_at(col.as_ref(), row).unwrap_or_default();
-                (string_to_h3(s.trim()), format!("'{s}'"))
+                (parse_hex_u64(s.trim()).unwrap_or(0), format!("'{s}'"))
             }
         };
-        if h3_is_valid_u64(cell) {
+        if self.grid.is_valid(cell) {
             Ok(Some(cell))
         } else {
             Err(DataFusionError::Execution(format!(
-                "PMTiles H3 column '{}': {shown} is not a valid H3 cell",
-                self.h3_name
+                "PMTiles {label} column '{}': {shown} is not a valid {label} cell",
+                self.h3_name,
+                label = self.grid.label()
             )))
         }
     }
@@ -491,6 +546,7 @@ where
 
 fn new_exporter(encoder: &FeatureEncoder) -> ExternalFeatureExport {
     ExternalFeatureExport::new(encoder.options.memory_budget_bytes, None)
+        .with_grid(encoder.grid)
         .with_layer_fields(encoder.layer_fields())
         .with_zoom_limits(encoder.options.min_zoom, encoder.options.max_zoom)
 }
@@ -502,6 +558,9 @@ pub async fn write_pmtiles(df: DataFrame, path: &str, options: PmtilesWriteOptio
     let mut map = HashMap::new();
     if let Some(col) = &options.h3_column {
         map.insert("format.h3_column".to_string(), col.clone());
+    }
+    if let Some(grid) = options.grid {
+        map.insert("format.grid".to_string(), grid.to_string());
     }
     if let Some(z) = options.min_zoom {
         map.insert("format.min_zoom".to_string(), z.to_string());
@@ -1004,6 +1063,7 @@ mod tests {
             opts,
             PmtilesWriteOptions {
                 h3_column: Some("cell".into()),
+                grid: None,
                 min_zoom: Some(4),
                 max_zoom: Some(9),
                 memory_budget_bytes: 64 << 20,

@@ -537,7 +537,7 @@ fn parquet_to_pmtiles_bad_invocations() {
             "-o",
             s(&out),
         ],
-        "H3 column 'nope' not found",
+        "Cell column 'nope' not found",
     );
     let missing = dir.path().join("missing.parquet");
     run_err(

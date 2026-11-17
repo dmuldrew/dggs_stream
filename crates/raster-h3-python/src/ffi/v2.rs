@@ -10,6 +10,7 @@ use std::sync::Arc;
 use raster_h3_core::aggregator::multi_horizon::{plan_partitions, QuantileTarget};
 use raster_h3_core::columnar::{ArrowArrayStream, ArrowSchema};
 use raster_h3_core::error::RasterH3Error;
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader};
 
 use crate::ffi::args::{
@@ -206,6 +207,7 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
     unsafe {
         ffi_call("plan_partitions", out_err, || {
             let mut cfg = build_py_scan_config(
+                GridKind::H3,
                 path,
                 ptr::null(),
                 0,
@@ -310,6 +312,63 @@ pub unsafe extern "C" fn raster_h3_py_quantile_columns(
             let json = serde_json::to_string(&names)
                 .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
             Ok(CString::new(json).unwrap_or_default().into_raw())
+        })
+        .unwrap_or(ptr::null_mut())
+    }
+}
+
+/// Run the scan of [`raster_h3_py_scan_json_v2`] to completion, discarding its rows, and
+/// return where the time went: a JSON object with `rows` and `profile` (the fields of
+/// `raster_h3_core::run_profile::ProfileReport`: per-phase wall and CPU time, pixels read
+/// and indexed, cells, stalls, spill and compaction counters, peak bytes). Free the
+/// string with `raster_h3_py_free_string`.
+///
+/// # Safety
+/// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
+/// NULL or a writable `char **`.
+#[no_mangle]
+pub unsafe extern "C" fn raster_h3_py_profile_scan_v2(
+    path: *const c_char,
+    resolutions: *const c_char,
+    categorical: c_int,
+    format: *const c_char,
+    crs: *const c_char,
+    has_nodata: c_int,
+    nodata: f64,
+    bbox: *const c_char,
+    columns: *const c_char,
+    limit: i64,
+    options: *const c_char,
+    out_err: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: as for `raster_h3_py_scan_json_v2`.
+    unsafe {
+        ffi_call("profile_scan_v2", out_err, || {
+            let mut cfg = build_py_scan_config_v2(
+                path,
+                resolutions,
+                categorical,
+                format,
+                crs,
+                has_nodata,
+                nodata,
+                bbox,
+                columns,
+                limit,
+                options,
+            )?;
+            let profile = raster_h3_core::run_profile::RunProfile::new();
+            cfg.profile = Some(Arc::clone(&profile));
+            let (_, batches) = PyRasterScanner::new(cfg).batch_iter()?;
+            let mut rows = 0usize;
+            for batch in batches {
+                rows += batch?.num_rows;
+            }
+            // The iterator (and its stream) is dropped here, publishing the totals.
+            let json = serde_json::json!({ "rows": rows, "profile": profile.report() });
+            Ok(CString::new(json.to_string())
+                .unwrap_or_default()
+                .into_raw())
         })
         .unwrap_or(ptr::null_mut())
     }

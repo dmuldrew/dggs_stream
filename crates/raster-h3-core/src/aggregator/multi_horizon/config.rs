@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use crate::aggregator::remap::CategoryRemapper;
 use crate::aggregator::sampling::SamplingPattern;
 use crate::error::{RasterH3Error, Result};
@@ -322,6 +323,26 @@ pub struct MultiResolutionConfig {
     /// system (e.g. a database file-system layer). None uses mmap for local
     /// files and the built-in HTTP range client for remote URLs.
     pub remote_source_factory: Option<crate::raster::http_range::RemoteSourceFactory>,
+    /// Whether cells that received only NoData samples are output (default: omitted).
+    pub nodata_policy: NodataPolicy,
+    /// Under [`NodataPolicy::Emit`], the value the statistics of an all-NoData cell
+    /// take; `None` leaves them NULL.
+    pub emit_nodata_value: Option<f64>,
+    /// Round floating-point output statistics to this many decimals (at most
+    /// [`crate::aggregator::output_policy::MAX_DECIMALS`]); `None` leaves them as computed.
+    pub decimals: Option<u8>,
+    /// Collect runtime telemetry of the scan into this profile (see
+    /// [`crate::run_profile`]). `None` (the default) costs one check per chunk.
+    pub profile: Option<Arc<crate::run_profile::RunProfile>>,
+    /// How pixels are transferred onto cells: centre assignment (the default, the
+    /// single-pass horizon kernel), interpolation at cell centres, or an area-weighted
+    /// overlay. See [`crate::transfer`].
+    pub transfer: crate::transfer::TransferMode,
+    /// A per-cell histogram of a categorical scan: its classes (pixel values or bins),
+    /// the weight of a pixel and the scaling of the result. Set it with
+    /// [`Self::set_histogram`], which also picks the transfer mode area weights need.
+    /// See [`crate::histogram`].
+    pub histogram: Option<crate::histogram::HistogramSpec>,
     /// Stream only this part of the mosaic (see [`super::partition`]). Cells that other
     /// partitions may also hold samples for are emitted as unfiltered partial states for a
     /// later merge, so the stream must be drained with `drain_partitioned_into`.
@@ -363,6 +384,12 @@ impl MultiResolutionConfig {
             transform_failure_counter: None,
             strict_transforms: false,
             remote_source_factory: None,
+            nodata_policy: NodataPolicy::Omit,
+            emit_nodata_value: None,
+            decimals: None,
+            profile: None,
+            transfer: crate::transfer::TransferMode::AssignCenters,
+            histogram: None,
             partition: None,
         }
     }
@@ -376,6 +403,16 @@ impl MultiResolutionConfig {
     pub fn with_grid(mut self, grid: GridKind) -> Self {
         self.grid = grid;
         self
+    }
+
+    /// How finished cells are turned into output values: the NoData policy and value,
+    /// and the decimal rounding.
+    pub fn output_policy(&self) -> OutputPolicy {
+        OutputPolicy {
+            nodata: self.nodata_policy,
+            nodata_value: self.emit_nodata_value,
+            decimals: self.decimals,
+        }
     }
 
     /// Whether hierarchical 7-cell compaction is enabled (checking both new and legacy fields)
@@ -397,7 +434,34 @@ impl MultiResolutionConfig {
     /// and compaction is active, the child resolution (8) would emit parent cells (7) that collide
     /// and duplicate records from the requested parent resolution (7). Therefore, adjacent
     /// resolutions cannot be combined with hierarchical compaction.
+    /// Ask for a per-cell histogram. Area weights run the `overlay` transfer mode, so a
+    /// scan left on the default mode switches to it; `sample` is refused.
+    pub fn set_histogram(&mut self, spec: crate::histogram::HistogramSpec) -> Result<()> {
+        spec.validate()?;
+        self.transfer = spec.transfer_mode(self.transfer)?;
+        self.histogram = Some(spec);
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(spec) = &self.histogram {
+            spec.validate()?;
+            if spec.transfer_mode(self.transfer)? != self.transfer {
+                return Err(RasterH3Error::InvalidParameter(
+                    "histogram weight 'area' needs transfer 'overlay'".into(),
+                ));
+            }
+            if self.partition.is_some() {
+                return Err(RasterH3Error::InvalidParameter(
+                    "a histogram cannot be combined with a partition".into(),
+                ));
+            }
+            if spec.is_binned() && self.remapper.is_some() {
+                return Err(RasterH3Error::InvalidParameter(
+                    "a binned histogram cannot be combined with a category remap".into(),
+                ));
+            }
+        }
         if self.aggregation_budget_bytes < self.resolutions.len().max(1) * 64 * 1024 {
             return Err(RasterH3Error::InvalidParameter(
                 "aggregation budget must provide at least 64 KiB per resolution".into(),
@@ -436,6 +500,46 @@ impl MultiResolutionConfig {
             return Err(RasterH3Error::InvalidParameter(
                 "Resolutions list cannot be empty".to_string(),
             ));
+        }
+        if let Some(decimals) = self.decimals {
+            let max = crate::aggregator::output_policy::MAX_DECIMALS;
+            if decimals > max {
+                return Err(RasterH3Error::InvalidParameter(format!(
+                    "decimals must be between 0 and {max}, got {decimals}"
+                )));
+            }
+        }
+        if self.emit_nodata_value.is_some_and(|v| !v.is_finite()) {
+            return Err(RasterH3Error::InvalidParameter(
+                "emit_nodata_value must be finite; leave it unset for NULL".into(),
+            ));
+        }
+        if self.nodata_policy == NodataPolicy::Emit {
+            if self.should_compact_h3_children() {
+                return Err(RasterH3Error::InvalidParameter(
+                    "nodata_policy 'emit' cannot be combined with compaction: a parent of \
+                     empty and non-empty children has no single NoData state"
+                        .into(),
+                ));
+            }
+            if self.min_count.is_some_and(|c| c > 0.0) {
+                return Err(RasterH3Error::InvalidParameter(
+                    "nodata_policy 'emit' cannot be combined with min_count: all-NoData \
+                     cells have count 0"
+                        .into(),
+                ));
+            }
+            if self
+                .remapper
+                .as_ref()
+                .is_some_and(|r| r.targets(super::categorical::NODATA_CLASS))
+            {
+                return Err(RasterH3Error::InvalidParameter(format!(
+                    "nodata_policy 'emit' reserves class {} for NoData pixels; remap to \
+                     another class",
+                    super::categorical::NODATA_CLASS
+                )));
+            }
         }
         let max_res = self.grid.max_resolution();
         let grid_label = self.grid.label();

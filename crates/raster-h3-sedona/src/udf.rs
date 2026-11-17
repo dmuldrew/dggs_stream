@@ -12,18 +12,23 @@ use datafusion::logical_expr::{
     Volatility,
 };
 use raster_h3_core::columnar::ArrowDataType;
+use raster_h3_core::grid::GridKind;
 
 use crate::convert::{from_column_array, geometry_field, to_arrow_type, to_column_array};
 
 /// All `raster_h3` scalar functions, ready for `SessionContext::register_udf`: the
-/// [`scan`](crate::scan) H3 functions plus [`H3PolygonToCells`](crate::H3PolygonToCells).
+/// [`scan`](crate::scan) cell functions of every grid, plus
+/// [`H3PolygonToCells`](crate::H3PolygonToCells) and [`LonLatToCell`] for each grid.
 pub fn scalar_udfs() -> Vec<ScalarUDF> {
     default_scalar_udfs()
         .into_iter()
         .map(|inner| ScalarUDF::new_from_impl(RasterH3ScalarUdf::new(inner)))
-        .chain([ScalarUDF::new_from_impl(
-            crate::polyfill::H3PolygonToCells::default(),
-        )])
+        .chain(GridKind::ALL.into_iter().flat_map(|grid| {
+            [
+                ScalarUDF::new_from_impl(crate::polyfill::H3PolygonToCells::for_grid(grid)),
+                ScalarUDF::new_from_impl(LonLatToCell::for_grid(grid)),
+            ]
+        }))
         .collect()
 }
 
@@ -152,6 +157,97 @@ impl ScalarUDFImpl for RasterH3ScalarUdf {
             .invoke(&columns)
             .map_err(crate::convert::to_df_error)?;
         let out = from_column_array(out);
+        if all_scalar {
+            Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(&out, 0)?))
+        } else {
+            Ok(ColumnarValue::Array(out))
+        }
+    }
+}
+
+/// `{grid}_lonlat_to_cell(lon, lat, resolution) -> UInt64`: the cell holding a WGS84 point
+/// (degrees). NULL for a NULL argument, a latitude outside `-90..=90`, a non-finite
+/// coordinate, or a resolution outside the grid's range; longitudes wrap.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct LonLatToCell {
+    signature: Signature,
+    grid: GridKind,
+    name: &'static str,
+}
+
+impl LonLatToCell {
+    /// `{grid}_lonlat_to_cell`.
+    pub fn for_grid(grid: GridKind) -> Self {
+        Self {
+            signature: Signature::user_defined(Volatility::Immutable),
+            grid,
+            name: match grid {
+                GridKind::H3 => "h3_lonlat_to_cell",
+                GridKind::A5 => "a5_lonlat_to_cell",
+                GridKind::S2 => "s2_lonlat_to_cell",
+                GridKind::Healpix => "healpix_lonlat_to_cell",
+            },
+        }
+    }
+}
+
+impl ScalarUDFImpl for LonLatToCell {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        let name = self.name;
+        if arg_types.len() != 3 {
+            return plan_err!("{name} expects (lon, lat, resolution)");
+        }
+        arg_types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| match (i, t) {
+                (0 | 1, t) if t.is_numeric() || t.is_null() => Ok(DataType::Float64),
+                (2, t) if t.is_integer() || t.is_null() => Ok(DataType::Int64),
+                (_, t) => plan_err!(
+                    "{name} expects (lon, lat, resolution), got {t} for argument {}",
+                    i + 1
+                ),
+            })
+            .collect()
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::UInt64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        use arrow::array::{Array, AsArray, UInt64Array};
+        use arrow::datatypes::{Float64Type, Int64Type};
+        let all_scalar = args
+            .args
+            .iter()
+            .all(|a| matches!(a, ColumnarValue::Scalar(_)));
+        let arrays = ColumnarValue::values_to_arrays(&args.args)?;
+        let lon = arrays[0].as_primitive::<Float64Type>();
+        let lat = arrays[1].as_primitive::<Float64Type>();
+        let res = arrays[2].as_primitive::<Int64Type>();
+        let out: UInt64Array = (0..lon.len())
+            .map(|i| {
+                if lon.is_null(i) || lat.is_null(i) || res.is_null(i) {
+                    return None;
+                }
+                raster_h3_core::scalar_ops::grid_lonlat_to_cell(
+                    self.grid,
+                    lon.value(i),
+                    lat.value(i),
+                    res.value(i),
+                )
+            })
+            .collect();
+        let out: Arc<dyn Array> = Arc::new(out);
         if all_scalar {
             Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(&out, 0)?))
         } else {

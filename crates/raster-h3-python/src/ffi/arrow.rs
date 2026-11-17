@@ -5,6 +5,7 @@ use std::ptr;
 
 use raster_h3_core::columnar::{ArrowArrayStream, ArrowSchema};
 use raster_h3_core::error::safe_panic_payload_to_string;
+use raster_h3_core::grid::GridKind;
 
 use crate::config::PyScanConfig;
 use crate::ffi::args::{build_py_scan_config, parse_c_format};
@@ -139,6 +140,7 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_ex(
     unsafe {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cfg = build_py_scan_config(
+                GridKind::H3,
                 path,
                 resolutions,
                 categorical,

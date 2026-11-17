@@ -299,14 +299,8 @@ pub(crate) fn fill_nested_grid(
     mode: ContainmentMode,
     out: &mut Vec<u64>,
 ) -> Result<(), PolygonToCellsError> {
-    let mut base = Vec::new();
-    match grid {
-        GridKind::S2 => base.extend((0..6).map(|face| s2::cellid::CellID::from_face(face).0)),
-        GridKind::Healpix => {
-            base.extend((0..12).map(|pixel| crate::grid::healpix_encode(0, pixel)))
-        }
-        GridKind::H3 | GridKind::A5 => unreachable!("H3 and A5 have their own fills"),
-    }
+    let mut base = Vec::with_capacity(usize::from(grid.spec().base_cell_count));
+    grid.base_cells_into(&mut base);
     let mut children = Vec::with_capacity(4);
     let mut stack = Vec::new();
     for polygon in &multi.0 {

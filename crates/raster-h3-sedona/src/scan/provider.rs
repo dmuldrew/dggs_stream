@@ -10,15 +10,19 @@ use raster_h3_core::aggregator::multi_horizon::{
 };
 use raster_h3_core::aggregator::remap::CategoryRemapper;
 use raster_h3_core::aggregator::sampling::SamplingPattern;
+use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 use raster_h3_core::columnar::{
     with_partial_state_field, ArrowArrayStream, CategoricalBatchReader, CategoricalFormat,
     ColumnSchema, ContinuousBatchReader, PartitionedBatchReader, RecordBatch,
 };
 use raster_h3_core::error::{RasterH3Error, Result};
+use raster_h3_core::grid::GridKind;
 use raster_h3_core::raster::mosaic::{
     resolve_raster_sources, MosaicReader, OverlapRule, NO_TILES_IN_BBOX,
 };
-use raster_h3_core::scalar_ops::estimate_raster_cardinality;
+use raster_h3_core::resolution::ResolutionSpec;
+use raster_h3_core::scalar_ops::estimate_raster_cardinality_for;
+use raster_h3_core::transfer::TransferMode;
 
 /// Cardinality statistics exposed to query planners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +88,19 @@ pub trait RasterScan: Send + Sync {
     ) -> Result<Box<dyn RasterScanExec>>;
 }
 
+/// Whether the scan outputs all-NoData cells. Their count is 0, so a count bound cannot
+/// be pushed into the scan (core refuses the combination); the caller filters the rows.
+fn emits_nodata(config: &MultiResolutionConfig) -> bool {
+    config.nodata_policy == NodataPolicy::Emit
+}
+
+/// With `decimals` the table shows rounded statistics, while the scan's value thresholds
+/// compare unrounded ones: a row whose rounded mean passes a predicate could be dropped.
+/// Such predicates are left to DataFusion.
+fn rounds(config: &MultiResolutionConfig) -> bool {
+    config.decimals.is_some()
+}
+
 /// Compaction changes both row identity and aggregate values. Scan predicates must
 /// remain residual predicates over the completed table, not filter its children.
 fn compacts(config: &MultiResolutionConfig) -> bool {
@@ -105,7 +122,10 @@ fn compacts(config: &MultiResolutionConfig) -> bool {
 fn apply_shared_filter(config: &mut MultiResolutionConfig, filter: &FilterPredicate) -> bool {
     match *filter {
         FilterPredicate::MinCount(v) => {
-            config.min_count = Some(config.min_count.map_or(v, |c| c.max(v)));
+            // Not pushed under `emit` (see `emits_nodata`): the caller re-applies it.
+            if !emits_nodata(config) {
+                config.min_count = Some(config.min_count.map_or(v, |c| c.max(v)));
+            }
             true
         }
         FilterPredicate::Resolution(r) => {
@@ -124,7 +144,7 @@ fn apply_shared_filter(config: &mut MultiResolutionConfig, filter: &FilterPredic
                 .resolutions
                 .iter()
                 .min()
-                .and_then(|&r| cell_margin_km(r))
+                .and_then(|&r| cell_margin_km(config.grid, r))
                 .and_then(|margin| expand_bbox(bbox, margin))
             else {
                 return true;
@@ -154,15 +174,14 @@ const KM_PER_DEG_LON_EQUATOR: f64 = 111.0;
 /// Beyond this latitude the widened box spans every longitude.
 const POLAR_LAT: f64 = 89.0;
 
-/// A distance larger than the diameter of any H3 cell at `resolution`, including the
-/// samples a cell owns along its geodesic edges.
+/// A distance larger than the diameter of any cell of `grid` at `resolution`
+/// ([`GridSpec::max_cell_diameter_km`]); `None` for a resolution the grid does not have.
 ///
-/// The largest cells have edges about 1.4x the average and a diameter about 2x their edge,
-/// so roughly 2.8x the average edge; 4x leaves headroom.
-fn cell_margin_km(resolution: u8) -> Option<f64> {
-    h3o::Resolution::try_from(resolution)
-        .ok()
-        .map(|r| 4.0 * r.edge_length_km())
+/// [`GridSpec::max_cell_diameter_km`]: raster_h3_core::grid::GridSpec::max_cell_diameter_km
+fn cell_margin_km(grid: GridKind, resolution: u8) -> Option<f64> {
+    let spec = grid.spec();
+    spec.has_resolution(resolution)
+        .then(|| spec.max_cell_diameter_km(resolution))
 }
 
 /// Widen a `[min_lon, min_lat, max_lon, max_lat]` box by `margin_km` on every side. The
@@ -267,10 +286,47 @@ mod bbox_tests {
         assert_eq!(expand_bbox([190.0, 0.0, 191.0, 1.0], m), None);
     }
 
+    /// Great-circle distance in kilometres between two `(lng, lat)` points in degrees.
+    fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
+        let (dlat, dlng) = ((b.1 - a.1).to_radians(), (b.0 - a.0).to_radians());
+        let h = (dlat / 2.0).sin().powi(2)
+            + a.1.to_radians().cos() * b.1.to_radians().cos() * (dlng / 2.0).sin().powi(2);
+        2.0 * 6371.0088 * h.sqrt().asin()
+    }
+
+    #[test]
+    fn margin_exceeds_cell_diameters_on_every_grid() {
+        for grid in GridKind::ALL {
+            assert_eq!(cell_margin_km(grid, grid.max_resolution() + 1), None);
+            for res in 0..=7u8 {
+                let margin = cell_margin_km(grid, res).unwrap();
+                let mut lat = -89.0;
+                while lat < 90.0 {
+                    let mut lon = -179.0;
+                    while lon < 180.0 {
+                        let cell = grid.cell_at(lat, lon, res).unwrap();
+                        let mut ring = [(0.0, 0.0); 10];
+                        let n = grid.boundary_lng_lat(cell, &mut ring);
+                        let widest = ring[..n]
+                            .iter()
+                            .flat_map(|p| ring[..n].iter().map(move |q| haversine_km(*p, *q)))
+                            .fold(0.0, f64::max);
+                        assert!(
+                            widest * 1.25 < margin,
+                            "{grid} res {res} ({lat}, {lon}): {widest} km >= {margin} km"
+                        );
+                        lon += 11.3;
+                    }
+                    lat += 7.9;
+                }
+            }
+        }
+    }
+
     #[test]
     fn margin_exceeds_every_cell_diameter() {
         for res in 0..=3u8 {
-            let margin = cell_margin_km(res).unwrap();
+            let margin = cell_margin_km(GridKind::H3, res).unwrap();
             let r = h3o::Resolution::try_from(res).unwrap();
             let widest = CellIndex::base_cells()
                 .flat_map(|b| b.children(r))
@@ -359,7 +415,7 @@ fn plan_for(
 
 /// The reader projection for a partitioned scan and the mapping from its output to the
 /// requested columns. `projection` indexes the partitioned schema (`base` columns, then
-/// `partial_state`). The reader always outputs `h3_index`, `resolution` and `partial_state`
+/// `partial_state`). The reader always outputs the cell index, `resolution` and `partial_state`
 /// so partial rows stay mergeable; columns the query did not ask for are dropped afterwards.
 fn partitioned_projection(
     base: &ColumnSchema,
@@ -376,11 +432,15 @@ fn partitioned_projection(
             reader.push(i);
         }
     }
-    for key in ["h3_index", "resolution"] {
-        if let Some(i) = base.index_of(key) {
-            if !reader.contains(&i) {
-                reader.push(i);
-            }
+    let cell_index = GridKind::ALL
+        .iter()
+        .find_map(|g| base.index_of(g.index_column_name()));
+    for i in [cell_index, base.index_of("resolution")]
+        .into_iter()
+        .flatten()
+    {
+        if !reader.contains(&i) {
+            reader.push(i);
         }
     }
     let out = requested
@@ -537,6 +597,60 @@ impl ContinuousRasterTableProvider {
         })
     }
 
+    /// A scan onto `grid` at the resolutions `spec` asks for. `auto` forms are measured
+    /// on the raster (opened with `crs`, headers only), so the table's resolution is fixed
+    /// from here on, as filter pushdown and partition planning need.
+    pub fn try_new_with(
+        source: &str,
+        grid: GridKind,
+        spec: &ResolutionSpec,
+        crs: Option<&str>,
+    ) -> Result<Self> {
+        let paths = resolve_raster_sources(source)?;
+        let resolutions = spec.resolve_paths(grid, &paths, crs)?;
+        let mut provider = Self::try_new(source, resolutions)?.with_grid(grid);
+        if let Some(crs) = crs {
+            provider = provider.with_crs(crs);
+        }
+        Ok(provider)
+    }
+
+    /// Aggregate onto `grid` instead of H3. The cell columns are then named for it
+    /// (`a5_index`, `s2_hex`, ...), and the resolutions must be within its range.
+    pub fn with_grid(mut self, grid: GridKind) -> Self {
+        self.config.grid = grid;
+        self
+    }
+
+    /// What happens to cells whose samples are all NoData, to their values, and to the
+    /// precision of the statistics (see [`OutputPolicy`]). Under `NodataPolicy::Emit`
+    /// count filters are not pushed into the scan.
+    pub fn with_output_policy(mut self, policy: OutputPolicy) -> Self {
+        self.config.nodata_policy = policy.nodata;
+        self.config.emit_nodata_value = policy.nodata_value;
+        self.config.decimals = policy.decimals;
+        self
+    }
+
+    /// How pixels map onto cells: centre assignment (the default), interpolation at
+    /// cell centres, or an area-weighted overlay (see [`TransferMode`]).
+    pub fn with_transfer(mut self, transfer: TransferMode) -> Self {
+        self.config.transfer = transfer;
+        self
+    }
+
+    /// Collect runtime telemetry of every scan of this table into `profile` (see
+    /// `raster_h3_core::run_profile`); read `profile.report()` after a query.
+    pub fn with_profile(mut self, profile: Arc<raster_h3_core::run_profile::RunProfile>) -> Self {
+        self.config.profile = Some(profile);
+        self
+    }
+
+    /// The grid this table aggregates onto.
+    pub fn grid(&self) -> GridKind {
+        self.config.grid
+    }
+
     pub fn with_crs(mut self, crs: impl Into<String>) -> Self {
         self.config.custom_crs = Some(crs.into());
         self
@@ -640,7 +754,8 @@ impl ContinuousRasterTableProvider {
 
 impl RasterScan for ContinuousRasterTableProvider {
     fn schema(&self) -> Arc<ColumnSchema> {
-        let base = ColumnSchema::continuous(&self.config.quantiles);
+        let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles)
+            .with_output_policy(&self.config.output_policy());
         match self.config.partition {
             Some(_) => Arc::new(with_partial_state_field(&base)),
             None => Arc::new(base),
@@ -648,7 +763,11 @@ impl RasterScan for ContinuousRasterTableProvider {
     }
 
     fn statistics(&self) -> TableStatistics {
-        let est = estimate_raster_cardinality(&self.paths, &self.config.resolutions);
+        let est = estimate_raster_cardinality_for(
+            self.config.grid,
+            &self.paths,
+            &self.config.resolutions,
+        );
         TableStatistics {
             num_rows: est,
             is_exact: false,
@@ -665,6 +784,14 @@ impl RasterScan for ContinuousRasterTableProvider {
         filters
             .iter()
             .map(|f| match f {
+                FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
+                    FilterPushdownStatus::Unsupported
+                }
+                FilterPredicate::MinMean(_) | FilterPredicate::MaxMean(_)
+                    if rounds(&self.config) =>
+                {
+                    FilterPushdownStatus::Unsupported
+                }
                 FilterPredicate::MinCount(_)
                 | FilterPredicate::MinMean(_)
                 | FilterPredicate::MaxMean(_)
@@ -682,7 +809,8 @@ impl RasterScan for ContinuousRasterTableProvider {
         limit: Option<usize>,
     ) -> Result<Box<dyn RasterScanExec>> {
         if self.config.partition.is_some() {
-            let base = ColumnSchema::continuous(&self.config.quantiles);
+            let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles)
+                .with_output_policy(&self.config.output_policy());
             return partitioned_scan(
                 &self.paths,
                 &self.config,
@@ -796,6 +924,72 @@ impl CategoricalRasterTableProvider {
         })
     }
 
+    /// A scan onto `grid` at the resolutions `spec` asks for. `auto` forms are measured
+    /// on the raster (opened with `crs`, headers only), so the table's resolution is fixed
+    /// from here on, as filter pushdown and partition planning need.
+    pub fn try_new_with(
+        source: &str,
+        grid: GridKind,
+        spec: &ResolutionSpec,
+        crs: Option<&str>,
+    ) -> Result<Self> {
+        let paths = resolve_raster_sources(source)?;
+        let resolutions = spec.resolve_paths(grid, &paths, crs)?;
+        let mut provider = Self::try_new(source, resolutions)?.with_grid(grid);
+        if let Some(crs) = crs {
+            provider = provider.with_crs(crs);
+        }
+        Ok(provider)
+    }
+
+    /// Aggregate onto `grid` instead of H3. The cell columns are then named for it
+    /// (`a5_index`, `s2_hex`, ...), and the resolutions must be within its range.
+    pub fn with_grid(mut self, grid: GridKind) -> Self {
+        self.config.grid = grid;
+        self
+    }
+
+    /// What happens to cells whose samples are all NoData, to their values, and to the
+    /// precision of the statistics (see [`OutputPolicy`]). Under `NodataPolicy::Emit`
+    /// count filters are not pushed into the scan.
+    pub fn with_output_policy(mut self, policy: OutputPolicy) -> Self {
+        self.config.nodata_policy = policy.nodata;
+        self.config.emit_nodata_value = policy.nodata_value;
+        self.config.decimals = policy.decimals;
+        self
+    }
+
+    /// How pixels map onto cells: centre assignment (the default), interpolation at
+    /// cell centres, or an area-weighted overlay (see [`TransferMode`]).
+    pub fn with_transfer(mut self, transfer: TransferMode) -> Self {
+        self.config.transfer = transfer;
+        self
+    }
+
+    /// Collect runtime telemetry of every scan of this table into `profile` (see
+    /// `raster_h3_core::run_profile`); read `profile.report()` after a query.
+    pub fn with_profile(mut self, profile: Arc<raster_h3_core::run_profile::RunProfile>) -> Self {
+        self.config.profile = Some(profile);
+        self
+    }
+
+    /// The grid this table aggregates onto.
+    pub fn grid(&self) -> GridKind {
+        self.config.grid
+    }
+
+    /// A structured per-cell histogram (see [`raster_h3_core::histogram`]): the wide
+    /// format's `histogram` column becomes a list of structs, and with bins the class
+    /// columns hold bin indices. Area weights switch a scan on the default transfer mode
+    /// to `overlay`; inconsistent requests are refused.
+    pub fn with_histogram(
+        mut self,
+        histogram: raster_h3_core::histogram::HistogramSpec,
+    ) -> raster_h3_core::error::Result<Self> {
+        self.config.set_histogram(histogram)?;
+        Ok(self)
+    }
+
     pub fn with_format(mut self, format: CategoricalFormat) -> Self {
         self.format = format;
         self
@@ -866,9 +1060,11 @@ impl CategoricalRasterTableProvider {
 impl RasterScan for CategoricalRasterTableProvider {
     fn schema(&self) -> Arc<ColumnSchema> {
         let base = match self.format {
-            CategoricalFormat::Wide => ColumnSchema::categorical_wide(),
-            CategoricalFormat::Long => ColumnSchema::categorical_long(),
-        };
+            CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(self.config.grid),
+            CategoricalFormat::Long => ColumnSchema::categorical_long_for(self.config.grid),
+        }
+        .with_output_policy(&self.config.output_policy())
+        .with_histogram(self.config.histogram.as_ref());
         match self.config.partition {
             Some(_) => Arc::new(with_partial_state_field(&base)),
             None => Arc::new(base),
@@ -876,7 +1072,11 @@ impl RasterScan for CategoricalRasterTableProvider {
     }
 
     fn statistics(&self) -> TableStatistics {
-        let est = estimate_raster_cardinality(&self.paths, &self.config.resolutions);
+        let est = estimate_raster_cardinality_for(
+            self.config.grid,
+            &self.paths,
+            &self.config.resolutions,
+        );
         TableStatistics {
             num_rows: est,
             is_exact: false,
@@ -893,6 +1093,12 @@ impl RasterScan for CategoricalRasterTableProvider {
         filters
             .iter()
             .map(|f| match f {
+                FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
+                    FilterPushdownStatus::Unsupported
+                }
+                FilterPredicate::MinMajorityFraction(_) if rounds(&self.config) => {
+                    FilterPushdownStatus::Unsupported
+                }
                 FilterPredicate::MinCount(_)
                 | FilterPredicate::MinMajorityFraction(_)
                 | FilterPredicate::Resolution(_) => FilterPushdownStatus::Exact,
@@ -918,7 +1124,8 @@ impl RasterScan for CategoricalRasterTableProvider {
                 &self.paths,
                 &self.config,
                 true,
-                &ColumnSchema::categorical_wide(),
+                &ColumnSchema::categorical_wide_for(self.config.grid)
+                    .with_output_policy(&self.config.output_policy()),
                 self.schema(),
                 projection,
                 filters,

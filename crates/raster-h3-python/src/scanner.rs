@@ -37,14 +37,18 @@ impl PyRasterScanner {
     }
 
     fn base_schema(&self) -> ColumnSchema {
-        if !self.config.categorical {
-            ColumnSchema::continuous(&self.config.quantiles)
+        let grid = self.config.grid;
+        let schema = if !self.config.categorical {
+            ColumnSchema::continuous_for(grid, &self.config.quantiles)
         } else {
             match self.config.format {
-                CategoricalFormat::Wide => ColumnSchema::categorical_wide(),
-                CategoricalFormat::Long => ColumnSchema::categorical_long(),
+                CategoricalFormat::Wide => ColumnSchema::categorical_wide_for(grid),
+                CategoricalFormat::Long => ColumnSchema::categorical_long_for(grid),
             }
-        }
+        };
+        schema
+            .with_output_policy(&self.config.output)
+            .with_histogram(self.config.histogram.as_ref())
     }
 
     pub(crate) fn resolve_projection(&self) -> Result<Option<Vec<usize>>> {
@@ -65,8 +69,8 @@ impl PyRasterScanner {
         {
             let idx = base.index_of(name).ok_or_else(|| {
                 RasterH3Error::InvalidParameter(format!(
-                    "Column '{}' not found in raster_h3 schema",
-                    name
+                    "Column '{}' not found in raster_h3 schema (grid '{}')",
+                    name, self.config.grid
                 ))
             })?;
             indices.push(idx);
@@ -133,6 +137,11 @@ impl PyRasterScanner {
         mr_cfg.sampling = self.config.sampling.clone();
         mr_cfg.spectral_formula = self.config.spectral_formula;
         mr_cfg.remapper = self.config.remapper.clone();
+        mr_cfg.transfer = self.config.transfer;
+        if let Some(spec) = &self.config.histogram {
+            mr_cfg.set_histogram(spec.clone())?;
+        }
+        mr_cfg.profile = self.config.profile.clone();
         self.config.apply_cell_options(&mut mr_cfg);
         mr_cfg.strict_transforms = self.config.strict_transforms;
         mr_cfg.transform_failure_counter = self.config.transform_failure_counter.clone();
@@ -234,6 +243,8 @@ fn batches_to_columnar_json(schema: &ColumnSchema, batches: &[RecordBatch]) -> R
                         }
                         serde_json::Value::String(hex)
                     }
+                    ColumnArray::Histogram(column) => serde_json::from_str(&column.row_json(row))
+                        .unwrap_or(serde_json::Value::Null),
                 };
                 arr.push(val);
             }

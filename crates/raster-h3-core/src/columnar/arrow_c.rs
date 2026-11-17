@@ -98,6 +98,25 @@ impl ArrowSchema {
 
     /// Construct a leaf `ArrowSchema` for a single [`ColumnField`].
     pub fn from_field(field: &ColumnField) -> Self {
+        if field.data_type.is_histogram() {
+            // List<item: Struct<...>>, with non-null items and entries.
+            let leaf =
+                |name: &str, data_type| Self::from_field(&ColumnField::new(name, data_type, false));
+            let entries = if field.data_type == ArrowDataType::BinHistogram {
+                vec![
+                    leaf("lower", ArrowDataType::Float64),
+                    leaf("upper", ArrowDataType::Float64),
+                    leaf("weight", ArrowDataType::Float64),
+                ]
+            } else {
+                vec![
+                    leaf("class", ArrowDataType::Int64),
+                    leaf("weight", ArrowDataType::Float64),
+                ]
+            };
+            let item = Self::nested("+s", "item", 0, entries);
+            return Self::nested("+l", &field.name, 0, vec![item]);
+        }
         let format_c = CString::new(field.data_type.arrow_format_str()).unwrap_or_default();
         let name_c = CString::new(field.name.as_str()).unwrap_or_default();
         let flags = if field.nullable {
@@ -127,12 +146,21 @@ impl ArrowSchema {
 
     /// Construct a top-level struct `ArrowSchema` (`"+s"`) representing a [`ColumnSchema`].
     pub fn from_column_schema(schema: &ColumnSchema) -> Self {
-        let format_c = CString::new("+s").unwrap();
-        let name_c = CString::new("").unwrap();
-        let mut children_vec: Vec<*mut ArrowSchema> = schema
-            .fields
-            .iter()
-            .map(|f| Box::into_raw(Box::new(Self::from_field(f))))
+        Self::nested(
+            "+s",
+            "",
+            0,
+            schema.fields.iter().map(Self::from_field).collect(),
+        )
+    }
+
+    /// A schema node with children (a struct or a list), which it owns.
+    fn nested(format: &str, name: &str, flags: i64, children: Vec<ArrowSchema>) -> Self {
+        let format_c = CString::new(format).unwrap_or_default();
+        let name_c = CString::new(name).unwrap_or_default();
+        let mut children_vec: Vec<*mut ArrowSchema> = children
+            .into_iter()
+            .map(|child| Box::into_raw(Box::new(child)))
             .collect();
         let n_children = children_vec.len() as i64;
         let children_ptr = if children_vec.is_empty() {
@@ -151,7 +179,7 @@ impl ArrowSchema {
             format: format_ptr,
             name: name_ptr,
             metadata: ptr::null(),
-            flags: 0,
+            flags,
             n_children,
             children: children_ptr,
             dictionary: ptr::null_mut(),
@@ -221,6 +249,15 @@ impl ArrowSchema {
                 "b" => ArrowDataType::Boolean,
                 "u" => ArrowDataType::Utf8,
                 "z" => ArrowDataType::Binary,
+                // SAFETY: `child` is a live schema node of a valid schema.
+                "+l" => match unsafe { histogram_type(child) } {
+                    Some(data_type) => data_type,
+                    None => {
+                        return Err(RasterH3Error::InvalidParameter(format!(
+                            "Unsupported Arrow list layout for column '{name}'"
+                        )))
+                    }
+                },
                 other => {
                     return Err(RasterH3Error::InvalidParameter(format!(
                         "Unsupported Arrow format '{}' for column '{}'",
@@ -382,6 +419,133 @@ unsafe fn read_values<T: Copy>(ptr: *const T, start: usize, len: usize) -> Vec<T
     unsafe { std::slice::from_raw_parts(ptr.add(start), len).to_vec() }
 }
 
+/// The histogram type of a list schema node, if it is the list of structs this crate
+/// exports: entries named `class, weight` or `lower, upper, weight`.
+///
+/// # Safety
+/// `list` must be a live node of a valid `ArrowSchema`.
+unsafe fn histogram_type(list: &ArrowSchema) -> Option<ArrowDataType> {
+    if list.n_children != 1 || list.children.is_null() {
+        return None;
+    }
+    // SAFETY: a valid node's `children` holds `n_children` (here 1) live pointers.
+    let item = unsafe { (*list.children).as_ref() }?;
+    if item.format.is_null() || item.children.is_null() {
+        return None;
+    }
+    // SAFETY: a valid node's non-null `format` is NUL-terminated.
+    if unsafe { CStr::from_ptr(item.format) }.to_bytes() != b"+s" {
+        return None;
+    }
+    let mut fields = Vec::new();
+    for i in 0..item.n_children.max(0) as usize {
+        // SAFETY: `children` holds `n_children` live pointers; `i < n_children`.
+        let field = unsafe { (*item.children.add(i)).as_ref() }?;
+        if field.name.is_null() || field.format.is_null() {
+            return None;
+        }
+        // SAFETY: non-null `name` and `format` of a valid node are NUL-terminated.
+        let (name, format) = unsafe { (CStr::from_ptr(field.name), CStr::from_ptr(field.format)) };
+        fields.push((name.to_bytes().to_vec(), format.to_bytes().to_vec()));
+    }
+    let is = |expected: &[(&str, &str)]| {
+        fields.len() == expected.len()
+            && fields
+                .iter()
+                .zip(expected)
+                .all(|((n, f), (en, ef))| n == en.as_bytes() && f == ef.as_bytes())
+    };
+    if is(&[("class", "l"), ("weight", "g")]) {
+        Some(ArrowDataType::ValueHistogram)
+    } else if is(&[("lower", "g"), ("upper", "g"), ("weight", "g")]) {
+        Some(ArrowDataType::BinHistogram)
+    } else {
+        None
+    }
+}
+
+/// Copy `len` rows from logical row `start` of a histogram list array.
+///
+/// # Safety
+/// `list` must be a live, valid list-of-struct `ArrowArray` whose schema
+/// [`histogram_type`] accepted, with at least `start + len` rows.
+unsafe fn import_histogram(
+    list: &ArrowArray,
+    binned: bool,
+    start: usize,
+    len: usize,
+) -> Result<super::HistogramColumn> {
+    let invalid =
+        |what: &str| RasterH3Error::InvalidParameter(format!("ArrowArray histogram {what}"));
+    let mut column = super::HistogramColumn::new(binned);
+    if len == 0 {
+        return Ok(column);
+    }
+    let fields = if binned { 3 } else { 2 };
+    if list.n_children != 1 || list.children.is_null() {
+        return Err(invalid("has no item array"));
+    }
+    // SAFETY: `buffers` has at least 2 entries (checked by the caller); entry 1 is the
+    // offsets buffer of a list.
+    let off_ptr = unsafe { *list.buffers.add(1) } as *const i32;
+    if off_ptr.is_null() {
+        return Err(invalid("has no offsets"));
+    }
+    // SAFETY: a list of at least `start + len` rows stores `start + len + 1` aligned
+    // offsets.
+    let offsets = unsafe { std::slice::from_raw_parts(off_ptr.add(start), len + 1) };
+    if offsets[0] < 0 || offsets.windows(2).any(|w| w[0] > w[1]) {
+        return Err(invalid("offsets are not monotonically non-decreasing"));
+    }
+    let (first, last) = (offsets[0] as usize, offsets[len] as usize);
+    // SAFETY: a valid list's `children` holds its one live item array.
+    let item = unsafe { (*list.children).as_ref() }.ok_or_else(|| invalid("has no item array"))?;
+    if item.n_children != fields || item.children.is_null() {
+        return Err(invalid("has the wrong entry fields"));
+    }
+    let item_offset = item.offset.max(0) as usize;
+    if (item.length.max(0) as usize) < last {
+        return Err(invalid("offsets exceed its entries"));
+    }
+    // The values of entry field `index`, rows `first..last` of the struct.
+    let values = |index: usize| -> Result<*const c_void> {
+        // SAFETY: `children` holds `n_children` live pointers; `index < n_children`.
+        let field = unsafe { (*item.children.add(index)).as_ref() }
+            .ok_or_else(|| invalid("has a null entry field"))?;
+        if field.n_buffers < 2 || field.buffers.is_null() {
+            return Err(invalid("entry field has no values"));
+        }
+        let field_offset = field.offset.max(0) as usize + item_offset;
+        if (field.length.max(0) as usize) < item_offset + last {
+            return Err(invalid("entry field is shorter than its struct"));
+        }
+        // SAFETY: `buffers` has at least 2 entries; entry 1 holds the 8-byte values,
+        // of which `field_offset + first` precede the ones wanted (length check above).
+        Ok(
+            unsafe { (*field.buffers.add(1) as *const u64).add(field_offset + first) }
+                as *const c_void,
+        )
+    };
+    let count = last - first;
+    // SAFETY: each pointer from `values` is aligned for 8-byte values and readable for
+    // `count` of them (length checks in `values`).
+    unsafe {
+        if binned {
+            column.lower = read_values(values(0)? as *const f64, 0, count);
+            column.upper = read_values(values(1)? as *const f64, 0, count);
+            column.weights = read_values(values(2)? as *const f64, 0, count);
+        } else {
+            column.classes = read_values(values(0)? as *const i64, 0, count);
+            column.weights = read_values(values(1)? as *const f64, 0, count);
+        }
+    }
+    if column.weights.len() != count {
+        return Err(invalid("entry field has no values"));
+    }
+    column.offsets = offsets.iter().map(|&o| o - first as i32).collect();
+    Ok(column)
+}
+
 /// Borrow `len` variable-length values (Utf8/Binary layout) starting at logical index `start`.
 /// Offsets are absolute positions into the data buffer, so slicing only shifts the offsets window.
 ///
@@ -448,6 +612,10 @@ impl ArrowArray {
     /// Fixed-width columns are handed to the consumer without copying; variable-width columns
     /// are packed into offsets + data, freeing each source value as it is copied.
     pub fn from_column_array(col: ColumnArray) -> Self {
+        let col = match col {
+            ColumnArray::Histogram(column) => return Self::from_histogram(column),
+            other => other,
+        };
         let len = col.len();
         let null_count = col.null_count();
         let mut owned_buffers = Vec::with_capacity(3);
@@ -504,6 +672,7 @@ impl ArrowArray {
                 owned_buffers.push(OwnedArrowBuffer::I32(offsets));
                 owned_buffers.push(OwnedArrowBuffer::U8(data));
             }
+            ColumnArray::Histogram(_) => unreachable!("handled above"),
         }
 
         let n_buffers = buffer_ptrs.len() as i64;
@@ -528,14 +697,65 @@ impl ArrowArray {
         }
     }
 
+    /// A list array of structs from a [`super::HistogramColumn`]: the list holds the
+    /// offsets, its struct child the entry columns.
+    fn from_histogram(column: super::HistogramColumn) -> Self {
+        let rows = column.len();
+        let entries = column.weights.len();
+        let f64s = |values: Vec<f64>| {
+            Self::from_column_array(ColumnArray::Float64 {
+                values,
+                validity: None,
+            })
+        };
+        let fields = if column.binned {
+            vec![f64s(column.lower), f64s(column.upper), f64s(column.weights)]
+        } else {
+            vec![
+                Self::from_column_array(ColumnArray::Int64 {
+                    values: column.classes,
+                    validity: None,
+                }),
+                f64s(column.weights),
+            ]
+        };
+        let item = Self::nested(entries, vec![ptr::null()], Vec::new(), fields);
+        let offsets = column.offsets;
+        let buffers = vec![ptr::null(), offsets.as_ptr() as *const c_void];
+        Self::nested(
+            rows,
+            buffers,
+            vec![OwnedArrowBuffer::I32(offsets)],
+            vec![item],
+        )
+    }
+
     /// Construct a top-level struct `ArrowArray` from a [`RecordBatch`], taking ownership
     /// of its column buffers.
     pub fn from_record_batch(batch: RecordBatch) -> Self {
         let num_rows = batch.num_rows;
-        let mut children_vec: Vec<*mut ArrowArray> = batch
+        let children = batch
             .columns
             .into_iter()
-            .map(|c| Box::into_raw(Box::new(Self::from_column_array(c))))
+            .map(Self::from_column_array)
+            .collect();
+        // Struct arrays have 1 buffer: the null bitmap (NULL: a batch has no null rows).
+        Self::nested(num_rows, vec![ptr::null()], Vec::new(), children)
+    }
+
+    /// An array node without nulls that owns `children` and the buffers behind
+    /// `buffer_ptrs`.
+    fn nested(
+        length: usize,
+        buffer_ptrs: Vec<*const c_void>,
+        owned_buffers: Vec<OwnedArrowBuffer>,
+        children: Vec<ArrowArray>,
+    ) -> Self {
+        let num_rows = length;
+        let n_buffers = buffer_ptrs.len() as i64;
+        let mut children_vec: Vec<*mut ArrowArray> = children
+            .into_iter()
+            .map(|c| Box::into_raw(Box::new(c)))
             .collect();
         let n_children = children_vec.len() as i64;
         let children_ptr = if children_vec.is_empty() {
@@ -544,10 +764,8 @@ impl ArrowArray {
             children_vec.as_mut_ptr()
         };
 
-        // Struct arrays have 1 buffer: the null bitmap (NULL since top-level batch has 0 struct nulls)
-        let buffer_ptrs = vec![ptr::null()];
         let mut priv_box = Box::new(ArrayPrivateData {
-            _owned_buffers: Vec::new(),
+            _owned_buffers: owned_buffers,
             buffer_ptrs,
             children_vec,
         });
@@ -557,7 +775,7 @@ impl ArrowArray {
             length: num_rows as i64,
             null_count: 0,
             offset: 0,
-            n_buffers: 1,
+            n_buffers,
             n_children,
             buffers: buffers_ptr,
             children: children_ptr,
@@ -697,6 +915,14 @@ impl ArrowArray {
                         .map(<[u8]>::to_vec)
                         .collect();
                         ColumnArray::Binary { values, validity }
+                    }
+                    ArrowDataType::ValueHistogram | ArrowDataType::BinHistogram => {
+                        ColumnArray::Histogram(import_histogram(
+                            child,
+                            field.data_type == ArrowDataType::BinHistogram,
+                            start,
+                            len,
+                        )?)
                     }
                 }
             };
@@ -1002,6 +1228,69 @@ mod tests {
         assert_eq!(*out_schema, *schema);
         assert_eq!(out_batches.len(), 1);
         assert_eq!(out_batches[0], batch);
+    }
+
+    /// Histogram columns leave as a list of structs and come back unchanged.
+    #[test]
+    fn histogram_columns_roundtrip_as_lists_of_structs() {
+        use crate::columnar::HistogramColumn;
+        use crate::histogram::HistogramEntry;
+        let entry = |class: i64, lower: f64, upper: f64, weight: f64| HistogramEntry {
+            class,
+            lower,
+            upper,
+            weight,
+        };
+        let mut values = HistogramColumn::new(false);
+        values.push(&[entry(3, 3.0, 3.0, 2.0), entry(9, 9.0, 9.0, 0.5)]);
+        values.push(&[]);
+        values.push(&[entry(-1, -1.0, -1.0, 7.0)]);
+        let mut bins = HistogramColumn::new(true);
+        for row in 0..3 {
+            bins.push(&[entry(0, 0.0, 1.5, f64::from(row)), entry(1, 1.5, 4.0, 0.25)]);
+        }
+        let schema = Arc::new(ColumnSchema::new(vec![
+            ColumnField::new("cell", ArrowDataType::UInt64, false),
+            ColumnField::new("by_value", ArrowDataType::ValueHistogram, false),
+            ColumnField::new("by_bin", ArrowDataType::BinHistogram, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                ColumnArray::UInt64 {
+                    values: vec![1, 2, 3],
+                    validity: None,
+                },
+                ColumnArray::Histogram(values),
+                ColumnArray::Histogram(bins),
+            ],
+        )
+        .unwrap();
+
+        let exported = ArrowSchema::from_column_schema(&schema);
+        // SAFETY: `exported` is a live schema with three children; the list children
+        // and their struct items were built by `from_field`.
+        unsafe {
+            let list = &**exported.children.add(1);
+            assert_eq!(CStr::from_ptr(list.format).to_bytes(), b"+l");
+            let item = &**list.children;
+            assert_eq!(CStr::from_ptr(item.format).to_bytes(), b"+s");
+            assert_eq!(item.n_children, 2);
+            assert_eq!((**exported.children.add(2)).n_children, 1);
+            assert_eq!((**(**exported.children.add(2)).children).n_children, 3);
+        }
+        drop(exported);
+
+        // Whole batches and a slice (rows 1..3) both survive the stream.
+        let sliced = batch.slice(1, 2);
+        let mut stream = ArrowArrayStream::from_iterator(
+            Arc::clone(&schema),
+            vec![Ok(batch.clone()), Ok(sliced.clone())].into_iter(),
+        );
+        // SAFETY: freshly built by `from_iterator`, so valid and unreleased.
+        let (out_schema, out_batches) = unsafe { stream.collect_batches().unwrap() };
+        assert_eq!(*out_schema, *schema);
+        assert_eq!(out_batches, vec![batch, sliced]);
     }
 
     fn sliceable_batch() -> (Arc<ColumnSchema>, RecordBatch) {

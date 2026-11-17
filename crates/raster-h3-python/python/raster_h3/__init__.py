@@ -234,6 +234,21 @@ def _get_lib() -> ctypes.CDLL:
         lib.raster_h3_py_create_arrow_schema_v2.restype = ctypes.c_void_p
         lib.raster_h3_py_quantile_columns.argtypes = [ctypes.c_char_p] + err_ptr
         lib.raster_h3_py_quantile_columns.restype = ctypes.c_void_p
+    if hasattr(lib, "raster_h3_py_profile_scan_v2"):
+        lib.raster_h3_py_profile_scan_v2.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_double,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int64,
+            ctypes.c_char_p,
+        ] + err_ptr
+        lib.raster_h3_py_profile_scan_v2.restype = ctypes.c_void_p
 
     if hasattr(lib, "raster_h3_py_parquet_to_pmtiles"):
         lib.raster_h3_py_parquet_to_pmtiles.argtypes = [
@@ -242,6 +257,65 @@ def _get_lib() -> ctypes.CDLL:
             ctypes.c_char_p,
         ] + err_ptr
         lib.raster_h3_py_parquet_to_pmtiles.restype = ctypes.c_int64
+
+    if hasattr(lib, "raster_h3_py_parquet_to_pmtiles_v2"):
+        lib.raster_h3_py_parquet_to_pmtiles_v2.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+        ] + err_ptr
+        lib.raster_h3_py_parquet_to_pmtiles_v2.restype = ctypes.c_int64
+
+    # Grid-neutral scalar C-ABI (absent from older builds); `grid` is a grid code.
+    if hasattr(lib, "raster_h3_py_grid_code"):
+        u64, i64, cint = ctypes.c_uint64, ctypes.c_int64, ctypes.c_int
+        lib.raster_h3_py_grid_code.argtypes = [ctypes.c_char_p]
+        lib.raster_h3_py_grid_code.restype = cint
+        lib.raster_h3_py_grid_max_resolution.argtypes = [cint]
+        lib.raster_h3_py_grid_max_resolution.restype = cint
+        lib.raster_h3_py_grid_lonlat_to_cell.argtypes = [
+            cint,
+            ctypes.c_double,
+            ctypes.c_double,
+            i64,
+        ]
+        lib.raster_h3_py_grid_lonlat_to_cell.restype = u64
+        lib.raster_h3_py_grid_is_valid.argtypes = [cint, u64]
+        lib.raster_h3_py_grid_is_valid.restype = cint
+        lib.raster_h3_py_grid_to_lat.argtypes = [cint, u64]
+        lib.raster_h3_py_grid_to_lat.restype = ctypes.c_double
+        lib.raster_h3_py_grid_to_lng.argtypes = [cint, u64]
+        lib.raster_h3_py_grid_to_lng.restype = ctypes.c_double
+        lib.raster_h3_py_grid_get_resolution.argtypes = [cint, u64]
+        lib.raster_h3_py_grid_get_resolution.restype = i64
+        lib.raster_h3_py_grid_cell_to_parent.argtypes = [cint, u64, i64]
+        lib.raster_h3_py_grid_cell_to_parent.restype = u64
+        lib.raster_h3_py_grid_to_wkb.argtypes = [
+            cint,
+            u64,
+            ctypes.POINTER(ctypes.c_uint8),
+            ctypes.c_size_t,
+        ]
+        lib.raster_h3_py_grid_to_wkb.restype = ctypes.c_size_t
+        lib.raster_h3_py_grid_polygon_to_cells.argtypes = [
+            cint,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+            i64,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.POINTER(u64)),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        lib.raster_h3_py_grid_polygon_to_cells.restype = ctypes.c_int
+    if hasattr(lib, "raster_h3_py_auto_resolution"):
+        lib.raster_h3_py_auto_resolution.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_char_p,
+        ] + err_ptr
+        lib.raster_h3_py_auto_resolution.restype = ctypes.c_int
 
     # Scalar C-ABI
     lib.raster_h3_py_h3_to_string.argtypes = [ctypes.c_uint64]
@@ -323,6 +397,11 @@ def _get_lib() -> ctypes.CDLL:
         if hasattr(lib, name + "_with_stats"):
             fn = getattr(lib, name + "_with_stats")
             fn.argtypes = args + stats_args
+            fn.restype = ctypes.c_int64
+        if hasattr(lib, name + "_v2"):
+            # `_v2` adds an options JSON object before the stats pointer.
+            fn = getattr(lib, name + "_v2")
+            fn.argtypes = args + [ctypes.c_char_p] + stats_args
             fn.restype = ctypes.c_int64
 
     # Capsule destructors implemented in the library (absent from older builds). It never
@@ -448,6 +527,7 @@ def _encode_columns(columns: Optional[Sequence[str]]) -> Optional[bytes]:
 #: Scan options sent to the `_v2` entry points as one JSON object, beyond the original
 #: positional C-ABI arguments. Every one defaults to `None` (unset).
 _SCAN_OPTIONS = (
+    "grid",
     "band",
     "sampling",
     "overlap_rule",
@@ -463,11 +543,60 @@ _SCAN_OPTIONS = (
     "min_mean",
     "max_mean",
     "min_majority_fraction",
+    "nodata_policy",
+    "emit_nodata_value",
+    "decimals",
+    "transfer",
+    "sample_method",
+    "overlay_weighted",
+    "mass_preserve",
+    "histogram",
+    "histogram_weight",
+    "histogram_normalize",
 )
 
-_INT_OPTIONS = ("band", "nir_band", "red_band", "green_band", "blue_band", "swir_band")
-_STR_OPTIONS = ("sampling", "overlap_rule", "spectral_formula")
-_FLOAT_OPTIONS = ("min_count", "min_mean", "max_mean", "min_majority_fraction")
+_INT_OPTIONS = (
+    "band",
+    "nir_band",
+    "red_band",
+    "green_band",
+    "blue_band",
+    "swir_band",
+    "decimals",
+)
+_STR_OPTIONS = (
+    "sampling",
+    "overlap_rule",
+    "spectral_formula",
+    "nodata_policy",
+    "transfer",
+    "sample_method",
+    "histogram_weight",
+    "histogram_normalize",
+)
+_BOOL_OPTIONS = ("overlay_weighted", "mass_preserve")
+_FLOAT_OPTIONS = (
+    "min_count",
+    "min_mean",
+    "max_mean",
+    "min_majority_fraction",
+    "emit_nodata_value",
+)
+
+#: The supported grids and their finest resolution.
+GRIDS: Dict[str, int] = {"h3": 15, "a5": 30, "s2": 30, "healpix": 29}
+
+
+def _normalize_grid(grid: Optional[str]) -> str:
+    """A grid name in canonical form; `None` is H3."""
+    if grid is None:
+        return "h3"
+    if not isinstance(grid, str):
+        raise TypeError(f"grid must be a str, got {type(grid).__name__}")
+    name = grid.strip().lower()
+    if name not in GRIDS:
+        raise ValueError(f"unknown grid {grid!r}: expected one of {', '.join(GRIDS)}")
+    return name
 
 
 def _encode_quantiles(value: Union[str, Sequence[Union[str, float]]]) -> str:
@@ -520,6 +649,22 @@ def _encode_remap(value: Union[str, Mapping[Any, Optional[int]]]) -> str:
     return ", ".join(entries)
 
 
+def _encode_histogram(value: Union[str, Sequence[float]]) -> str:
+    """`"values"`, `"10:0:100"` or bin edges (`[0, 1, 5]` or `"0,1,5"`) as the native
+    `histogram` string."""
+    if isinstance(value, str):
+        return value
+    edges = list(value)
+    if any(isinstance(e, bool) or not isinstance(e, (int, float)) for e in edges):
+        raise TypeError("histogram bin edges must be numbers")
+    return ",".join(repr(float(e)) for e in edges)
+
+
+def _wants_histogram(*options: Any) -> bool:
+    """Whether any histogram option is set: such a scan is categorical."""
+    return any(o is not None for o in options)
+
+
 def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
     """The options JSON of the `_v2` entry points, or None when every option is unset.
 
@@ -530,7 +675,14 @@ def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
     for key, value in options.items():
         if value is None:
             continue
-        if key in _INT_OPTIONS:
+        if key == "grid":
+            # H3 is the native default; leaving it out keeps older libraries usable.
+            name = _normalize_grid(value)
+            if name != "h3":
+                opts[key] = name
+        elif key == "histogram":
+            opts[key] = _encode_histogram(value)
+        elif key in _INT_OPTIONS:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{key} must be an int, got {type(value).__name__}")
             opts[key] = value
@@ -548,6 +700,10 @@ def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
             if key == "min_majority_fraction" and not 0.0 <= number <= 1.0:
                 raise ValueError(f"min_majority_fraction must be between 0 and 1, got {number}")
             opts[key] = number
+        elif key in _BOOL_OPTIONS:
+            if not isinstance(value, bool):
+                raise TypeError(f"{key} must be a bool, got {type(value).__name__}")
+            opts[key] = value
         elif key == "quantiles":
             opts[key] = _encode_quantiles(value)
         elif key == "remap":
@@ -624,6 +780,7 @@ class RasterH3ArrowStream:
         limit: Optional[int] = None,
         strict_transforms: bool = False,
         partition: Optional[str] = None,
+        grid: Optional[str] = None,
         band: Optional[int] = None,
         sampling: Optional[str] = None,
         overlap_rule: Optional[str] = None,
@@ -639,8 +796,24 @@ class RasterH3ArrowStream:
         min_mean: Optional[float] = None,
         max_mean: Optional[float] = None,
         min_majority_fraction: Optional[float] = None,
+        nodata_policy: Optional[str] = None,
+        emit_nodata_value: Optional[float] = None,
+        decimals: Optional[int] = None,
+        transfer: Optional[str] = None,
+        sample_method: Optional[str] = None,
+        overlay_weighted: Optional[bool] = None,
+        mass_preserve: Optional[bool] = None,
+        histogram: Optional[Union[str, Sequence[float]]] = None,
+        histogram_weight: Optional[str] = None,
+        histogram_normalize: Optional[str] = None,
     ) -> None:
+        if _wants_histogram(histogram, histogram_weight, histogram_normalize):
+            categorical = True
         self.path = str(path)
+        #: The grid scanned onto (`h3`, `a5`, `s2` or `healpix`); it names the cell
+        #: columns `{grid}_index` and `{grid}_hex`.
+        self.grid = _normalize_grid(grid)
+        grid = None if self.grid == "h3" else self.grid
         self.resolutions = resolutions
         self.categorical = categorical
         self.format = format
@@ -915,6 +1088,7 @@ def scan_raster_h3(
     columns: Optional[Sequence[str]] = None,
     limit: Optional[int] = None,
     strict_transforms: bool = False,
+    grid: Optional[str] = None,
     band: Optional[int] = None,
     sampling: Optional[str] = None,
     overlap_rule: Optional[str] = None,
@@ -930,9 +1104,33 @@ def scan_raster_h3(
     min_mean: Optional[float] = None,
     max_mean: Optional[float] = None,
     min_majority_fraction: Optional[float] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
+    transfer: Optional[str] = None,
+    sample_method: Optional[str] = None,
+    overlay_weighted: Optional[bool] = None,
+    mass_preserve: Optional[bool] = None,
+    histogram: Optional[Union[str, Sequence[float]]] = None,
+    histogram_weight: Optional[str] = None,
+    histogram_normalize: Optional[str] = None,
 ) -> Any:
     """
-    Scan a GeoTIFF / COG into H3 hexagonal cells.
+    Scan a GeoTIFF / COG into the cells of a discrete global grid (H3 by default).
+
+    `grid` selects the grid: `"h3"` (hexagons, resolutions 0 to 15, the default), `"a5"`
+    (equal-area pentagons, 0 to 30), `"s2"` (0 to 30) or `"healpix"` (equal-area, nested
+    scheme, NUNIQ ids, 0 to 29). The cell columns are named for it: `{grid}_index`
+    (`UInt64`) and `{grid}_hex` (lowercase hexadecimal string). Every other option,
+    column and pushdown works the same on each grid. `scan_raster` is the same function
+    under a grid-neutral name.
+
+    `resolutions` is an int, a list of ints, or `"auto"`: the resolution whose cells are
+    closest in area to the raster's ground pixels (measured at the raster's centre through
+    its geotransform and CRS). `"auto+1"` is one resolution step finer, `"auto-2"` two
+    coarser; the result is clamped to the grid's range. Since the grids number their
+    resolutions on unrelated scales, `"auto"` is the way to ask for comparable cells on
+    each. `auto_resolution(path, grid)` returns the resolution it picks.
 
     If `polars` is installed with `register_io_source`, returns a Polars `LazyFrame`
     with column projection (`with_columns`) and row-slice (`n_rows`) pushdown.
@@ -961,6 +1159,38 @@ def scan_raster_h3(
       (`None` drops the class).
     - `min_count`, `min_mean` / `max_mean` (continuous) and `min_majority_fraction`
       (categorical): drop cells outside these bounds inside the engine.
+    - `nodata_policy`: `"omit"` (default) skips NoData samples and returns no row for a
+      cell without a valid sample. `"emit"` returns every cell a pixel falls in: NoData
+      still adds nothing to the statistics, and a cell without a valid sample has `count`
+      0 (`total_count` for categorical scans) and null `mean` / `min` / `max` (or
+      `majority_class` / `category`), or `emit_nodata_value` when that is given (an
+      integer for categorical scans). Not combinable with `min_count`.
+    - `decimals`: round the floating-point statistics (not counts or class codes) to
+      this many decimals, 0 to 15.
+    - `transfer`: how pixels map onto cells. `"assign_centers"` (default) aggregates
+      each pixel into the cell holding its centre. `"sample"` gives each cell whose
+      centre lies on the raster the value interpolated there with `sample_method`
+      (`"nearest"`, `"bilinear"` (default), `"bicubic"`, `"lanczos"`); use it when the
+      cells are finer than the pixels, where centre assignment leaves most cells empty.
+      `"overlay"` aggregates, for each cell, the pixels it overlaps, weighted by the
+      overlapped fraction of each pixel (`overlay_weighted=False` counts every touched
+      pixel once); `count` is then the overlapped area in pixels. With
+      `mass_preserve=True` each pixel's weights are normalised to sum to one, so the
+      `sum` column adds up to the raster's total. Categorical scans take `"overlay"`
+      and `"sample"` with `sample_method="nearest"`. Not combinable with `sampling`,
+      `spectral_formula` or partitions.
+
+    `histogram` asks for a structured per-cell histogram and makes the scan categorical:
+    the wide format's `histogram` column is then a list of structs instead of JSON text.
+    `"values"` gives a weight per pixel value (`{class, weight}`); `"N:min:max"` (N equal
+    bins) or a sequence of bin edges bins the calibrated values of a continuous raster
+    (`{lower, upper, weight}`, every bin listed; a bin holds `lower <= v < upper`, the
+    last also its upper edge; values outside the edges are not counted). The class
+    columns (`majority_class`, `category`) then hold bin indices. `histogram_weight` is
+    `"count"` (default) or `"area"` (the overlapped area in pixels; runs
+    `transfer="overlay"`), and `histogram_normalize` is `"none"`, `"fraction"` (weights
+    sum to 1) or `"density"` (fractions per unit of value; bins only). Not combinable
+    with `remap` when binned, or with partitions.
 
     A Polars `filter` on `count` (`total_count` for categorical scans), `mean`,
     `majority_fraction` or `resolution`, combined with `&`, is also pushed into the scan
@@ -968,6 +1198,11 @@ def scan_raster_h3(
     1.22 filters are not pushed into the scan at all, because those versions drop some
     filters they hand to IO sources; Polars applies them after the scan instead.
     """
+    grid = _normalize_grid(grid)
+    index_col, hex_col = f"{grid}_index", f"{grid}_hex"
+    structured = _wants_histogram(histogram, histogram_weight, histogram_normalize)
+    if structured:
+        categorical = True
     _locals = locals()
     extra = {k: _locals[k] for k in _SCAN_OPTIONS}
     stream = RasterH3ArrowStream(
@@ -990,8 +1225,8 @@ def scan_raster_h3(
         # Build Polars schema from field names
         if not categorical:
             pl_schema = {
-                "h3_index": pl.UInt64,
-                "h3_hex": pl.String,
+                index_col: pl.UInt64,
+                hex_col: pl.String,
                 "mean": pl.Float64,
                 "stddev": pl.Float64,
                 "count": pl.Float64,
@@ -1003,8 +1238,8 @@ def scan_raster_h3(
             }
         elif format.lower() == "long":
             pl_schema = {
-                "h3_index": pl.UInt64,
-                "h3_hex": pl.String,
+                index_col: pl.UInt64,
+                hex_col: pl.String,
                 "category": pl.Int64,
                 "count": pl.Float64,
                 "fraction": pl.Float64,
@@ -1018,8 +1253,8 @@ def scan_raster_h3(
             }
         else:
             pl_schema = {
-                "h3_index": pl.UInt64,
-                "h3_hex": pl.String,
+                index_col: pl.UInt64,
+                hex_col: pl.String,
                 "majority_class": pl.Int64,
                 "majority_fraction": pl.Float64,
                 "majority_count": pl.Float64,
@@ -1032,6 +1267,18 @@ def scan_raster_h3(
                 "distinct_classes": pl.Int64,
                 "wkb": pl.Binary,
             }
+
+        if structured and "histogram" in pl_schema:
+            binned = histogram is not None and not (
+                isinstance(histogram, str)
+                and histogram.strip().lower() in ("values", "categorical")
+            )
+            entry = (
+                {"lower": pl.Float64, "upper": pl.Float64, "weight": pl.Float64}
+                if binned
+                else {"class": pl.Int64, "weight": pl.Float64}
+            )
+            pl_schema["histogram"] = pl.List(pl.Struct(entry))
 
         if not categorical and quantiles is not None:
             for name in _quantile_columns(quantiles):
@@ -1076,12 +1323,21 @@ def scan_raster_h3(
             options = dict(extra)
             scan_resolutions: Union[int, str, Sequence[int]] = resolutions
             if predicate is not None:
-                pushed = _pushdown_bounds(predicate, categorical, format)
+                pushed = _pushdown_bounds(predicate, categorical, format, GRIDS[grid])
+                if options.get("decimals") is not None:
+                    # The engine's statistic bounds compare unrounded values, so a row
+                    # whose rounded statistic passes the predicate could be dropped.
+                    for key in ("min_mean", "max_mean", "min_majority_fraction"):
+                        pushed.pop(key, None)
                 if _native_has_scan_options():
+                    if str(options.get("nodata_policy") or "").strip().lower() == "emit":
+                        # `emit` scans cannot take a count bound (their all-NoData cells
+                        # have count 0); Polars applies the filter to the rows instead.
+                        pushed = {k: v for k, v in pushed.items() if k != "min_count"}
                     options = _narrow_options(options, pushed)
                 allowed = pushed.get("resolutions")
                 if allowed is not None:
-                    configured = _resolution_list(resolutions)
+                    configured = _resolution_list(resolutions, GRIDS[grid])
                     if configured is not None:
                         kept = [r for r in configured if r in allowed]
                         if not kept:
@@ -1154,8 +1410,11 @@ def _quantile_columns(quantiles: Union[str, Sequence[Union[str, float]]]) -> Lis
         lib.raster_h3_py_free_string(ptr)
 
 
-def _resolution_list(resolutions: Union[int, str, Sequence[int]]) -> Optional[List[int]]:
-    """The scan's resolutions as ints when they are valid (non-empty, each 0 to 15; repeats
+def _resolution_list(
+    resolutions: Union[int, str, Sequence[int]], max_resolution: int = 15
+) -> Optional[List[int]]:
+    """The scan's resolutions as ints when they are valid (non-empty, each 0 to
+    `max_resolution`, the grid's finest; repeats
     are dropped, as the native parser does), else None. Pushdown narrows only a valid set, so an invalid one still
     reaches the native scan and raises its usual error instead of being filtered away."""
     try:
@@ -1169,7 +1428,7 @@ def _resolution_list(resolutions: Union[int, str, Sequence[int]]) -> Optional[Li
             values = [int(r) for r in resolutions]
     except (TypeError, ValueError):
         return None
-    if not values or any(not 0 <= r <= 15 for r in values):
+    if not values or any(not 0 <= r <= max_resolution for r in values):
         return None
     return sorted(set(values))
 
@@ -1259,13 +1518,16 @@ def _comparisons(node: Any) -> Iterable[Tuple[str, str, float]]:
             return
 
 
-def _pushdown_bounds(predicate: Any, categorical: bool, format: str) -> Dict[str, Any]:
+def _pushdown_bounds(
+    predicate: Any, categorical: bool, format: str, max_resolution: int = 15
+) -> Dict[str, Any]:
     """Scan bounds implied by a Polars predicate: `min_count`, `min_mean`, `max_mean`,
     `min_majority_fraction` and the set of allowed `resolutions`.
 
     Every bound keeps a superset of the rows the predicate keeps (the engine's filters are
     inclusive: `count >= min_count`, ...), so applying the predicate afterwards gives the
-    exact result. An expression this cannot read pushes nothing.
+    exact result. An expression this cannot read pushes nothing. `max_resolution` is the
+    grid's finest resolution.
     """
     try:
         tree = json.loads(predicate.meta.serialize(format="json"))
@@ -1277,7 +1539,7 @@ def _pushdown_bounds(predicate: Any, categorical: bool, format: str) -> Dict[str
     resolutions: Optional[set] = None
     for column, op, value in _comparisons(tree):
         if column == "resolution":
-            allowed = {r for r in range(16) if _COMPARE[op](r, value)}
+            allowed = {r for r in range(max_resolution + 1) if _COMPARE[op](r, value)}
             resolutions = allowed if resolutions is None else resolutions & allowed
             continue
         if column == count_col:
@@ -1326,6 +1588,68 @@ def read_raster_h3(
         return stream.to_polars()
     except ImportError:
         return stream
+
+
+def profile_raster(
+    path: Union[str, Path],
+    resolutions: Union[int, str, Sequence[int]] = 8,
+    *,
+    categorical: bool = False,
+    format: str = "wide",
+    crs: Optional[str] = None,
+    nodata: Optional[float] = None,
+    bbox: Optional[Union[str, Sequence[float]]] = None,
+    columns: Optional[Sequence[str]] = None,
+    limit: Optional[int] = None,
+    **options: Any,
+) -> Dict[str, Any]:
+    """Run a scan to completion, discarding its rows, and report where the time went.
+
+    Takes the arguments and options of `scan_raster_h3`. Returns `{"rows": n,
+    "profile": {...}}`; the profile has `elapsed_ms`, a tree of `phases` (`fetch`,
+    `tiff_decode`, `kernel` with its `crs_transform` / `grid_index` / `accumulate` split,
+    `horizon` with `spill`, `stall`, `serialize`), each with `wall_ms` summed over worker
+    threads and `cpu_ms` where the platform reports it, and counters: `pixels_read`,
+    `samples_indexed`, `indexed_pct`, `cells`, `stall_pct`, `chunks`, `spill_runs`,
+    `forced_compaction_flushes` and peak bytes. The kernel split is a sampled upper estimate
+    (`accumulate` is left out when it cannot be resolved).
+    Telemetry is collected per chunk, never per pixel.
+    """
+    if _wants_histogram(*(options.get(k) for k in _SCAN_OPTIONS if k.startswith("histogram"))):
+        categorical = True
+    lib = _get_lib()
+    if not hasattr(lib, "raster_h3_py_profile_scan_v2"):
+        raise RuntimeError("profile_raster requires a newer raster_h3 native library")
+    unknown = [k for k in options if k not in _SCAN_OPTIONS]
+    if unknown:
+        raise TypeError(f"unknown scan option(s) {sorted(unknown)}")
+    err = ctypes.c_void_p(0)
+    ptr = lib.raster_h3_py_profile_scan_v2(
+        str(path).encode("utf-8"),
+        _encode_resolutions(resolutions),
+        1 if categorical else 0,
+        format.encode("utf-8"),
+        crs.encode("utf-8") if crs else None,
+        1 if nodata is not None else 0,
+        float(nodata) if nodata is not None else 0.0,
+        _encode_bbox(bbox),
+        _encode_columns(columns),
+        int(limit) if limit is not None else -1,
+        _encode_scan_options(options),
+        ctypes.byref(err),
+    )
+    _raise_if_err(err)
+    if not ptr:
+        raise RuntimeError("Failed to profile the scan")
+    try:
+        return json.loads(ctypes.string_at(ptr).decode("utf-8"))
+    finally:
+        lib.raster_h3_py_free_string(ptr)
+
+
+#: Grid-neutral names for `scan_raster_h3` and `read_raster_h3`; pass `grid=`.
+scan_raster = scan_raster_h3
+read_raster = read_raster_h3
 
 
 # -----------------------------------------------------------------------------
@@ -1420,6 +1744,10 @@ def merge_partials(
     min_mean: Optional[float] = None,
     max_mean: Optional[float] = None,
     min_majority_fraction: Optional[float] = None,
+    grid: Optional[str] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
 ) -> Any:
     """
     Merge the partial rows of every partition of a partitioned scan into final rows.
@@ -1447,21 +1775,27 @@ def merge_partials(
     lib = _get_lib()
     if not hasattr(lib, "raster_h3_py_merge_partials"):
         raise RuntimeError("merge_partials requires a newer raster_h3 native library")
+    grid = _normalize_grid(grid)
+    index_col = f"{grid}_index"
     options = _encode_scan_options(
         dict(
+            grid=grid,
             quantiles=quantiles,
             min_count=min_count,
             min_mean=min_mean,
             max_mean=max_mean,
             min_majority_fraction=min_majority_fraction,
+            nodata_policy=nodata_policy,
+            emit_nodata_value=emit_nodata_value,
+            decimals=decimals,
         )
     )
     if options is not None and not hasattr(lib, "raster_h3_py_merge_partials_v2"):
         raise RuntimeError(
-            "quantiles and filters in merge_partials require a newer raster_h3 native library"
+            "grid, quantiles and filters in merge_partials require a newer raster_h3 native library"
         )
     table = _as_pyarrow_table(partials)
-    keys = {"resolution": pa.uint8(), "h3_index": pa.uint64(), PARTIAL_STATE_COLUMN: pa.binary()}
+    keys = {"resolution": pa.uint8(), index_col: pa.uint64(), PARTIAL_STATE_COLUMN: pa.binary()}
     if table is None:
         table = pa.table({name: pa.array([], type=t) for name, t in keys.items()})
     missing = [name for name in keys if name not in table.column_names]
@@ -1612,11 +1946,32 @@ def h3_polygon_to_cells(
     return None
 
 
-def _run_export(name: str, args: Tuple[Any, ...]) -> int:
-    """Call a native exporter, preferring its `_with_stats` variant when available."""
+def _run_export(
+    name: str,
+    args: Tuple[Any, ...],
+    grid: Optional[str] = None,
+    output: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """Call a native exporter, preferring its newest variant available. A grid other than
+    H3 and the output options (`nodata_policy`, `emit_nodata_value`, `decimals`) need the
+    `_v2` variant, which takes them in an options JSON object."""
     lib = _get_lib()
     err = ctypes.c_void_p(0)
-    if hasattr(lib, name + "_with_stats"):
+    grid = _normalize_grid(grid)
+    options = _encode_scan_options({"grid": grid, **(output or {})})
+    if hasattr(lib, name + "_v2"):
+        failures = ctypes.c_uint64(0)
+        count = getattr(lib, name + "_v2")(
+            *args, options, ctypes.byref(failures), ctypes.byref(err)
+        )
+        _raise_if_err(err)
+        _warn_transform_failures(failures.value)
+    elif options is not None:
+        raise RuntimeError(
+            "grid, nodata_policy, emit_nodata_value and decimals require a newer raster_h3 "
+            "native library"
+        )
+    elif hasattr(lib, name + "_with_stats"):
         failures = ctypes.c_uint64(0)
         count = getattr(lib, name + "_with_stats")(
             *args, ctypes.byref(failures), ctypes.byref(err)
@@ -1649,7 +2004,31 @@ def raster_to_parquet(
     categorical: bool = False,
     crs: Optional[str] = None,
     geoparquet: bool = True,
+    grid: Optional[str] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
+    transfer: Optional[str] = None,
+    sample_method: Optional[str] = None,
+    overlay_weighted: Optional[bool] = None,
+    mass_preserve: Optional[bool] = None,
 ) -> int:
+    """Aggregate a raster onto `grid` (H3 by default) and write the cells to a Parquet
+    file (GeoParquet with a `wkb` geometry column by default). Returns the cells written.
+
+    `nodata_policy`, `emit_nodata_value`, `decimals` and the `transfer` options are as
+    in `scan_raster_h3`. The file's statistics columns are not nullable, so under `nodata_policy="emit"` a
+    statistic without a value is NaN, and a categorical export needs an integer
+    `emit_nodata_value`."""
+    output = dict(
+        nodata_policy=nodata_policy,
+        emit_nodata_value=emit_nodata_value,
+        decimals=decimals,
+        transfer=transfer,
+        sample_method=sample_method,
+        overlay_weighted=overlay_weighted,
+        mass_preserve=mass_preserve,
+    )
     args = (
         str(input_path).encode("utf-8"),
         str(output_path).encode("utf-8"),
@@ -1658,7 +2037,7 @@ def raster_to_parquet(
         crs.encode("utf-8") if crs else None,
         1 if geoparquet else 0,
     )
-    return _run_export("raster_h3_py_export_parquet", args)
+    return _run_export("raster_h3_py_export_parquet", args, grid, output)
 
 
 def raster_to_pmtiles(
@@ -1668,7 +2047,27 @@ def raster_to_pmtiles(
     *,
     categorical: bool = False,
     crs: Optional[str] = None,
+    grid: Optional[str] = None,
+    nodata_policy: Optional[str] = None,
+    emit_nodata_value: Optional[float] = None,
+    decimals: Optional[int] = None,
+    transfer: Optional[str] = None,
+    sample_method: Optional[str] = None,
+    overlay_weighted: Optional[bool] = None,
+    mass_preserve: Optional[bool] = None,
 ) -> int:
+    """Aggregate a raster onto `grid` (H3 by default) and write the cells to a PMTiles v3
+    vector archive. Returns the cells written. `nodata_policy`, `emit_nodata_value` and
+    `decimals` are as in `scan_raster_h3`."""
+    output = dict(
+        nodata_policy=nodata_policy,
+        emit_nodata_value=emit_nodata_value,
+        decimals=decimals,
+        transfer=transfer,
+        sample_method=sample_method,
+        overlay_weighted=overlay_weighted,
+        mass_preserve=mass_preserve,
+    )
     args = (
         str(input_path).encode("utf-8"),
         str(output_path).encode("utf-8"),
@@ -1676,35 +2075,199 @@ def raster_to_pmtiles(
         1 if categorical else 0,
         crs.encode("utf-8") if crs else None,
     )
-    return _run_export("raster_h3_py_export_pmtiles", args)
+    return _run_export("raster_h3_py_export_pmtiles", args, grid, output)
 
 
 def parquet_to_pmtiles(
     parquet_path: Union[str, Path],
     output_path: Union[str, Path],
     *,
+    cell_column: Optional[str] = None,
+    grid: Optional[str] = None,
     h3_column: Optional[str] = None,
 ) -> int:
     """
-    Transcode an H3-indexed Parquet file into a PMTiles v3 vector archive, one hexagon
+    Transcode a cell-indexed Parquet file into a PMTiles v3 vector archive, one cell
     feature per row with the other columns as properties (DuckDB's `h3_parquet_to_pmtiles`).
 
-    `h3_column` names the H3 column (integer or hex string, matched case-insensitively);
-    by default the first of `h3_index`, `h3_hex`, `h3`, `cell` or `hex` is used. Returns
-    the number of hexagon features written.
+    `cell_column` names the cell column (integer or hex string, matched
+    case-insensitively); by default the first of `{h3,a5,s2,healpix}_{index,hex}`, a bare
+    grid name, `cell` or `hex` is used. The grid is the one the column is named for (H3
+    if the name does not say); pass `grid` for a column named otherwise. `h3_column` is
+    the earlier name of `cell_column`. Returns the number of cell features written.
     """
+    if h3_column is not None:
+        if cell_column is not None and cell_column != h3_column:
+            raise ValueError("pass cell_column or h3_column, not both")
+        cell_column = h3_column
     lib = _get_lib()
     if not hasattr(lib, "raster_h3_py_parquet_to_pmtiles"):
         raise RuntimeError("parquet_to_pmtiles requires a newer raster_h3 native library")
     err = ctypes.c_void_p(0)
-    count = lib.raster_h3_py_parquet_to_pmtiles(
-        str(parquet_path).encode("utf-8"),
-        str(output_path).encode("utf-8"),
-        h3_column.encode("utf-8") if h3_column else None,
+    column = cell_column.encode("utf-8") if cell_column else None
+    paths = (str(parquet_path).encode("utf-8"), str(output_path).encode("utf-8"))
+    if hasattr(lib, "raster_h3_py_parquet_to_pmtiles_v2"):
+        grid_arg = None if grid is None else _normalize_grid(grid).encode("utf-8")
+        count = lib.raster_h3_py_parquet_to_pmtiles_v2(
+            *paths, column, grid_arg, ctypes.byref(err)
+        )
+    elif grid is not None and _normalize_grid(grid) != "h3":
+        raise RuntimeError(f"grid={grid!r} requires a newer raster_h3 native library")
+    else:
+        count = lib.raster_h3_py_parquet_to_pmtiles(*paths, column, ctypes.byref(err))
+    _raise_if_err(err)
+    return int(count)
+
+
+# -----------------------------------------------------------------------------
+# Grid-neutral scalar functions (`grid`: "h3", "a5", "s2" or "healpix")
+# -----------------------------------------------------------------------------
+
+def _grid_code(grid: Optional[str]) -> Tuple[ctypes.CDLL, int]:
+    lib = _get_lib()
+    if not hasattr(lib, "raster_h3_py_grid_code"):
+        raise RuntimeError("grid scalar functions require a newer raster_h3 native library")
+    return lib, int(lib.raster_h3_py_grid_code(_normalize_grid(grid).encode("utf-8")))
+
+
+def _as_cell(cell_or_hex: Union[int, str]) -> int:
+    """A cell id from an integer or its hexadecimal string; 0 (never a cell) if malformed."""
+    if isinstance(cell_or_hex, str):
+        try:
+            cell = int(cell_or_hex, 16)
+        except ValueError:
+            return 0
+    else:
+        cell = int(cell_or_hex)
+    return cell if 0 < cell < 1 << 64 else 0
+
+
+def auto_resolution(
+    path: Union[str, Path], grid: str = "h3", *, offset: int = 0, crs: Optional[str] = None
+) -> int:
+    """The resolution `resolutions="auto"` picks for a raster on `grid`: the one whose
+    cells are closest in area to the raster's ground pixels, moved `offset` steps
+    (positive is finer) and clamped to the grid's range. `crs` overrides the raster's CRS.
+    """
+    lib, code = _grid_code(grid)
+    if not hasattr(lib, "raster_h3_py_auto_resolution"):
+        raise RuntimeError("auto_resolution requires a newer raster_h3 native library")
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        raise TypeError(f"offset must be an int, got {type(offset).__name__}")
+    err = ctypes.c_void_p(0)
+    res = lib.raster_h3_py_auto_resolution(
+        str(path).encode("utf-8"),
+        code,
+        max(-1000, min(1000, offset)),
+        crs.encode("utf-8") if crs else None,
         ctypes.byref(err),
     )
     _raise_if_err(err)
-    return int(count)
+    if res < 0:
+        raise RuntimeError("Failed to determine the auto resolution")
+    return int(res)
+
+
+def lonlat_to_cell(lon: float, lat: float, resolution: int, grid: str = "h3") -> Optional[int]:
+    """The cell of `grid` holding a WGS84 point (degrees) at `resolution`, or `None` if
+    the latitude is outside -90..90 or the resolution outside the grid's range."""
+    lib, code = _grid_code(grid)
+    cell = int(lib.raster_h3_py_grid_lonlat_to_cell(code, float(lon), float(lat), int(resolution)))
+    return cell or None
+
+
+def cell_to_string(cell: int, grid: str = "h3") -> Optional[str]:
+    """A cell id as its lowercase hexadecimal string (the `{grid}_hex` column), or `None`
+    if it is not a cell of `grid`."""
+    return format(int(cell), "x") if cell_is_valid(cell, grid) else None
+
+
+def string_to_cell(hex_str: str, grid: str = "h3") -> Optional[int]:
+    """The cell id of a hexadecimal string, or `None` if it is not a cell of `grid`."""
+    cell = _as_cell(hex_str)
+    return cell if cell and cell_is_valid(cell, grid) else None
+
+
+def cell_is_valid(cell_or_hex: Union[int, str], grid: str = "h3") -> bool:
+    lib, code = _grid_code(grid)
+    cell = _as_cell(cell_or_hex)
+    return bool(cell) and bool(lib.raster_h3_py_grid_is_valid(code, cell))
+
+
+def cell_to_lat(cell_or_hex: Union[int, str], grid: str = "h3") -> float:
+    """Centre latitude in degrees (NaN for an invalid cell)."""
+    lib, code = _grid_code(grid)
+    return float(lib.raster_h3_py_grid_to_lat(code, _as_cell(cell_or_hex)))
+
+
+def cell_to_lng(cell_or_hex: Union[int, str], grid: str = "h3") -> float:
+    """Centre longitude in degrees (NaN for an invalid cell)."""
+    lib, code = _grid_code(grid)
+    return float(lib.raster_h3_py_grid_to_lng(code, _as_cell(cell_or_hex)))
+
+
+def cell_resolution(cell_or_hex: Union[int, str], grid: str = "h3") -> int:
+    """The cell's resolution, or -1 for an invalid cell."""
+    lib, code = _grid_code(grid)
+    return int(lib.raster_h3_py_grid_get_resolution(code, _as_cell(cell_or_hex)))
+
+
+def cell_to_parent(
+    cell_or_hex: Union[int, str], parent_res: int, grid: str = "h3"
+) -> Optional[Union[int, str]]:
+    """The ancestor at `parent_res`, in the form given (integer or hex string); `None` if
+    the cell is invalid or `parent_res` is finer than it."""
+    lib, code = _grid_code(grid)
+    parent = int(lib.raster_h3_py_grid_cell_to_parent(code, _as_cell(cell_or_hex), int(parent_res)))
+    if not parent:
+        return None
+    return format(parent, "x") if isinstance(cell_or_hex, str) else parent
+
+
+def cell_to_wkb(cell_or_hex: Union[int, str], grid: str = "h3") -> Optional[bytes]:
+    """OGC WKB for a cell: a Polygon, or a MultiPolygon for cells crossing 180°."""
+    lib, code = _grid_code(grid)
+    cap = lib.raster_h3_py_wkb_buf_len()
+    buf = (ctypes.c_uint8 * cap)()
+    written = lib.raster_h3_py_grid_to_wkb(code, _as_cell(cell_or_hex), buf, cap)
+    return bytes(buf[:written]) if written else None
+
+
+def polygon_to_cells(
+    wkb: bytes, resolution: int, containment: str = "contains_centroid", grid: str = "h3"
+) -> Optional[List[int]]:
+    """Fill a WKB POLYGON / MULTIPOLYGON (WGS84 lon/lat degrees) with cells of `grid`.
+
+    As `h3_polygon_to_cells`: the cells sorted ascending and deduplicated, `None` for an
+    invalid polygon or a resolution outside the grid's range, and `ValueError` for an
+    unknown containment mode or a polygon that would exceed 10,000,000 cells.
+    """
+    lib, code = _grid_code(grid)
+    data = bytes(wkb)
+    out_cells = ctypes.POINTER(ctypes.c_uint64)()
+    out_len = ctypes.c_size_t(0)
+    status = lib.raster_h3_py_grid_polygon_to_cells(
+        code,
+        data,
+        len(data),
+        int(resolution),
+        containment.encode("utf-8"),
+        ctypes.byref(out_cells),
+        ctypes.byref(out_len),
+    )
+    if status == 0:
+        try:
+            return [int(out_cells[i]) for i in range(out_len.value)]
+        finally:
+            lib.raster_h3_py_free_cells(out_cells, out_len.value)
+    if status == 2:
+        raise ValueError(f"unknown containment mode {containment!r}")
+    if status == 3:
+        raise ValueError(
+            "polygon would produce more than 10,000,000 cells; "
+            "use a coarser resolution or split the polygon"
+        )
+    return None
 
 
 __all__ = [
@@ -1715,6 +2278,21 @@ __all__ = [
     "plan_partitions",
     "scan_raster_h3",
     "read_raster_h3",
+    "scan_raster",
+    "read_raster",
+    "GRIDS",
+    "auto_resolution",
+    "profile_raster",
+    "lonlat_to_cell",
+    "cell_to_string",
+    "string_to_cell",
+    "cell_is_valid",
+    "cell_to_lat",
+    "cell_to_lng",
+    "cell_resolution",
+    "cell_to_parent",
+    "cell_to_wkb",
+    "polygon_to_cells",
     "h3_to_string",
     "string_to_h3",
     "h3_to_lat",

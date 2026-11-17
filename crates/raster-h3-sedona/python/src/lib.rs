@@ -38,6 +38,7 @@ use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 use raster_h3_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
+use raster_h3_sedona::{GridKind, NodataPolicy, OutputPolicy, ResolutionSpec, TransferMode};
 use sedona_extension::extension::SedonaCTableProvider;
 use sedona_extension::runtime::RuntimeHandle;
 use sedona_extension::table_provider::ExportedTableProvider;
@@ -63,29 +64,76 @@ fn runtime() -> PyResult<Arc<RuntimeHandle>> {
 enum Resolutions {
     One(u8),
     Many(Vec<u8>),
+    /// `"auto"`, `"auto+1"`, `"auto-2"`, ...
+    Text(String),
 }
 
 impl Resolutions {
-    fn into_vec(self) -> PyResult<Vec<u8>> {
+    fn into_spec(self, grid: GridKind) -> PyResult<ResolutionSpec> {
         let resolutions = match self {
             Self::One(r) => vec![r],
             Self::Many(rs) => rs,
+            Self::Text(text) => return ResolutionSpec::parse(grid, &text).map_err(value_error),
         };
-        match resolutions.iter().find(|&&r| r > 15) {
+        let finest = grid.max_resolution();
+        match resolutions.iter().find(|&&r| r > finest) {
             Some(r) => Err(PyValueError::new_err(format!(
-                "resolution must be between 0 and 15, got {r}"
+                "{} resolution must be between 0 and {finest}, got {r}",
+                grid.label()
             ))),
-            None => Ok(resolutions),
+            None => Ok(ResolutionSpec::Fixed(resolutions)),
         }
     }
 }
 
-fn resolutions(resolutions: Option<Resolutions>) -> PyResult<Vec<u8>> {
-    resolutions.map_or(Ok(Vec::new()), Resolutions::into_vec)
+fn resolutions(resolutions: Option<Resolutions>, grid: GridKind) -> PyResult<ResolutionSpec> {
+    resolutions.map_or(Ok(ResolutionSpec::Fixed(Vec::new())), |r| r.into_spec(grid))
+}
+
+/// A grid name (`h3`, `a5`, `s2`, `healpix`, case-insensitive); `None` is H3.
+fn grid_of(name: Option<&str>) -> PyResult<GridKind> {
+    name.map_or(Ok(GridKind::H3), |name| {
+        GridKind::parse(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown grid {name:?}: expected {}",
+                GridKind::EXPECTED
+            ))
+        })
+    })
 }
 
 /// Filters reach these tables only through SedonaDB's extension ABI, which strips the
 /// `geoarrow.wkb` tag from geometry literals after SedonaDB has checked their CRS.
+/// `nodata_policy`, `emit_nodata_value` and `decimals` as an [`OutputPolicy`].
+fn output_policy(
+    nodata_policy: Option<&str>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<u8>,
+) -> PyResult<OutputPolicy> {
+    let mut policy = OutputPolicy::default();
+    if let Some(name) = nodata_policy {
+        policy.nodata = NodataPolicy::parse(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "nodata_policy must be {}, got {name:?}",
+                NodataPolicy::EXPECTED
+            ))
+        })?;
+    }
+    if let Some(value) = emit_nodata_value {
+        if !value.is_finite() || !policy.emits_nodata() {
+            return Err(PyValueError::new_err(
+                "emit_nodata_value must be finite and needs nodata_policy='emit'",
+            ));
+        }
+        policy.nodata_value = Some(value);
+    }
+    if decimals.is_some_and(|d| d > 15) {
+        return Err(PyValueError::new_err("decimals must be between 0 and 15"));
+    }
+    policy.decimals = decimals;
+    Ok(policy)
+}
+
 fn sedona_table(table: raster_h3_sedona::RasterH3Table) -> raster_h3_sedona::RasterH3Table {
     table.with_untagged_wkb_as_lnglat(true)
 }
@@ -113,7 +161,8 @@ impl PyRasterH3Table {
     /// selects a 1-based band, and `bbox` (`[min_lon, min_lat, max_lon, max_lat]`) clips
     /// the samples aggregated.
     #[staticmethod]
-    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, band=None, bbox=None))]
+    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, band=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None, transfer=None, sample_method=None, overlay_weighted=None, mass_preserve=None))]
+    #[allow(clippy::too_many_arguments)]
     fn continuous(
         source: &str,
         resolutions: Option<Resolutions>,
@@ -121,13 +170,29 @@ impl PyRasterH3Table {
         nodata: Option<f64>,
         band: Option<usize>,
         bbox: Option<[f64; 4]>,
+        grid: Option<&str>,
+        nodata_policy: Option<&str>,
+        emit_nodata_value: Option<f64>,
+        decimals: Option<u8>,
+        transfer: Option<&str>,
+        sample_method: Option<&str>,
+        overlay_weighted: Option<bool>,
+        mass_preserve: Option<bool>,
     ) -> PyResult<Self> {
-        let mut provider =
-            ContinuousRasterTableProvider::try_new(source, self::resolutions(resolutions)?)
+        let grid = grid_of(grid)?;
+        let transfer =
+            TransferMode::from_options(transfer, sample_method, overlay_weighted, mass_preserve)
                 .map_err(value_error)?;
-        if let Some(crs) = crs {
-            provider = provider.with_crs(crs);
-        }
+        let output = output_policy(nodata_policy, emit_nodata_value, decimals)?;
+        let mut provider = ContinuousRasterTableProvider::try_new_with(
+            source,
+            grid,
+            &self::resolutions(resolutions, grid)?,
+            crs.as_deref(),
+        )
+        .map_err(value_error)?
+        .with_output_policy(output)
+        .with_transfer(transfer);
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }
@@ -141,27 +206,50 @@ impl PyRasterH3Table {
             inner: Arc::new(sedona_table(raster_h3_sedona::RasterH3Table::continuous(
                 provider,
             ))),
-            description: format!("RasterH3Table.continuous({source:?})"),
+            description: match grid {
+                GridKind::H3 => format!("RasterH3Table.continuous({source:?})"),
+                grid => format!(
+                    "RasterH3Table.continuous({source:?}, grid={:?})",
+                    grid.as_str()
+                ),
+            },
         })
     }
 
     /// Categorical statistics (`majority_class`, `majority_fraction`, `histogram`, ...) per
     /// cell, in wide format. Arguments as for `continuous`.
     #[staticmethod]
-    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, bbox=None))]
+    #[pyo3(signature = (source, resolutions=None, *, crs=None, nodata=None, bbox=None, grid=None, nodata_policy=None, emit_nodata_value=None, decimals=None, transfer=None, sample_method=None, overlay_weighted=None, mass_preserve=None))]
+    #[allow(clippy::too_many_arguments)]
     fn categorical(
         source: &str,
         resolutions: Option<Resolutions>,
         crs: Option<String>,
         nodata: Option<f64>,
         bbox: Option<[f64; 4]>,
+        grid: Option<&str>,
+        nodata_policy: Option<&str>,
+        emit_nodata_value: Option<f64>,
+        decimals: Option<u8>,
+        transfer: Option<&str>,
+        sample_method: Option<&str>,
+        overlay_weighted: Option<bool>,
+        mass_preserve: Option<bool>,
     ) -> PyResult<Self> {
-        let mut provider =
-            CategoricalRasterTableProvider::try_new(source, self::resolutions(resolutions)?)
+        let grid = grid_of(grid)?;
+        let transfer =
+            TransferMode::from_options(transfer, sample_method, overlay_weighted, mass_preserve)
                 .map_err(value_error)?;
-        if let Some(crs) = crs {
-            provider = provider.with_crs(crs);
-        }
+        let output = output_policy(nodata_policy, emit_nodata_value, decimals)?;
+        let mut provider = CategoricalRasterTableProvider::try_new_with(
+            source,
+            grid,
+            &self::resolutions(resolutions, grid)?,
+            crs.as_deref(),
+        )
+        .map_err(value_error)?
+        .with_output_policy(output)
+        .with_transfer(transfer);
         if let Some(nodata) = nodata {
             provider = provider.with_nodata(nodata);
         }
@@ -172,7 +260,13 @@ impl PyRasterH3Table {
             inner: Arc::new(sedona_table(raster_h3_sedona::RasterH3Table::categorical(
                 provider,
             ))),
-            description: format!("RasterH3Table.categorical({source:?})"),
+            description: match grid {
+                GridKind::H3 => format!("RasterH3Table.categorical({source:?})"),
+                grid => format!(
+                    "RasterH3Table.categorical({source:?}, grid={:?})",
+                    grid.as_str()
+                ),
+            },
         })
     }
 
@@ -208,19 +302,22 @@ fn write_error(err: DataFusionError) -> PyErr {
     }
 }
 
-/// Write rows as H3 hexagon features to a PMTiles v3 archive at `path`; returns the number
-/// of features written.
+/// Write rows as cell features (H3, A5, S2 or HEALPix) to a PMTiles v3 archive at `path`;
+/// returns the number of features written.
 ///
 /// `data` is anything exposing `__arrow_c_stream__`: a SedonaDB DataFrame, a PyArrow table
-/// or a Polars DataFrame. The H3 column is `h3_column`, else the first of `h3_index`,
-/// `h3_hex`, `h3`, `cell`, `hex`, else the first column; it may be unsigned or signed 64-bit
+/// or a Polars DataFrame. The cell column is `cell_column` (or its earlier name,
+/// `h3_column`), else the first of `{h3,a5,s2,healpix}_{index,hex}`, a bare grid name,
+/// `cell`, `hex`, else the first column; the grid is `grid` if given, else the one the
+/// column is named for, else H3. The column it may be unsigned or signed 64-bit
 /// or a hex string. Rows where it is null are skipped and any other invalid value raises.
 /// Every other column becomes a feature property (binary columns such as `wkb` are left
 /// out). `min_zoom` / `max_zoom` keep only cells whose PMTiles zoom is in range, and
 /// `memory_budget_mb` (default 256) bounds the rows held in memory before sorting spills to
 /// temporary files. The archive is written atomically.
 #[pyfunction]
-#[pyo3(signature = (data, path, *, h3_column=None, min_zoom=None, max_zoom=None, memory_budget_mb=None))]
+#[pyo3(signature = (data, path, *, h3_column=None, min_zoom=None, max_zoom=None, memory_budget_mb=None, cell_column=None, grid=None))]
+#[allow(clippy::too_many_arguments)]
 fn write_pmtiles(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
@@ -229,9 +326,21 @@ fn write_pmtiles(
     min_zoom: Option<u8>,
     max_zoom: Option<u8>,
     memory_budget_mb: Option<usize>,
+    cell_column: Option<String>,
+    grid: Option<&str>,
 ) -> PyResult<usize> {
+    // `cell_column` is the grid-neutral name of `h3_column`.
+    let h3_column = match (cell_column, h3_column) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(PyValueError::new_err(
+                "pass cell_column or h3_column, not both",
+            ))
+        }
+        (a, b) => a.or(b),
+    };
     let mut options = raster_h3_sedona::PmtilesWriteOptions {
         h3_column,
+        grid: grid.map(|g| grid_of(Some(g))).transpose()?,
         min_zoom,
         max_zoom,
         ..Default::default()

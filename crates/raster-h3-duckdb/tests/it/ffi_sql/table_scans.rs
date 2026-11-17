@@ -665,3 +665,723 @@ fn test_s2_and_healpix_continuous_table_scans_and_cell_filters() {
         }
     }
 }
+
+/// Binds and scans `raster_h3_bind` with `grid :=` and `resolutions :=`, returning the
+/// distinct resolutions of the cells it emits, or the bind error.
+fn scan_resolutions(
+    path: &std::path::Path,
+    grid: raster_h3_duckdb::grid::GridKind,
+    resolutions: &str,
+) -> Result<Vec<u8>, String> {
+    let mut named = HashMap::new();
+    named.insert("grid".to_string(), MockVal::Str(grid.to_string()));
+    named.insert(
+        "resolutions".to_string(),
+        MockVal::Str(resolutions.to_string()),
+    );
+    named.insert("geom".to_string(), MockVal::Bool(true));
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: live `MockBindContext` for the installed mock C API.
+    unsafe {
+        raster_h3_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    if let Some(error) = bind_ctx.error.take() {
+        return Err(error);
+    }
+    let columns = bind_ctx.result_columns.len();
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, (0..columns).collect());
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying bind_data from `bind_ctx`.
+    unsafe {
+        raster_h3_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_init_local(&mut local_ctx as *mut MockInitContext as duckdb_init_info);
+    }
+    assert!(init_ctx.error.is_none());
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut seen = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live `MockFuncContext` and `MockDataChunk`.
+        unsafe {
+            raster_h3_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func_ctx.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        // SAFETY: column 0 holds `chunk.size` 64-bit cell ids written by `raster_h3_scan`.
+        let cells =
+            unsafe { std::slice::from_raw_parts(chunk.vectors[0].data.as_ptr(), chunk.size) };
+        for &cell in cells {
+            let res = grid.resolution(cell).expect("a valid cell");
+            if !seen.contains(&res) {
+                seen.push(res);
+            }
+        }
+    }
+    Ok(seen)
+}
+
+#[test]
+fn test_auto_resolution_on_every_grid() {
+    use raster_h3_core::raster::mosaic::{MosaicReader, OverlapRule};
+    use raster_h3_core::resolution::{auto_resolution, offset_resolution};
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    let (_tmp, path) = TestGeoTiffBuilder::new(32, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| (c + r + 10) as f32);
+    let mosaic = MosaicReader::open(
+        std::slice::from_ref(&path),
+        None,
+        None,
+        OverlapRule::default(),
+    )
+    .unwrap();
+    for grid in GridKind::ALL {
+        let matched = auto_resolution(grid, &mosaic, 0).unwrap();
+        for (text, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2)] {
+            assert_eq!(
+                scan_resolutions(&path, grid, text).unwrap(),
+                vec![offset_resolution(grid, matched, offset)],
+                "{grid} {text}"
+            );
+        }
+        // Explicit lists still work, and a malformed `auto` is a bind error.
+        assert_eq!(scan_resolutions(&path, grid, "5").unwrap(), vec![5]);
+        let err = scan_resolutions(&path, grid, "auto+x").unwrap_err();
+        assert!(err.contains("auto"), "{err}");
+    }
+    let missing = std::path::Path::new("/nonexistent/raster.tif");
+    assert!(scan_resolutions(missing, GridKind::H3, "auto").is_err());
+}
+
+/// One row of a continuous scan: `(cell, mean or NULL, count, min or NULL)`.
+type StatRow = (u64, Option<f64>, f64, Option<f64>);
+
+/// Binds and scans `raster_h3_bind` with the given named parameters.
+fn scan_stats(path: &std::path::Path, extra: Vec<(&str, MockVal)>) -> Result<Vec<StatRow>, String> {
+    let mut named = HashMap::new();
+    named.insert("geom".to_string(), MockVal::Bool(true));
+    for (name, value) in extra {
+        named.insert(name.to_string(), value);
+    }
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: live `MockBindContext` for the installed mock C API.
+    unsafe {
+        raster_h3_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    if let Some(error) = bind_ctx.error.take() {
+        return Err(error);
+    }
+    let columns = bind_ctx.result_columns.len();
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, (0..columns).collect());
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying bind_data from `bind_ctx`.
+    unsafe {
+        raster_h3_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_init_local(&mut local_ctx as *mut MockInitContext as duckdb_init_info);
+    }
+    if let Some(error) = init_ctx.error.take() {
+        return Err(error);
+    }
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut rows = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live `MockFuncContext` and `MockDataChunk`.
+        unsafe {
+            raster_h3_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func_ctx.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        for i in 0..chunk.size {
+            // SAFETY: columns 0 (cell), 2 (mean), 4 (count) and 5 (min) hold `chunk.size`
+            // 8-byte values written by `raster_h3_scan`.
+            let f =
+                |col: usize| unsafe { *(chunk.vectors[col].data.as_ptr() as *const f64).add(i) };
+            let cell = chunk.vectors[0].data[i];
+            let mean = chunk.vectors[2].is_valid(i).then(|| f(2));
+            let min = chunk.vectors[5].is_valid(i).then(|| f(5));
+            rows.push((cell, mean, f(4), min));
+        }
+    }
+    rows.sort_by_key(|r| r.0);
+    Ok(rows)
+}
+
+#[test]
+fn test_nodata_policy_and_decimals() {
+    install_mock_api();
+    // NoData in the left third; values with fractional means elsewhere.
+    let (_tmp, path) = TestGeoTiffBuilder::new(48, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| {
+            if c < 16 {
+                -9999.0
+            } else {
+                ((c * 7 + r * 3) % 11) as f32 + 0.25
+            }
+        });
+    let base = || {
+        vec![
+            ("resolution", MockVal::Int(9)),
+            ("nodata", MockVal::Double(-9999.0)),
+        ]
+    };
+    let with = |extra: Vec<(&'static str, MockVal)>| {
+        let mut params = base();
+        params.extend(extra);
+        scan_stats(&path, params)
+    };
+
+    let omit = with(vec![]).unwrap();
+    assert!(omit.iter().all(|r| r.1.is_some() && r.2 > 0.0));
+    assert_eq!(
+        with(vec![("nodata_policy", MockVal::Str("omit".into()))]).unwrap(),
+        omit
+    );
+
+    // emit: the all-NoData cells appear with count 0 and NULL statistics.
+    let emit = with(vec![("nodata_policy", MockVal::Str("EMIT".into()))]).unwrap();
+    let empty: Vec<_> = emit.iter().filter(|r| r.2 == 0.0).collect();
+    assert!(!empty.is_empty() && emit.len() == omit.len() + empty.len());
+    assert!(empty.iter().all(|r| r.1.is_none() && r.3.is_none()));
+    let kept: Vec<_> = emit.iter().filter(|r| r.2 > 0.0).copied().collect();
+    assert_eq!(kept, omit);
+
+    // emit with a value: it replaces NULL.
+    let filled = with(vec![
+        ("nodata_policy", MockVal::Str("emit".into())),
+        ("emit_nodata_value", MockVal::Double(-1.5)),
+    ])
+    .unwrap();
+    assert_eq!(filled.len(), emit.len());
+    for row in filled.iter().filter(|r| r.2 == 0.0) {
+        assert_eq!((row.1, row.3), (Some(-1.5), Some(-1.5)));
+    }
+
+    // decimals: statistics are rounded, counts are not.
+    let rounded = with(vec![("decimals", MockVal::Int(1))]).unwrap();
+    assert_eq!(rounded.len(), omit.len());
+    assert!(omit.iter().any(|r| (r.1.unwrap() * 10.0).fract() != 0.0));
+    for (plain, round) in omit.iter().zip(&rounded) {
+        assert_eq!(round.0, plain.0);
+        assert_eq!(round.1, Some((plain.1.unwrap() * 10.0).round() / 10.0));
+        assert_eq!(round.2, plain.2);
+    }
+
+    for (bad, needle) in [
+        (
+            vec![("nodata_policy", MockVal::Str("drop".into()))],
+            "nodata_policy",
+        ),
+        (vec![("decimals", MockVal::Int(16))], "decimals"),
+        (vec![("decimals", MockVal::Int(-1))], "decimals"),
+        (
+            vec![("emit_nodata_value", MockVal::Double(0.0))],
+            "emit_nodata_value",
+        ),
+        (
+            vec![
+                ("nodata_policy", MockVal::Str("emit".into())),
+                ("min_count", MockVal::Double(2.0)),
+            ],
+            "min_count",
+        ),
+    ] {
+        let err = with(bad).unwrap_err();
+        assert!(err.contains(needle), "{err}");
+    }
+}
+
+#[test]
+fn test_transfer_modes() {
+    use raster_h3_core::resolution::area_matched_resolution;
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    let value = |c: u32, r: u32| ((c * 7 + r * 13) % 23 + 1) as f32;
+    let (_tmp, path) = TestGeoTiffBuilder::new(40, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(value);
+    let total: f64 = (0..32)
+        .flat_map(|r| (0..40).map(move |c| f64::from(value(c, r))))
+        .sum();
+    let pixel_m2 = 111_320.0f64.powi(2) * 1e-6 * 37.8f64.to_radians().cos();
+    for grid in GridKind::ALL {
+        let matched = i64::from(area_matched_resolution(grid, pixel_m2));
+        let scan = |res: i64, extra: Vec<(&'static str, MockVal)>| {
+            let mut params = vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolution", MockVal::Int(res)),
+            ];
+            params.extend(extra);
+            scan_stats(&path, params)
+        };
+        // `(count, mean)` totals of a scan: overlapped area and mass.
+        let totals = |rows: &[StatRow]| {
+            rows.iter().fold((0.0, 0.0), |(area, mass), r| {
+                (area + r.2, mass + r.2 * r.1.unwrap())
+            })
+        };
+        let centres = scan(matched - 1, vec![]).unwrap();
+        let overlay = scan(
+            matched - 1,
+            vec![("transfer", MockVal::Str("overlay".into()))],
+        )
+        .unwrap();
+        assert!(overlay.len() >= centres.len(), "{grid}");
+        let (area, mass) = totals(&overlay);
+        assert!((area / 1280.0 - 1.0).abs() < 1e-6, "{grid}: {area}");
+        assert!((mass / total - 1.0).abs() < 1e-6, "{grid}: {mass}");
+        let preserved = scan(
+            matched - 1,
+            vec![
+                ("transfer", MockVal::Str("overlay".into())),
+                ("mass_preserve", MockVal::Bool(true)),
+            ],
+        )
+        .unwrap();
+        let (area, mass) = totals(&preserved);
+        assert!(
+            (area - 1280.0).abs() < 1e-6 && (mass - total).abs() < 1e-6 * total,
+            "{grid}"
+        );
+
+        // Sampling two steps finer than the pixels fills every cell on the raster.
+        let fine_centres = scan(matched + 2, vec![]).unwrap();
+        let sampled = scan(
+            matched + 2,
+            vec![
+                ("transfer", MockVal::Str("sample".into())),
+                ("sample_method", MockVal::Str("nearest".into())),
+            ],
+        )
+        .unwrap();
+        assert!(sampled.len() > 3 * fine_centres.len(), "{grid}");
+        for row in &sampled {
+            let (lat, lng) = grid.center_lat_lng(row.0).unwrap();
+            let c = ((lng + 122.45) / 0.001).floor() as u32;
+            let r = ((37.80 - lat) / 0.001).floor() as u32;
+            assert_eq!(row.1, Some(f64::from(value(c, r))), "{grid}");
+            assert_eq!(row.2, 1.0);
+        }
+
+        for (bad, needle) in [
+            (vec![("transfer", MockVal::Str("smear".into()))], "transfer"),
+            (
+                vec![("sample_method", MockVal::Str("bilinear".into()))],
+                "sample_method",
+            ),
+            (
+                vec![("mass_preserve", MockVal::Bool(true))],
+                "mass_preserve",
+            ),
+        ] {
+            let err = scan(matched, bad).unwrap_err();
+            assert!(err.contains(needle), "{err}");
+        }
+    }
+}
+
+/// `profile := true` leaves the scan's rows alone and keeps its telemetry as the core's
+/// last report.
+#[test]
+fn test_profile_named_parameter() {
+    install_mock_api();
+    let (_tmp, path) = TestGeoTiffBuilder::new(40, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| (c + r) as f32);
+    let plain = scan_stats(&path, vec![("resolution", MockVal::Int(9))]).unwrap();
+    assert!(raster_h3_core::run_profile::last_report().is_none());
+    let profiled = scan_stats(
+        &path,
+        vec![
+            ("resolution", MockVal::Int(9)),
+            ("profile", MockVal::Bool(true)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(plain, profiled);
+    let report = raster_h3_core::run_profile::last_report().expect("a report");
+    assert_eq!(report.pixels_read, 40 * 32);
+    assert_eq!(report.cells as usize, plain.len());
+    assert!(report.phase("kernel").unwrap().wall_ms > 0.0);
+    assert!(report.phase("grid_index").is_some());
+}
+
+/// Wide categorical rows as `(cell, total_count, histogram text)`.
+fn scan_histograms(
+    path: &std::path::Path,
+    extra: Vec<(&str, MockVal)>,
+) -> Result<Vec<(u64, f64, String)>, String> {
+    let mut named = HashMap::new();
+    for (name, value) in extra {
+        named.insert(name.to_string(), value);
+    }
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: live `MockBindContext` for the installed mock C API.
+    unsafe {
+        raster_h3_categorical_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    if let Some(error) = bind_ctx.error.take() {
+        return Err(error);
+    }
+    let columns = bind_ctx.result_columns.len();
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, (0..columns).collect());
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying bind_data from `bind_ctx`.
+    unsafe {
+        raster_h3_categorical_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_categorical_init_local(
+            &mut local_ctx as *mut MockInitContext as duckdb_init_info,
+        );
+    }
+    if let Some(error) = init_ctx.error.take() {
+        return Err(error);
+    }
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut rows = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live `MockFuncContext` and `MockDataChunk`.
+        unsafe {
+            raster_h3_categorical_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func_ctx.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        for i in 0..chunk.size {
+            // SAFETY: column 6 (total_count) holds `chunk.size` doubles written by the scan.
+            let total = unsafe { *(chunk.vectors[6].data.as_ptr() as *const f64).add(i) };
+            let text = String::from_utf8(chunk.vectors[7].strings[i].clone()).unwrap();
+            rows.push((chunk.vectors[0].data[i], total, text));
+        }
+    }
+    Ok(rows)
+}
+
+/// `histogram :=` writes the `histogram` column as the spec asks, on every grid.
+#[test]
+fn test_histogram_parameters() {
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    let value = |c: u32, r: u32| ((c * 7 + r * 13) % 40) as f32 * 0.25 + 0.1;
+    let (_tmp, path) = TestGeoTiffBuilder::new(40, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(value);
+    // Pixels per bin of [0, 2, 4, 6, 8]; values above 8 are not counted.
+    let mut per_bin = [0.0f64; 4];
+    for r in 0..32 {
+        for c in 0..40 {
+            let v = value(c, r);
+            if v <= 8.0 {
+                per_bin[((v / 2.0) as usize).min(3)] += 1.0;
+            }
+        }
+    }
+    for grid in GridKind::ALL {
+        let scan = |extra: Vec<(&'static str, MockVal)>| {
+            let mut params = vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolutions", MockVal::Str("auto-1".into())),
+            ];
+            params.extend(extra);
+            scan_histograms(&path, params)
+        };
+        // `[[lower, upper, weight], ...]` per cell, summed per bin over the cells.
+        let bins = |rows: &[(u64, f64, String)]| -> [f64; 4] {
+            let mut sums = [0.0; 4];
+            for (_, total, text) in rows {
+                let entries: Vec<[f64; 3]> = serde_json::from_str(text).unwrap();
+                assert_eq!(entries.len(), 4);
+                for (i, [lower, upper, weight]) in entries.iter().enumerate() {
+                    assert_eq!((*lower, *upper), (2.0 * i as f64, 2.0 * i as f64 + 2.0));
+                    sums[i] += weight;
+                }
+                let weights: f64 = entries.iter().map(|e| e[2]).sum();
+                assert!((weights - total).abs() < 1e-9 || weights <= 1.0 + 1e-9);
+            }
+            sums
+        };
+        let counts = scan(vec![("histogram", MockVal::Str("4:0:8".into()))]).unwrap();
+        assert_eq!(bins(&counts), per_bin, "{grid}");
+        let edges = scan(vec![("histogram", MockVal::Str("0,2,4,6,8".into()))]).unwrap();
+        assert_eq!(edges, counts, "{grid}");
+        let area = scan(vec![
+            ("histogram", MockVal::Str("4:0:8".into())),
+            ("histogram_weight", MockVal::Str("area".into())),
+        ])
+        .unwrap();
+        for (got, want) in bins(&area).iter().zip(per_bin) {
+            assert!((got / want - 1.0).abs() < 1e-6, "{grid}: {got} vs {want}");
+        }
+        // One cell holding the whole raster (resolution 0) still takes every pixel.
+        let whole = scan_histograms(
+            &path,
+            vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolution", MockVal::Int(0)),
+                ("histogram", MockVal::Str("4:0:8".into())),
+                ("histogram_weight", MockVal::Str("area".into())),
+            ],
+        )
+        .unwrap();
+        for (got, want) in bins(&whole).iter().zip(per_bin) {
+            assert!(
+                (got / want - 1.0).abs() < 1e-6,
+                "{grid} res 0: {got} vs {want}"
+            );
+        }
+        let fractions = scan(vec![
+            ("histogram", MockVal::Str("4:0:8".into())),
+            ("histogram_normalize", MockVal::Str("fraction".into())),
+        ])
+        .unwrap();
+        let total: f64 = bins(&fractions).iter().sum();
+        assert!((total - fractions.len() as f64).abs() < 1e-9, "{grid}");
+
+        // By value: an object of class weights (counts, not the default fractions).
+        let values = scan(vec![("histogram", MockVal::Str("values".into()))]).unwrap();
+        for (_, total, text) in &values {
+            let classes: std::collections::BTreeMap<String, f64> =
+                serde_json::from_str(text).unwrap();
+            assert_eq!(classes.values().sum::<f64>(), *total, "{grid}");
+        }
+
+        for bad in [
+            vec![("histogram", MockVal::Str("0:0:1".into()))],
+            vec![("histogram_normalize", MockVal::Str("density".into()))],
+            vec![("histogram_weight", MockVal::Str("mass".into()))],
+            vec![
+                ("histogram_weight", MockVal::Str("area".into())),
+                ("transfer", MockVal::Str("sample".into())),
+            ],
+        ] {
+            assert!(scan(bad.clone()).is_err(), "{grid}: {bad:?}");
+        }
+    }
+}
+
+/// The table function and the CLI return the same cells and statistics for the same
+/// raster and options, on every grid and in every transfer mode. The CLI is compared
+/// with the Python bindings and DataFusion SQL, on a raster with the same pixels, by
+/// `cross_engine` in `raster-h3-sedona`.
+#[test]
+fn test_cross_engine_consistency_with_the_cli() {
+    use raster_h3_cli::{parse_stream_args, stream_raster_to_writer, StreamOutputFormat};
+    use raster_h3_duckdb::grid::GridKind;
+    install_mock_api();
+    // Pixel values are the column index: a field linear in longitude.
+    let (_tmp, path) = TestGeoTiffBuilder::new(48, 48)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, _| c as f32);
+    let source = path.to_string_lossy().into_owned();
+    type Options = Vec<(&'static str, MockVal)>;
+    let text = |s: &str| MockVal::Str(s.into());
+    let cases: Vec<(&str, &str, &[&str], Options)> = vec![
+        ("centres", "auto", &[], vec![]),
+        (
+            "centres, emit, decimals",
+            "auto-1",
+            &["--nodata-policy", "emit", "--decimals", "2"],
+            vec![
+                ("nodata_policy", text("emit")),
+                ("decimals", MockVal::Int(2)),
+            ],
+        ),
+        (
+            "overlay, mass preserving",
+            "auto-1",
+            &["--transfer", "overlay", "--mass-preserve"],
+            vec![
+                ("transfer", text("overlay")),
+                ("mass_preserve", MockVal::Bool(true)),
+            ],
+        ),
+        (
+            "sample, bilinear",
+            "auto+1",
+            &["--transfer", "sample", "--sample-method", "bilinear"],
+            vec![
+                ("transfer", text("sample")),
+                ("sample_method", text("bilinear")),
+            ],
+        ),
+        (
+            "sample, bicubic",
+            "auto+1",
+            &["--transfer", "sample", "--sample-method", "bicubic"],
+            vec![
+                ("transfer", text("sample")),
+                ("sample_method", text("bicubic")),
+            ],
+        ),
+    ];
+    let close = |x: f64, y: f64| (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(1.0);
+    for grid in GridKind::ALL {
+        for (name, resolution, cli_options, sql_options) in &cases {
+            let what = format!("{grid}, {name}");
+            let mut args: Vec<String> = vec![source.clone(), "--grid".into(), grid.to_string()];
+            args.extend(["-r".to_string(), resolution.to_string()]);
+            args.extend(cli_options.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out).unwrap();
+            let column = grid.index_column_name();
+            // `cell -> (count, mean, min)`.
+            let from_cli: std::collections::BTreeMap<u64, (f64, Option<f64>, Option<f64>)> =
+                String::from_utf8(out)
+                    .unwrap()
+                    .lines()
+                    .map(|line| {
+                        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+                        (
+                            row[column].as_u64().unwrap(),
+                            (
+                                row["count"].as_f64().unwrap(),
+                                row["mean"].as_f64(),
+                                row["min"].as_f64(),
+                            ),
+                        )
+                    })
+                    .collect();
+            assert!(!from_cli.is_empty(), "{what}");
+
+            let mut params = vec![
+                ("grid", MockVal::Str(grid.to_string())),
+                ("resolutions", MockVal::Str(resolution.to_string())),
+            ];
+            params.extend(sql_options.iter().cloned());
+            let rows = scan_stats(&path, params).unwrap();
+            assert_eq!(rows.len(), from_cli.len(), "{what}: cells");
+            for (cell, mean, count, min) in rows {
+                let (cli_count, cli_mean, cli_min) = *from_cli
+                    .get(&cell)
+                    .unwrap_or_else(|| panic!("{what}: {cell:x}"));
+                assert!(close(count, cli_count), "{what}: count of {cell:x}");
+                for (ours, theirs) in [(mean, cli_mean), (min, cli_min)] {
+                    match (ours.filter(|v| v.is_finite()), theirs) {
+                        (Some(x), Some(y)) => assert!(close(x, y), "{what}: {cell:x}"),
+                        (None, None) => {}
+                        other => panic!("{what}: {cell:x}: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `(fraction, entropy)` of every row of a long-format categorical scan.
+fn long_fractions(path: &std::path::Path, decimals: Option<i64>) -> Vec<(f64, f64)> {
+    let mut named = HashMap::new();
+    named.insert("resolution".to_string(), MockVal::Int(7));
+    named.insert("format".to_string(), MockVal::Str("long".to_string()));
+    if let Some(d) = decimals {
+        named.insert("decimals".to_string(), MockVal::Int(d));
+    }
+    let mut bind = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: a live `MockBindContext`, which the mock C API treats as the bind info.
+    unsafe {
+        raster_h3_categorical_bind(&mut bind as *mut MockBindContext as duckdb_bind_info);
+    }
+    assert!(bind.error.is_none(), "{:?}", bind.error);
+    let columns = bind.result_columns.len();
+    let mut init = MockInitContext::new(bind.bind_data, (0..columns).collect());
+    let mut local = MockInitContext::new(bind.bind_data, Vec::new());
+    // SAFETY: live `MockInitContext`s carrying the bind data installed above.
+    unsafe {
+        raster_h3_categorical_init(&mut init as *mut MockInitContext as duckdb_init_info);
+        raster_h3_categorical_init_local(&mut local as *mut MockInitContext as duckdb_init_info);
+    }
+    let mut func = MockFuncContext {
+        bind_data: bind.bind_data,
+        init_data: init.init_data,
+        local_init_data: local.init_data,
+        error: None,
+    };
+    let mut out = Vec::new();
+    loop {
+        let mut chunk = MockDataChunk::new(columns, 2048);
+        // SAFETY: live function context and a chunk with one vector per column.
+        unsafe {
+            raster_h3_categorical_scan(
+                &mut func as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        assert!(func.error.is_none());
+        if chunk.size == 0 {
+            break;
+        }
+        for i in 0..chunk.size {
+            // SAFETY: columns 4 (fraction) and 8 (entropy) hold `chunk.size` doubles.
+            let f =
+                |col: usize| unsafe { *(chunk.vectors[col].data.as_ptr() as *const f64).add(i) };
+            out.push((f(4), f(8)));
+        }
+    }
+    out
+}
+
+#[test]
+fn long_categorical_rows_are_rounded() {
+    install_mock_api();
+    let (_tmp, path) = TestGeoTiffBuilder::new(48, 48)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_tempfile(|c, r| ((c * 7 + r * 3) % 3 + 1) as u8);
+    let plain = long_fractions(&path, None);
+    let rounded = long_fractions(&path, Some(2));
+    assert_eq!(plain.len(), rounded.len());
+    let round = |v: f64| (v * 100.0).round() / 100.0;
+    assert!(plain.iter().any(|&(f, e)| f != round(f) || e != round(e)));
+    for (p, r) in plain.iter().zip(&rounded) {
+        assert_eq!(*r, (round(p.0), round(p.1)));
+    }
+}

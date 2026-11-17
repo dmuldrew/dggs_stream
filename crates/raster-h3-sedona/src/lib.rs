@@ -5,11 +5,14 @@
 //! plain DataFusion `SessionContext` or into `SedonaContext::ctx`:
 //! - [`RasterH3Table`]: a real `datafusion::catalog::TableProvider` wrapping the
 //!   [`scan`] providers, with projection, limit and `Expr` filter pushdown
-//! - Table functions `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate`
-//! - The `raster_h3` H3 scalar functions as DataFusion `ScalarUDF`s, including
-//!   `h3_polygon_to_cells(geometry, resolution [, containment])`
+//! - Table functions `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate`,
+//!   and the same for the other grids (`a5_`, `s2_`, `healpix_` prefixes, or a grid-name
+//!   argument such as `'s2'`); the cell columns are `{grid}_index` and `{grid}_hex`
+//! - The `raster_h3` scalar functions of every grid as DataFusion `ScalarUDF`s
+//!   (`h3_to_string`, `a5_to_wkb`, `s2_cell_to_parent`, `healpix_lonlat_to_cell`, ...),
+//!   including `{grid}_polygon_to_cells(geometry, resolution [, containment])`
 //! - A `pmtiles` output format: `COPY (query) TO 'cells.pmtiles'` writes any query's rows as
-//!   H3 hexagon features in a PMTiles v3 archive ([`pmtiles`])
+//!   cell features of any of the grids in a PMTiles v3 archive ([`pmtiles`])
 //!
 //! Geometry columns (`wkb`, and the output of `h3_to_wkb`) are tagged with the
 //! `geoarrow.wkb` extension type and CRS `OGC:CRS84`, so Sedona's `ST_*` functions accept
@@ -49,9 +52,17 @@ pub use pmtiles::{
     PmtilesWriteOptions,
 };
 pub use polyfill::H3PolygonToCells;
+pub use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
+pub use raster_h3_core::grid::GridKind;
+pub use raster_h3_core::resolution::ResolutionSpec;
+pub use raster_h3_core::run_profile::{ProfileReport, RunProfile};
+pub use raster_h3_core::transfer::{SampleMethod, TransferMode};
 pub use table::{RasterH3Table, TableKind};
-pub use udf::{scalar_udfs, RasterH3ScalarUdf};
-pub use udtf::{CategoricalAggregateFunction, ContinuousAggregateFunction, PlanPartitionsFunction};
+pub use udf::{scalar_udfs, LonLatToCell, RasterH3ScalarUdf};
+pub use udtf::{
+    CategoricalAggregateFunction, ContinuousAggregateFunction, GridCategoricalAggregateFunction,
+    GridContinuousAggregateFunction, PlanPartitionsFunction,
+};
 
 /// Register the `raster_h3` table functions, scalar UDFs, merge aggregates and the
 /// `pmtiles` output format (`COPY ... TO 'cells.pmtiles'`, see [`pmtiles`]) into `ctx`.
@@ -66,6 +77,16 @@ pub fn register_all(ctx: &SessionContext) {
         "h3_raster_categorical_aggregate",
         Arc::new(CategoricalAggregateFunction),
     );
+    for grid in [GridKind::A5, GridKind::S2, GridKind::Healpix] {
+        ctx.register_udtf(
+            &format!("{grid}_raster_continuous_aggregate"),
+            Arc::new(GridContinuousAggregateFunction(grid)),
+        );
+        ctx.register_udtf(
+            &format!("{grid}_raster_categorical_aggregate"),
+            Arc::new(GridCategoricalAggregateFunction(grid)),
+        );
+    }
     ctx.register_udtf(
         "h3_raster_plan_partitions",
         Arc::new(PlanPartitionsFunction),

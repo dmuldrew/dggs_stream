@@ -4,30 +4,80 @@ use std::ffi::{c_char, c_int, CStr};
 
 use raster_h3_core::aggregator::multi_horizon::{QuantileTarget, ScanPartition, SpectralFormula};
 use raster_h3_core::aggregator::{CategoryRemapper, SamplingPattern};
+use raster_h3_core::aggregator::{NodataPolicy, OutputPolicy};
 use raster_h3_core::columnar::CategoricalFormat;
 use raster_h3_core::error::{RasterH3Error, Result};
-use raster_h3_core::raster::mosaic::OverlapRule;
-use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str};
+use raster_h3_core::grid::GridKind;
+use raster_h3_core::raster::mosaic::{resolve_raster_sources, OverlapRule};
+use raster_h3_core::resolution::ResolutionSpec;
+use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
+use raster_h3_core::transfer::TransferMode;
 
 use crate::config::PyScanConfig;
 use crate::ffi::opt_cstr;
 
-/// H3 resolutions from a C string; NULL means the default `[8]`. An empty string is
+/// Resolutions of `grid` from a C string: a list, or `auto` / `auto+N` / `auto-N` (the
+/// resolution whose cells match the raster's pixel size, see
+/// [`raster_h3_core::resolution`]). NULL means the default `[8]`. An empty string is
 /// rejected like any other list without a resolution.
 ///
 /// # Safety
 /// `ptr` must be null or a valid NUL-terminated string.
-pub(crate) unsafe fn parse_c_resolutions(ptr: *const c_char) -> Result<Vec<u8>> {
+pub(crate) unsafe fn parse_c_resolutions(
+    grid: GridKind,
+    ptr: *const c_char,
+) -> Result<ResolutionSpec> {
     if ptr.is_null() {
-        return Ok(vec![8]);
+        return Ok(ResolutionSpec::Fixed(vec![8]));
     }
     // SAFETY: `ptr` is non-null and NUL-terminated (caller contract).
     let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy();
-    try_parse_resolutions_str(&s).ok_or_else(|| {
+    if let Some(auto) = ResolutionSpec::parse_auto(&s) {
+        return auto;
+    }
+    try_parse_resolutions_str_for(grid, &s)
+        .map(ResolutionSpec::Fixed)
+        .ok_or_else(|| {
+            RasterH3Error::InvalidParameter(format!(
+                "Invalid resolutions '{s}': expected 'auto', 'auto+N', 'auto-N' or {} \
+                 resolutions between 0 and {}, e.g. 7,8",
+                grid.label(),
+                grid.max_resolution()
+            ))
+        })
+}
+
+/// A grid name (`h3`, `a5`, `s2`, `healpix`, case-insensitive).
+pub(crate) fn parse_grid(name: &str) -> Result<GridKind> {
+    GridKind::parse(name).ok_or_else(|| {
         RasterH3Error::InvalidParameter(format!(
-            "Invalid resolutions '{s}': expected H3 resolutions between 0 and 15, e.g. 7,8"
+            "Invalid grid '{name}': expected {}",
+            GridKind::EXPECTED
         ))
     })
+}
+
+/// The grid named by a C string; NULL or empty means H3.
+///
+/// # Safety
+/// `ptr` must be null or a valid NUL-terminated string.
+pub(crate) unsafe fn parse_c_grid(ptr: *const c_char) -> Result<GridKind> {
+    // SAFETY: null or NUL-terminated (caller contract), as `opt_cstr` requires.
+    match unsafe { opt_cstr(ptr) } {
+        None => Ok(GridKind::H3),
+        Some(name) => parse_grid(&name),
+    }
+}
+
+/// The `grid` of an `options` JSON object (H3 when there is no object or no `grid`),
+/// read ahead of the other options because it bounds the resolutions.
+pub(crate) fn grid_of_options(options: Option<&str>) -> Result<GridKind> {
+    let Some(json) = options else {
+        return Ok(GridKind::H3);
+    };
+    let opts: PyScanOptions = serde_json::from_str(json)
+        .map_err(|e| RasterH3Error::InvalidParameter(format!("Invalid scan options: {e}")))?;
+    opts.grid.as_deref().map_or(Ok(GridKind::H3), parse_grid)
 }
 
 /// Categorical output format from a C string; NULL or empty means `wide`.
@@ -63,6 +113,7 @@ fn parse_bbox_strict(s: &str) -> Option<[f64; 4]> {
 /// Every C string argument must be null or a valid NUL-terminated string.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn build_py_scan_config(
+    grid: GridKind,
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -79,9 +130,16 @@ pub(crate) unsafe fn build_py_scan_config(
     unsafe {
         let path_str = opt_cstr(path)
             .ok_or_else(|| RasterH3Error::InvalidParameter("Missing input raster path".into()))?;
-        let res_vec = parse_c_resolutions(resolutions)?;
         let fmt = parse_c_format(format)?;
         let crs_opt = opt_cstr(crs);
+        // `auto` is measured on the raster, opened (headers only) as the scan will.
+        let res_vec = match parse_c_resolutions(grid, resolutions)? {
+            ResolutionSpec::Fixed(resolutions) => resolutions,
+            auto => {
+                let paths = resolve_raster_sources(&path_str)?;
+                auto.resolve_paths(grid, &paths, crs_opt.as_deref())?
+            }
+        };
         let nodata_opt = if has_nodata != 0 { Some(nodata) } else { None };
         let bbox_opt = opt_cstr(bbox)
             .map(|s| {
@@ -106,6 +164,7 @@ pub(crate) unsafe fn build_py_scan_config(
 
         Ok(PyScanConfig {
             path: path_str,
+            grid,
             resolutions: res_vec,
             categorical: categorical != 0,
             format: fmt,
@@ -126,6 +185,8 @@ pub(crate) unsafe fn build_py_scan_config(
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PyScanOptions {
+    /// `h3` (default), `a5`, `s2` or `healpix`.
+    pub(crate) grid: Option<String>,
     band: Option<i64>,
     sampling: Option<String>,
     pub(crate) overlap_rule: Option<String>,
@@ -141,6 +202,57 @@ pub(crate) struct PyScanOptions {
     min_count: Option<f64>,
     min_mean: Option<f64>,
     max_mean: Option<f64>,
+    /// `omit` (default) or `emit`.
+    pub(crate) nodata_policy: Option<String>,
+    pub(crate) emit_nodata_value: Option<f64>,
+    pub(crate) decimals: Option<i64>,
+    /// `assign_centers` (default), `sample` or `overlay`.
+    pub(crate) transfer: Option<String>,
+    pub(crate) sample_method: Option<String>,
+    pub(crate) overlay_weighted: Option<bool>,
+    pub(crate) mass_preserve: Option<bool>,
+    /// `values`, `N:min:max` or comma-separated bin edges.
+    histogram: Option<String>,
+    /// `count` (default) or `area`.
+    histogram_weight: Option<String>,
+    /// `none` (default), `fraction` or `density`.
+    histogram_normalize: Option<String>,
+}
+
+/// The output policy of an options object: `nodata_policy`, `emit_nodata_value` and
+/// `decimals`, checked as the other engines check them.
+pub(crate) fn output_policy_of(
+    nodata_policy: Option<&str>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<i64>,
+) -> Result<OutputPolicy> {
+    let mut policy = OutputPolicy::default();
+    if let Some(name) = nodata_policy {
+        policy.nodata = NodataPolicy::parse(name).ok_or_else(|| {
+            RasterH3Error::InvalidParameter(format!(
+                "Invalid nodata_policy '{name}': expected {}",
+                NodataPolicy::EXPECTED
+            ))
+        })?;
+    }
+    if let Some(value) = emit_nodata_value {
+        if !policy.emits_nodata() {
+            return Err(RasterH3Error::InvalidParameter(
+                "emit_nodata_value needs nodata_policy 'emit'".into(),
+            ));
+        }
+        policy.nodata_value = Some(value);
+    }
+    if let Some(decimals) = decimals {
+        let max = i64::from(raster_h3_core::aggregator::output_policy::MAX_DECIMALS);
+        if !(0..=max).contains(&decimals) {
+            return Err(RasterH3Error::InvalidParameter(format!(
+                "decimals must be between 0 and {max}, got {decimals}"
+            )));
+        }
+        policy.decimals = Some(decimals as u8);
+    }
+    Ok(policy)
 }
 
 /// Names accepted for `overlap_rule`, as in DuckDB's `overlap_rule :=`.
@@ -223,6 +335,36 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         cfg.remapper = Some(CategoryRemapper::parse(spec)?.into_arc());
     }
     cfg.min_count = opts.min_count;
+    cfg.transfer = TransferMode::from_options(
+        opts.transfer.as_deref(),
+        opts.sample_method.as_deref(),
+        opts.overlay_weighted,
+        opts.mass_preserve,
+    )?;
+    cfg.histogram = raster_h3_core::histogram::HistogramSpec::from_options(
+        opts.histogram.as_deref(),
+        opts.histogram_weight.as_deref(),
+        opts.histogram_normalize.as_deref(),
+    )?;
+    if let Some(spec) = &cfg.histogram {
+        // A histogram is a categorical aggregation; area weights run `overlay`.
+        if !cfg.categorical {
+            return Err(RasterH3Error::InvalidParameter(
+                "histogram options apply to categorical scans only".into(),
+            ));
+        }
+        if cfg.partition.is_some() {
+            return Err(RasterH3Error::InvalidParameter(
+                "histogram options cannot be combined with a partition".into(),
+            ));
+        }
+        cfg.transfer = spec.transfer_mode(cfg.transfer)?;
+    }
+    cfg.output = output_policy_of(
+        opts.nodata_policy.as_deref(),
+        opts.emit_nodata_value,
+        opts.decimals,
+    )?;
     for (name, value) in [("min_mean", opts.min_mean), ("max_mean", opts.max_mean)] {
         if value.is_some() && cfg.categorical {
             return Err(RasterH3Error::InvalidParameter(format!(
@@ -296,7 +438,9 @@ pub(crate) unsafe fn build_py_scan_config_v2(
 ) -> Result<PyScanConfig> {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract).
     unsafe {
+        let options = opt_cstr(options);
         let mut cfg = build_py_scan_config(
+            grid_of_options(options.as_deref())?,
             path,
             resolutions,
             categorical,
@@ -308,7 +452,7 @@ pub(crate) unsafe fn build_py_scan_config_v2(
             columns,
             limit,
         )?;
-        apply_scan_options(&mut cfg, opt_cstr(options).as_deref())?;
+        apply_scan_options(&mut cfg, options.as_deref())?;
         Ok(cfg)
     }
 }

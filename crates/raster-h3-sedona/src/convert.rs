@@ -49,6 +49,24 @@ pub(crate) fn to_arrow_type(dt: ArrowDataType) -> DataType {
         ArrowDataType::Boolean => DataType::Boolean,
         ArrowDataType::Utf8 => DataType::Utf8,
         ArrowDataType::Binary => DataType::Binary,
+        ArrowDataType::ValueHistogram | ArrowDataType::BinHistogram => {
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(histogram_fields(dt == ArrowDataType::BinHistogram)),
+                false,
+            )))
+        }
+    }
+}
+
+/// The entry fields of a histogram column: `lower, upper, weight` when binned, else
+/// `class, weight`.
+fn histogram_fields(binned: bool) -> arrow::datatypes::Fields {
+    let float = |name: &str| Field::new(name, DataType::Float64, false);
+    if binned {
+        vec![float("lower"), float("upper"), float("weight")].into()
+    } else {
+        vec![Field::new("class", DataType::Int64, false), float("weight")].into()
     }
 }
 
@@ -137,6 +155,29 @@ pub(crate) fn from_column_array(column: ColumnArray) -> ArrayRef {
         }
         ColumnArray::Binary { values, validity } => {
             Arc::new(BinaryArray::from_iter(masked(values, validity)))
+        }
+        ColumnArray::Histogram(column) => {
+            let fields = histogram_fields(column.binned);
+            let float = |values: Vec<f64>| Arc::new(Float64Array::from(values)) as ArrayRef;
+            let entries: Vec<ArrayRef> = if column.binned {
+                vec![
+                    float(column.lower),
+                    float(column.upper),
+                    float(column.weights),
+                ]
+            } else {
+                vec![
+                    Arc::new(arrow::array::Int64Array::from(column.classes)),
+                    float(column.weights),
+                ]
+            };
+            let item = Arc::new(Field::new("item", DataType::Struct(fields.clone()), false));
+            Arc::new(arrow::array::ListArray::new(
+                item,
+                arrow::buffer::OffsetBuffer::new(column.offsets.into()),
+                Arc::new(arrow::array::StructArray::new(fields, entries, None)),
+                None,
+            ))
         }
     }
 }

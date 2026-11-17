@@ -3,6 +3,7 @@
 //! Orchestrates the streaming aggregation of GeoTIFF rasters across multiple H3 resolutions
 //! and packages the resulting vector hexagons directly into a single PMTiles v3 archive.
 
+use crate::aggregator::output_policy::OutputPolicy;
 use rayon::prelude::*;
 use rustc_hash::FxBuildHasher;
 use serde_json::json;
@@ -96,6 +97,7 @@ trait TileKind: Sync {
 
 struct ContinuousTiles {
     needs_stddev: bool,
+    policy: OutputPolicy,
 }
 
 impl TileKind for ContinuousTiles {
@@ -123,15 +125,17 @@ impl TileKind for ContinuousTiles {
         acc: &Self::Acc,
         summary: &Self::Summary,
     ) -> FeatureProperties {
+        // MVT properties have no NULL: a statistic without a value is NaN.
+        let stats = self.policy.continuous(acc);
         FeatureProperties::Continuous {
             h3_index,
             resolution,
-            mean: acc.mean(),
-            sum: acc.sum,
-            stddev: *summary,
-            count: acc.count,
-            min: acc.min,
-            max: acc.max,
+            mean: stats.mean.unwrap_or(f64::NAN),
+            sum: stats.sum,
+            stddev: self.policy.round(*summary),
+            count: stats.count,
+            min: stats.min.unwrap_or(f64::NAN),
+            max: stats.max.unwrap_or(f64::NAN),
         }
     }
 
@@ -230,6 +234,7 @@ struct CategoricalTileStats {
 
 struct CategoricalTiles {
     needs_entropy: bool,
+    policy: OutputPolicy,
 }
 
 impl TileKind for CategoricalTiles {
@@ -245,10 +250,15 @@ impl TileKind for CategoricalTiles {
     fn summarize(&self, acc: &Self::Acc) -> Self::Summary {
         let (majority, _maj_count, majority_fraction) = acc.majority();
         CategoricalSummary {
-            majority,
-            majority_fraction,
+            // A cell without samples carries the NoData class (0 without one).
+            majority: if acc.total_count > 0.0 {
+                majority
+            } else {
+                self.policy.nodata_class().unwrap_or(0)
+            },
+            majority_fraction: self.policy.round(majority_fraction),
             entropy: if self.needs_entropy {
-                acc.shannon_entropy()
+                self.policy.round(acc.shannon_entropy())
             } else {
                 0.0
             },
@@ -504,6 +514,7 @@ impl H3PmtilesTiler {
             .unwrap_or_else(PropertyFilter::all);
         let kind = ContinuousTiles {
             needs_stddev: property_filter.needs_stddev(),
+            policy: streamer.output_policy(),
         };
         Self::generate_tiles(streamer, output_path, property_filter, kind)
     }
@@ -533,6 +544,7 @@ impl H3PmtilesTiler {
             .unwrap_or_else(PropertyFilter::all);
         let kind = CategoricalTiles {
             needs_entropy: property_filter.needs_entropy(),
+            policy: streamer.output_policy(),
         };
         Self::generate_tiles(streamer, output_path, property_filter, kind)
     }
@@ -603,6 +615,8 @@ impl H3PmtilesTiler {
             String::new(),
         )?;
 
+        // Building and writing tiles is this exporter's serialization time.
+        let mut clock = crate::run_profile::SerializeClock::start(streamer.run_profile());
         let (tx, rx) = std::sync::mpsc::sync_channel::<StreamBatch<K::Record>>(4);
         let producer_handle = std::thread::spawn(move || -> crate::error::Result<()> {
             loop {
@@ -628,7 +642,8 @@ impl H3PmtilesTiler {
         });
         let mut producer_channel = ProducerChannel::new(rx, producer_handle);
 
-        while let Ok(batch) = producer_channel.recv() {
+        while let Ok(batch) = clock.wait(|| producer_channel.recv()) {
+            clock.rows(batch.records.len());
             let prepared_batch: Vec<PreparedHex<K>> = batch
                 .records
                 .into_par_iter()
@@ -864,5 +879,22 @@ impl H3PmtilesTiler {
         h3_column_name: Option<&str>,
     ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
         crate::transcode::process_parquet_to_pmtiles(parquet_path, pmtiles_path, h3_column_name)
+    }
+
+    /// [`Self::process_parquet_to_pmtiles`] with the cells' grid given rather than taken
+    /// from the cell column's name.
+    #[inline]
+    pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
+        parquet_path: P1,
+        pmtiles_path: P2,
+        cell_column_name: Option<&str>,
+        grid: Option<crate::grid::GridKind>,
+    ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
+        crate::transcode::process_parquet_to_pmtiles_for(
+            parquet_path,
+            pmtiles_path,
+            cell_column_name,
+            grid,
+        )
     }
 }

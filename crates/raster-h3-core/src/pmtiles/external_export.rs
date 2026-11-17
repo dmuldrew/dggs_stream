@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grid::GridKind;
 use crate::pmtiles::features::{
-    build_default_pmtiles_fields, build_pmtiles_metadata, H3Feature, PmtilesExportSummary,
+    build_default_pmtiles_fields_for, build_pmtiles_metadata, H3Feature, PmtilesExportSummary,
     TilePyramidAccumulator,
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
@@ -406,24 +406,9 @@ impl ExternalFeatureExport {
 
     /// The default fields plus [`Self::with_layer_fields`]'s, the caller's types winning.
     fn fields_metadata(&self) -> serde_json::Value {
-        let mut fields = match self.grid {
-            GridKind::H3 => match build_default_pmtiles_fields() {
-                serde_json::Value::Object(map) => map,
-                _ => serde_json::Map::new(),
-            },
-            grid => {
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    grid.index_column_name().to_string(),
-                    serde_json::json!("Number"),
-                );
-                map.insert(
-                    grid.hex_column_name().to_string(),
-                    serde_json::json!("String"),
-                );
-                map.insert("resolution".to_string(), serde_json::json!("Number"));
-                map
-            }
+        let mut fields = match build_default_pmtiles_fields_for(self.grid) {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
         };
         for (name, kind) in &self.layer_fields {
             fields.insert(name.clone(), kind.clone());

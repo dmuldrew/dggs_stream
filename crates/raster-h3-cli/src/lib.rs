@@ -20,6 +20,7 @@ use raster_h3_core::aggregator::multi_horizon::{
     plan_partitions, ChunkBlock, MultiCategoricalHorizonStreamer, MultiResolutionConfig,
     MultiScanHorizonStreamer, ScanPartition,
 };
+use raster_h3_core::aggregator::output_policy::{NodataPolicy, OutputPolicy, MAX_DECIMALS};
 use raster_h3_core::columnar::ipc::{write_ipc_stream, write_jsonl_stream, IpcStreamReader};
 use raster_h3_core::columnar::partitioned::{
     merge_partial_batches, PartitionedBatchReader, PARTIAL_STATE_COLUMN,
@@ -30,10 +31,14 @@ use raster_h3_core::columnar::{
 };
 use raster_h3_core::error::{RasterH3Error, Result};
 use raster_h3_core::grid::GridKind;
+use raster_h3_core::histogram::HistogramSpec;
 use raster_h3_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use raster_h3_core::pmtiles::{H3PmtilesTiler, PmtilesExportSummary};
 use raster_h3_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
+use raster_h3_core::resolution::ResolutionSpec;
+use raster_h3_core::run_profile::RunProfile;
 use raster_h3_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
+use raster_h3_core::transfer::TransferMode;
 
 /// Output wire format for streaming CLI queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +69,18 @@ pub struct CliStreamOptions {
     /// Scan only this partition (from [`plan_raster_partitions`]). The output gains a
     /// nullable `partial_state` column; combine the partitions with [`merge_partition_files`].
     pub partition: Option<ScanPartition>,
+    /// `--nodata-policy`, `--emit-nodata-value` and `--decimals`: whether all-NoData
+    /// cells are output and with what value, and the decimal rounding of statistics.
+    pub output: OutputPolicy,
+    /// `--transfer`, `--sample-method`, `--overlay-weighted` and `--mass-preserve`: how
+    /// pixels map onto cells (default: each pixel into the cell holding its centre).
+    pub transfer: TransferMode,
+    /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
+    /// per-cell histogram (see [`raster_h3_core::histogram`]). Implies `--categorical`.
+    pub histogram: Option<HistogramSpec>,
+    /// `--profile`: collect runtime telemetry of the scan (see
+    /// [`raster_h3_core::run_profile`]); the binary prints the report on stderr.
+    pub profile: Option<Arc<RunProfile>>,
 }
 
 impl Default for CliStreamOptions {
@@ -83,6 +100,10 @@ impl Default for CliStreamOptions {
             limit: None,
             output_format: StreamOutputFormat::Ipc,
             partition: None,
+            output: OutputPolicy::default(),
+            transfer: TransferMode::AssignCenters,
+            histogram: None,
+            profile: None,
         }
     }
 }
@@ -110,6 +131,20 @@ fn resolve_projection_indices(
     Ok(Some(indices))
 }
 
+/// Copy the NoData policy, NoData value and decimals onto a scan configuration.
+fn apply_output_policy(config: &mut MultiResolutionConfig, policy: &OutputPolicy) {
+    config.nodata_policy = policy.nodata;
+    config.emit_nodata_value = policy.nodata_value;
+    config.decimals = policy.decimals;
+}
+
+/// Print the runtime profile of a finished scan on stderr (`--profile`).
+fn print_profile(profile: &Option<Arc<RunProfile>>) {
+    if let Some(profile) = profile {
+        eprintln!("{}", profile.report());
+    }
+}
+
 /// Report valid samples the coordinate transform could not place, on stderr
 /// so streamed output stays clean.
 fn warn_transform_failures(failures: u64) {
@@ -124,6 +159,13 @@ fn warn_transform_failures(failures: u64) {
 /// Stream a GeoTIFF/COG aggregation directly to `writer` in binary IPC or JSONL format.
 /// Returns the total number of rows emitted.
 pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
+    let rows = stream_raster(opts, writer);
+    // The scan's stream has been dropped by now, so its totals are in the profile.
+    print_profile(&opts.profile);
+    rows
+}
+
+fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
     let paths = resolve_raster_sources(&opts.input_path)?;
     let mut config = MultiResolutionConfig::new(opts.resolutions.clone()).with_grid(opts.grid);
     config.custom_crs = opts.source_crs.clone();
@@ -131,6 +173,17 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
     config.apply_scale_offset = opts.apply_scale_offset;
     config.bbox = opts.bbox;
     config.overlap_rule = OverlapRule::Cutline;
+    apply_output_policy(&mut config, &opts.output);
+    config.transfer = opts.transfer;
+    if let Some(spec) = &opts.histogram {
+        if opts.partition.is_some() {
+            return Err(RasterH3Error::InvalidParameter(
+                "--histogram cannot be combined with --partition".into(),
+            ));
+        }
+        config.set_histogram(spec.clone())?;
+    }
+    config.profile = opts.profile.clone();
 
     if let Some(partition) = &opts.partition {
         config.partition = Some(partition.clone());
@@ -248,7 +301,27 @@ fn scan_identity(opts: &CliStreamOptions) -> serde_json::Value {
         "nodata": opts.nodata,
         "apply_scale_offset": opts.apply_scale_offset,
         "bbox": opts.bbox,
+        "nodata_policy": opts.output.nodata.as_str(),
+        "emit_nodata_value": opts.output.nodata_value,
+        "decimals": opts.output.decimals,
     })
+}
+
+/// The output policy a partition file's header records (the default for files written
+/// before it was recorded).
+fn header_output_policy(scan: &serde_json::Value) -> OutputPolicy {
+    OutputPolicy {
+        nodata: scan
+            .get("nodata_policy")
+            .and_then(|v| v.as_str())
+            .and_then(NodataPolicy::parse)
+            .unwrap_or_default(),
+        nodata_value: scan.get("emit_nodata_value").and_then(|v| v.as_f64()),
+        decimals: scan
+            .get("decimals")
+            .and_then(|v| v.as_u64())
+            .and_then(|d| u8::try_from(d).ok()),
+    }
 }
 
 fn write_partition_header<W: Write>(writer: &mut W, header: &PartitionHeader) -> Result<()> {
@@ -459,6 +532,7 @@ pub fn merge_partition_files<W: Write>(opts: &CliMergeOptions, writer: &mut W) -
             categorical,
             projection,
             batch_size: opts.batch_size,
+            output: header_output_policy(&headers[0].scan),
         }),
     };
     let rows = match opts.output_format {
@@ -576,6 +650,9 @@ struct MergeSpec {
     categorical: bool,
     projection: Vec<usize>,
     batch_size: usize,
+    /// NoData policy, NoData value and decimals of the scan, so merged boundary cells
+    /// are written as the interior ones were.
+    output: OutputPolicy,
 }
 
 /// Yields every file's final rows, streaming the files one batch at a time and keeping
@@ -627,8 +704,10 @@ impl PartitionMerge {
                 return Ok(None);
             };
             // The CLI's scans have no value filters or quantiles, so the default merge
-            // settings match them; the resolutions come from the partial rows.
-            let config = MultiResolutionConfig::new(vec![8]).with_grid(spec.grid);
+            // settings match them apart from the output policy; the resolutions come from
+            // the partial rows.
+            let mut config = MultiResolutionConfig::new(vec![8]).with_grid(spec.grid);
+            apply_output_policy(&mut config, &spec.output);
             let (_, merged) = merge_partial_batches(
                 &std::mem::take(&mut self.partials),
                 spec.categorical,
@@ -770,12 +849,83 @@ pub fn export_raster_to_parquet_with_grid(
     geoparquet: bool,
     apply_scale_offset: bool,
 ) -> Result<usize> {
+    export_raster_to_parquet_with_policy(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        geoparquet,
+        apply_scale_offset,
+        &OutputPolicy::default(),
+    )
+}
+
+/// [`export_raster_to_parquet_with_grid`] under an [`OutputPolicy`] (NoData policy and
+/// value, decimal rounding). Parquet statistics columns are `REQUIRED`, so a statistic
+/// without a value is written as NaN.
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_parquet_with_policy(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    geoparquet: bool,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+) -> Result<usize> {
+    export_raster_to_parquet_with_transfer(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        geoparquet,
+        apply_scale_offset,
+        policy,
+        TransferMode::AssignCenters,
+        None,
+    )
+}
+
+/// [`export_raster_to_parquet_with_policy`] with a [`TransferMode`] (`sample` or
+/// `overlay` instead of pixel-centre assignment) and an optional runtime profile.
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_parquet_with_transfer(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    geoparquet: bool,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+    transfer: TransferMode,
+    profile: Option<Arc<RunProfile>>,
+) -> Result<usize> {
     let paths = resolve_raster_sources(input_path)?;
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.custom_crs = source_crs.clone();
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
+    config.transfer = transfer;
+    let report_profile = profile.clone();
+    config.profile = profile;
+    apply_output_policy(&mut config, policy);
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
@@ -801,6 +951,7 @@ pub fn export_raster_to_parquet_with_grid(
     }
     .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
+    print_profile(&report_profile);
     Ok(rows)
 }
 
@@ -842,11 +993,76 @@ pub fn export_raster_to_pmtiles_with_grid(
     bbox: Option<[f64; 4]>,
     apply_scale_offset: bool,
 ) -> Result<usize> {
+    export_raster_to_pmtiles_with_policy(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        apply_scale_offset,
+        &OutputPolicy::default(),
+    )
+}
+
+/// [`export_raster_to_pmtiles_with_grid`] under an [`OutputPolicy`]. Vector tile
+/// properties have no NULL, so a statistic without a value is written as NaN.
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_pmtiles_with_policy(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+) -> Result<usize> {
+    export_raster_to_pmtiles_with_transfer(
+        grid,
+        input_path,
+        output_path,
+        resolutions,
+        categorical,
+        source_crs,
+        nodata,
+        bbox,
+        apply_scale_offset,
+        policy,
+        TransferMode::AssignCenters,
+        None,
+    )
+}
+
+/// [`export_raster_to_pmtiles_with_policy`] with a [`TransferMode`].
+#[allow(clippy::too_many_arguments)]
+pub fn export_raster_to_pmtiles_with_transfer(
+    grid: GridKind,
+    input_path: &str,
+    output_path: &Path,
+    resolutions: Vec<u8>,
+    categorical: bool,
+    source_crs: Option<String>,
+    nodata: Option<f64>,
+    bbox: Option<[f64; 4]>,
+    apply_scale_offset: bool,
+    policy: &OutputPolicy,
+    transfer: TransferMode,
+    profile: Option<Arc<RunProfile>>,
+) -> Result<usize> {
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
+    config.transfer = transfer;
+    let report_profile = profile.clone();
+    config.profile = profile;
     config.custom_crs = source_crs;
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
+    apply_output_policy(&mut config, policy);
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
@@ -857,6 +1073,7 @@ pub fn export_raster_to_pmtiles_with_grid(
     }
     .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
+    print_profile(&report_profile);
     Ok(tiles)
 }
 
@@ -958,6 +1175,9 @@ pub fn parse_stream_args(
     let mut partition_spec: Option<String> = None;
     let mut partition_index: Option<usize> = None;
     let mut raw_resolutions: Option<(String, String)> = None;
+    let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
+    let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
+    let mut histogram = [None::<String>, None, None];
 
     let invalid = |flag: &str, value: &str, expected: &str| {
         RasterH3Error::InvalidParameter(format!(
@@ -1024,6 +1244,44 @@ pub fn parse_stream_args(
                 }
                 opts.columns = Some(cols);
             }
+            "--transfer" => transfer = Some(value()?.to_string()),
+            "--sample-method" => sample_method = Some(value()?.to_string()),
+            "--overlay-weighted" => {
+                let v = value()?;
+                overlay_weighted = Some(match v.to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" => true,
+                    "false" | "0" | "no" => false,
+                    _ => return Err(invalid(flag, v, "true or false")),
+                });
+            }
+            "--mass-preserve" => mass_preserve = Some(true),
+            "--histogram" => histogram[0] = Some(value()?.to_string()),
+            "--histogram-weight" => histogram[1] = Some(value()?.to_string()),
+            "--histogram-normalize" => histogram[2] = Some(value()?.to_string()),
+            "--profile" => opts.profile = Some(RunProfile::new()),
+            "--nodata-policy" => {
+                let v = value()?;
+                opts.output.nodata = NodataPolicy::parse(v)
+                    .ok_or_else(|| invalid(flag, v, NodataPolicy::EXPECTED))?;
+            }
+            "--emit-nodata-value" => {
+                let v = value()?;
+                opts.output.nodata_value = Some(
+                    v.parse::<f64>()
+                        .ok()
+                        .filter(|x| x.is_finite())
+                        .ok_or_else(|| invalid(flag, v, "a finite number"))?,
+                );
+            }
+            "--decimals" => {
+                let v = value()?;
+                opts.output.decimals = Some(
+                    v.parse::<u8>()
+                        .ok()
+                        .filter(|d| *d <= MAX_DECIMALS)
+                        .ok_or_else(|| invalid(flag, v, "an integer between 0 and 15"))?,
+                );
+            }
             "--limit" => {
                 let v = value()?;
                 opts.limit = Some(
@@ -1054,20 +1312,57 @@ pub fn parse_stream_args(
         }
     }
 
+    let mut auto = None;
     if let Some((flag, v)) = raw_resolutions {
         let expected = format!(
-            "{} resolutions between 0 and {}, e.g. 7,8",
+            "'auto', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
             opts.grid.label(),
             opts.grid.max_resolution()
         );
-        opts.resolutions = try_parse_resolutions_str_for(opts.grid, &v)
-            .ok_or_else(|| invalid(&flag, &v, &expected))?;
+        match ResolutionSpec::parse_auto(&v) {
+            Some(spec) => auto = Some(spec.map_err(|_| invalid(&flag, &v, &expected))?),
+            None => {
+                opts.resolutions = try_parse_resolutions_str_for(opts.grid, &v)
+                    .ok_or_else(|| invalid(&flag, &v, &expected))?
+            }
+        }
     }
 
+    opts.transfer = TransferMode::from_options(
+        transfer.as_deref(),
+        sample_method.as_deref(),
+        overlay_weighted,
+        mass_preserve,
+    )?;
+    opts.histogram = HistogramSpec::from_options(
+        histogram[0].as_deref(),
+        histogram[1].as_deref(),
+        histogram[2].as_deref(),
+    )?;
+    if let Some(spec) = &opts.histogram {
+        // A histogram is a categorical aggregation; area weights run `overlay`.
+        opts.categorical = true;
+        opts.transfer = spec.transfer_mode(opts.transfer)?;
+    }
+    if opts.output.nodata_value.is_some() && !opts.output.emits_nodata() {
+        return Err(RasterH3Error::InvalidParameter(
+            "--emit-nodata-value needs --nodata-policy emit".into(),
+        ));
+    }
     if opts.input_path.is_empty() {
         return Err(RasterH3Error::InvalidParameter(
             "Missing required input raster path".into(),
         ));
+    }
+    // `auto` is measured on the raster, so it is resolved once the path and CRS are known.
+    if let Some(spec) = auto {
+        let paths = resolve_raster_sources(&opts.input_path)?;
+        opts.resolutions = spec.resolve_paths(opts.grid, &paths, opts.source_crs.as_deref())?;
+        eprintln!(
+            "raster-h3: -r {spec} selected {} resolution {}",
+            opts.grid.label(),
+            opts.resolutions[0]
+        );
     }
     match (partition_spec, partition_index) {
         (Some(spec), index) => opts.partition = Some(read_partition_spec(&spec, index)?),
@@ -1421,6 +1716,404 @@ mod tests {
             let total: usize = batches.iter().map(|b| b.num_rows).sum();
             assert_eq!(total, whole.len(), "{grid}");
         }
+    }
+
+    #[test]
+    fn test_cli_partition_merge_keeps_the_output_policy() {
+        // Strips of 4 rows, so the plan has several partitions.
+        let tif = NamedTempFile::new().unwrap();
+        {
+            let mut encoder = TiffEncoder::new(File::create(tif.path()).unwrap()).unwrap();
+            let mut img = encoder.new_image::<Gray32Float>(32, 32).unwrap();
+            img.rows_per_strip(4).unwrap();
+            img.encoder()
+                .write_tag(tiff::tags::Tag::Unknown(33550), &[0.001f64, 0.001, 0.0][..])
+                .unwrap();
+            img.encoder()
+                .write_tag(
+                    tiff::tags::Tag::Unknown(33922),
+                    &[0.0f64, 0.0, 0.0, -122.45, 37.80, 0.0][..],
+                )
+                .unwrap();
+            img.write_data(&[1.23456f32; 32 * 32]).unwrap();
+        }
+        let input = tif.path().to_str().unwrap();
+        let plan = plan_raster_partitions(input, 1, Some("EPSG:4326"), None).unwrap();
+        assert!(plan.len() > 1);
+        let dir = tempfile::tempdir().unwrap();
+        let write_parts = |extra: &[&str], tag: &str| -> Vec<String> {
+            let mut parts = Vec::new();
+            for (i, partition) in plan.iter().enumerate() {
+                let spec = partition.to_json();
+                let mut args: Vec<String> = [
+                    input,
+                    "--crs",
+                    "EPSG:4326",
+                    "-r",
+                    "9",
+                    "--columns",
+                    "h3_index,resolution,mean",
+                    "--partition",
+                    &spec,
+                ]
+                .iter()
+                .chain(extra)
+                .map(|s| s.to_string())
+                .collect();
+                args.dedup();
+                let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Ipc).unwrap();
+                let path = dir.path().join(format!("{tag}{i}.rh3"));
+                let mut file = std::fs::File::create(&path).unwrap();
+                stream_raster_to_writer(&opts, &mut file).unwrap();
+                parts.push(path.to_string_lossy().to_string());
+            }
+            parts
+        };
+        let rounded = write_parts(&["--decimals", "2"], "rounded");
+        let (merge, _) = parse_merge_args(&rounded).unwrap();
+        let mut out = Vec::new();
+        merge_partition_files(&merge, &mut out).unwrap();
+        let (_, batches) = read_ipc_stream(&mut std::io::Cursor::new(out)).unwrap();
+        let mut means = Vec::new();
+        for batch in &batches {
+            let ColumnArray::Float64 { values, .. } = &batch.columns[2] else {
+                panic!("mean is Float64");
+            };
+            means.extend_from_slice(values);
+        }
+        assert!(means.len() > 1);
+        assert!(means.iter().all(|&m| m == 1.23), "{means:?}");
+
+        // Partitions of scans with other output settings do not merge together.
+        let plain = write_parts(&[], "plain");
+        let mixed = vec![rounded[0].clone(), plain[1].clone()];
+        let (merge, _) = parse_merge_args(&mixed).unwrap();
+        assert!(merge_partition_files(&merge, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn test_cli_nodata_policy_and_decimals() {
+        let tif = write_test_tif(24, 24, 1.23456);
+        let input = tif.path().to_str().unwrap();
+        let run = |extra: &[&str]| -> Result<Vec<serde_json::Value>> {
+            // Fine enough for several cells on every grid; a later `-r` wins.
+            let mut args: Vec<String> = [input, "--crs", "EPSG:4326"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl)?;
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out)?;
+            Ok(String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect())
+        };
+        for grid in GridKind::ALL {
+            let res = if grid == GridKind::H3 { "9" } else { "14" };
+            let g = ["--grid", grid.as_str(), "-r", res];
+            let plain = run(&g).unwrap();
+            assert!(plain.len() > 1);
+            assert!(plain[0]["mean"].as_f64().unwrap() != 1.23);
+
+            // Rounded statistics; counts untouched.
+            let rounded = run(&[g[0], g[1], g[2], g[3], "--decimals", "2"]).unwrap();
+            assert_eq!(rounded.len(), plain.len());
+            for row in &rounded {
+                assert_eq!(row["mean"], 1.23, "{grid}");
+                assert_eq!(row["min"], 1.23);
+                assert!(row["count"].as_f64().unwrap() >= 1.0);
+            }
+
+            // Every pixel is NoData: `omit` has no rows, `emit` has them all, empty.
+            let nodata = ["--grid", grid.as_str(), "-r", res, "--nodata", "1.23456"];
+            assert!(run(&nodata).unwrap().is_empty(), "{grid}");
+            let mut emit = nodata.to_vec();
+            emit.extend(["--nodata-policy", "emit"]);
+            let rows = run(&emit).unwrap();
+            assert_eq!(rows.len(), plain.len(), "{grid}");
+            for row in &rows {
+                assert_eq!(row["count"], 0.0);
+                assert!(row["mean"].is_null() && row["min"].is_null() && row["max"].is_null());
+            }
+            emit.extend(["--emit-nodata-value", "-9999"]);
+            for row in run(&emit).unwrap() {
+                assert_eq!(
+                    (&row["mean"], &row["max"]),
+                    (&serde_json::json!(-9999.0), &serde_json::json!(-9999.0))
+                );
+            }
+        }
+        for bad in [
+            &["--nodata-policy", "drop"][..],
+            &["--decimals", "16"],
+            &["--decimals", "-1"],
+            &["--emit-nodata-value", "nan"],
+            &["--emit-nodata-value", "0"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_cli_histograms() {
+        // 24 x 24 pixels, all 2.5.
+        let tif = write_test_tif(24, 24, 2.5);
+        let input = tif.path().to_str().unwrap();
+        let run = |extra: &[&str]| -> Result<Vec<serde_json::Value>> {
+            let mut args: Vec<String> = [input, "--crs", "EPSG:4326"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl)?;
+            assert!(opts.categorical);
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out)?;
+            Ok(String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect())
+        };
+        // The weight of bin `bin` over all cells, and that of the other bins.
+        let totals = |rows: &[serde_json::Value], bin: usize| -> (f64, f64) {
+            let mut totals = (0.0, 0.0);
+            for row in rows {
+                let bins = row["histogram"].as_array().unwrap();
+                assert_eq!(bins.len(), 4);
+                for (i, entry) in bins.iter().enumerate() {
+                    assert_eq!(entry[0].as_f64().unwrap(), i as f64);
+                    assert_eq!(entry[1].as_f64().unwrap(), i as f64 + 1.0);
+                    let weight = entry[2].as_f64().unwrap();
+                    if i == bin {
+                        totals.0 += weight;
+                    } else {
+                        totals.1 += weight;
+                    }
+                }
+            }
+            totals
+        };
+        for grid in GridKind::ALL {
+            let base = [
+                "--grid",
+                grid.as_str(),
+                "-r",
+                "auto-1",
+                "--histogram",
+                "4:0:4",
+            ];
+            let with = |extra: &[&str]| run(&[&base[..], extra].concat()).unwrap();
+            // 2.5 is in bin 2 of [0, 1, 2, 3, 4].
+            let counts = with(&[]);
+            assert_eq!(totals(&counts, 2), (576.0, 0.0), "{grid}");
+            let area = with(&["--histogram-weight", "area"]);
+            assert!(area.len() >= counts.len(), "{grid}");
+            let (in_bin, outside) = totals(&area, 2);
+            assert!(
+                (in_bin / 576.0 - 1.0).abs() < 1e-6 && outside == 0.0,
+                "{grid}"
+            );
+            let fractions = with(&["--histogram-normalize", "fraction"]);
+            assert_eq!(
+                totals(&fractions, 2),
+                (fractions.len() as f64, 0.0),
+                "{grid}"
+            );
+
+            // By value: 2.5 rounds to class 3 (ties away from zero).
+            let values = run(&[
+                "--grid",
+                grid.as_str(),
+                "-r",
+                "auto-1",
+                "--histogram",
+                "values",
+            ])
+            .unwrap();
+            let total: f64 = values
+                .iter()
+                .map(|row| {
+                    let object = row["histogram"].as_object().unwrap();
+                    assert_eq!(object.len(), 1);
+                    object["3"].as_f64().unwrap()
+                })
+                .sum();
+            assert_eq!(total, 576.0, "{grid}");
+        }
+        for bad in [
+            &["--histogram", "0:0:1"][..],
+            &["--histogram", "values", "--histogram-normalize", "density"],
+            &["--histogram-weight", "mass"],
+            &["--histogram-weight", "area", "--transfer", "sample"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_cli_transfer_modes() {
+        let tif = write_test_tif(24, 24, 2.5);
+        let input = tif.path().to_str().unwrap();
+        let run = |extra: &[&str]| -> Result<Vec<serde_json::Value>> {
+            let mut args: Vec<String> = [input, "--crs", "EPSG:4326"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            args.extend(extra.iter().map(|s| s.to_string()));
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl)?;
+            let mut out = Vec::new();
+            stream_raster_to_writer(&opts, &mut out)?;
+            Ok(String::from_utf8(out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect())
+        };
+        let sum = |rows: &[serde_json::Value], column: &str| -> f64 {
+            rows.iter().map(|r| r[column].as_f64().unwrap()).sum()
+        };
+        for grid in GridKind::ALL {
+            let g = grid.as_str();
+            let centres = run(&["--grid", g, "-r", "auto"]).unwrap();
+            assert_eq!(sum(&centres, "count"), 576.0);
+
+            let overlay = run(&["--grid", g, "-r", "auto-1", "--transfer", "overlay"]).unwrap();
+            assert!(
+                (sum(&overlay, "count") / 576.0 - 1.0).abs() < 1e-6,
+                "{grid}"
+            );
+            assert!((sum(&overlay, "sum") / 1440.0 - 1.0).abs() < 1e-6, "{grid}");
+            let preserved = run(&[
+                "--grid",
+                g,
+                "-r",
+                "auto-1",
+                "--transfer",
+                "overlay",
+                "--mass-preserve",
+            ])
+            .unwrap();
+            assert!((sum(&preserved, "sum") - 1440.0).abs() < 1e-6, "{grid}");
+            let touched = run(&[
+                "--grid",
+                g,
+                "-r",
+                "auto-1",
+                "--transfer",
+                "overlay",
+                "--overlay-weighted",
+                "false",
+            ])
+            .unwrap();
+            assert!(sum(&touched, "count") > 576.0, "{grid}");
+
+            // Sampling finer than the pixels returns one value per cell on the raster.
+            let fine = run(&["--grid", g, "-r", "auto+2"]).unwrap();
+            for method in ["nearest", "bilinear", "bicubic", "lanczos"] {
+                let sampled = run(&[
+                    "--grid",
+                    g,
+                    "-r",
+                    "auto+2",
+                    "--transfer",
+                    "sample",
+                    "--sample-method",
+                    method,
+                ])
+                .unwrap();
+                assert!(sampled.len() > 3 * fine.len(), "{grid} {method}");
+                for row in &sampled {
+                    assert_eq!(row["count"], 1.0);
+                    assert!(
+                        (row["mean"].as_f64().unwrap() - 2.5).abs() < 1e-9,
+                        "{grid} {method}"
+                    );
+                }
+            }
+        }
+        for bad in [
+            &["--transfer", "smear"][..],
+            &["--sample-method", "bilinear"],
+            &["--mass-preserve"],
+            &["--transfer", "overlay", "--overlay-weighted", "maybe"],
+            &["--transfer", "sample", "--sample-method", "cubic9"],
+        ] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_cli_auto_resolution_on_every_grid() {
+        use raster_h3_core::raster::mosaic::{MosaicReader, OverlapRule};
+        use raster_h3_core::resolution::{auto_resolution, offset_resolution};
+        let tif = write_test_tif(32, 32, 5.0);
+        let input = tif.path().to_str().unwrap();
+        let mosaic = MosaicReader::open(
+            &[tif.path().to_path_buf()],
+            None,
+            Some("EPSG:4326"),
+            OverlapRule::default(),
+        )
+        .unwrap();
+        for grid in GridKind::ALL {
+            let matched = auto_resolution(grid, &mosaic, 0).unwrap();
+            for (arg, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2), ("auto+64", 64)] {
+                let args: Vec<String> = [
+                    input,
+                    "--crs",
+                    "EPSG:4326",
+                    "--grid",
+                    grid.as_str(),
+                    "-r",
+                    arg,
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+                let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+                assert_eq!(
+                    opts.resolutions,
+                    vec![offset_resolution(grid, matched, offset)],
+                    "{grid} {arg}"
+                );
+            }
+            // The scan runs at the selected resolution.
+            let args: Vec<String> = [
+                input,
+                "--crs",
+                "EPSG:4326",
+                "--grid",
+                grid.as_str(),
+                "-r",
+                "auto",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+            let mut out = Vec::new();
+            let rows = stream_raster_to_writer(&opts, &mut out).unwrap();
+            assert!(rows > 0);
+            let first: serde_json::Value =
+                serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap())
+                    .unwrap();
+            assert_eq!(first["resolution"], u64::from(matched), "{grid}");
+        }
+        for bad in ["auto+", "auto1", "auto+1.5", "automatic"] {
+            let args: Vec<String> = [input, "-r", bad].iter().map(|s| s.to_string()).collect();
+            let err = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap_err();
+            assert!(err.to_string().contains("auto"), "{bad}: {err}");
+        }
+        // `auto` needs a raster to measure.
+        let args: Vec<String> = ["/nonexistent.tif", "-r", "auto"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_stream_args(&args, StreamOutputFormat::Jsonl).is_err());
     }
 
     #[test]

@@ -85,5 +85,16 @@ pub unsafe fn register_common_raster_named_parameters(func: duckdb_table_functio
         add_named_parameter(func, "decode_budget_mb", DuckDBType::BigInt);
         add_named_parameter(func, "compaction_budget_mb", DuckDBType::BigInt);
         add_named_parameter(func, "strict_transforms", DuckDBType::Boolean);
+        // What all-NoData cells and output precision look like.
+        add_named_parameter(func, "nodata_policy", DuckDBType::Varchar);
+        add_named_parameter(func, "emit_nodata_value", DuckDBType::Double);
+        add_named_parameter(func, "decimals", DuckDBType::BigInt);
+        // How pixels map onto cells.
+        add_named_parameter(func, "transfer", DuckDBType::Varchar);
+        add_named_parameter(func, "sample_method", DuckDBType::Varchar);
+        add_named_parameter(func, "overlay_weighted", DuckDBType::Boolean);
+        add_named_parameter(func, "mass_preserve", DuckDBType::Boolean);
+        // Runtime telemetry of the scan, reported on stderr when it ends.
+        add_named_parameter(func, "profile", DuckDBType::Boolean);
     }
 }

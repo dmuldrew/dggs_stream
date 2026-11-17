@@ -104,6 +104,12 @@ pub struct WalkContext<'a> {
     pub band_scaling: &'a [BandScaling],
     /// Zero-based interleaved alpha sample; pixels with zero alpha are skipped.
     pub alpha_sample: Option<u16>,
+    /// `NodataPolicy::Emit`: NoData pixels are walked too, so the cells they fall in
+    /// exist in the output with no samples.
+    pub emit_nodata: bool,
+    /// Bins of a binned histogram scan: the categorical kernel's classes are then the
+    /// indices of the bins holding the (calibrated) pixel values.
+    pub histogram_bins: Option<&'a crate::histogram::HistogramBins>,
 }
 
 impl WalkContext<'_> {
@@ -215,6 +221,8 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
         owner: None,
         band_scaling: &[],
         alpha_sample: None,
+        emit_nodata: false,
+        histogram_bins: None,
     };
     walk_direct(&ctx, slice, is_row_all_nodata, engine, chunk_maps);
 }
@@ -878,6 +886,8 @@ pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<
                 owner: None,
                 band_scaling: &[],
                 alpha_sample: None,
+                emit_nodata: false,
+                histogram_bins: None,
             };
             f(name, &ctx);
         }
@@ -958,8 +968,6 @@ mod tests {
         for sampling in [SamplingPattern::center(), SamplingPattern::rgss()] {
             let ctx = WalkContext {
                 chunk: &chunk,
-                grid: GridKind::H3,
-                resolution_u8s: &[],
                 resolutions: &resolutions,
                 crs: &crs,
                 gt: &gt,
@@ -970,6 +978,10 @@ mod tests {
                 owner: None,
                 band_scaling: &[],
                 alpha_sample: None,
+                emit_nodata: false,
+                histogram_bins: None,
+                grid: GridKind::H3,
+                resolution_u8s: &[],
             };
             for interleaved in [false, true] {
                 let mut maps: Vec<CellMap<Vec<Observation>>> =
@@ -1056,6 +1068,8 @@ mod tests {
             owner: None,
             band_scaling: &[],
             alpha_sample: None,
+            emit_nodata: false,
+            histogram_bins: None,
         };
         RowPruner::new(&ctx).unwrap().columns(&ctx, 0, 200)
     }
@@ -1103,6 +1117,8 @@ mod tests {
                     owner: None,
                     band_scaling: &[],
                     alpha_sample: None,
+                    emit_nodata: false,
+                    histogram_bins: None,
                 };
                 let mut projector = SampleProjector::new(&ctx);
                 assert!(matches!(projector.cache, RowCache::Mercator(_)));
@@ -1162,6 +1178,8 @@ mod tests {
                     owner: None,
                     band_scaling: &[],
                     alpha_sample: None,
+                    emit_nodata: false,
+                    histogram_bins: None,
                 };
                 let mut projector = SampleProjector::new(&ctx);
                 match (&crs, &projector.cache) {

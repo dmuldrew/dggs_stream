@@ -45,3 +45,26 @@ macOS arm64 and x86_64, and Windows x86_64. Building from source requires a Rust
 
 Source and the DuckDB, DataFusion and PostgreSQL integrations:
 <https://github.com/dmuldrew/raster_h3>
+
+## Grids
+
+Every scan, export and scalar helper takes `grid`: `"h3"` (default), `"a5"`, `"s2"` or
+`"healpix"`. The cell columns are named for the grid (`{grid}_index`, `{grid}_hex`), and
+projection, filter and limit pushdown work the same on each.
+
+```python
+import raster_h3
+
+lf = raster_h3.scan_raster("dem.tif", 14, grid="healpix")   # same as scan_raster_h3(..., grid=)
+lf.filter(pl.col("count") >= 4).select("healpix_index", "mean").collect()
+
+raster_h3.raster_to_parquet("dem.tif", "cells.parquet", 15, grid="s2")
+raster_h3.parquet_to_pmtiles("cells.parquet", "cells.pmtiles")          # grid from `s2_index`
+raster_h3.parquet_to_pmtiles("other.parquet", "o.pmtiles", cell_column="id", grid="a5")
+
+cell = raster_h3.lonlat_to_cell(-122.42, 37.77, 12, grid="s2")
+raster_h3.cell_to_parent(cell, 8, grid="s2")
+```
+
+Cell ids are unsigned 64-bit integers on every grid (S2 ids on faces 4 and 5 use the
+top bit).

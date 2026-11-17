@@ -281,5 +281,5 @@ def test_parquet_to_pmtiles_named_hex_column(raster_h3, gradient_tif, tmp_path):
 def test_parquet_to_pmtiles_missing_column(raster_h3, gradient_tif, tmp_path):
     parquet = tmp_path / "cells.parquet"
     raster_h3.raster_to_parquet(gradient_tif, parquet, RES)
-    with pytest.raises(RuntimeError, match="H3 column 'nope' not found"):
+    with pytest.raises(RuntimeError, match="Cell column 'nope' not found"):
         raster_h3.parquet_to_pmtiles(parquet, tmp_path / "x.pmtiles", h3_column="nope")

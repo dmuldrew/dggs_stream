@@ -72,6 +72,7 @@ fn take(col: &ColumnArray, idx: &[usize]) -> ColumnArray {
         ColumnArray::Boolean { values, validity } => pick!(Boolean, values, validity),
         ColumnArray::Utf8 { values, validity } => pick!(Utf8, values, validity),
         ColumnArray::Binary { values, validity } => pick!(Binary, values, validity),
+        ColumnArray::Histogram(_) => unreachable!("partitioned scans have no histogram column"),
     }
 }
 

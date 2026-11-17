@@ -20,6 +20,7 @@ use parquet::schema::parser::parse_message_type;
 use parquet::schema::types::ColumnPath;
 
 pub use crate::aggregator::multi_horizon::RecordStreamer;
+use crate::aggregator::output_policy::OutputPolicy;
 use crate::grid::GridKind;
 use crate::parquet::column_order::restore_type_defined_float_orders;
 use crate::parquet::geoparquet_metadata::build_geoparquet_metadata;
@@ -50,6 +51,16 @@ pub trait ParquetStreamer {
     fn grid(&self) -> GridKind {
         GridKind::H3
     }
+
+    /// NoData policy and decimal rounding of the values written.
+    fn output_policy(&self) -> OutputPolicy {
+        OutputPolicy::default()
+    }
+
+    /// The runtime profile to report row-group writing into, if any.
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        None
+    }
 }
 
 impl<T: RecordStreamer> ParquetStreamer for T {
@@ -75,6 +86,15 @@ impl<T: RecordStreamer> ParquetStreamer for T {
     #[inline]
     fn grid(&self) -> GridKind {
         RecordStreamer::grid(self)
+    }
+
+    #[inline]
+    fn output_policy(&self) -> OutputPolicy {
+        RecordStreamer::output_policy(self)
+    }
+
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        RecordStreamer::run_profile(self)
     }
 }
 
@@ -181,6 +201,15 @@ pub trait ParquetRowGroupBuffer: Sized + Send + 'static {
         Self::with_capacity_and_options(capacity, compact, false)
     }
 
+    /// Use `policy` for the values of records pushed from now on. The columns are
+    /// `REQUIRED`, so a statistic the policy leaves NULL is written as NaN.
+    fn set_output_policy(&mut self, _policy: OutputPolicy) {}
+
+    /// Whether this buffer type can write every cell `policy` produces.
+    fn check_output_policy(_policy: &OutputPolicy) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Push a single stream record into column vectors
     fn push_record(&mut self, record: Self::Record);
 
@@ -240,6 +269,9 @@ where
     let geoparquet = parquet_config.geoparquet;
     let row_group_size = parquet_config.row_group_size.max(1);
     let grid = streamer.grid();
+    let policy = streamer.output_policy();
+    B::check_output_policy(&policy)?;
+    let run_profile = streamer.run_profile();
 
     let message_type = B::schema_message_for(grid, compact, geoparquet);
     let schema = Arc::new(parse_message_type(&message_type)?);
@@ -281,20 +313,29 @@ where
     let (writer_tx, writer_rx) = sync_channel::<B>(2);
     let (recycle_tx, recycle_rx) = sync_channel::<B>(2);
 
-    let buf1 = B::with_capacity_and_grid_options(row_group_size, compact, geoparquet, grid);
-    let buf2 = B::with_capacity_and_grid_options(row_group_size, compact, geoparquet, grid);
+    let new_buffer = move || {
+        let mut buffer =
+            B::with_capacity_and_grid_options(row_group_size, compact, geoparquet, grid);
+        buffer.set_output_policy(policy);
+        buffer
+    };
+    let buf1 = new_buffer();
+    let buf2 = new_buffer();
     let _ = recycle_tx.send(buf2);
 
     let writer_handle = thread::spawn(
         move || -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
             let mut total_rows = 0usize;
             let mut bbox: Option<[f64; 4]> = None;
-            while let Ok(mut buf) = writer_rx.recv() {
+            // Sorting and writing row groups is this exporter's serialization time.
+            let mut clock = crate::run_profile::SerializeClock::start(run_profile);
+            while let Ok(mut buf) = clock.wait(|| writer_rx.recv()) {
                 if !buf.is_empty() {
                     buf.sort_by_h3_index();
                     let count = buf.len();
                     buf.flush_to_row_group(&mut writer)?;
                     total_rows += count;
+                    clock.rows(count);
                     if let Some(b) = buf.geometry_bounds() {
                         bbox = Some(bbox.map_or(b, |a| {
                             [
@@ -350,9 +391,7 @@ where
             }
             current_buf = match recycle_rx.recv() {
                 Ok(b) => b,
-                Err(_) => {
-                    B::with_capacity_and_grid_options(row_group_size, compact, geoparquet, grid)
-                }
+                Err(_) => new_buffer(),
             };
         }
 

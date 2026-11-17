@@ -1,5 +1,6 @@
 use super::*;
 use crate::ffi::args::build_py_scan_config;
+use raster_h3_core::grid::GridKind;
 use std::ffi::{c_char, CStr, CString};
 use std::fs::File;
 use std::ptr;
@@ -38,6 +39,7 @@ fn test_py_scan_config_rejects_malformed_bbox() {
     unsafe {
         let build = |bbox: *const c_char| {
             build_py_scan_config(
+                GridKind::H3,
                 path_c.as_ptr(),
                 ptr::null(),
                 0,

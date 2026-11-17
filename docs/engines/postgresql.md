@@ -127,6 +127,51 @@ valid cells are always positive.
 
 All are `IMMUTABLE STRICT PARALLEL SAFE`.
 
+### Other grids: A5, S2 and HEALPix
+
+Every function above also exists for the other grids, under the grid's prefix:
+`a5_raster_continuous_aggregate`, `s2_raster_categorical_aggregate`,
+`healpix_to_string`, `string_to_s2`, `a5_cell_to_parent`, `s2_to_wkb`, and so on, plus
+`{grid}_lonlat_to_cell(lon, lat, res)` (for `h3` too). The SRFs take the same arguments
+(the resolution argument is named `{grid}_res`: `0..30` for A5 and S2, `0..29` for
+HEALPix) and return the same columns, with the cell columns named `{grid}_index` and
+`{grid}_hex`.
+
+```sql
+SELECT s2_hex, mean, count
+FROM s2_raster_continuous_aggregate('/data/dem.tif', 14);
+
+SELECT healpix_to_string(healpix_cell_to_parent(healpix_index, 8)) AS parent, avg(mean)
+FROM healpix_raster_continuous_aggregate('/data/dem.tif', 13)
+GROUP BY 1;
+```
+
+`{grid}_auto_resolution(raster_path [, res_offset [, source_crs]])` returns the
+resolution whose cells are closest in area to the raster's ground pixels (`-r auto` in
+the CLI, `resolutions := 'auto'` in DuckDB), moved `res_offset` steps finer (positive) or
+coarser and clamped to the grid's range. Since the grids number their resolutions on
+unrelated scales, it is the way to get comparable cells on each:
+
+```sql
+SELECT * FROM s2_raster_continuous_aggregate(
+    '/data/dem.tif', s2_auto_resolution('/data/dem.tif'));
+SELECT h3_auto_resolution('/data/dem.tif', 1);   -- one step finer than the match
+```
+
+**Cell ids are `bigint`, the signed reading of the id's 64 bits**, as for H3. PostgreSQL
+has no unsigned 64-bit type, and A5 and S2 ids use all 64 bits: an S2 id on cube faces 4
+and 5 (roughly longitudes 90°W to 180° at the equator, and the south polar face) has
+the top bit set and so reads as a negative `bigint`. Nothing is lost: equal cells have
+equal `bigint`s, every function takes and returns that form, and `{grid}_to_string` and
+the `{grid}_hex` column give the unsigned hexadecimal id that other engines print. Two
+things to keep in mind: `ORDER BY` on the `bigint` is not the unsigned order, and for the
+unsigned decimal value use
+`CASE WHEN id < 0 THEN id::numeric + 18446744073709551616 ELSE id END`.
+
+Databases that installed extension version 0.7.0 before these functions were added do
+not gain them from the shared library alone; they need the definitions from the
+install script (shipped as an upgrade script with the next extension version).
+
 ## Recipes
 
 These mirror the [DuckDB SQL recipes](duckdb.md#sql-usage--recipes) for the arguments the

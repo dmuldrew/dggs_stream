@@ -1,7 +1,8 @@
 //! Loadable-module glue for a real PostgreSQL server (`pg-extension` feature).
 //!
 //! Provides the `PG_MODULE_MAGIC` block, the `text`/`bytea` scalar functions and the
-//! value-per-call set-returning functions declared in `sql/raster_h3--0.7.0.sql`.
+//! value-per-call set-returning functions declared in `sql/raster_h3--0.7.0.sql`, for
+//! H3 and, under `a5_` / `s2_` / `healpix_` names, the other grids.
 //! These call into the server (`palloc`, `ereport`, `funcapi`), so they are only
 //! compiled when building the extension library itself.
 //!
@@ -13,12 +14,18 @@ use std::ffi::{c_char, c_int, c_short, c_void};
 use std::mem::size_of;
 use std::ptr;
 
-use raster_h3_core::encoding::{h3_index_to_wkb, WkbBuf, WKB_BUF_LEN};
+use raster_h3_core::aggregator::output_policy::OutputPolicy;
+use raster_h3_core::encoding::{
+    cell_index_to_wkb, h3_index_to_wkb, parse_hex_u64, WkbBuf, WKB_BUF_LEN,
+};
 use raster_h3_core::error::safe_panic_payload_to_string;
-use raster_h3_core::scalar_ops::{h3_is_valid_str, h3_to_string, parse_bbox_str, try_string_to_h3};
+use raster_h3_core::grid::GridKind;
+use raster_h3_core::scalar_ops::{
+    grid_is_valid_str, h3_is_valid_str, h3_to_string, parse_bbox_str, try_string_to_h3,
+};
 
 use crate::{
-    pg_func_call_info, Datum, NullableDatum, Oid, PgCategoricalRow, PgCategoricalSrf,
+    pg_func_call_info, Datum, NodataPolicy, NullableDatum, Oid, PgCategoricalRow, PgCategoricalSrf,
     PgContinuousRow, PgContinuousSrf, Pg_finfo_record, PG_FINFO_V1,
 };
 
@@ -546,6 +553,201 @@ pub unsafe extern "C" fn pg_h3_to_wkb(fcinfo: pg_func_call_info) -> Datum {
 }
 
 // =============================================================================
+// text / bytea scalar functions of the other grids (A5, S2, HEALPix)
+//
+// A cell id is the `bigint` reading of its 64 bits (see `lib.rs`); the text form is
+// the unsigned hexadecimal id, so a round trip through either is lossless.
+// =============================================================================
+
+/// `{grid}_to_string(int8) -> text`: the unsigned hexadecimal id, NULL for an invalid cell.
+///
+/// # Safety
+/// `fcinfo` must be the valid call info of a function declared `(int8) -> text`.
+unsafe fn grid_to_string(fcinfo: pg_func_call_info, grid: GridKind) -> Datum {
+    // SAFETY: `fcinfo` is valid with an `int8` argument (caller contract). No Rust value
+    // with a destructor is live where `raise_error` or `palloc` can longjmp: the hex text
+    // is written into the stack buffer `buf`.
+    unsafe {
+        let Some(cell) = arg(fcinfo, 0) else {
+            return return_null(fcinfo);
+        };
+        let cell = cell as u64;
+        match guarded(|| Ok(grid.is_valid(cell))) {
+            Ok(true) => {
+                let mut buf = [0u8; 16];
+                varlena_datum(raster_h3_core::encoding::fast_hex_u64(cell, &mut buf))
+            }
+            Ok(false) => return_null(fcinfo),
+            Err(msg) => raise_error(msg),
+        }
+    }
+}
+
+/// `string_to_{grid}(text) -> int8`: NULL when the text is not the hexadecimal id of a
+/// valid cell.
+///
+/// # Safety
+/// `fcinfo` must be the valid call info of a function declared `(text) -> int8`.
+unsafe fn string_to_grid(fcinfo: pg_func_call_info, grid: GridKind) -> Datum {
+    // SAFETY: `fcinfo` is valid with a `text` argument (caller contract); `text` is a
+    // borrowed slice and `parsed` is consumed before any error is raised.
+    unsafe {
+        let text = arg_str(fcinfo, 0);
+        let parsed = guarded(|| {
+            Ok(text
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .and_then(|s| parse_hex_u64(s.trim()))
+                .filter(|&cell| grid.is_valid(cell)))
+        });
+        match parsed.unwrap_or_else(|msg| raise_error(msg)) {
+            Some(cell) => cell as i64 as Datum,
+            None => return_null(fcinfo),
+        }
+    }
+}
+
+/// `{grid}_is_valid(text) -> bool`
+///
+/// # Safety
+/// `fcinfo` must be the valid call info of a function declared `(text) -> bool`.
+unsafe fn grid_is_valid_text(fcinfo: pg_func_call_info, grid: GridKind) -> Datum {
+    // SAFETY: `fcinfo` is valid with a `text` argument (caller contract); `text` is a
+    // borrowed slice.
+    unsafe {
+        let Some(text) = arg_str(fcinfo, 0) else {
+            return return_null(fcinfo);
+        };
+        match guarded(|| {
+            Ok(std::str::from_utf8(text)
+                .map(|s| grid_is_valid_str(grid, s.trim()))
+                .unwrap_or(false))
+        }) {
+            Ok(valid) => usize::from(valid),
+            Err(msg) => raise_error(msg),
+        }
+    }
+}
+
+/// `{grid}_to_wkb(int8) -> bytea`: NULL for an invalid cell.
+///
+/// # Safety
+/// `fcinfo` must be the valid call info of a function declared `(int8) -> bytea`.
+unsafe fn grid_to_wkb(fcinfo: pg_func_call_info, grid: GridKind) -> Datum {
+    // SAFETY: `fcinfo` is valid with an `int8` argument (caller contract). The WKB is
+    // encoded into the stack buffer `buf`, so no heap value is live if `palloc` longjmps.
+    unsafe {
+        let Some(cell) = arg(fcinfo, 0) else {
+            return return_null(fcinfo);
+        };
+        let mut buf: WkbBuf = [0u8; WKB_BUF_LEN];
+        let len = match guarded(|| Ok(cell_index_to_wkb(grid, cell as u64, &mut buf))) {
+            Ok(len) => len,
+            Err(msg) => raise_error(msg),
+        };
+        match len {
+            Some(len) => varlena_datum(&buf[..len]),
+            None => return_null(fcinfo),
+        }
+    }
+}
+
+/// Defines one V1 entry point (and its `pg_finfo_*` record) that forwards `fcinfo`.
+macro_rules! grid_text_v1 {
+    ($(#[$doc:meta])* $finfo:ident, $name:ident, |$fcinfo:ident| $body:expr) => {
+        #[no_mangle]
+        pub extern "C" fn $finfo() -> *const Pg_finfo_record {
+            &PG_FINFO_V1
+        }
+
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// Called by the PostgreSQL function manager with a valid `fcinfo`.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name($fcinfo: pg_func_call_info) -> Datum {
+            // SAFETY: the function manager passes a valid `fcinfo` whose arguments match
+            // the SQL declaration in the doc comment, as the forwarded-to function requires.
+            unsafe { $body }
+        }
+    };
+}
+
+grid_text_v1!(
+    /// `a5_to_string(int8) -> text`
+    pg_finfo_pg_a5_to_string,
+    pg_a5_to_string,
+    |fcinfo| grid_to_string(fcinfo, GridKind::A5)
+);
+grid_text_v1!(
+    /// `string_to_a5(text) -> int8` (NULL when the text is not a cell's hexadecimal id).
+    pg_finfo_pg_string_to_a5,
+    pg_string_to_a5,
+    |fcinfo| string_to_grid(fcinfo, GridKind::A5)
+);
+grid_text_v1!(
+    /// `a5_is_valid(text) -> bool`
+    pg_finfo_pg_a5_is_valid_text,
+    pg_a5_is_valid_text,
+    |fcinfo| grid_is_valid_text(fcinfo, GridKind::A5)
+);
+grid_text_v1!(
+    /// `a5_to_wkb(int8) -> bytea`
+    pg_finfo_pg_a5_to_wkb,
+    pg_a5_to_wkb,
+    |fcinfo| grid_to_wkb(fcinfo, GridKind::A5)
+);
+
+grid_text_v1!(
+    /// `s2_to_string(int8) -> text`
+    pg_finfo_pg_s2_to_string,
+    pg_s2_to_string,
+    |fcinfo| grid_to_string(fcinfo, GridKind::S2)
+);
+grid_text_v1!(
+    /// `string_to_s2(text) -> int8` (NULL when the text is not a cell's hexadecimal id).
+    pg_finfo_pg_string_to_s2,
+    pg_string_to_s2,
+    |fcinfo| string_to_grid(fcinfo, GridKind::S2)
+);
+grid_text_v1!(
+    /// `s2_is_valid(text) -> bool`
+    pg_finfo_pg_s2_is_valid_text,
+    pg_s2_is_valid_text,
+    |fcinfo| grid_is_valid_text(fcinfo, GridKind::S2)
+);
+grid_text_v1!(
+    /// `s2_to_wkb(int8) -> bytea`
+    pg_finfo_pg_s2_to_wkb,
+    pg_s2_to_wkb,
+    |fcinfo| grid_to_wkb(fcinfo, GridKind::S2)
+);
+
+grid_text_v1!(
+    /// `healpix_to_string(int8) -> text`
+    pg_finfo_pg_healpix_to_string,
+    pg_healpix_to_string,
+    |fcinfo| grid_to_string(fcinfo, GridKind::Healpix)
+);
+grid_text_v1!(
+    /// `string_to_healpix(text) -> int8` (NULL when the text is not a cell's hexadecimal id).
+    pg_finfo_pg_string_to_healpix,
+    pg_string_to_healpix,
+    |fcinfo| string_to_grid(fcinfo, GridKind::Healpix)
+);
+grid_text_v1!(
+    /// `healpix_is_valid(text) -> bool`
+    pg_finfo_pg_healpix_is_valid_text,
+    pg_healpix_is_valid_text,
+    |fcinfo| grid_is_valid_text(fcinfo, GridKind::Healpix)
+);
+grid_text_v1!(
+    /// `healpix_to_wkb(int8) -> bytea`
+    pg_finfo_pg_healpix_to_wkb,
+    pg_healpix_to_wkb,
+    |fcinfo| grid_to_wkb(fcinfo, GridKind::Healpix)
+);
+
+// =============================================================================
 // Value-per-call set-returning functions
 // =============================================================================
 
@@ -559,12 +761,16 @@ struct SrfArgs<'a> {
     source_crs: Option<&'a [u8]>,
     nodata: Option<f64>,
     bbox: Option<&'a [u8]>,
+    nodata_policy: Option<&'a [u8]>,
+    emit_nodata_value: Option<f64>,
+    decimals: Option<i32>,
 }
 
 impl SrfArgs<'_> {
     /// # Safety
     /// `fcinfo` must be the valid call info of an aggregate SRF call with arguments `(text,
-    /// int4, text, float8, text)`.
+    /// int4, text, float8, text)`, optionally followed by `(text, float8, int4)`: functions
+    /// created by install scripts before those options existed pass only the first five.
     unsafe fn read(fcinfo: pg_func_call_info) -> Self {
         // SAFETY: `fcinfo` is valid and its arguments are `(text, int4, text, float8,
         // text)` (caller contract), matching each accessor used; the borrowed slices live
@@ -576,13 +782,69 @@ impl SrfArgs<'_> {
                 source_crs: arg_str(fcinfo, 2),
                 nodata: arg(fcinfo, 3).map(|d| f64::from_bits(d as u64)),
                 bbox: arg_str(fcinfo, 4),
+                nodata_policy: arg_str(fcinfo, 5),
+                emit_nodata_value: arg(fcinfo, 6).map(|d| f64::from_bits(d as u64)),
+                decimals: arg(fcinfo, 7).map(|d| d as i32),
             }
         }
     }
 
+    /// The NoData policy, NoData value and decimals of the call.
+    fn output_policy(&self) -> Result<OutputPolicy, String> {
+        let mut policy = OutputPolicy::default();
+        if let Some(name) = self.nodata_policy {
+            let name = String::from_utf8_lossy(name);
+            policy.nodata = NodataPolicy::parse(&name).ok_or_else(|| {
+                format!(
+                    "nodata_policy must be {}, got '{name}'",
+                    NodataPolicy::EXPECTED
+                )
+            })?;
+        }
+        if let Some(value) = self.emit_nodata_value {
+            if !value.is_finite() {
+                return Err("emit_nodata_value must be finite; leave it NULL for NULL".into());
+            }
+            if !policy.emits_nodata() {
+                return Err("emit_nodata_value needs nodata_policy 'emit'".into());
+            }
+            policy.nodata_value = Some(value);
+        }
+        if let Some(decimals) = self.decimals {
+            let max = i32::from(raster_h3_core::aggregator::output_policy::MAX_DECIMALS);
+            if !(0..=max).contains(&decimals) {
+                return Err(format!(
+                    "decimals must be between 0 and {max}, got {decimals}"
+                ));
+            }
+            policy.decimals = Some(decimals as u8);
+        }
+        Ok(policy)
+    }
+
+    /// The arguments of an H3 scan.
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     fn parse(
         &self,
+    ) -> Result<
+        (
+            String,
+            Vec<u8>,
+            Option<String>,
+            Option<f64>,
+            Option<[f64; 4]>,
+        ),
+        String,
+    > {
+        self.parse_for(GridKind::H3)
+    }
+
+    /// The arguments of a scan onto `grid`, whose range bounds the resolution.
+    #[allow(clippy::type_complexity)]
+    fn parse_for(
+        &self,
+        grid: GridKind,
     ) -> Result<
         (
             String,
@@ -601,8 +863,14 @@ impl SrfArgs<'_> {
             .ok_or("raster_path must not be NULL or empty")?;
         let res = match self.h3_res {
             None => 8,
-            Some(r) if (0..=15).contains(&r) => r as u8,
-            Some(r) => return Err(format!("h3_res must be between 0 and 15, got {r}")),
+            Some(r) if (0..=i32::from(grid.max_resolution())).contains(&r) => r as u8,
+            Some(r) => {
+                return Err(format!(
+                    "{}_res must be between 0 and {}, got {r}",
+                    grid.as_str(),
+                    grid.max_resolution()
+                ))
+            }
         };
         let crs = self.source_crs.map(text).filter(|s| !s.is_empty());
         let bbox = match self.bbox.map(text).filter(|s| !s.is_empty()) {
@@ -640,11 +908,12 @@ fn continuous_values(r: PgContinuousRow) -> RowText {
     vec![
         Some(r.h3_index.to_string()),
         Some(r.h3_hex),
-        Some(float_text(r.mean)),
+        // NaN marks a cell without samples and without a NoData value: SQL NULL.
+        (!r.mean.is_nan()).then(|| float_text(r.mean)),
         r.stddev.map(float_text),
         Some(float_text(r.count)),
-        Some(float_text(r.min)),
-        Some(float_text(r.max)),
+        (!r.min.is_nan()).then(|| float_text(r.min)),
+        (!r.max.is_nan()).then(|| float_text(r.max)),
         Some(float_text(r.sum)),
         Some(r.resolution.to_string()),
         Some(bytea_text(&r.wkb)),
@@ -655,7 +924,7 @@ fn categorical_values(r: PgCategoricalRow) -> RowText {
     vec![
         Some(r.h3_index.to_string()),
         Some(r.h3_hex),
-        Some(r.majority_class.to_string()),
+        (!r.majority_is_null).then(|| r.majority_class.to_string()),
         Some(float_text(r.majority_fraction)),
         Some(float_text(r.majority_count)),
         Some(r.unique_classes.to_string()),
@@ -810,8 +1079,13 @@ unsafe fn run_srf<S: 'static>(
 }
 
 fn open_continuous(args: &SrfArgs<'_>) -> Result<PgContinuousSrf, String> {
-    let (path, res, crs, nodata, bbox) = args.parse()?;
-    PgContinuousSrf::open(&path, res, crs, nodata, bbox).map_err(|e| e.to_string())
+    open_continuous_for(GridKind::H3, args)
+}
+
+fn open_continuous_for(grid: GridKind, args: &SrfArgs<'_>) -> Result<PgContinuousSrf, String> {
+    let (path, res, crs, nodata, bbox) = args.parse_for(grid)?;
+    PgContinuousSrf::open_with(grid, &path, res, crs, nodata, bbox, args.output_policy()?)
+        .map_err(|e| e.to_string())
 }
 
 fn next_continuous(srf: &mut PgContinuousSrf) -> Result<Option<RowText>, String> {
@@ -821,8 +1095,13 @@ fn next_continuous(srf: &mut PgContinuousSrf) -> Result<Option<RowText>, String>
 }
 
 fn open_categorical(args: &SrfArgs<'_>) -> Result<PgCategoricalSrf, String> {
-    let (path, res, crs, nodata, bbox) = args.parse()?;
-    PgCategoricalSrf::open(&path, res, crs, nodata, bbox).map_err(|e| e.to_string())
+    open_categorical_for(GridKind::H3, args)
+}
+
+fn open_categorical_for(grid: GridKind, args: &SrfArgs<'_>) -> Result<PgCategoricalSrf, String> {
+    let (path, res, crs, nodata, bbox) = args.parse_for(grid)?;
+    PgCategoricalSrf::open_with(grid, &path, res, crs, nodata, bbox, args.output_policy()?)
+        .map_err(|e| e.to_string())
 }
 
 fn next_categorical(srf: &mut PgCategoricalSrf) -> Result<Option<RowText>, String> {
@@ -871,6 +1150,127 @@ pub unsafe extern "C" fn pg_h3_raster_categorical_aggregate(fcinfo: pg_func_call
     }
 }
 
+/// `{grid}_auto_resolution(raster_path text, res_offset int4, source_crs text) -> int4`:
+/// the resolution whose cells match the raster's pixel size. Raises an error for a NULL
+/// or unreadable raster; a NULL offset is 0 and a NULL CRS uses the raster's own.
+///
+/// # Safety
+/// `fcinfo` must be the valid call info of a function declared `(text, int4, text) -> int4`.
+unsafe fn grid_auto_resolution(fcinfo: pg_func_call_info, grid: GridKind) -> Datum {
+    // SAFETY: `fcinfo` is valid with arguments `(text, int4, text)` (caller contract).
+    // The borrowed argument slices live for the call, and `resolved` is consumed by the
+    // match before `raise_error` can longjmp, so no Rust value with a destructor is live.
+    unsafe {
+        let (path, offset, crs) = (arg_str(fcinfo, 0), arg(fcinfo, 1), arg_str(fcinfo, 2));
+        let resolved = guarded(|| {
+            let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+            let path = path
+                .map(text)
+                .filter(|s| !s.is_empty())
+                .ok_or("raster_path must not be NULL or empty")?;
+            let offset = offset.map_or(0, |d| (d as i32).clamp(-1000, 1000));
+            let crs = crs.map(text).filter(|s| !s.is_empty());
+            crate::pg_auto_resolution(grid, &path, offset, crs.as_deref())
+                .map_err(|e| e.to_string())
+        });
+        match resolved {
+            Ok(res) => usize::from(res),
+            Err(msg) => raise_error(msg),
+        }
+    }
+}
+
+grid_text_v1!(
+    /// `h3_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_h3_auto_resolution,
+    pg_h3_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::H3)
+);
+grid_text_v1!(
+    /// `a5_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_a5_auto_resolution,
+    pg_a5_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::A5)
+);
+grid_text_v1!(
+    /// `s2_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_s2_auto_resolution,
+    pg_s2_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::S2)
+);
+grid_text_v1!(
+    /// `healpix_auto_resolution(text, int4, text) -> int4`
+    pg_finfo_pg_healpix_auto_resolution,
+    pg_healpix_auto_resolution,
+    |fcinfo| grid_auto_resolution(fcinfo, GridKind::Healpix)
+);
+
+/// Defines one aggregate SRF entry point (and its `pg_finfo_*` record).
+macro_rules! grid_srf_v1 {
+    ($(#[$doc:meta])* $finfo:ident, $name:ident, |$args:ident| $open:expr, $next:expr) => {
+        #[no_mangle]
+        pub extern "C" fn $finfo() -> *const Pg_finfo_record {
+            &PG_FINFO_V1
+        }
+
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// Called by the PostgreSQL function manager with a valid `fcinfo`.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(fcinfo: pg_func_call_info) -> Datum {
+            // SAFETY: forwards the function manager's valid `fcinfo` for this SRF,
+            // declared as returning a composite, to `run_srf`.
+            unsafe { run_srf(fcinfo, |$args| $open, $next, |s| s.transform_failures()) }
+        }
+    };
+}
+
+grid_srf_v1!(
+    /// `a5_raster_continuous_aggregate(text, int4, text, float8, text) -> SETOF record`
+    pg_finfo_pg_a5_raster_continuous_aggregate,
+    pg_a5_raster_continuous_aggregate,
+    |args| open_continuous_for(GridKind::A5, args),
+    next_continuous
+);
+grid_srf_v1!(
+    /// `a5_raster_categorical_aggregate(text, int4, text, float8, text) -> SETOF record`
+    pg_finfo_pg_a5_raster_categorical_aggregate,
+    pg_a5_raster_categorical_aggregate,
+    |args| open_categorical_for(GridKind::A5, args),
+    next_categorical
+);
+
+grid_srf_v1!(
+    /// `s2_raster_continuous_aggregate(text, int4, text, float8, text) -> SETOF record`
+    pg_finfo_pg_s2_raster_continuous_aggregate,
+    pg_s2_raster_continuous_aggregate,
+    |args| open_continuous_for(GridKind::S2, args),
+    next_continuous
+);
+grid_srf_v1!(
+    /// `s2_raster_categorical_aggregate(text, int4, text, float8, text) -> SETOF record`
+    pg_finfo_pg_s2_raster_categorical_aggregate,
+    pg_s2_raster_categorical_aggregate,
+    |args| open_categorical_for(GridKind::S2, args),
+    next_categorical
+);
+
+grid_srf_v1!(
+    /// `healpix_raster_continuous_aggregate(text, int4, text, float8, text) -> SETOF record`
+    pg_finfo_pg_healpix_raster_continuous_aggregate,
+    pg_healpix_raster_continuous_aggregate,
+    |args| open_continuous_for(GridKind::Healpix, args),
+    next_continuous
+);
+grid_srf_v1!(
+    /// `healpix_raster_categorical_aggregate(text, int4, text, float8, text) -> SETOF record`
+    pg_finfo_pg_healpix_raster_categorical_aggregate,
+    pg_healpix_raster_categorical_aggregate,
+    |args| open_categorical_for(GridKind::Healpix, args),
+    next_categorical
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,6 +1291,9 @@ mod tests {
             source_crs: None,
             nodata: None,
             bbox: None,
+            nodata_policy: None,
+            emit_nodata_value: None,
+            decimals: None,
         };
         let (path, res, ..) = base.parse().unwrap();
         assert_eq!((path.as_str(), res), ("a.tif", vec![8]));
@@ -922,6 +1325,9 @@ mod tests {
             source_crs: a.source_crs,
             nodata: a.nodata,
             bbox: a.bbox,
+            nodata_policy: a.nodata_policy,
+            emit_nodata_value: a.emit_nodata_value,
+            decimals: a.decimals,
         }
     }
 

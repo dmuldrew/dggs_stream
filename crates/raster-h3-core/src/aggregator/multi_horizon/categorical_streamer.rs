@@ -119,9 +119,20 @@ impl HorizonStreamKernel for CategoricalKernel {
 pub struct MultiCategoricalHorizonStreamer {
     inner: MultiHorizonStreamer<CategoricalKernel>,
     remapper: Option<Arc<CategoryRemapper>>,
+    /// The `sample` / `overlay` stream, when `config.transfer` is not the default; the
+    /// horizon kernel in `inner` is then idle.
+    transfer: Option<Box<crate::transfer::TransferStream<CategoricalAccumulator>>>,
+    transfer_mode: crate::transfer::TransferMode,
+    histogram: Option<Arc<crate::histogram::HistogramSpec>>,
 }
 
 impl MultiCategoricalHorizonStreamer {
+    /// The histogram this scan was asked for (see [`crate::histogram`]): with bins, the
+    /// classes of its records are bin indices.
+    pub fn histogram(&self) -> Option<&crate::histogram::HistogramSpec> {
+        self.histogram.as_deref()
+    }
+
     /// Category remapping applied before aggregation, if configured
     pub fn remapper(&self) -> Option<&CategoryRemapper> {
         self.remapper.as_deref()
@@ -131,21 +142,40 @@ impl MultiCategoricalHorizonStreamer {
     pub fn new(reader: GeoTiffStreamReader, config: &MultiResolutionConfig) -> Result<Self> {
         let kernel = CategoricalKernel::from_config(config);
         let remapper = kernel.remapper.clone();
-        let inner = MultiHorizonStreamer::new(reader, config, kernel)?;
-        Ok(Self { inner, remapper })
+        let mut inner = MultiHorizonStreamer::new(reader, config, kernel)?;
+        let transfer = transfer_stream(&mut inner, config)?;
+        Ok(Self {
+            inner,
+            remapper,
+            transfer,
+            transfer_mode: config.transfer,
+            histogram: config.histogram.clone().map(Arc::new),
+        })
     }
 
     /// Initialize a new MultiCategoricalHorizonStreamer from a multi-file MosaicReader
     pub fn new_mosaic(mosaic: Arc<MosaicReader>, config: &MultiResolutionConfig) -> Result<Self> {
         let kernel = CategoricalKernel::from_config(config);
         let remapper = kernel.remapper.clone();
-        let inner = MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?;
-        Ok(Self { inner, remapper })
+        let mut inner = MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?;
+        let transfer = transfer_stream(&mut inner, config)?;
+        Ok(Self {
+            inner,
+            remapper,
+            transfer,
+            transfer_mode: config.transfer,
+            histogram: config.histogram.clone().map(Arc::new),
+        })
     }
 
     /// Pull up to `max_rows` completed multi-resolution records using multi-core chunk-row parallelism
     #[inline(always)]
     pub fn fetch_next_batch(&mut self, max_rows: usize) -> Result<Vec<MultiCategoricalRecord>> {
+        if self.transfer.is_some() {
+            let mut records = Vec::new();
+            self.drain_completed_into(max_rows, |_, record| records.push(record))?;
+            return Ok(records);
+        }
         self.inner.fetch_next_batch(max_rows)
     }
 
@@ -186,19 +216,60 @@ impl MultiCategoricalHorizonStreamer {
     where
         F: FnMut(usize, MultiCategoricalRecord),
     {
-        self.inner.drain_completed_into(max_rows, consumer)
+        let mut consumer = consumer;
+        // With a runtime profile, count the cells handed out and the samples behind
+        // those of the first resolution. One check per drain call otherwise.
+        let profile = self.inner.run_profile().cloned();
+        let first_resolution = self.inner.resolution_u8s().first().copied();
+        let (mut cells, mut samples) = (0u64, 0.0f64);
+        let mut consumer = |i: usize, record: MultiCategoricalRecord| {
+            if profile.is_some() {
+                cells += 1;
+                if Some(record.resolution) == first_resolution {
+                    samples += record.accumulator.total_count;
+                }
+            }
+            consumer(i, record)
+        };
+        let drained = match &mut self.transfer {
+            Some(transfer) => {
+                transfer.drain_into(max_rows, |i, resolution, h3_index, accumulator| {
+                    consumer(
+                        i,
+                        MultiCategoricalRecord {
+                            resolution,
+                            h3_index,
+                            accumulator,
+                        },
+                    )
+                })
+            }
+            None => self.inner.drain_completed_into(max_rows, &mut consumer),
+        };
+        if let Some(profile) = &profile {
+            use crate::run_profile::Counter;
+            profile.count(Counter::Cells, cells);
+            profile.count(Counter::SamplesIndexed, samples.round() as u64);
+        }
+        drained
     }
 
     /// Advance scanline horizon until at least `min_rows` completed records are available or finished
     #[inline(always)]
     pub fn advance_until_completed(&mut self, min_rows: usize) -> Result<()> {
-        self.inner.advance_until_completed(min_rows)
+        match &mut self.transfer {
+            Some(transfer) => transfer.advance_until_completed(min_rows),
+            None => self.inner.advance_until_completed(min_rows),
+        }
     }
 
     /// Return current southernmost latitude reached by scanline horizon
     #[inline(always)]
     pub fn current_lat_horizon(&self) -> f64 {
-        self.inner.current_lat_horizon()
+        match &self.transfer {
+            Some(transfer) => transfer.current_lat_horizon(),
+            None => self.inner.current_lat_horizon(),
+        }
     }
 
     /// Target H3 resolutions
@@ -226,7 +297,16 @@ impl MultiCategoricalHorizonStreamer {
     /// Valid sample points dropped by failed or out-of-domain coordinate
     /// transforms. Non-zero means some valid pixels are missing from the output.
     pub fn transform_failures(&self) -> u64 {
-        self.inner.transform_failures()
+        match &self.transfer {
+            Some(transfer) => transfer.transform_failures(),
+            None => self.inner.transform_failures(),
+        }
+    }
+
+    /// How serializers turn this stream's cells into output values: the NoData policy
+    /// and value, and the decimal rounding.
+    pub fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.inner.output_policy()
     }
 
     /// Stage timings and counters, including observed kernel concurrency.
@@ -248,7 +328,19 @@ impl MultiCategoricalHorizonStreamer {
     /// Check if stream is fully drained and finished
     #[inline(always)]
     pub fn is_finished(&self) -> bool {
-        self.inner.is_finished()
+        match &self.transfer {
+            Some(transfer) => transfer.is_finished(),
+            None => self.inner.is_finished(),
+        }
+    }
+
+    /// The transfer mode this stream runs (`AssignCenters` for the default scan).
+    pub fn transfer_mode(&self) -> crate::transfer::TransferMode {
+        if self.transfer.is_some() {
+            self.transfer_mode
+        } else {
+            crate::transfer::TransferMode::AssignCenters
+        }
     }
 }
 
@@ -276,17 +368,17 @@ impl RecordStreamer for MultiCategoricalHorizonStreamer {
     where
         F: FnMut(usize, Self::Record),
     {
-        self.inner.drain_completed_into(max_rows, consumer)
+        MultiCategoricalHorizonStreamer::drain_completed_into(self, max_rows, consumer)
     }
 
     #[inline(always)]
     fn current_lat_horizon(&self) -> f64 {
-        self.inner.current_lat_horizon()
+        MultiCategoricalHorizonStreamer::current_lat_horizon(self)
     }
 
     #[inline(always)]
     fn is_finished(&self) -> bool {
-        self.inner.is_finished()
+        MultiCategoricalHorizonStreamer::is_finished(self)
     }
 
     #[inline(always)]
@@ -308,4 +400,37 @@ impl RecordStreamer for MultiCategoricalHorizonStreamer {
     fn grid(&self) -> crate::grid::GridKind {
         self.inner.grid()
     }
+
+    #[inline(always)]
+    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
+        self.inner.output_policy()
+    }
+
+    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
+        self.inner.run_profile().cloned()
+    }
+}
+
+impl Drop for MultiCategoricalHorizonStreamer {
+    fn drop(&mut self) {
+        // A scan abandoned early (a LIMIT) still reports what it did.
+        self.inner.publish_profile();
+        if let Some(profile) = self.inner.run_profile() {
+            profile.stream_finished();
+        }
+    }
+}
+
+/// The transfer stream of a non-default `config.transfer`, with the horizon kernel's
+/// prefetch stopped: the transfer modes read the raster themselves.
+fn transfer_stream<K: HorizonStreamKernel>(
+    inner: &mut MultiHorizonStreamer<K>,
+    config: &MultiResolutionConfig,
+) -> Result<Option<Box<crate::transfer::TransferStream<CategoricalAccumulator>>>> {
+    if config.transfer.is_assign_centers() {
+        return Ok(None);
+    }
+    inner.stop_prefetch();
+    let stream = crate::transfer::TransferStream::new(inner.mosaic_arc(), config)?;
+    Ok(Some(Box::new(stream)))
 }

@@ -31,9 +31,325 @@ pub enum GridKind {
     Healpix,
 }
 
+/// How a cell's edges run between its vertices, which decides how far a cell can reach
+/// south of them (see [`GridSpec::edge_dips_south`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeModel {
+    /// Great-circle arcs. An arc bulges toward the nearer pole, so only an edge with an
+    /// endpoint on or south of the equator can pass south of both endpoints.
+    Geodesic,
+    /// Curves that are not great-circle arcs and may pass south of both endpoints in
+    /// either hemisphere.
+    Curved,
+    /// Sides of a diamond in a projection whose northing depends on latitude alone: the
+    /// south vertex is the cell's southernmost point.
+    IsoLatitudeDiamond,
+}
+
+/// Where the poles sit relative to a grid's cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoleModel {
+    /// One cell at every resolution holds each pole in its interior; no cell has a
+    /// vertex on a pole.
+    InteriorAtEveryResolution,
+    /// A resolution-0 cell holds each pole in its interior; finer cells meet at the
+    /// pole as a vertex.
+    InteriorAtBaseOnly,
+    /// Cells meet at each pole as a vertex at every resolution.
+    VertexOnly,
+}
+
+/// How a grid's resolutions map to Web Mercator zoom levels in PMTiles pyramids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomModel {
+    /// Aperture 7: the hand-tuned H3 table, where a resolution spans one or two zooms.
+    Aperture7Table,
+    /// Aperture 4, like the tile pyramid: zoom equals resolution, capped at `max_zoom`.
+    OnePerLevel {
+        /// Highest zoom written.
+        max_zoom: u8,
+    },
+}
+
+/// The algorithm that fills a polygon with a grid's cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolygonFill {
+    /// `h3o`'s polygon tiler (geodesic containment).
+    H3Tiler,
+    /// The `a5` crate's `polygon_to_cells`.
+    A5Native,
+    /// The polygon fill's descent through the grid's 4-ary hierarchy, testing
+    /// cells against the polygon in lon/lat.
+    NestedDescent,
+}
+
+/// A bound, in degrees of latitude, on how far north or south of its centre a cell
+/// reaches: `head[res]` for the coarsest resolutions, then `tail` halved for each
+/// further one. Stretched cells (HEALPix near 45 degrees) can be wider east to west.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadiusModel {
+    /// Bounds of resolutions `0..head.len()`.
+    pub head: &'static [f64],
+    /// Bound at resolution `head.len()`; each finer resolution halves it.
+    pub tail: f64,
+}
+
+impl RadiusModel {
+    /// The bound at `res`.
+    #[inline]
+    pub fn at(&self, res: u8) -> f64 {
+        match self.head.get(usize::from(res)) {
+            Some(&radius) => radius,
+            None => {
+                let steps = i32::from(res) - self.head.len() as i32;
+                // Past the table an aperture-7 grid shrinks faster than halving, so the
+                // last entry halved stays a bound.
+                self.tail * 0.5_f64.powi(steps)
+            }
+        }
+    }
+}
+
+/// The fixed properties and invariants of one grid: the single place pipeline stages
+/// and engine adapters read them from, instead of matching on [`GridKind`].
+///
+/// Per-cell operations (indexing, hierarchy, geometry) are methods of [`GridKind`];
+/// the per-sample indexing kernels are the [`GridBackend`] types.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridSpec {
+    /// The grid these properties describe.
+    pub kind: GridKind,
+    /// Canonical lowercase identifier (`"h3"`), also the prefix of SQL function names.
+    pub name: &'static str,
+    /// Display name (`"HEALPix"`).
+    pub label: &'static str,
+    /// Name of the 64-bit integer cell column (`"h3_index"`).
+    pub index_column: &'static str,
+    /// Name of the hexadecimal string cell column (`"h3_hex"`).
+    pub hex_column: &'static str,
+    /// Finest resolution; resolutions are `0..=max_resolution`.
+    pub max_resolution: u8,
+    /// Number of resolution-0 cells.
+    pub base_cell_count: u16,
+    /// Children of an ordinary cell at the next resolution (see
+    /// [`GridKind::expected_immediate_children`] for the exceptions).
+    pub aperture: u8,
+    /// Whether every cell of a resolution has the same area.
+    pub equal_area: bool,
+    /// Whether ids use bit 63, so they do not fit a signed 64-bit integer as a
+    /// non-negative value. Adapters without an unsigned type keep the bit pattern.
+    pub ids_use_sign_bit: bool,
+    /// Whether the Parquet exporters annotate the index column `UINT_64`. H3's stays a
+    /// plain `INT64`, as in every earlier release (its ids never use the sign bit).
+    pub parquet_index_unsigned: bool,
+    /// How edges run between vertices.
+    pub edges: EdgeModel,
+    /// Where the poles sit.
+    pub poles: PoleModel,
+    /// Whether streams may evict cells by raster row (`eviction_space::RowSpace`) rather
+    /// than latitude. The row caps are certified for great-circle edges of H3's size
+    /// bounds only.
+    pub row_space_eviction: bool,
+    /// PMTiles zoom mapping.
+    pub zoom: ZoomModel,
+    /// Bound on a cell's north-south extent around its centre, per resolution.
+    pub radius: RadiusModel,
+    /// Polygon-fill algorithm.
+    pub polygon_fill: PolygonFill,
+}
+
+/// Empirical bounds (with at least 8% headroom) for `h3o` cells.
+const H3_RADIUS_DEG: [f64; 16] = [
+    13.5, 5.2, 1.95, 0.74, 0.28, 0.106, 0.04, 0.015, 0.006, 0.0025, 0.001, 0.0004, 0.00015,
+    0.00006, 0.000025, 0.00001,
+];
+
+static GRID_SPECS: [GridSpec; 4] = [
+    GridSpec {
+        kind: GridKind::H3,
+        name: "h3",
+        label: "H3",
+        index_column: "h3_index",
+        hex_column: "h3_hex",
+        max_resolution: 15,
+        base_cell_count: 122,
+        aperture: 7,
+        equal_area: false,
+        ids_use_sign_bit: false,
+        parquet_index_unsigned: false,
+        edges: EdgeModel::Geodesic,
+        poles: PoleModel::InteriorAtEveryResolution,
+        row_space_eviction: true,
+        zoom: ZoomModel::Aperture7Table,
+        radius: RadiusModel {
+            head: &H3_RADIUS_DEG,
+            tail: 0.000005,
+        },
+        polygon_fill: PolygonFill::H3Tiler,
+    },
+    GridSpec {
+        kind: GridKind::A5,
+        name: "a5",
+        label: "A5",
+        index_column: "a5_index",
+        hex_column: "a5_hex",
+        max_resolution: 30,
+        base_cell_count: 12,
+        aperture: 4,
+        equal_area: true,
+        ids_use_sign_bit: true,
+        parquet_index_unsigned: true,
+        edges: EdgeModel::Curved,
+        poles: PoleModel::InteriorAtBaseOnly,
+        row_space_eviction: false,
+        // One zoom per level: a tile then holds roughly 15 cells.
+        zoom: ZoomModel::OnePerLevel { max_zoom: 24 },
+        // Measured extents are 37.5, 21.5 and 11.5 degrees, then halve per level.
+        radius: RadiusModel {
+            head: &[42.0, 23.0],
+            tail: 12.5,
+        },
+        polygon_fill: PolygonFill::A5Native,
+    },
+    GridSpec {
+        kind: GridKind::S2,
+        name: "s2",
+        label: "S2",
+        index_column: "s2_index",
+        hex_column: "s2_hex",
+        max_resolution: 30,
+        base_cell_count: 6,
+        aperture: 4,
+        equal_area: false,
+        ids_use_sign_bit: true,
+        parquet_index_unsigned: true,
+        edges: EdgeModel::Geodesic,
+        poles: PoleModel::InteriorAtBaseOnly,
+        row_space_eviction: false,
+        // One zoom per level: a tile then holds roughly 6 cells.
+        zoom: ZoomModel::OnePerLevel { max_zoom: 24 },
+        // S2's maximum cell diagonal is 2.44 rad / 2^level; half of it is 70 degrees.
+        radius: RadiusModel {
+            head: &[],
+            tail: 70.0,
+        },
+        polygon_fill: PolygonFill::NestedDescent,
+    },
+    GridSpec {
+        kind: GridKind::Healpix,
+        name: "healpix",
+        label: "HEALPix",
+        index_column: "healpix_index",
+        hex_column: "healpix_hex",
+        max_resolution: 29,
+        base_cell_count: 12,
+        aperture: 4,
+        equal_area: true,
+        ids_use_sign_bit: false,
+        parquet_index_unsigned: true,
+        edges: EdgeModel::IsoLatitudeDiamond,
+        poles: PoleModel::VertexOnly,
+        row_space_eviction: false,
+        zoom: ZoomModel::OnePerLevel { max_zoom: 24 },
+        // A polar base cell reaches 48 degrees from its centre; cells halve per depth
+        // but stretch near the polar-cap boundary.
+        radius: RadiusModel {
+            head: &[],
+            tail: 60.0,
+        },
+        polygon_fill: PolygonFill::NestedDescent,
+    },
+];
+
+impl GridSpec {
+    /// Every grid's spec, in [`GridKind::ALL`] order.
+    pub fn all() -> &'static [GridSpec; 4] {
+        &GRID_SPECS
+    }
+
+    /// Whether `res` is a resolution of this grid.
+    #[inline]
+    pub const fn has_resolution(&self, res: u8) -> bool {
+        res <= self.max_resolution
+    }
+
+    /// Average cell area in square metres at `res` (clamped to the grid's range).
+    #[inline]
+    pub fn area_m2(&self, res: u8) -> f64 {
+        self.kind.area_m2(res)
+    }
+
+    /// Whether a cell can have a vertex on a pole. Such a vertex has no longitude of its
+    /// own, so bounds computed from vertex longitudes are not valid near it.
+    #[inline]
+    pub const fn has_pole_vertices(&self) -> bool {
+        !matches!(self.poles, PoleModel::InteriorAtEveryResolution)
+    }
+
+    /// Whether an edge between vertices at latitudes `p_lat` and `q_lat` (degrees) can
+    /// pass south of both, so a southern bound must be padded below the lower vertex.
+    #[inline]
+    pub fn edge_dips_south(&self, p_lat: f64, q_lat: f64) -> bool {
+        match self.edges {
+            EdgeModel::IsoLatitudeDiamond => false,
+            EdgeModel::Curved => true,
+            EdgeModel::Geodesic => p_lat <= 0.0 || q_lat <= 0.0,
+        }
+    }
+
+    /// The northern mirror of [`Self::edge_dips_south`]: whether an edge can pass north
+    /// of both of its endpoints.
+    #[inline]
+    pub fn edge_bulges_north(&self, p_lat: f64, q_lat: f64) -> bool {
+        match self.edges {
+            EdgeModel::IsoLatitudeDiamond => false,
+            EdgeModel::Curved => true,
+            EdgeModel::Geodesic => p_lat >= 0.0 || q_lat >= 0.0,
+        }
+    }
+
+    /// A bound, in degrees of latitude, on how far north or south of its centre a cell
+    /// at `res` reaches.
+    #[inline]
+    pub fn max_cell_radius_deg(&self, res: u8) -> f64 {
+        self.radius.at(res)
+    }
+
+    /// A distance in kilometres larger than the diameter of any cell at `res`,
+    /// including the points a cell owns along curved edges. Widening a box by it
+    /// makes every cell that touches the box lie wholly inside the widened one.
+    pub fn max_cell_diameter_km(&self, res: u8) -> f64 {
+        /// Kilometres per degree of great-circle arc, rounded up.
+        const KM_PER_DEG: f64 = 111.4;
+        let res = res.min(self.max_resolution);
+        match Resolution::try_from(res) {
+            // The largest H3 cells have edges about 1.4x the average and a diameter
+            // about 2x their edge, so roughly 2.8x the average edge; 4x leaves headroom.
+            Ok(h3_res) if self.kind == GridKind::H3 => 4.0 * h3_res.edge_length_km(),
+            // Four times the north-south reach: twice it is the diameter only for a
+            // cell centred in its extent, and stretched cells (HEALPix near 45
+            // degrees) are wider east to west.
+            _ => 4.0 * self.max_cell_radius_deg(res) * KM_PER_DEG,
+        }
+    }
+
+    /// Whether the 64-bit ids of this grid need an unsigned column type (or a documented
+    /// bit-pattern conversion) to be stored without loss of the natural ordering.
+    #[inline]
+    pub const fn needs_unsigned_ids(&self) -> bool {
+        self.ids_use_sign_bit
+    }
+}
+
 impl GridKind {
     /// Every supported grid.
     pub const ALL: [Self; 4] = [Self::H3, Self::A5, Self::S2, Self::Healpix];
+
+    /// The grid's fixed properties and invariants.
+    #[inline]
+    pub fn spec(self) -> &'static GridSpec {
+        &GRID_SPECS[self as usize]
+    }
 
     /// The grid whose discriminant (`GridKind as u8`) is `index`; H3 if there is none.
     /// Lets a grid be a const generic argument.
@@ -63,46 +379,26 @@ impl GridKind {
 
     /// Canonical lowercase identifier (`"h3"`, `"a5"`, `"s2"` or `"healpix"`).
     #[inline]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::H3 => "h3",
-            Self::A5 => "a5",
-            Self::S2 => "s2",
-            Self::Healpix => "healpix",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.spec().name
     }
 
     /// Display name (`"H3"`, `"A5"`, `"S2"` or `"HEALPix"`).
     #[inline]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::H3 => "H3",
-            Self::A5 => "A5",
-            Self::S2 => "S2",
-            Self::Healpix => "HEALPix",
-        }
+    pub fn label(self) -> &'static str {
+        self.spec().label
     }
 
     /// Canonical 64-bit integer cell index column name (`"h3_index"`, `"a5_index"`, ...).
     #[inline]
-    pub const fn index_column_name(self) -> &'static str {
-        match self {
-            Self::H3 => "h3_index",
-            Self::A5 => "a5_index",
-            Self::S2 => "s2_index",
-            Self::Healpix => "healpix_index",
-        }
+    pub fn index_column_name(self) -> &'static str {
+        self.spec().index_column
     }
 
     /// Canonical hexadecimal string cell index column name (`"h3_hex"`, `"a5_hex"`, ...).
     #[inline]
-    pub const fn hex_column_name(self) -> &'static str {
-        match self {
-            Self::H3 => "h3_hex",
-            Self::A5 => "a5_hex",
-            Self::S2 => "s2_hex",
-            Self::Healpix => "healpix_hex",
-        }
+    pub fn hex_column_name(self) -> &'static str {
+        self.spec().hex_column
     }
 
     /// The grid whose index or hex column is called `name` (case-insensitive), also
@@ -116,12 +412,8 @@ impl GridKind {
 
     /// Maximum supported resolution level (`15` for H3, `30` for A5 and S2, `29` for HEALPix).
     #[inline]
-    pub const fn max_resolution(self) -> u8 {
-        match self {
-            Self::H3 => 15,
-            Self::A5 | Self::S2 => 30,
-            Self::Healpix => 29,
-        }
+    pub fn max_resolution(self) -> u8 {
+        self.spec().max_resolution
     }
 
     /// Average cell area in square meters at `res`.
@@ -372,8 +664,104 @@ impl GridKind {
     /// Whether cell edges are great-circle arcs, which lets latitude bounds assume an
     /// edge stays on its endpoints' side of the equator-ward bulge.
     #[inline]
-    pub const fn has_geodesic_edges(self) -> bool {
-        matches!(self, Self::H3 | Self::S2)
+    pub fn has_geodesic_edges(self) -> bool {
+        self.spec().edges == EdgeModel::Geodesic
+    }
+
+    /// Conservative WGS84 bounding box `[min_lon, min_lat, max_lon, max_lat]` of a cell:
+    /// every point of the cell is inside it. `min_lon > max_lon` for a box crossing the
+    /// antimeridian; a cell holding or touching a pole spans every longitude. `None` for
+    /// an invalid cell.
+    pub fn wgs84_bbox(self, cell_u64: u64) -> Option<[f64; 4]> {
+        let grid = self;
+        let spec = grid.spec();
+        let res = grid.resolution(cell_u64)?;
+        let pole = grid.interior_pole(cell_u64);
+        let (is_north_pole, is_south_pole) = (pole == Some(true), pole == Some(false));
+        let mut verts = [(0.0, 0.0); 10];
+        let n = grid.boundary_lng_lat(cell_u64, &mut verts);
+        if n == 0 {
+            return Some([-180.0, -90.0, 180.0, 90.0]);
+        }
+
+        let south_lat =
+            crate::aggregator::horizon_streamer::compute_cell_south_lat_for(grid, cell_u64);
+        // By symmetry, great-circle edges in the northern hemisphere can bulge northward by at most
+        // (|delta_lat| + |delta_lon|) / 2 relative to their endpoints.
+        let mut north_lat = if is_north_pole { 90.0 } else { -90.0_f64 };
+        if !is_north_pole {
+            for i in 0..n {
+                let (p_lng, p_lat) = verts[i];
+                let (q_lng, q_lat) = verts[(i + 1) % n];
+                let mut edge_north = p_lat.max(q_lat).next_up();
+                // Whether the edge can pass north of both endpoints depends on the grid's
+                // edge model.
+                if spec.edge_bulges_north(p_lat, q_lat) {
+                    let direct = (p_lng - q_lng).abs();
+                    let delta_lon = direct.min(360.0 - direct);
+                    let delta_lat = (p_lat - q_lat).abs();
+                    edge_north = (edge_north + 0.5 * (delta_lat + delta_lon)).next_up();
+                }
+                north_lat = north_lat.max(edge_north);
+            }
+            north_lat = north_lat.min(90.0);
+        }
+
+        if is_north_pole || is_south_pole || north_lat >= 89.5 || south_lat <= -89.5 {
+            return Some([-180.0, south_lat, 180.0, north_lat]);
+        }
+
+        // Unwrap boundary vertex longitudes around vertex 0 so antimeridian-crossing
+        // cells form a tight continuous interval instead of [-180, 180].
+        let mut lngs = [0.0f64; 10];
+        lngs[0] = verts[0].0;
+        let mut min_u = lngs[0];
+        let mut max_u = lngs[0];
+        for i in 1..n {
+            let mut lng = verts[i].0;
+            while lng - lngs[i - 1] > 180.0 {
+                lng -= 360.0;
+            }
+            while lng - lngs[i - 1] < -180.0 {
+                lng += 360.0;
+            }
+            lngs[i] = lng;
+            min_u = min_u.min(lng);
+            max_u = max_u.max(lng);
+        }
+
+        // Pad longitude by a small geodesic safety margin scaled by sec(lat).
+        let max_abs_lat = south_lat.abs().max(north_lat.abs()).min(89.0);
+        let r = spec.max_cell_radius_deg(res);
+        let pad_lon = (r * 0.25 / max_abs_lat.to_radians().cos()).max(1e-5);
+        let lo = min_u - pad_lon;
+        let hi = max_u + pad_lon;
+        if hi - lo >= 360.0 {
+            return Some([-180.0, south_lat, 180.0, north_lat]);
+        }
+
+        let wrap = crate::crs::transformer::wrap_lon;
+        let (min_lon, max_lon) = if lo >= -180.0 && hi <= 180.0 {
+            (lo, hi)
+        } else {
+            (wrap(lo), wrap(hi))
+        };
+
+        Some([min_lon, south_lat, max_lon, north_lat])
+    }
+
+    /// Append every resolution-0 cell of the grid to `out`.
+    pub fn base_cells_into(self, out: &mut Vec<u64>) {
+        match self {
+            Self::H3 => out.extend(CellIndex::base_cells().map(u64::from)),
+            Self::A5 => {
+                if let Ok(cells) = a5::get_res0_cells() {
+                    out.extend(cells);
+                }
+            }
+            Self::S2 => out.extend((0..6).map(|face| S2CellId::from_face(face).0)),
+            Self::Healpix => out.extend((0..12).map(|pixel| healpix_encode(0, pixel))),
+        }
     }
 
     /// `Some(true)` if `cell` holds the north pole in its interior, `Some(false)` for
@@ -420,6 +808,9 @@ impl GridKind {
                     wrap_lon_180(lon),
                     lat,
                 ));
+                if a5_near_pole(lat) {
+                    crate::aggregator::multi_horizon::profile::a5_forget_last_cell(pt, res);
+                }
                 crate::aggregator::multi_horizon::profile::index_a5(pt, res)
             }
             Self::S2 | Self::Healpix => {
@@ -495,6 +886,16 @@ pub fn a5_pole_cells() -> [u64; 2] {
             a5::lonlat_to_cell(a5::LonLat::new(0.0, -90.0), 0).expect("south pole a5"),
         ]
     })
+}
+
+/// Latitudes within this many degrees of a pole (about 110 m) are indexed on A5 without
+/// the `a5` crate's last-cell shortcut, which misplaces points within about 1e-5 degrees
+/// of a pole (see `profile::a5_forget_last_cell`).
+pub const A5_POLE_GUARD_DEG: f64 = 1e-3;
+
+#[inline(always)]
+fn a5_near_pole(lat: f64) -> bool {
+    lat.abs() > 90.0 - A5_POLE_GUARD_DEG
 }
 
 /// Surface area of the authalic sphere in square meters.
@@ -677,7 +1078,8 @@ impl GridBackend for H3Backend {
 pub struct A5Backend;
 
 impl GridBackend for A5Backend {
-    type Point = a5::coordinate_systems::Spherical;
+    /// The point on the sphere, and whether it is within [`A5_POLE_GUARD_DEG`] of a pole.
+    type Point = (a5::coordinate_systems::Spherical, bool);
     type Indexer = ();
 
     #[inline]
@@ -689,8 +1091,9 @@ impl GridBackend for A5Backend {
             return None;
         }
         let norm_lon = wrap_lon_180(lon);
-        Some(a5::core::coordinate_transforms::from_lon_lat(
-            a5::LonLat::new(norm_lon, lat),
+        Some((
+            a5::core::coordinate_transforms::from_lon_lat(a5::LonLat::new(norm_lon, lat)),
+            a5_near_pole(lat),
         ))
     }
 
@@ -701,7 +1104,17 @@ impl GridBackend for A5Backend {
         resolutions: &[u8],
         out: &mut [u64],
     ) {
-        crate::aggregator::multi_horizon::profile::index_all_a5(point, resolutions, out);
+        let (spherical, near_pole) = point;
+        if near_pole {
+            // Rare: one sample row at most in a raster that reaches a pole.
+            for (cell, &res) in out.iter_mut().zip(resolutions) {
+                crate::aggregator::multi_horizon::profile::a5_forget_last_cell(spherical, res);
+                *cell = crate::aggregator::multi_horizon::profile::index_a5(spherical, res)
+                    .unwrap_or(0);
+            }
+            return;
+        }
+        crate::aggregator::multi_horizon::profile::index_all_a5(spherical, resolutions, out);
     }
 }
 
@@ -1071,5 +1484,268 @@ mod tests {
         }
         assert!(S2Backend::make_point(f64::NAN, 0.0).is_none());
         assert!(HealpixBackend::make_point(0.0, 91.0).is_none());
+    }
+
+    #[test]
+    fn spec_names_and_ranges_agree_with_the_grid() {
+        assert_eq!(GridSpec::all().len(), GridKind::ALL.len());
+        for (grid, spec) in GridKind::ALL.into_iter().zip(GridSpec::all()) {
+            assert_eq!(spec.kind, grid);
+            assert_eq!(grid.spec(), spec);
+            assert_eq!(GridKind::parse(spec.name), Some(grid));
+            assert_eq!(GridKind::from_index(grid as u8), grid);
+            assert_eq!(spec.index_column, format!("{}_index", spec.name));
+            assert_eq!(spec.hex_column, format!("{}_hex", spec.name));
+            assert_eq!(
+                GridKind::from_cell_column_name(spec.index_column),
+                Some(grid)
+            );
+            assert!(usize::from(spec.max_resolution) < MAX_GRID_RESOLUTIONS);
+            assert!(spec.has_resolution(spec.max_resolution));
+            assert!(!spec.has_resolution(spec.max_resolution + 1));
+            // The range is exactly what indexing accepts.
+            let finest = grid.cell_at(10.0, 20.0, spec.max_resolution).unwrap();
+            assert!(grid.is_valid(finest));
+            assert_eq!(grid.cell_at(10.0, 20.0, spec.max_resolution + 1), None);
+            // Areas shrink with resolution and cover the globe at resolution 0.
+            let covered = spec.area_m2(0) * f64::from(spec.base_cell_count);
+            // H3's table is the average hexagon; its pentagons are smaller.
+            let tolerance = if spec.equal_area { 1e-6 } else { 0.05 };
+            assert!(
+                (covered / EARTH_AREA_M2 - 1.0).abs() < tolerance,
+                "{grid}: {covered}"
+            );
+            for res in 1..=spec.max_resolution {
+                assert!(spec.area_m2(res) < spec.area_m2(res - 1), "{grid} {res}");
+            }
+        }
+    }
+
+    #[test]
+    fn spec_base_cells_and_aperture_match_the_hierarchy() {
+        for grid in GridKind::ALL {
+            let spec = grid.spec();
+            let mut base = Vec::new();
+            grid.base_cells_into(&mut base);
+            assert_eq!(base.len(), usize::from(spec.base_cell_count), "{grid}");
+            let mut unique = base.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), base.len());
+            for &cell in &base {
+                assert_eq!(grid.resolution(cell), Some(0), "{grid}");
+            }
+            // Every point's resolution-0 cell is a base cell.
+            for (lat, lon) in sample_points() {
+                assert!(base.contains(&grid.cell_at(lat, lon, 0).unwrap()), "{grid}");
+            }
+            // An ordinary cell has `aperture` children.
+            let parent = grid.cell_at(37.7749, -122.4194, 5).unwrap();
+            let mut children = Vec::new();
+            grid.children_into(parent, 6, &mut children);
+            assert_eq!(children.len(), usize::from(spec.aperture), "{grid}");
+            assert_eq!(grid.expected_immediate_children(parent, 5), children.len());
+        }
+    }
+
+    #[test]
+    fn spec_sign_bit_flag_matches_the_ids() {
+        for grid in GridKind::ALL {
+            let spec = grid.spec();
+            let mut seen_top_bit = false;
+            for (lat, lon) in sample_points() {
+                for res in [0, 3, spec.max_resolution - 1] {
+                    seen_top_bit |= grid.cell_at(lat, lon, res).unwrap() >> 63 == 1;
+                }
+            }
+            assert_eq!(seen_top_bit, spec.ids_use_sign_bit, "{grid}");
+            assert_eq!(spec.needs_unsigned_ids(), spec.ids_use_sign_bit);
+            // Ids that use the sign bit are always written unsigned.
+            assert!(spec.parquet_index_unsigned || !spec.ids_use_sign_bit);
+        }
+    }
+
+    #[test]
+    fn spec_pole_model_matches_the_cells() {
+        for grid in GridKind::ALL {
+            let spec = grid.spec();
+            for res in [0u8, 1, 4] {
+                let north = grid.cell_at(90.0, 0.0, res).unwrap();
+                let interior = grid.interior_pole(north) == Some(true);
+                let expected = match spec.poles {
+                    PoleModel::InteriorAtEveryResolution => true,
+                    PoleModel::InteriorAtBaseOnly => res == 0,
+                    PoleModel::VertexOnly => false,
+                };
+                assert_eq!(interior, expected, "{grid} res {res}");
+                let mut verts = [(0.0, 0.0); 10];
+                let n = grid.boundary_lng_lat(north, &mut verts);
+                let on_pole = verts[..n].iter().any(|v| v.1 >= 90.0 - 1e-9);
+                assert_eq!(on_pole, !interior, "{grid} res {res}");
+                assert!(!on_pole || spec.has_pole_vertices());
+            }
+        }
+    }
+
+    #[test]
+    fn spec_edge_model_bounds_the_true_southern_extent() {
+        use crate::aggregator::horizon_streamer::compute_cell_south_lat_for;
+        for grid in GridKind::ALL {
+            let spec = grid.spec();
+            assert_eq!(grid.has_geodesic_edges(), spec.edges == EdgeModel::Geodesic);
+            assert!(!spec.edge_dips_south(10.0, 20.0) || spec.edges == EdgeModel::Curved);
+            assert_eq!(
+                spec.edge_dips_south(-10.0, 20.0),
+                spec.edges != EdgeModel::IsoLatitudeDiamond
+            );
+            assert_eq!(
+                spec.edge_bulges_north(10.0, -20.0),
+                spec.edges != EdgeModel::IsoLatitudeDiamond
+            );
+            // Points inside a cell are never south of its bound, nor outside its box.
+            for res in [1u8, 3, 6] {
+                for (lat, lon) in sample_points() {
+                    let cell = grid.cell_at(lat, lon, res).unwrap();
+                    let south = compute_cell_south_lat_for(grid, cell);
+                    assert!(
+                        south <= lat,
+                        "{grid} {res} ({lat}, {lon}) cell {cell:x}: {south}"
+                    );
+                    let [w, s, e, n] = grid.wgs84_bbox(cell).unwrap();
+                    assert!(s <= lat && lat <= n, "{grid} {res}: {lat} not in {s}..{n}");
+                    let inside = if w <= e {
+                        w <= lon && lon <= e
+                    } else {
+                        lon >= w || lon <= e
+                    };
+                    assert!(inside, "{grid} {res}: lon {lon} not in {w}..{e}");
+                    let (c_lat, _) = grid.center_lat_lng(cell).unwrap();
+                    assert!((lat - c_lat).abs() <= spec.max_cell_radius_deg(res));
+                }
+            }
+            assert_eq!(grid.wgs84_bbox(0), None);
+        }
+    }
+
+    #[test]
+    fn spec_radius_and_zoom_models() {
+        use crate::pmtiles::pyramid::{
+            grid_res_for_zoom, grid_res_to_zoom, max_cell_radius_deg, zooms_for_grid_res,
+        };
+        for grid in GridKind::ALL {
+            let spec = grid.spec();
+            for res in 0..=spec.max_resolution {
+                assert_eq!(
+                    max_cell_radius_deg(grid, res),
+                    spec.max_cell_radius_deg(res)
+                );
+                if res > 0 {
+                    assert!(spec.max_cell_radius_deg(res) < spec.max_cell_radius_deg(res - 1));
+                    assert!(grid_res_to_zoom(grid, res) >= grid_res_to_zoom(grid, res - 1));
+                }
+                let zooms = zooms_for_grid_res(grid, res, res);
+                assert_eq!(
+                    zooms.first(),
+                    Some(&0),
+                    "the coarsest resolution fills from zoom 0"
+                );
+                assert!(zooms.contains(&grid_res_to_zoom(grid, res)), "{grid} {res}");
+            }
+            match spec.zoom {
+                ZoomModel::OnePerLevel { max_zoom } => {
+                    assert_eq!(grid_res_to_zoom(grid, 7), 7);
+                    assert_eq!(grid_res_to_zoom(grid, spec.max_resolution), max_zoom);
+                    assert_eq!(grid_res_for_zoom(grid, 40), spec.max_resolution);
+                }
+                ZoomModel::Aperture7Table => {
+                    assert_eq!(spec.aperture, 7);
+                    assert!(grid_res_for_zoom(grid, 40) <= spec.max_resolution);
+                }
+            }
+        }
+        // The H3 table is the published one, entry for entry.
+        assert_eq!(GridKind::H3.spec().max_cell_radius_deg(0), 13.5);
+        assert_eq!(GridKind::H3.spec().max_cell_radius_deg(15), 0.00001);
+        assert_eq!(crate::pmtiles::pyramid::max_hex_radius_deg(200), 0.00001);
+    }
+
+    #[test]
+    fn spec_capabilities_drive_the_pipeline() {
+        use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode};
+        // A small square around San Francisco fills on every grid.
+        let ring = [
+            (-122.45f64, 37.75f64),
+            (-122.40, 37.75),
+            (-122.40, 37.80),
+            (-122.45, 37.80),
+            (-122.45, 37.75),
+        ];
+        let mut wkb = vec![1u8];
+        wkb.extend(3u32.to_le_bytes());
+        wkb.extend(1u32.to_le_bytes());
+        wkb.extend((ring.len() as u32).to_le_bytes());
+        for (x, y) in ring {
+            wkb.extend(x.to_le_bytes());
+            wkb.extend(y.to_le_bytes());
+        }
+        for grid in GridKind::ALL {
+            let spec = grid.spec();
+            let res = if spec.aperture == 7 { 8 } else { 13 };
+            let mut cells = Vec::new();
+            grid_polygon_to_cells_wkb_into(
+                grid,
+                &wkb,
+                res,
+                ContainmentMode::ContainsCentroid,
+                &mut cells,
+            )
+            .unwrap();
+            assert!(!cells.is_empty(), "{grid} ({:?})", spec.polygon_fill);
+            assert!(cells.contains(&grid.cell_at(37.775, -122.425, res as u8).unwrap()));
+            // Equal-area grids report one area for every cell of a resolution.
+            if spec.equal_area {
+                let total = spec.area_m2(res as u8) * cells.len() as f64;
+                let polygon_m2 = 0.05f64.to_radians()
+                    * (37.80f64.to_radians().sin() - 37.75f64.to_radians().sin())
+                    * 6_371_007.18f64.powi(2);
+                assert!(
+                    (total / polygon_m2 - 1.0).abs() < 0.1,
+                    "{grid}: {total} vs {polygon_m2}"
+                );
+            }
+        }
+        assert!(GridKind::H3.spec().row_space_eviction);
+        assert!(
+            GridSpec::all()
+                .iter()
+                .filter(|s| s.row_space_eviction)
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn a5_pole_points_do_not_inherit_the_previous_cell() {
+        // The `a5` crate's last-cell cache would hand a pole point the polar cell looked
+        // up before it, even one at the other pole.
+        for res in [1u8, 3, 9, 20] {
+            for (first, second) in [(90.0, -90.0), (-90.0, 90.0), (89.99999, -89.9999999999)] {
+                for lon in [0.0, 100.0] {
+                    let a = GridKind::A5.cell_at(first, lon, res).unwrap();
+                    let b = GridKind::A5.cell_at(second, lon, res).unwrap();
+                    let (a_lat, _) = GridKind::A5.center_lat_lng(a).unwrap();
+                    let (b_lat, _) = GridKind::A5.center_lat_lng(b).unwrap();
+                    assert!(a_lat * first > 0.0, "res {res}: {first} -> {a_lat}");
+                    assert!(b_lat * second > 0.0, "res {res}: {second} -> {b_lat}");
+                    // The scan backend agrees with `cell_at`, whatever came before.
+                    let mut cells = [0u64; 2];
+                    for (lat, want) in [(first, a), (second, b), (first, a)] {
+                        let p = A5Backend::make_point(lon, lat).unwrap();
+                        A5Backend::index_all(&mut (), p, &[res, res], &mut cells);
+                        assert_eq!(cells, [want, want], "res {res} lat {lat}");
+                    }
+                }
+            }
+        }
     }
 }
