@@ -20,7 +20,7 @@ This eliminates the traditional serving stack entirely:
 
 ## Motivation: Closing the Analytics-to-Visualization Gap
 
-While DuckDB and `raster_h3` can aggregate hundreds of millions of raster pixels into H3 hexagonal summaries in seconds, **visualizing and serving** these massive spatial datasets to web clients has traditionally remained a slow, fragmented, and infrastructure-heavy bottleneck.
+While DuckDB and dggs_stream can aggregate hundreds of millions of raster pixels into H3 hexagonal summaries in seconds, **visualizing and serving** these massive spatial datasets to web clients has traditionally remained a slow, fragmented, and infrastructure-heavy bottleneck.
 
 ### Traditional 4-Step ETL Pipeline
 ```mermaid
@@ -31,7 +31,7 @@ flowchart LR
     T4 --> T5["🌐 Tile Server\n(Martin / Tegola)"]
 ```
 
-### `raster_h3` Direct In-Memory Pipeline (Zero Intermediate Files)
+### dggs_stream Direct In-Memory Pipeline (Zero Intermediate Files)
 ```mermaid
 flowchart LR
     R1["📁 GeoTIFF / Parquet"] --> R2["⚡ MultiScanHorizonStreamer + Pure-Rust MVT Encoder\n(Single-Pass In-Memory Stream < 25 MB RAM)"]
@@ -42,7 +42,7 @@ flowchart LR
 
 A web map spans zoom level 0 (the entire planet) down to zoom level 15+ (individual parcels). Each zoom level needs hexagons at a matching spatial density — coarse H3 resolution 5 cells for the state-level overview, fine resolution 8 cells for the neighborhood view. Without multi-resolution support, you'd need to run the raster aggregation **N separate times** — once per zoom level — and stitch the results together.
 
-`raster_h3` builds the entire multi-resolution pyramid in a **single pass** over the raster. It reads each pixel once and simultaneously aggregates it into every requested H3 resolution, streaming results directly into the PMTiles archive:
+dggs_stream builds the entire multi-resolution pyramid in a **single pass** over the raster. It reads each pixel once and simultaneously aggregates it into every requested H3 resolution, streaming results directly into the PMTiles archive:
 
 ```sql
 -- Single-pass multi-resolution PMTiles export: resolutions 5 through 8
@@ -62,7 +62,7 @@ Building multi-resolution pyramids for H3 is harder than for standard quadtree t
 
 As a result:
 * **Naive Parent Rollups (`cell.parent()`)**: Suffer from boundary distortion near cell edges because child hexagons slightly overlap neighboring parent boundaries. Rolling up child statistics introduces spatial error that compounds at coarser resolutions.
-* **`raster_h3` Direct Multi-Resolution Streaming**: Evaluates every pixel's exact coordinate center against the true polygon boundary of every requested resolution level simultaneously. No rollups, no approximation.
+* **dggs_stream Direct Multi-Resolution Streaming**: Evaluates every pixel's exact coordinate center against the true polygon boundary of every requested resolution level simultaneously. No rollups, no approximation.
 
 > [!TIP]
 > **100.000% Exact Numerical Identity**: Running multi-resolution extraction on `[7, 8, 9]` produces cell indices, pixel counts, means, variances, mins, and maxes that are **100% identical** down to the exact pixel compared to running three separate single-resolution scans.
@@ -107,7 +107,7 @@ Because H3 uses an Aperture-7 hexagonal hierarchy (7x area reduction per step) w
 
 $$\Delta \text{Zoom} / \Delta \text{Resolution} = \log_4(7) \approx 1.4037$$
 
-To ensure optimal visual density on screen (150 to 2,500 hexagons per 512px tile) without WebGL frame drops, `raster_h3` maps H3 resolutions to Web Mercator zoom levels as follows:
+To ensure optimal visual density on screen (150 to 2,500 hexagons per 512px tile) without WebGL frame drops, dggs_stream maps H3 resolutions to Web Mercator zoom levels as follows:
 
 | H3 Res (R) | Avg Hexagon Area | Avg Edge Length | Geographic Scale | Recommended PMTiles Zoom | Hexagons / 512px Tile |
 | :---: | :---: | :---: | :--- | :---: | :---: |
@@ -191,7 +191,7 @@ gap between resolutions can also trigger the cap for nonpolar cells and leave a 
 
 ## PMTiles v3 Leaf Directory Architecture
 
-For massive multi-resolution archives containing tens of thousands or millions of vector tiles, `raster_h3` automatically constructs **PMTiles v3 Leaf Directories**:
+For massive multi-resolution archives containing tens of thousands or millions of vector tiles, dggs_stream automatically constructs **PMTiles v3 Leaf Directories**:
 * **16 KB Root Fetch Budget**: The PMTiles v3 specification specifies that web clients (e.g. `pmtiles.js`) fetch only the first 16 KB (bytes 0 to 16383) during initialization to retrieve the archive header and root directory index.
 * **4,096-Entry Leaf Chunks**: When tile counts exceed a single directory block, directory entries are partitioned into compressed leaf directory blocks (~4 to 8 KB each). The root directory retains lightweight pointer entries (`run_length = 0`, pointing to leaf byte offsets and lengths).
 * **Root Always Fits**: `pmtiles::writer::build_directories(entries, max_root_bytes)` chooses the layout. If the compressed root of leaf pointers would exceed 16,257 bytes (about 30 million tiles), the leaf size grows in 20% steps until it fits, as go-pmtiles does; an archive whose root cannot fit fails instead of writing an out-of-spec root.
@@ -199,7 +199,7 @@ For massive multi-resolution archives containing tens of thousands or millions o
 
 ## Embedded Multi-Resolution Statistical Metadata (`h3_resolution_stats`)
 
-`raster_h3` automatically embeds rich statistical envelopes across all pyramid levels directly inside the PMTiles JSON metadata:
+dggs_stream automatically embeds rich statistical envelopes across all pyramid levels directly inside the PMTiles JSON metadata:
 ```json
 {
   "h3_resolution_stats": {
@@ -308,6 +308,6 @@ That's it — GeoTIFF to interactive, zoomable web map in three steps.
 
 ## PMTiles Hexagon Studio Web Viewer
 
-`raster_h3` includes a browser-based visual exploration studio for inspecting continuous and categorical H3 vector pyramids. It runs entirely client-side via MapLibre GL JS with HTTP byte-range streaming or offline drag-and-drop.
+dggs_stream includes a browser-based visual exploration studio for inspecting continuous and categorical H3 vector pyramids. It runs entirely client-side via MapLibre GL JS with HTTP byte-range streaming or offline drag-and-drop.
 
 > 📖 **Full viewer documentation** — See [pmtiles_viewer/README.md](../pmtiles_viewer/README.md) for launch methods, data schemas, studio controls, and features.

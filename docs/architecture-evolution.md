@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [Core Engineering](engineering.md) · [Architecture Comparison](architecture-comparison.md) · [Optimal Raster Format](optimal-raster-format.md)
 
-This document traces the chronological evolution of `raster_h3` from an initial single-threaded DuckDB prototype (`v0.1.0`) to a multi-engine geospatial workspace (`v0.4.0`) capable of aggregating 18+ billion pixels across the Continental United States (CONUS) into 74.4 million H3 hexagons in under 9 minutes on a single workstation. It then follows the hardening of that workspace for production (`v0.5.0`), its expansion to DuckDB 2.0 and SedonaDB (`v0.6.0`), and its move to scans partitioned across independent workers (`v0.7.0`).
+This document traces the chronological evolution of dggs_stream from an initial single-threaded DuckDB prototype (`v0.1.0`) to a multi-engine geospatial workspace (`v0.4.0`) capable of aggregating 18+ billion pixels across the Continental United States (CONUS) into 74.4 million H3 hexagons in under 9 minutes on a single workstation. It then follows the hardening of that workspace for production (`v0.5.0`), its expansion to DuckDB 2.0 and SedonaDB (`v0.6.0`), and its move to scans partitioned across independent workers (`v0.7.0`).
 
 More importantly, it documents the **engineering hypotheses that failed**, the **subtle geodetic and concurrency bugs uncovered under continental-scale stress testing**, and the **systems lessons learned** along the way.
 
@@ -39,7 +39,7 @@ flowchart LR
 ### What We Built
 Traditional geospatial pipelines (`rasterio` + `h3-py`, or `gdal_polygonize` + PostGIS) materialize entire 2D coordinate meshgrids in RAM or convert rasters into millions of vector polygons before intersecting them with H3 cells. On a 24 GB raster, this exhausts memory almost immediately.
 
-Phase 1 introduced two foundational primitives that remain at the heart of `raster_h3`:
+Phase 1 introduced two foundational primitives that remain at the heart of dggs_stream:
 1. **North-to-South Scanline Horizon Streaming:** Reading GeoTIFFs like a document scanner so completed hexagons north of the active scan front can be sealed and emitted immediately.
 2. **In-Register Run Accumulation (Option 5):** Maintaining `run_cell`, `run_sum`, `run_min`, `run_max`, and `run_count` in local scalar variables (CPU registers) across contiguous horizontal pixels sharing the same H3 cell, flushing to the hash map only when a cell boundary is crossed.
 
@@ -133,7 +133,7 @@ On CONUS (`BP_CONUS.tif`, Albers EPSG:5070), removing lookahead and pairing exac
 * **The Fix:** Replaced the shard selector and map hasher with a `SplitMix64` finalizer (`H3BuildHasher`) that mixes all 64 bits (including base cell and high-order face/IJK digits) down to the low bits, restoring uniform 32-way distribution and $O(1)$ shard byte accounting (`067d742`).
 
 ### Lesson 10: Rayon `pool.install()` Reentrancy Trap
-* **The Bug:** To avoid deadlocks when called inside an existing Rayon thread, the controller checked `if rayon::current_thread_index().is_some()` and fell back to serial iteration. Consequently, any user or benchmark invoking `raster_h3` inside `pool.install(|| ...)` silently ran **single-threaded on 1 core** regardless of pool size!
+* **The Bug:** To avoid deadlocks when called inside an existing Rayon thread, the controller checked `if rayon::current_thread_index().is_some()` and fell back to serial iteration. Consequently, any user or benchmark invoking dggs_stream inside `pool.install(|| ...)` silently ran **single-threaded on 1 core** regardless of pool size!
 * **The Fix (Commit `2caf9d0`):** Replaced global/caller pool reliance with `shared_aggregation_pool(threads)`—a dedicated, weak-referenced pool registry (`OnceLock<Mutex<HashMap<usize, Weak<ThreadPool>>>>`) that guarantees true multi-core execution without starving or deadlocking caller thread pools.
 
 ### Lesson 11: Geodetic Rigor — Units, Prime Meridians, Datums & Mosaic Footprints
