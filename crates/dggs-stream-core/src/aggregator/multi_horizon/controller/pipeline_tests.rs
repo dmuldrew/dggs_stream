@@ -3,7 +3,7 @@ use super::super::sharded_map::ShardedResolutionMap;
 use super::super::spill::SpillRuns;
 use super::pipeline::{run_pipelined, CellMaps, MergeTarget, WindowJobs};
 use crate::aggregator::accumulator::ContinuousAccumulator;
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::mosaic::MosaicReader;
@@ -208,7 +208,7 @@ fn scheduling_storage_is_bounded_for_half_a_million_windows() {
     let mut metrics = super::super::profile::StreamProfile::default();
     let mut peak = 0;
     let mut free = (0..8)
-        .map(|_| vec![HashMap::with_hasher(H3BuildHasher)])
+        .map(|_| vec![HashMap::with_hasher(CellIdBuildHasher)])
         .collect();
     let mut finished = Vec::new();
     let mut target = MergeTarget {
@@ -258,7 +258,7 @@ fn run(jobs: usize, panic_at: Option<usize>) -> std::thread::Result<Result<Vec<u
     let mut metrics = super::super::profile::StreamProfile::default();
     let mut peak = 0;
     let mut free: Vec<CellMaps<ContinuousAccumulator>> = (0..8)
-        .map(|_| vec![HashMap::with_hasher(H3BuildHasher)])
+        .map(|_| vec![HashMap::with_hasher(CellIdBuildHasher)])
         .collect();
     let order = Mutex::new(Vec::new());
     // Window i adds one cell whose index records i, with a delay that

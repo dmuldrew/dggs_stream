@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::aggregator::area_accumulator::AreaAccumulator;
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::aggregator::simd::SimdSpanAccumulate;
 use crate::crs::transformer::CrsTransformer;
 use crate::error::{DggsStreamError, Result};
@@ -16,7 +16,7 @@ use crate::raster::metadata::BandScaling;
 use super::walker::{is_slice_all_native_nodata, walk_direct, ScanlineEngine, WalkContext};
 
 /// A window's per-resolution area-weighted H3 maps.
-pub type AreaWindowMaps = Vec<HashMap<u64, AreaAccumulator, H3BuildHasher>>;
+pub type AreaWindowMaps = Vec<HashMap<u64, AreaAccumulator, CellIdBuildHasher>>;
 
 struct AreaEngine<'a, T> {
     ctx: &'a WalkContext<'a>,

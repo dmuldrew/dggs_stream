@@ -3,7 +3,7 @@
 //! Encodes H3 hexagonal geometries and statistical properties directly into
 //! standard MVT protocol buffer byte streams without intermediate GIS allocations.
 
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::grid::GridKind;
 use h3o::LatLng;
 use std::borrow::Cow;
@@ -720,7 +720,7 @@ pub struct MvtLayer {
     pub extent: u32,
     pub features: Vec<MvtFeature>,
     pub property_filter: PropertyFilter,
-    pub seen_ids: HashSet<u64, H3BuildHasher>,
+    pub seen_ids: HashSet<u64, CellIdBuildHasher>,
 }
 
 impl MvtLayer {

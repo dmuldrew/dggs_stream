@@ -8,7 +8,7 @@
 //! the engine's span kernels. Scratch storage is bounded by the sampling
 //! pattern and resolution count, not by row or raster size.
 
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::grid::{A5Backend, GridBackend, GridKind, H3Backend, HealpixBackend, S2Backend};
 use h3o::Resolution;
 use std::collections::hash_map::Entry;
@@ -80,7 +80,7 @@ pub trait ScanlineEngine<T, Acc> {
     }
 }
 
-type CellMap<Acc> = HashMap<u64, Acc, H3BuildHasher>;
+type CellMap<Acc> = HashMap<u64, Acc, CellIdBuildHasher>;
 
 /// Borrowed inputs shared by every row of one chunk window.
 #[derive(Clone, Copy)]

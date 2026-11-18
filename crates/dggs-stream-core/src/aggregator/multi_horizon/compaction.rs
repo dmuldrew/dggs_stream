@@ -14,7 +14,7 @@
 //! compaction: those children are emitted individually and their remaining
 //! siblings can never form a complete group, so no parent duplicates them.
 
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::grid::{GridKind, MAX_GRID_RESOLUTIONS};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -85,7 +85,7 @@ impl Ord for HeapEntry {
 pub struct HierarchicalCompactor<K: HorizonStreamKernel> {
     grid: GridKind,
     enabled: bool,
-    pending: HashMap<u64, Group<K::Accumulator>, H3BuildHasher>,
+    pending: HashMap<u64, Group<K::Accumulator>, CellIdBuildHasher>,
     /// Per child resolution, groups by `siblings_south`, northernmost first.
     completion: Vec<BinaryHeap<HeapEntry>>,
     /// Groups by `emit_south`, northernmost first.
@@ -114,7 +114,7 @@ impl<K: HorizonStreamKernel> HierarchicalCompactor<K> {
         Self {
             grid,
             enabled,
-            pending: HashMap::with_hasher(H3BuildHasher),
+            pending: HashMap::with_hasher(CellIdBuildHasher),
             completion: (0..RESOLUTIONS).map(|_| BinaryHeap::new()).collect(),
             emit: BinaryHeap::new(),
             group_bytes: 0,
@@ -164,7 +164,7 @@ impl<K: HorizonStreamKernel> HierarchicalCompactor<K> {
 
     /// Clear all pending compaction state.
     pub fn clear(&mut self) {
-        self.pending = HashMap::with_hasher(H3BuildHasher);
+        self.pending = HashMap::with_hasher(CellIdBuildHasher);
         self.completion
             .iter_mut()
             .for_each(|h| *h = BinaryHeap::new());
