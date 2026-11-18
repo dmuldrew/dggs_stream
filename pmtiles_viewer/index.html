@@ -1795,7 +1795,9 @@
       if (dropzoneEl) dropzoneEl.innerText = fileName;
       
       console.log(`[PMTiles Studio] Loading archive: ${fullUrl}`);
-      sourceCounter++;
+      const loadId = ++sourceCounter;
+      currentMetadata = undefined;
+      currentHeader = null;
       const pmtilesInstance = new pmtiles.PMTiles(fullUrl);
       protocol.add(pmtilesInstance);
       activePMTileSource = `pmtiles://${fullUrl}`;
@@ -1826,8 +1828,9 @@
           return null;
         })
       ]).then(([meta, h]) => {
+        if (loadId !== sourceCounter) return;
+        currentMetadata = meta;
         if (meta) {
-          currentMetadata = meta;
           detectedClasses = extractDetectedClasses(meta);
           const detectedMode = detectDatasetType(meta);
           setDatasetMode(detectedMode);
@@ -2011,7 +2014,8 @@
     }
 
     function addOrUpdateHexLayers() {
-      if (!activePMTileSource) return;
+      if (!activePMTileSource || currentMetadata === undefined) return;
+      const sourceLayer = currentMetadata?.vector_layers?.[0]?.id || 'h3_hexagons';
       if (!map.isStyleLoaded()) {
         map.once('style.load', addOrUpdateHexLayers);
         return;
@@ -2082,7 +2086,7 @@
             id: 'h3_extrusion',
             type: 'fill-extrusion',
             source: 'h3_source',
-            'source-layer': 'h3_hexagons',
+            'source-layer': sourceLayer,
             paint: {
               'fill-extrusion-color': colorExpr,
               'fill-extrusion-height': ['*', ['max', 0, ['to-number', ['get', heightProp], 0]], heightMult],
@@ -2106,7 +2110,7 @@
             id: 'h3_fill',
             type: 'fill',
             source: 'h3_source',
-            'source-layer': 'h3_hexagons',
+            'source-layer': sourceLayer,
             paint: {
               'fill-color': colorExpr,
               'fill-opacity': opacity
@@ -2126,7 +2130,7 @@
               id: 'h3_line',
               type: 'line',
               source: 'h3_source',
-              'source-layer': 'h3_hexagons',
+              'source-layer': sourceLayer,
               paint: {
                 'line-color': 'rgba(255, 255, 255, 0.22)',
                 'line-width': 0.8
@@ -2663,7 +2667,9 @@
     function handlePMTilesFile(file) {
       document.getElementById('dropzone-filename').innerText = file.name;
       categoricalFilter = null;
-      sourceCounter++;
+      const loadId = ++sourceCounter;
+      currentMetadata = undefined;
+      currentHeader = null;
       const uniqueKey = `dropped_${sourceCounter}_${file.name}`;
       
       const fileSource = new pmtiles.FileSource(file);
@@ -2699,8 +2705,9 @@
           return null;
         })
       ]).then(([meta, h]) => {
+        if (loadId !== sourceCounter) return;
+        currentMetadata = meta;
         if (meta) {
-          currentMetadata = meta;
           detectedClasses = extractDetectedClasses(meta);
           const detectedMode = detectDatasetType(meta);
           setDatasetMode(detectedMode);

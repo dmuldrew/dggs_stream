@@ -52,6 +52,7 @@ fn fields(mut bytes: &[u8]) -> Vec<(u64, Field<'_>)> {
 
 #[derive(Debug)]
 pub struct Feature {
+    pub layer_name: String,
     pub id: u64,
     pub properties: HashMap<String, MvtValue>,
     pub rings: Vec<Vec<(i32, i32)>>,
@@ -88,11 +89,13 @@ pub fn decode(tile: &[u8]) -> Vec<Feature> {
         let (3, Field::Bytes(layer)) = field else {
             continue;
         };
+        let mut layer_name = None;
         let mut keys = Vec::new();
         let mut values = Vec::new();
         let mut features = Vec::new();
         for (tag, field) in fields(layer) {
             match (tag, field) {
+                (1, Field::Bytes(name)) => layer_name = Some(std::str::from_utf8(name).unwrap()),
                 (2, Field::Bytes(f)) => features.push(f),
                 (3, Field::Bytes(k)) => keys.push(std::str::from_utf8(k).unwrap().to_owned()),
                 (4, Field::Bytes(v)) => {
@@ -117,6 +120,7 @@ pub fn decode(tile: &[u8]) -> Vec<Feature> {
         }
         for raw in features {
             let mut feature = Feature {
+                layer_name: layer_name.expect("MVT layer name").to_owned(),
                 id: 0,
                 properties: HashMap::new(),
                 rings: Vec::new(),

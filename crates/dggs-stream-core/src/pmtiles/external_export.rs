@@ -486,12 +486,12 @@ impl ExternalFeatureExport {
             "H3 vector hexagon tile pyramid exported by dggs_stream",
             min_zoom,
             max_zoom,
-            "h3_hexagons",
+            crate::pmtiles::CELL_LAYER_ID,
             "H3 hexagonal vector polygons with attributes",
             self.fields_metadata(),
             (capped_cells > 0).then(|| {
                 serde_json::Map::from_iter([(
-                    "h3_cells_over_tile_cap".to_string(),
+                    crate::pmtiles::CELLS_OVER_TILE_CAP.to_string(),
                     serde_json::json!(capped_cells),
                 )])
             }),

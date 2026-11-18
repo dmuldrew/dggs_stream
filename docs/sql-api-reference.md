@@ -365,7 +365,7 @@ TO 's3://my-bucket/census.pmtiles' (FORMAT pmtiles);
 | First | `UBIGINT`, `BIGINT` or hex `VARCHAR` | The H3 cell. Rows where it is `NULL` are skipped. Any other value that is not a valid H3 cell (a negative `BIGINT`, unparsable hex, or an invalid index) fails the `COPY`. |
 | Every other | `UBIGINT`, `BIGINT`, `UINTEGER`, `INTEGER`, `USMALLINT`, `SMALLINT`, `UTINYINT`, `TINYINT`, `DOUBLE`, `FLOAT`, `BOOLEAN`, `VARCHAR` | A feature property. The stable C API does not expose column names, so the property is named `column_<n>`, where `n` is the column's 1-based position (the first property column is `column_2`). `NULL` values and columns of other types are left out of the feature. |
 
-Every feature also gets `h3_index`, `h3_hex` and `resolution` properties, like the other PMTiles exports. Cells go in the `h3_hexagons` layer. Each resolution present fills a band of zooms, so there are no empty zooms between resolutions (see [zoom bands for H3 tables](pmtiles.md#zoom-bands-for-h3-tables)).
+Every feature also gets `h3_index`, `h3_hex` and `resolution` properties, like the other PMTiles exports. Cells go in the `dggs_cells` layer. Each resolution present fills a band of zooms, so there are no empty zooms between resolutions (see [zoom bands for H3 tables](pmtiles.md#zoom-bands-for-h3-tables)).
 
 ### Options
 | Option | Type | Default | Description |
