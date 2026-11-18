@@ -8,7 +8,7 @@
 //! 3. (The DataFusion engine lives in the separate `dggs-stream-sedona` workspace, whose
 //!    `scan` tests check its providers against the core batch readers.)
 //! 4. `dggs-stream-python`: Real Python subprocess loading `libdggs_stream_python`, testing
-//!    `RasterH3ArrowStream` (`to_dict()`, `__arrow_c_schema__()`, `__arrow_c_stream__()` C-ABI consumption),
+//!    `RasterArrowStream` (`to_dict()`, `__arrow_c_schema__()`, `__arrow_c_stream__()` C-ABI consumption),
 //!    `raster_to_parquet()`, `raster_to_pmtiles()`, and scalar H3 ops.
 //! 5. `dggs-stream-pg`: `PgContinuousSrf` and `PgCategoricalSrf` Set-Returning Functions (both Rust & C-ABI) +
 //!    Postgres V1 `fmgr` scalar C-ABI functions (`pg_h3_to_lat`, `pg_h3_to_lng`, `pg_h3_get_resolution`,
@@ -360,7 +360,7 @@ fn run_continuous_parity(
     // =========================================================================
     // Engine 2: dggs-stream-cli (Real subprocess for `ipc`, `jsonl`, `parquet`, `pmtiles`)
     // =========================================================================
-    let cli_bin = env!("CARGO_BIN_EXE_raster-h3");
+    let cli_bin = env!("CARGO_BIN_EXE_dggs-stream");
 
     // 2a. Subprocess `ipc` streaming over stdout
     let ipc_out = Command::new(cli_bin)
@@ -472,8 +472,8 @@ crs = sys.argv[4]
 resolutions = [int(r) for r in sys.argv[5].split(",")]
 resolution_arg = ",".join(str(r) for r in resolutions)
 
-# 1. Stream via RasterH3ArrowStream.to_dict()
-stream = dggs_stream.RasterH3ArrowStream(tif_path, resolutions=resolutions, crs=crs)
+# 1. Stream via RasterArrowStream.to_dict()
+stream = dggs_stream.RasterArrowStream(tif_path, resolutions=resolutions, crs=crs)
 d = stream.to_dict()
 
 # 2. Verify __arrow_c_schema__() and __arrow_c_stream__() PyCapsules and consume C stream
@@ -827,7 +827,7 @@ fn test_cross_engine_categorical_e2e_parity() {
     assert!(!core_map.is_empty());
 
     // 2. dggs-stream-cli subprocess (`ipc` categorical wide)
-    let cli_bin = env!("CARGO_BIN_EXE_raster-h3");
+    let cli_bin = env!("CARGO_BIN_EXE_dggs-stream");
     let ipc_out = Command::new(cli_bin)
         .args([
             "ipc",
@@ -848,7 +848,7 @@ fn test_cross_engine_categorical_e2e_parity() {
     let cli_map = collect_categorical_from_batches(&cli_batches);
     assert_categorical_maps_equal("dggs-stream-cli (categorical ipc)", &core_map, &cli_map);
 
-    // 4. dggs-stream-python subprocess (`RasterH3ArrowStream(..., categorical=True)`)
+    // 4. dggs-stream-python subprocess (`RasterArrowStream(..., categorical=True)`)
     let py_lib = ensure_cdylib_built("dggs-stream-python", "dggs_stream_python");
     let py_pkg_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/dggs-stream-python/python");
     let py_out = Command::new(python_exe())
@@ -856,7 +856,7 @@ fn test_cross_engine_categorical_e2e_parity() {
         .env("DGGS_STREAM_PYTHON_LIB", &py_lib)
         .args([
             "-c",
-            "import json, sys, dggs_stream; s = dggs_stream.RasterH3ArrowStream(sys.argv[1], resolutions=8, categorical=True, format='wide', crs='EPSG:4326'); print(json.dumps(s.to_dict()))",
+            "import json, sys, dggs_stream; s = dggs_stream.RasterArrowStream(sys.argv[1], resolutions=8, categorical=True, format='wide', crs='EPSG:4326'); print(json.dumps(s.to_dict()))",
             tif_path.to_str().unwrap(),
         ])
         .output()

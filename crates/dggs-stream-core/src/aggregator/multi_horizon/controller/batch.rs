@@ -12,7 +12,7 @@ use super::pipeline::{
 };
 use super::{HorizonStreamKernel, MultiHorizonStreamer};
 use crate::aggregator::cell_hash::H3BuildHasher;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::prefetch::MosaicPrefetchItem;
 
 impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
@@ -319,7 +319,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         result?;
         let failures = self.metrics.worker.transform_failures;
         if self.strict_transforms && failures > 0 {
-            return Err(RasterH3Error::TransformFailures(failures));
+            return Err(DggsStreamError::TransformFailures(failures));
         }
         Ok(())
     }

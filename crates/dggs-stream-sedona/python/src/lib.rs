@@ -1,6 +1,6 @@
 //! SedonaDB Python bindings for `dggs_stream`.
 //!
-//! `dggs_stream_sedona.RasterH3Table` wraps [`dggs_stream_sedona::RasterH3Table`] and
+//! `dggs_stream_sedona.RasterTable` wraps [`dggs_stream_sedona::RasterTable`] and
 //! implements SedonaDB's `__sedonadb_table_provider__` protocol: it returns a
 //! `sedonadb_table_provider` capsule holding a `SedonaCTableProvider`
 //! ([`ExportedTableProvider`]), so any SedonaDB context can scan it with projection,
@@ -17,11 +17,11 @@
 //! ```python
 //! import sedonadb
 //! import dggs_stream_sedona
-//! from dggs_stream_sedona import RasterH3Table
+//! from dggs_stream_sedona import RasterTable
 //!
 //! sd = sedonadb.connect()
 //! sd.register(dggs_stream_sedona.scalar_functions())
-//! sd.create_data_frame(RasterH3Table.continuous("dem.tif", 8)).to_view("dem")
+//! sd.create_data_frame(RasterTable.continuous("dem.tif", 8)).to_view("dem")
 //! sd.sql("SELECT h3_index, mean FROM dem WHERE count >= 4").show()
 //! ```
 
@@ -59,7 +59,7 @@ fn runtime() -> PyResult<Arc<RuntimeHandle>> {
     ))
 }
 
-/// One H3 resolution or a list of them.
+/// One grid resolution or a list of them.
 #[derive(FromPyObject)]
 enum Resolutions {
     One(u8),
@@ -134,7 +134,7 @@ fn output_policy(
     Ok(policy)
 }
 
-fn sedona_table(table: dggs_stream_sedona::RasterH3Table) -> dggs_stream_sedona::RasterH3Table {
+fn sedona_table(table: dggs_stream_sedona::RasterTable) -> dggs_stream_sedona::RasterTable {
     table.with_untagged_wkb_as_lnglat(true)
 }
 
@@ -142,21 +142,21 @@ fn value_error(err: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
-/// A raster aggregated to H3 cells, scannable by SedonaDB.
+/// A raster aggregated to cells of the selected grid, scannable by SedonaDB.
 ///
-/// Build one with `RasterH3Table.continuous(...)` or `RasterH3Table.categorical(...)` and
+/// Build one with `RasterTable.continuous(...)` or `RasterTable.categorical(...)` and
 /// pass it to `SedonaContext.create_data_frame`. The table is re-scanned on every query.
-#[pyclass(name = "RasterH3Table", module = "dggs_stream_sedona", frozen)]
-struct PyRasterH3Table {
-    inner: Arc<dggs_stream_sedona::RasterH3Table>,
+#[pyclass(name = "RasterTable", module = "dggs_stream_sedona", frozen)]
+struct PyRasterTable {
+    inner: Arc<dggs_stream_sedona::RasterTable>,
     description: String,
 }
 
 #[pymethods]
-impl PyRasterH3Table {
+impl PyRasterTable {
     /// Continuous statistics (`mean`, `stddev`, `count`, `min`, `max`, `sum`) per cell.
     ///
-    /// `source` is a path, glob or URL; `resolutions` one H3 resolution or a list
+    /// `source` is a path, glob or URL; `resolutions` one grid resolution or a list
     /// (default 8). `crs` overrides the raster's CRS, `nodata` its NoData value, `band`
     /// selects a 1-based band, and `bbox` (`[min_lon, min_lat, max_lon, max_lat]`) clips
     /// the samples aggregated.
@@ -203,13 +203,13 @@ impl PyRasterH3Table {
             provider = provider.with_bbox(bbox);
         }
         Ok(Self {
-            inner: Arc::new(sedona_table(dggs_stream_sedona::RasterH3Table::continuous(
+            inner: Arc::new(sedona_table(dggs_stream_sedona::RasterTable::continuous(
                 provider,
             ))),
             description: match grid {
-                GridKind::H3 => format!("RasterH3Table.continuous({source:?})"),
+                GridKind::H3 => format!("RasterTable.continuous({source:?})"),
                 grid => format!(
-                    "RasterH3Table.continuous({source:?}, grid={:?})",
+                    "RasterTable.continuous({source:?}, grid={:?})",
                     grid.as_str()
                 ),
             },
@@ -257,13 +257,13 @@ impl PyRasterH3Table {
             provider = provider.with_bbox(bbox);
         }
         Ok(Self {
-            inner: Arc::new(sedona_table(
-                dggs_stream_sedona::RasterH3Table::categorical(provider),
-            )),
+            inner: Arc::new(sedona_table(dggs_stream_sedona::RasterTable::categorical(
+                provider,
+            ))),
             description: match grid {
-                GridKind::H3 => format!("RasterH3Table.categorical({source:?})"),
+                GridKind::H3 => format!("RasterTable.categorical({source:?})"),
                 grid => format!(
-                    "RasterH3Table.categorical({source:?}, grid={:?})",
+                    "RasterTable.categorical({source:?}, grid={:?})",
                     grid.as_str()
                 ),
             },
@@ -385,7 +385,7 @@ fn write_pmtiles(
 
 #[pymodule(name = "dggs_stream_sedona")]
 fn dggs_stream_sedona_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyRasterH3Table>()?;
+    m.add_class::<PyRasterTable>()?;
     m.add_class::<functions::PyScalarFunction>()?;
     m.add_class::<functions::PyScalarFunctions>()?;
     m.add_function(wrap_pyfunction!(functions::scalar_functions, m)?)?;

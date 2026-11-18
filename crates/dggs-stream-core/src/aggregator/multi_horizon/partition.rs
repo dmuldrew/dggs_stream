@@ -30,7 +30,7 @@ use h3o::{CellIndex, Resolution};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::{MosaicChunkRef, MosaicReader};
 
@@ -86,7 +86,7 @@ impl ScanPartition {
     /// Parse a partition serialized with [`Self::to_json`].
     pub fn from_json(json: &str) -> Result<Self> {
         serde_json::from_str(json)
-            .map_err(|e| RasterH3Error::InvalidParameter(format!("invalid scan partition: {e}")))
+            .map_err(|e| DggsStreamError::InvalidParameter(format!("invalid scan partition: {e}")))
     }
 
     /// Whether `chunk` belongs to this partition.
@@ -109,14 +109,14 @@ impl ScanPartition {
     /// Check that this partition was planned for `mosaic` and that its blocks fit it.
     pub fn validate_for(&self, mosaic: &MosaicReader) -> Result<()> {
         if self.count == 0 || self.index >= self.count {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "scan partition index {} out of range for {} partitions",
                 self.index, self.count
             )));
         }
         let fingerprint = mosaic_fingerprint(mosaic);
         if fingerprint != self.mosaic_fingerprint {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "scan partition was planned for a different mosaic (fingerprint {:016x}, this mosaic {:016x}); \
                  open the same sources with the same bbox, CRS override and overlap rule",
                 self.mosaic_fingerprint, fingerprint
@@ -124,7 +124,7 @@ impl ScanPartition {
         }
         for b in &self.blocks {
             let Some(tile) = mosaic.tiles.get(b.tile_idx as usize) else {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "scan partition block names tile {} of {}",
                     b.tile_idx,
                     mosaic.tiles.len()
@@ -136,7 +136,7 @@ impl ScanPartition {
                 || b.col_end > layout.chunks_across
                 || b.row_end > layout.chunks_down
             {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "scan partition block {b:?} does not fit tile {} ({}x{} chunks)",
                     b.tile_idx, layout.chunks_across, layout.chunks_down
                 )));
@@ -227,7 +227,7 @@ pub fn mosaic_fingerprint(mosaic: &MosaicReader) -> u64 {
 /// few hundred chunks or more per partition.
 pub fn plan_partitions(mosaic: &MosaicReader, target_chunks: usize) -> Result<Vec<ScanPartition>> {
     if target_chunks == 0 {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "target_chunks must be at least 1".into(),
         ));
     }

@@ -9,7 +9,7 @@ use crate::aggregator::area_accumulator::AreaAccumulator;
 use crate::aggregator::cell_hash::H3BuildHasher;
 use crate::aggregator::simd::SimdSpanAccumulate;
 use crate::crs::transformer::CrsTransformer;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::ground_area::wgs84_pixel_area;
 use crate::raster::metadata::BandScaling;
 
@@ -22,7 +22,7 @@ struct AreaEngine<'a, T> {
     ctx: &'a WalkContext<'a>,
     nodata: Option<T>,
     scaling: BandScaling,
-    error: RefCell<Option<RasterH3Error>>,
+    error: RefCell<Option<DggsStreamError>>,
 }
 
 impl<T: SimdSpanAccumulate> ScanlineEngine<T, AreaAccumulator> for AreaEngine<'_, T> {
@@ -101,12 +101,12 @@ pub fn aggregate_wgs84_area_window<T: SimdSpanAccumulate>(
     source_epsg: u32,
 ) -> Result<AreaWindowMaps> {
     if source_epsg != 4326 || !matches!(ctx.crs, CrsTransformer::Wgs84Identity) {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "area weighting requires EPSG:4326".into(),
         ));
     }
     if ctx.samples_per_pixel != 1 || ctx.alpha_sample.is_some() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "area window kernel requires a single band without alpha".into(),
         ));
     }
@@ -121,21 +121,21 @@ pub fn aggregate_wgs84_area_window<T: SimdSpanAccumulate>(
                 || !(0.0..=1.0).contains(&p.dy)
         })
     {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "invalid area sampling pattern".into(),
         ));
     }
     let first = points[0].weight;
     let total: f64 = points.iter().map(|p| p.weight).sum();
     if points.iter().any(|p| (p.weight - first).abs() > 1e-12) || (total - 1.0).abs() > 1e-12 {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "area weighting requires uniform sample weights summing to one".into(),
         ));
     }
     let width = ctx.chunk.width as usize;
     let height = ctx.chunk.height as usize;
     if width == 0 || height == 0 || ctx.resolutions.is_empty() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "area window must be non-empty".into(),
         ));
     }
@@ -147,18 +147,18 @@ pub fn aggregate_wgs84_area_window<T: SimdSpanAccumulate>(
     let required = (height - 1)
         .checked_mul(stride)
         .and_then(|n| n.checked_add(width))
-        .ok_or_else(|| RasterH3Error::InvalidParameter("area window size overflow".into()))?;
+        .ok_or_else(|| DggsStreamError::InvalidParameter("area window size overflow".into()))?;
     if stride < width || values.len() < required {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "truncated or invalid area window".into(),
         ));
     }
     let last_col = (ctx.chunk.col_offset as usize)
         .checked_add(width - 1)
-        .ok_or_else(|| RasterH3Error::InvalidParameter("area column overflow".into()))?;
+        .ok_or_else(|| DggsStreamError::InvalidParameter("area column overflow".into()))?;
     let last_row = (ctx.chunk.row_offset as usize)
         .checked_add(height - 1)
-        .ok_or_else(|| RasterH3Error::InvalidParameter("area row overflow".into()))?;
+        .ok_or_else(|| DggsStreamError::InvalidParameter("area row overflow".into()))?;
     // Validate the window endpoints even when all values are nodata or filtered.
     wgs84_pixel_area(
         ctx.gt,

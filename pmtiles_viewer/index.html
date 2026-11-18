@@ -1383,8 +1383,8 @@
           if (!isNaN(num)) classesSet.add(num);
         });
       }
-      if (meta?.h3_resolution_stats) {
-        for (const s of Object.values(meta.h3_resolution_stats)) {
+      if (meta?.resolution_stats) {
+        for (const s of Object.values(meta.resolution_stats)) {
           if (s.class_frequencies) {
             Object.keys(s.class_frequencies).forEach(c => {
               const num = parseInt(c, 10);
@@ -1557,7 +1557,7 @@
     }
 
     function getDataBoundsForProp(prop, targetRes = null) {
-      const resStats = currentMetadata?.h3_resolution_stats;
+      const resStats = currentMetadata?.resolution_stats;
       if (!resStats || typeof resStats !== 'object' || Object.keys(resStats).length === 0) {
         const defaults = {
           'mean': { min: 0, max: 300, step: 0.5 },
@@ -1670,7 +1670,7 @@
       const container = document.getElementById('stats-container');
       if (!container) return;
 
-      const resStats = metadata?.h3_resolution_stats;
+      const resStats = metadata?.resolution_stats;
       if (!resStats || typeof resStats !== 'object' || Object.keys(resStats).length === 0) {
         container.innerHTML = `
           <div style="font-size: 11px; color: var(--theme-text-muted); padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px;">
@@ -1984,7 +1984,7 @@
       }
 
       const isAdaptive = document.getElementById('adaptive-color-toggle')?.checked;
-      const resStats = currentMetadata?.h3_resolution_stats;
+      const resStats = currentMetadata?.resolution_stats;
 
       if (isAdaptive && resStats && typeof resStats === 'object' && Object.keys(resStats).length > 0) {
         const matchExpr = ['match', ['to-number', ['get', 'resolution'], 0]];
@@ -2299,7 +2299,7 @@
 
     function getEstimatedH3Res(z) {
       const intZ = Math.floor(z);
-      const resStats = currentMetadata?.h3_resolution_stats;
+      const resStats = currentMetadata?.resolution_stats;
       if (resStats && typeof resStats === 'object') {
         for (const [resStr, s] of Object.entries(resStats)) {
           if (Array.isArray(s.zooms) && s.zooms.includes(intZ)) {
@@ -2326,7 +2326,7 @@
 
       const isAdaptive = document.getElementById('adaptive-color-toggle')?.checked;
       const prop = document.getElementById('property-select')?.value;
-      const resStats = currentMetadata?.h3_resolution_stats?.[estimatedRes.toString()];
+      const resStats = currentMetadata?.resolution_stats?.[estimatedRes.toString()];
 
       if (estimatedRes !== lastActiveRes) {
         lastActiveRes = estimatedRes;

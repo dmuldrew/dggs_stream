@@ -3,15 +3,15 @@
 //! These helpers calculate pixel footprints only. They do not enable area-weighted
 //! aggregation or calculate exact intersections with H3 cell boundaries.
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotransform::GeoTransform;
 
 const WGS84_A: f64 = 6_378_137.0;
 const WGS84_F: f64 = 1.0 / 298.257_223_563;
 const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F);
 
-fn invalid(message: &str) -> RasterH3Error {
-    RasterH3Error::InvalidParameter(format!("invalid WGS84 footprint: {message}"))
+fn invalid(message: &str) -> DggsStreamError {
+    DggsStreamError::InvalidParameter(format!("invalid WGS84 footprint: {message}"))
 }
 
 /// Area in square metres of a WGS84 rectangle bounded by meridians and parallels.

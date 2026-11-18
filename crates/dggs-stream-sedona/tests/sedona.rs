@@ -10,7 +10,7 @@ use sedona::context::SedonaContext;
 
 use common::{gradient_tif, rows, source};
 use dggs_stream_sedona::scan::ContinuousRasterTableProvider;
-use dggs_stream_sedona::RasterH3Table;
+use dggs_stream_sedona::RasterTable;
 use std::sync::Arc;
 
 async fn sedona() -> SedonaContext {
@@ -161,7 +161,7 @@ async fn bbox_pushdown_keeps_edge_cells_whole() {
         .unwrap()
         .with_bbox([-122.40, 37.72, -122.38, 37.74]);
     ctx.ctx
-        .register_table("naive", Arc::new(RasterH3Table::continuous(naive)))
+        .register_table("naive", Arc::new(RasterTable::continuous(naive)))
         .unwrap();
     assert_ne!(cells_in_polygon(&ctx, "naive").await, expected);
 }

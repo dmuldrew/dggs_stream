@@ -270,7 +270,7 @@ fn test_ordered_prefetch_queue_worker_panic_latches_error() {
         if let Some(payload) = res.err() {
             let msg = dggs_stream_duckdb::ffi::panic_payload_to_string(payload);
             q.fail(Err(
-                dggs_stream_core::error::RasterH3Error::InvalidParameter(format!(
+                dggs_stream_core::error::DggsStreamError::InvalidParameter(format!(
                     "Decode worker panicked: {msg}"
                 )),
             ));

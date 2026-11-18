@@ -8,7 +8,7 @@ use super::super::eviction_space::CellKeys;
 use super::super::sharded_map::ShardedResolutionMap;
 use super::super::spill::{SpillAccumulator, SpillRuns};
 use crate::aggregator::cell_hash::H3BuildHasher;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::mosaic::MosaicReader;
 use crate::raster::prefetch::MosaicPrefetchItem;
 use crate::raster::RasterChunk;
@@ -47,7 +47,7 @@ impl<'a> WindowJobs<'a> {
         for item in items {
             let (tile, index, chunk, data, _) = item
                 .as_ref()
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
             if chunk.width == 0
                 || chunk.height == 0
                 || mosaic.tiles[*tile].reader.is_sparse_chunk(*index)
@@ -61,7 +61,7 @@ impl<'a> WindowJobs<'a> {
             let len = width
                 .checked_mul(height)
                 .and_then(|pixels| pixels.checked_mul(spp))
-                .ok_or_else(|| RasterH3Error::InvalidMetadata("sample window overflow".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidMetadata("sample window overflow".into()))?;
             samples.window(0, len)?;
             *decoded_bytes += samples.bytes() as u64;
             remaining += if width <= worker_pixels {
@@ -161,7 +161,7 @@ pub(super) fn shared_aggregation_pool(threads: usize) -> Result<Arc<rayon::Threa
             .num_threads(threads)
             .thread_name(|i| format!("raster-h3-agg-{i}"))
             .build()
-            .map_err(|e| RasterH3Error::InvalidParameter(format!("aggregation pool: {e}")))?,
+            .map_err(|e| DggsStreamError::InvalidParameter(format!("aggregation pool: {e}")))?,
     );
     pools.retain(|_, w| w.strong_count() > 0);
     pools.insert(threads, Arc::downgrade(&pool));
@@ -299,14 +299,14 @@ impl<A: SpillAccumulator> MergeTarget<'_, A> {
         for (i, map) in maps.iter_mut().enumerate() {
             for (key, acc) in map.drain() {
                 if acc.memory_bytes() > self.accumulator_limit {
-                    return Err(RasterH3Error::InvalidParameter("single accumulator exceeds aggregation budget; increase aggregation_budget_bytes".into()));
+                    return Err(DggsStreamError::InvalidParameter("single accumulator exceeds aggregation budget; increase aggregation_budget_bytes".into()));
                 }
                 let (merged, new) = self.shards[i].merge_owned_deferred(key, acc);
                 if new {
                     self.new_cells.push((i, key));
                 }
                 if merged > self.accumulator_limit {
-                    return Err(RasterH3Error::InvalidParameter("merged accumulator exceeds aggregation budget; increase aggregation_budget_bytes".into()));
+                    return Err(DggsStreamError::InvalidParameter("merged accumulator exceeds aggregation budget; increase aggregation_budget_bytes".into()));
                 }
                 *self.peak_active_bytes = (*self.peak_active_bytes).max(
                     self.shards

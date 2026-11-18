@@ -81,7 +81,7 @@ def scan_partitions(resolutions: List[int]):
 
         for batch in batches:
             for path, spec in zip(batch.column("path").to_pylist(), batch.column("spec").to_pylist()):
-                stream = dggs_stream.RasterH3ArrowStream(path, resolutions, columns=COLUMNS, partition=spec)
+                stream = dggs_stream.RasterArrowStream(path, resolutions, columns=COLUMNS, partition=spec)
                 for cells in pa.RecordBatchReader.from_stream(stream):
                     yield to_spark(cells, path)
 
@@ -177,7 +177,7 @@ def verify(cells, paths: List[str], resolutions: List[int]) -> None:
 
     for path in paths:
         mine = got.filter(pc.equal(got.column("path"), path))
-        want = pa.table(dggs_stream.RasterH3ArrowStream(path, resolutions, columns=COLUMNS))
+        want = pa.table(dggs_stream.RasterArrowStream(path, resolutions, columns=COLUMNS))
         a, b = rows(want), rows(mine)
         assert len(b) == mine.num_rows, f"{path}: a cell appears twice"
         assert a.keys() == b.keys(), (

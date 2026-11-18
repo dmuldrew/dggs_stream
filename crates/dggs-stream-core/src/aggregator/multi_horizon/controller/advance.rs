@@ -1,13 +1,13 @@
 //! Driving the stream forward: batch sizing, EOF finalization and failure latching.
 
 use super::{FinalCells, HorizonStreamKernel, MultiHorizonStreamer};
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
     /// Advance until a bounded batch of completed records is available.
     pub fn advance_until_completed(&mut self, min_rows: usize) -> Result<()> {
         if let Some(reason) = self.lifecycle.failure_reason() {
-            return Err(RasterH3Error::StreamFailed(reason.to_string()));
+            return Err(DggsStreamError::StreamFailed(reason.to_string()));
         }
         let result = self.latch_panics(|s| s.advance_inner(min_rows.min(2048)));
         self.metrics.peak_compaction_bytes = self.compactor.peak_bytes();
@@ -17,7 +17,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         }
         match result {
             Ok(()) => Ok(()),
-            Err(e @ RasterH3Error::TransformFailures(_)) => {
+            Err(e @ DggsStreamError::TransformFailures(_)) => {
                 // Keep the typed error for this call; later reads get the latched text.
                 self.fail(e.to_string());
                 Err(e)
@@ -140,7 +140,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             self.metrics.prefetch_wait_ns += elapsed;
             if items.is_empty() {
                 if self.processed_chunk_count != self.mosaic.chunk_refs.len() {
-                    return Err(RasterH3Error::StreamFailed(format!(
+                    return Err(DggsStreamError::StreamFailed(format!(
                         "Prefetch ended after {} of {} chunks",
                         self.processed_chunk_count,
                         self.mosaic.chunk_refs.len()
@@ -238,7 +238,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
     }
 
     /// Latch failures so subsequent reads cannot mistake a failed stream for EOF.
-    fn fail(&mut self, reason: String) -> RasterH3Error {
+    fn fail(&mut self, reason: String) -> DggsStreamError {
         self.prefetcher.take();
         self.output_buffer.clear();
         if let Some(partition) = &mut self.partition {

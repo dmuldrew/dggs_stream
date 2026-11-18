@@ -1,5 +1,5 @@
 [package]
-name = "raster-h3-fuzz"
+name = "dggs-stream-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false

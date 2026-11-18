@@ -15,7 +15,7 @@ use dggs_stream_core::columnar::{
     with_partial_state_field, ArrowArrayStream, CategoricalBatchReader, CategoricalFormat,
     ColumnSchema, ContinuousBatchReader, PartitionedBatchReader, RecordBatch,
 };
-use dggs_stream_core::error::{RasterH3Error, Result};
+use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::raster::mosaic::{
     resolve_raster_sources, MosaicReader, OverlapRule, NO_TILES_IN_BBOX,
@@ -68,7 +68,7 @@ pub trait RasterScanExec: Send + Sync {
 }
 
 /// A GeoTIFF/COG raster (or mosaic) scannable as an H3 table, with projection, filter and
-/// limit pushdown. [`crate::table::RasterH3Table`] adapts it to DataFusion's `TableProvider`.
+/// limit pushdown. [`crate::table::RasterTable`] adapts it to DataFusion's `TableProvider`.
 pub trait RasterScan: Send + Sync {
     /// Table schema prior to projection.
     fn schema(&self) -> Arc<ColumnSchema>;
@@ -374,7 +374,7 @@ fn bbox_pushed(
 fn open_or_empty<R>(bbox_pushed: bool, open: impl FnOnce() -> Result<R>) -> Result<Option<R>> {
     match open() {
         Ok(reader) => Ok(Some(reader)),
-        Err(RasterH3Error::InvalidParameter(msg)) if bbox_pushed && msg == NO_TILES_IN_BBOX => {
+        Err(DggsStreamError::InvalidParameter(msg)) if bbox_pushed && msg == NO_TILES_IN_BBOX => {
             Ok(None)
         }
         Err(e) => Err(e),
@@ -1116,7 +1116,7 @@ impl RasterScan for CategoricalRasterTableProvider {
     ) -> Result<Box<dyn RasterScanExec>> {
         if self.config.partition.is_some() {
             if self.format == CategoricalFormat::Long {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "partitioned scans support the wide categorical format only".into(),
                 ));
             }

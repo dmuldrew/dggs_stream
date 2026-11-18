@@ -183,10 +183,10 @@ fn test_malformed_proj_strings_and_error_handling() {
             s
         );
         match res.err().unwrap() {
-            RasterH3Error::CrsError(msg) => {
+            DggsStreamError::CrsError(msg) => {
                 assert!(!msg.is_empty(), "CrsError must contain diagnostic message");
             }
-            other => panic!("Expected RasterH3Error::CrsError, got {:?}", other),
+            other => panic!("Expected DggsStreamError::CrsError, got {:?}", other),
         }
     }
 }
@@ -218,11 +218,11 @@ fn test_unsupported_epsg_error() {
     let res = CrsTransformer::from_crs_or_epsg(Some(999999), None);
     assert!(res.is_err(), "Expected error for unsupported EPSG code");
     match res.err().unwrap() {
-        RasterH3Error::UnsupportedEpsg { code, detail } => {
+        DggsStreamError::UnsupportedEpsg { code, detail } => {
             assert_eq!(code, 999999);
             assert!(detail.contains("999999"));
         }
-        other => panic!("Expected RasterH3Error::UnsupportedEpsg, got {:?}", other),
+        other => panic!("Expected DggsStreamError::UnsupportedEpsg, got {:?}", other),
     }
 }
 

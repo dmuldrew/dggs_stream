@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use crate::columnar::{ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch};
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 const IPC_MAGIC: &[u8; 8] = b"RH3IPC01";
 
@@ -70,7 +70,7 @@ fn decode_dtype(tag: u8) -> Result<ArrowDataType> {
         7 => Ok(ArrowDataType::Binary),
         8 => Ok(ArrowDataType::ValueHistogram),
         9 => Ok(ArrowDataType::BinHistogram),
-        other => Err(RasterH3Error::InvalidParameter(format!(
+        other => Err(DggsStreamError::InvalidParameter(format!(
             "Unknown IPC data type tag: {}",
             other
         ))),
@@ -233,7 +233,7 @@ impl<R: Read> IpcStreamReader<R> {
         let mut magic = [0u8; 8];
         reader.read_exact(&mut magic)?;
         if &magic != IPC_MAGIC {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "Invalid IPC stream magic header".into(),
             ));
         }
@@ -244,7 +244,7 @@ impl<R: Read> IpcStreamReader<R> {
             let name_len = read_u32(&mut reader)? as usize;
             let name_bytes = read_exact_vec(&mut reader, name_len)?;
             let name = String::from_utf8(name_bytes).map_err(|e| {
-                RasterH3Error::InvalidParameter(format!("Invalid UTF-8 field name in IPC: {e}"))
+                DggsStreamError::InvalidParameter(format!("Invalid UTF-8 field name in IPC: {e}"))
             })?;
             let dt = decode_dtype(read_u8(&mut reader)?)?;
             let nullable = read_u8(&mut reader)? != 0;
@@ -270,7 +270,7 @@ impl<R: Read> IpcStreamReader<R> {
             return Ok(None);
         }
         if marker != 1 {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "Invalid IPC batch marker: {}",
                 marker
             )));
@@ -429,7 +429,7 @@ where
                 map.insert(field.name.clone(), json_val);
             }
             let line = serde_json::to_string(&serde_json::Value::Object(map))
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
             writer.write_all(line.as_bytes())?;
             writer.write_all(b"\n")?;
             total_rows += 1;

@@ -1,6 +1,6 @@
 //! Engine-neutral raster scans and H3 scalar functions over `dggs_stream_core`'s columnar types.
 //!
-//! [`crate::table::RasterH3Table`] and [`crate::udf::RasterH3ScalarUdf`] wrap these in
+//! [`crate::table::RasterTable`] and [`crate::udf::H3ScalarUdf`] wrap these in
 //! DataFusion's real `TableProvider` and `ScalarUDFImpl`. The traits here are deliberately
 //! named differently from DataFusion's:
 //! - [`ContinuousRasterTableProvider`] and [`CategoricalRasterTableProvider`] implement
@@ -70,7 +70,7 @@ pub fn find_scalar_udf(name: &str) -> Option<Arc<dyn H3ScalarFn>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dggs_stream_core::error::{RasterH3Error, Result};
+    use dggs_stream_core::error::{DggsStreamError, Result};
     use std::fs::File;
     use tempfile::NamedTempFile;
     use tiff::encoder::colortype::Gray32Float;
@@ -78,7 +78,9 @@ mod tests {
 
     fn invoke_scalar(name: &str, args: &[ColumnArray]) -> Result<ColumnArray> {
         find_scalar_udf(name)
-            .ok_or_else(|| RasterH3Error::InvalidParameter(format!("no scalar function '{name}'")))?
+            .ok_or_else(|| {
+                DggsStreamError::InvalidParameter(format!("no scalar function '{name}'"))
+            })?
             .invoke(args)
     }
 

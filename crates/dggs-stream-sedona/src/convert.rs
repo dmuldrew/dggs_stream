@@ -11,7 +11,7 @@ use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Int64Type, Schema, SchemaRef, UInt64Type};
 use datafusion::error::{DataFusionError, Result};
 use dggs_stream_core::columnar::{ArrowDataType, ColumnArray, ColumnSchema};
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 
 /// Arrow extension name SedonaDB (and GeoArrow readers) use for WKB geometry.
 pub const GEOARROW_WKB_EXTENSION: &str = "geoarrow.wkb";
@@ -22,7 +22,7 @@ pub const GEOARROW_WKB_METADATA: &str = r#"{"crs":"OGC:CRS84"}"#;
 /// Name of the WKB polygon column in every `dggs_stream` table schema.
 pub(crate) const WKB_COLUMN: &str = "wkb";
 
-pub(crate) fn to_df_error(err: RasterH3Error) -> DataFusionError {
+pub(crate) fn to_df_error(err: DggsStreamError) -> DataFusionError {
     DataFusionError::External(Box::new(err))
 }
 

@@ -4,7 +4,7 @@ use super::super::spill::SpillRuns;
 use super::pipeline::{run_pipelined, CellMaps, MergeTarget, WindowJobs};
 use crate::aggregator::accumulator::H3Accumulator;
 use crate::aggregator::cell_hash::H3BuildHasher;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::mosaic::MosaicReader;
 use crate::raster::RasterChunk;
@@ -171,12 +171,12 @@ fn malformed_chunks_fail_before_dispatch() {
     let mut decoded_bytes = 0;
     assert!(matches!(
         WindowJobs::new(&items, &mosaic, 1, &mut decoded_bytes),
-        Err(RasterH3Error::InvalidMetadata(_))
+        Err(DggsStreamError::InvalidMetadata(_))
     ));
-    items[1] = Err(RasterH3Error::StreamFailed("decode failed".into()));
+    items[1] = Err(DggsStreamError::StreamFailed("decode failed".into()));
     assert!(matches!(
         WindowJobs::new(&items, &mosaic, 1, &mut decoded_bytes),
-        Err(RasterH3Error::StreamFailed(_))
+        Err(DggsStreamError::StreamFailed(_))
     ));
 }
 

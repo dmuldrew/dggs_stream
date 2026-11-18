@@ -55,29 +55,29 @@ def assert_matches(df, expected) -> None:
 
 @pytest.mark.parametrize("band", [1, 2])
 def test_band_selects_that_band(dggs_stream, two_band_tif, band):
-    df = dggs_stream.read_raster_h3(two_band_tif, RES, band=band)
+    df = dggs_stream.read_raster(two_band_tif, RES, band=band)
     assert_matches(df, per_cell(lambda c, r: two_band_value(c, r)[band - 1]))
 
 
 def test_default_band_is_one(dggs_stream, two_band_tif):
-    default = sort(dggs_stream.read_raster_h3(two_band_tif, RES))
-    assert default.equals(sort(dggs_stream.read_raster_h3(two_band_tif, RES, band=1)))
+    default = sort(dggs_stream.read_raster(two_band_tif, RES))
+    assert default.equals(sort(dggs_stream.read_raster(two_band_tif, RES, band=1)))
 
 
 def test_band_beyond_raster_is_an_error(dggs_stream, two_band_tif):
     with pytest.raises(RuntimeError, match="band 3 does not exist: the raster has 2 band"):
-        dggs_stream.read_raster_h3(two_band_tif, RES, band=3)
+        dggs_stream.read_raster(two_band_tif, RES, band=3)
 
 
 @pytest.mark.parametrize("band", [0, -1])
 def test_band_below_one_is_an_error(dggs_stream, two_band_tif, band):
     with pytest.raises(RuntimeError, match="band must be at least 1"):
-        dggs_stream.RasterH3ArrowStream(two_band_tif, RES, band=band).to_dict()
+        dggs_stream.RasterArrowStream(two_band_tif, RES, band=band).to_dict()
 
 
 def test_band_must_be_an_int(dggs_stream, two_band_tif):
     with pytest.raises(TypeError, match="band must be an int"):
-        dggs_stream.RasterH3ArrowStream(two_band_tif, RES, band="2")
+        dggs_stream.RasterArrowStream(two_band_tif, RES, band="2")
 
 
 # -----------------------------------------------------------------------------
@@ -86,7 +86,7 @@ def test_band_must_be_an_int(dggs_stream, two_band_tif):
 
 
 def test_ndvi_from_chosen_bands(dggs_stream, two_band_tif):
-    df = dggs_stream.read_raster_h3(
+    df = dggs_stream.read_raster(
         two_band_tif, RES, spectral_formula="NDVI", nir_band=2, red_band=1
     )
 
@@ -100,22 +100,22 @@ def test_ndvi_from_chosen_bands(dggs_stream, two_band_tif):
 def test_spectral_formula_default_bands_must_exist(dggs_stream, two_band_tif):
     # NDVI defaults to nir_band=4, red_band=3, as in DuckDB.
     with pytest.raises(RuntimeError, match="spectral formula band 4 does not exist"):
-        dggs_stream.read_raster_h3(two_band_tif, RES, spectral_formula="ndvi")
+        dggs_stream.read_raster(two_band_tif, RES, spectral_formula="ndvi")
 
 
 def test_unknown_spectral_formula_is_an_error(dggs_stream, two_band_tif):
     with pytest.raises(RuntimeError, match="Invalid spectral_formula 'savi'.*ndvi, ndwi"):
-        dggs_stream.RasterH3ArrowStream(two_band_tif, RES, spectral_formula="savi").to_dict()
+        dggs_stream.RasterArrowStream(two_band_tif, RES, spectral_formula="savi").to_dict()
 
 
 def test_formula_bands_without_formula_are_an_error(dggs_stream, two_band_tif):
     with pytest.raises(RuntimeError, match="need a spectral_formula"):
-        dggs_stream.RasterH3ArrowStream(two_band_tif, RES, nir_band=2).to_dict()
+        dggs_stream.RasterArrowStream(two_band_tif, RES, nir_band=2).to_dict()
 
 
 def test_spectral_formula_rejects_categorical(dggs_stream, classes_tif):
     with pytest.raises(RuntimeError, match="continuous scans only"):
-        dggs_stream.RasterH3ArrowStream(
+        dggs_stream.RasterArrowStream(
             classes_tif, RES, categorical=True, spectral_formula="ndvi"
         ).to_dict()
 
@@ -126,15 +126,15 @@ def test_spectral_formula_rejects_categorical(dggs_stream, classes_tif):
 
 
 def test_center_sampling_is_the_default(dggs_stream, two_band_tif):
-    default = sort(dggs_stream.read_raster_h3(two_band_tif, RES))
-    center = sort(dggs_stream.read_raster_h3(two_band_tif, RES, sampling="center"))
+    default = sort(dggs_stream.read_raster(two_band_tif, RES))
+    center = sort(dggs_stream.read_raster(two_band_tif, RES, sampling="center"))
     assert center.equals(default)
 
 
 @pytest.mark.parametrize("pattern", ["rgss", "hex", "16point"])
 def test_sub_pixel_sampling_spreads_each_pixel_over_cells(dggs_stream, two_band_tif, pattern):
-    center = dggs_stream.read_raster_h3(two_band_tif, RES)
-    sampled = dggs_stream.read_raster_h3(two_band_tif, RES, sampling=pattern)
+    center = dggs_stream.read_raster(two_band_tif, RES)
+    sampled = dggs_stream.read_raster(two_band_tif, RES, sampling=pattern)
     # Sample weights sum to one per pixel, so the totals are unchanged...
     assert sampled["count"].sum() == pytest.approx(center["count"].sum())
     assert sampled["sum"].sum() == pytest.approx(center["sum"].sum())
@@ -147,7 +147,7 @@ def test_sub_pixel_sampling_spreads_each_pixel_over_cells(dggs_stream, two_band_
 def test_unknown_sampling_is_an_error(dggs_stream, two_band_tif):
     # Core falls back to centre sampling for unknown names; the adapter refuses them.
     with pytest.raises(RuntimeError, match="Invalid sampling 'bilinear'"):
-        dggs_stream.RasterH3ArrowStream(two_band_tif, RES, sampling="bilinear").to_dict()
+        dggs_stream.RasterArrowStream(two_band_tif, RES, sampling="bilinear").to_dict()
 
 
 # -----------------------------------------------------------------------------
@@ -166,7 +166,7 @@ def overlapping_mosaic(tmp_path_factory) -> str:
 
 def test_overlap_rules(dggs_stream, overlapping_mosaic):
     def scan(rule):
-        return dggs_stream.read_raster_h3(overlapping_mosaic, RES, overlap_rule=rule)
+        return dggs_stream.read_raster(overlapping_mosaic, RES, overlap_rule=rule)
 
     pixels, overlap = 2 * W * H, (W - 16) * H
     cutline, first, average = scan("cutline"), scan("first"), scan("average")
@@ -181,17 +181,17 @@ def test_overlap_rules(dggs_stream, overlapping_mosaic):
 
 def test_unknown_overlap_rule_is_an_error(dggs_stream, overlapping_mosaic):
     with pytest.raises(RuntimeError, match="Invalid overlap_rule 'max'"):
-        dggs_stream.RasterH3ArrowStream(overlapping_mosaic, RES, overlap_rule="max").to_dict()
+        dggs_stream.RasterArrowStream(overlapping_mosaic, RES, overlap_rule="max").to_dict()
 
 
 def test_partitions_follow_the_overlap_rule(dggs_stream, overlapping_mosaic):
     whole = sort(
-        dggs_stream.read_raster_h3(overlapping_mosaic, RES, overlap_rule="first")
+        dggs_stream.read_raster(overlapping_mosaic, RES, overlap_rule="first")
     )
     specs = dggs_stream.plan_partitions(overlapping_mosaic, target_chunks=1, overlap_rule="first")
     assert len(specs) == 2
     parts = [
-        dggs_stream.RasterH3ArrowStream(
+        dggs_stream.RasterArrowStream(
             overlapping_mosaic, RES, partition=spec, overlap_rule="first"
         ).to_pyarrow()
         for spec in specs
@@ -204,7 +204,7 @@ def test_partitions_follow_the_overlap_rule(dggs_stream, overlapping_mosaic):
     # A plan made under another rule does not match these scans.
     cutline_spec = dggs_stream.plan_partitions(overlapping_mosaic, target_chunks=1)[0]
     with pytest.raises(RuntimeError):
-        dggs_stream.RasterH3ArrowStream(
+        dggs_stream.RasterArrowStream(
             overlapping_mosaic, RES, partition=cutline_spec, overlap_rule="first"
         ).to_pyarrow()
 
@@ -216,8 +216,8 @@ def test_partitions_follow_the_overlap_rule(dggs_stream, overlapping_mosaic):
 
 @pytest.mark.parametrize("fraction", [0.0, 0.5, 0.75, 1.0])
 def test_min_majority_fraction_filters_cells(dggs_stream, classes_tif, fraction):
-    everything = dggs_stream.read_raster_h3(classes_tif, RES, categorical=True)
-    kept = dggs_stream.read_raster_h3(
+    everything = dggs_stream.read_raster(classes_tif, RES, categorical=True)
+    kept = dggs_stream.read_raster(
         classes_tif, RES, categorical=True, min_majority_fraction=fraction
     )
     expected = everything.filter(pl.col("majority_fraction") >= fraction)
@@ -227,13 +227,13 @@ def test_min_majority_fraction_filters_cells(dggs_stream, classes_tif, fraction)
 
 def test_min_majority_fraction_rejects_continuous(dggs_stream, gradient_tif):
     with pytest.raises(RuntimeError, match="categorical scans only"):
-        dggs_stream.RasterH3ArrowStream(gradient_tif, RES, min_majority_fraction=0.5).to_dict()
+        dggs_stream.RasterArrowStream(gradient_tif, RES, min_majority_fraction=0.5).to_dict()
 
 
 @pytest.mark.parametrize("fraction", [-0.1, 1.5, float("nan")])
 def test_min_majority_fraction_range(dggs_stream, classes_tif, fraction):
     with pytest.raises(ValueError, match="min_majority_fraction must be (between 0 and 1|finite)"):
-        dggs_stream.RasterH3ArrowStream(
+        dggs_stream.RasterArrowStream(
             classes_tif, RES, categorical=True, min_majority_fraction=fraction
         ).to_dict()
 
@@ -244,11 +244,11 @@ def test_min_majority_fraction_range(dggs_stream, classes_tif, fraction):
 
 
 def test_options_reach_every_scan_path(dggs_stream, two_band_tif):
-    expected = sort(dggs_stream.read_raster_h3(two_band_tif, RES, band=2))
-    lazy = dggs_stream.scan_raster_h3(two_band_tif, RES, band=2)
+    expected = sort(dggs_stream.read_raster(two_band_tif, RES, band=2))
+    lazy = dggs_stream.scan_raster(two_band_tif, RES, band=2)
     if isinstance(lazy, pl.LazyFrame):  # Polars >= 1.4 (register_io_source)
         assert sort(lazy.collect()).equals(expected)
-    stream = dggs_stream.RasterH3ArrowStream(two_band_tif, RES, band=2)
+    stream = dggs_stream.RasterArrowStream(two_band_tif, RES, band=2)
     assert sort(stream.to_polars()).equals(expected)
     assert sort(pl.concat(list(stream.iter_batches(7)))).equals(expected)
     # `to_dict` goes through JSON, which carries `wkb` as hex text.
@@ -272,7 +272,7 @@ def test_parquet_to_pmtiles(dggs_stream, gradient_tif, tmp_path):
 
 def test_parquet_to_pmtiles_named_hex_column(dggs_stream, gradient_tif, tmp_path):
     parquet = tmp_path / "hex.parquet"
-    df = dggs_stream.read_raster_h3(gradient_tif, RES, columns=["h3_hex", "mean"])
+    df = dggs_stream.read_raster(gradient_tif, RES, columns=["h3_hex", "mean"])
     df.rename({"h3_hex": "Cell_ID"}).write_parquet(parquet)
     out = tmp_path / "hex.pmtiles"
     assert dggs_stream.parquet_to_pmtiles(parquet, out, h3_column="cell_id") == df.height
