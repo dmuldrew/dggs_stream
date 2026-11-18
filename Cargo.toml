@@ -36,7 +36,7 @@ undocumented_unsafe_blocks = "warn"
 broken_intra_doc_links = "warn"
 
 [workspace.dependencies]
-a5 = "0.10.1"
+a5 = "1.0.0"
 healpix = "0.3.3"
 s2 = { version = "0.2.0", default-features = false }
 h3o = "0.11.1"
