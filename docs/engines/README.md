@@ -85,7 +85,7 @@ Each deep dive has a recipes section covering the same tasks. The core calls, si
 | CRS / NoData / bbox | `source_crs :=`, `nodata :=`, `bbox :=` | `crs=`, `nodata=`, `bbox=` | `source_crs =>`, `nodata =>`, `bbox =>` | `--crs`, `--nodata`, `--bbox` | `with_crs`, `with_nodata`, `with_bbox` |
 | Band scale/offset | `scale_offset := false` opts out | always applied | always applied | `--raw-values` opts out | `with_scale_offset(false)` opts out |
 | Fail on dropped samples | `strict_transforms := true` | `strict_transforms=True` | — (`WARNING` only) | — (stderr warning only) | `with_strict_transforms(true)` |
-| GeoParquet export | `h3_raster_to_parquet(...)` | `raster_to_parquet(...)` | — (`COPY` to CSV) | `dggs-stream-cli parquet ... -o` | — (core `H3ParquetWriter`) |
+| GeoParquet export | `h3_raster_to_parquet(...)` | `raster_to_parquet(...)` | — (`COPY` to CSV) | `dggs-stream-cli parquet ... -o` | — (core `ParquetWriter`) |
 | PMTiles export | `h3_raster_to_pmtiles(...)` | `raster_to_pmtiles(...)` | — | `dggs-stream-cli pmtiles ... -o` | `COPY (query) TO 'out.pmtiles'` (`dggs-stream-sedona`) |
 | Parquet → PMTiles | `h3_parquet_to_pmtiles(...)` | `parquet_to_pmtiles(...)` | — | `dggs-stream-cli parquet-to-pmtiles ... -o` | — (core `process_parquet_to_pmtiles`) |
 | Recipes | [DuckDB](duckdb.md#sql-usage--recipes) | [Python](python-polars.md#recipes) | [PostgreSQL](postgresql.md#recipes) | [CLI](cli.md#recipes) | [DataFusion](datafusion.md#recipes) |

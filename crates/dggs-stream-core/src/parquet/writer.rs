@@ -578,9 +578,10 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
     }
 }
 
-pub struct H3ParquetWriter;
+/// Writes raster aggregations to Parquet or GeoParquet using the grid selected by the scan.
+pub struct ParquetWriter;
 
-impl H3ParquetWriter {
+impl ParquetWriter {
     /// Convenience helper to run continuous or categorical GeoTIFF/Mosaic-to-Parquet pipeline
     pub fn process_raster_source_to_parquet<P1: AsRef<Path>, P2: AsRef<Path>>(
         source: P1,

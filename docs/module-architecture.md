@@ -208,10 +208,10 @@ Grid-independent options a scan can add to the default pixel-centre kernel. See 
 
 | File | Responsibility |
 | :--- | :--- |
-| [`mod.rs`](../crates/dggs-stream-core/src/parquet/mod.rs) | Module declarations and public re-exports (`build_geoparquet_metadata`, `run_parquet_streaming_pipeline`, `ParquetStreamer`, `ParquetRowGroupBuffer`, `H3ParquetWriter`, etc.). |
+| [`mod.rs`](../crates/dggs-stream-core/src/parquet/mod.rs) | Module declarations and public re-exports (`build_geoparquet_metadata`, `run_parquet_streaming_pipeline`, `ParquetStreamer`, `ParquetRowGroupBuffer`, `ParquetWriter`, etc.). |
 | [`geoparquet_metadata.rs`](../crates/dggs-stream-core/src/parquet/geoparquet_metadata.rs) | Specification-compliant OGC GeoParquet 1.1 JSON metadata builder (`build_geoparquet_metadata`) embedded in Parquet `FileMetaData`, including official PROJJSON `OGC:CRS84` datum ensemble definitions, planar edge definitions, and per-column bounding boxes. |
 | [`pipeline.rs`](../crates/dggs-stream-core/src/parquet/pipeline.rs) | Double-buffered channel streaming pipeline (`run_parquet_streaming_pipeline`, `run_parquet_streaming_pipeline_with_progress`), streaming source abstraction (`ParquetStreamer`), row group buffer abstraction (`ParquetRowGroupBuffer`), in-memory spatial sorting by H3 index, and low-level typed column writers. |
-| [`writer.rs`](../crates/dggs-stream-core/src/parquet/writer.rs) | Schema-specific columnar row group buffers (`ContinuousRowGroupBuffer`, `CategoricalRowGroupBuffer`), export configuration (`ParquetExportConfig`), and high-level export facade (`H3ParquetWriter`). |
+| [`writer.rs`](../crates/dggs-stream-core/src/parquet/writer.rs) | Schema-specific columnar row group buffers (`ContinuousRowGroupBuffer`, `CategoricalRowGroupBuffer`), export configuration (`ParquetExportConfig`), and high-level export facade (`ParquetWriter`). |
 
 ---
 

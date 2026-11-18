@@ -11,5 +11,5 @@ pub use pipeline::{
     ParquetRowGroupBuffer, ParquetStreamer, RecordStreamer,
 };
 pub use writer::{
-    CategoricalRowGroupBuffer, ContinuousRowGroupBuffer, H3ParquetWriter, ParquetExportConfig,
+    CategoricalRowGroupBuffer, ContinuousRowGroupBuffer, ParquetExportConfig, ParquetWriter,
 };

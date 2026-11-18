@@ -712,3 +712,32 @@ fn test_remote_coalesce_chunk_ranges_algorithm() {
     assert_eq!(coalesced[1].chunk_slices[0], (3, 0, 3000));
     assert_eq!(coalesced[1].chunk_slices[1], (4, 3000, 3000));
 }
+
+#[test]
+fn zstd_remote_chunks_decode_from_ranges_and_prefetch() {
+    if !MockHttpServer::is_networking_supported() {
+        return;
+    }
+    let frames: Vec<_> = (1..=6u8)
+        .map(|value| zstd::bulk::compress(&[value; 256], 1).unwrap())
+        .collect();
+    let file = crate::codecs::write_zstd_fixture(true, 8, 1, 1, 50000, &frames);
+    let server = MockHttpServer::start(std::fs::read(file.path()).unwrap());
+    let reader = GeoTiffStreamReader::open(format!("{}/test.tif", server.url_base)).unwrap();
+    let mut decoder = reader.open_decoder().unwrap();
+    let queue = RemoteChunkPrefetchQueue::spawn_single(&reader, &[2, 5], None).unwrap();
+
+    let (_, first) = decoder.read_chunk(0).unwrap();
+    assert!(matches!(&first, DecodingResult::U8(v) if v == &[1; 256]));
+    let mut buffer = first;
+    for (index, width, height, value) in [(2, 13, 16, 3), (5, 13, 7, 6)] {
+        let payload = queue.get_chunk_payload(0, index).unwrap().unwrap();
+        let (bounds, samples) = decoder
+            .read_chunk_from_compressed_bytes(index, &payload, Some(buffer))
+            .unwrap();
+        assert_eq!((bounds.width, bounds.height), (width, height));
+        assert!(matches!(&samples, DecodingResult::U8(v)
+            if v.len() == (width * height) as usize && v.iter().all(|&sample| sample == value)));
+        buffer = samples;
+    }
+}

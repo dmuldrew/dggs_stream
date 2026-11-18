@@ -122,7 +122,7 @@ fn batch_readers_report_transform_failures() {
 
 #[test]
 fn exporters_report_through_the_shared_counter() {
-    use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+    use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
     use dggs_stream_core::pmtiles::PmtilesTiler;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -134,7 +134,7 @@ fn exporters_report_through_the_shared_counter() {
     let counter = Arc::new(AtomicU64::new(0));
     let mut cfg = config(SamplingPattern::center(), None);
     cfg.transform_failure_counter = Some(Arc::clone(&counter));
-    H3ParquetWriter::process_raster_source_to_parquet(
+    ParquetWriter::process_raster_source_to_parquet(
         &path,
         dir.path().join("out.parquet"),
         cfg.clone(),

@@ -38,7 +38,7 @@ flowchart LR
     READER --> ARROW["ArrowArrayStream (C Stream Interface)"]
     READER --> IPC["write_ipc_stream (RH3IPC01)"]
     READER --> JSONL["write_jsonl_stream (NDJSON)"]
-    STREAMER --> PQ["H3ParquetWriter"]
+    STREAMER --> PQ["ParquetWriter"]
     CFG --> PMT["PmtilesTiler"]
 ```
 
@@ -88,7 +88,7 @@ purpose and are not counted. A non-zero count means valid data is missing from t
 usually because of a wrong or out-of-domain source CRS. It is counted in every build, not
 only with `stream-profile`, and is also available as `metrics().worker.transform_failures`.
 
-For pipelines that own the streamer (`H3ParquetWriter`, `PmtilesTiler`), set
+For pipelines that own the streamer (`ParquetWriter`, `PmtilesTiler`), set
 `MultiResolutionConfig::transform_failure_counter` to a shared `Arc<AtomicU64>`; every
 stream built from that configuration adds its failures to it.
 
@@ -690,7 +690,7 @@ floats become `null`; binary columns (`wkb`) are lowercase hex strings.
 
 | API | Output |
 | :--- | :--- |
-| `H3ParquetWriter::write_continuous_streamer_to_parquet(streamer, path, ParquetExportConfig)` / `write_categorical_streamer_to_parquet` | Parquet or OGC GeoParquet 1.1 (`config.geoparquet`); the file is published only after the stream completes successfully. |
+| `ParquetWriter::write_continuous_streamer_to_parquet(streamer, path, ParquetExportConfig)` / `write_categorical_streamer_to_parquet` | Parquet or OGC GeoParquet 1.1 (`config.geoparquet`); the file is published only after the stream completes successfully. |
 | `PmtilesTiler::process_raster_source_to_pmtiles(source, path, config)` / `process_categorical_source_to_pmtiles` | PMTiles v3 archive with one zoom range per requested resolution. See [PMTiles & Multi-Resolution](../pmtiles.md). |
 | `transcode::process_parquet_to_pmtiles` | Pre-aggregated H3 Parquet → PMTiles. An explicit `h3_column_name` that isn't in the schema returns `Err` listing available columns; `None` auto-detects. |
 | `PmtilesTiler::export_features(grid, features, path)` | PMTiles v3 from `CellFeature`s in any order, with bounded memory (external sort by latitude, 256 MiB buffer). Invalid cell IDs are counted in `PmtilesExportSummary::invalid_features_dropped`. |
