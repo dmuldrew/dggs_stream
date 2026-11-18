@@ -146,11 +146,7 @@ impl SpillAccumulator for H3Accumulator {
 impl SpillAccumulator for CategoricalAccumulator {
     fn write_state(&self, out: &mut impl Write) -> io::Result<()> {
         write_f64(out, self.total_count)?;
-        let n = self
-            .heap_counts
-            .as_ref()
-            .map_or(self.inline_len as usize, |h| h.len());
-        write_u64(out, n as u64)?;
+        write_u64(out, self.unique_classes() as u64)?;
         // Do not round-trip through JSON: it cannot preserve arbitrary f64 states.
         let mut result = Ok(());
         self.for_each_class(|k, v| {
@@ -166,7 +162,14 @@ impl SpillAccumulator for CategoricalAccumulator {
     /// positive, and a class listed twice.
     fn read_state(input: &mut impl Read, limit: usize) -> io::Result<Self> {
         let total = read_total(input, "total count")?;
-        let n = count(input, limit)?;
+        // The compact list stores a class in 16 bytes, so the generic `count` bound
+        // (64 bytes per entry) would refuse states that `push_sorted` accepted. Bound
+        // the count by the smallest per-class size and check the real size as
+        // classes arrive, so an oversized state still fails before it grows far.
+        let n = usize::try_from(read_u64(input)?).map_err(|_| invalid("spill length overflow"))?;
+        if n > limit / size_of::<(i64, f64)>() {
+            return Err(invalid("spill accumulator exceeds aggregation budget"));
+        }
         let mut acc = Self::new();
         for _ in 0..n {
             let mut k = [0; 8];
@@ -177,6 +180,11 @@ impl SpillAccumulator for CategoricalAccumulator {
                 return Err(invalid("duplicate class in accumulator state"));
             }
             acc.update_weighted(class, weight);
+            if acc.memory_bytes() > limit {
+                return Err(invalid(
+                    "categorical accumulator exceeds aggregation budget",
+                ));
+            }
         }
         acc.total_count = total;
         if acc.memory_bytes() > limit {
@@ -551,13 +559,53 @@ mod tests {
     }
 
     #[test]
+    fn compact_categorical_states_round_trip_under_a_small_limit() {
+        // 40 classes use the 16-byte list tier: well under 2 KiB, but more than the
+        // generic 64-bytes-per-entry bound (32 entries) would allow.
+        let mut acc = CategoricalAccumulator::new();
+        for k in 0..40 {
+            acc.update_weighted(k, 1.0 + k as f64);
+        }
+        assert!(acc.memory_bytes() <= 2048);
+        let mut bytes = Vec::new();
+        acc.write_state(&mut bytes).unwrap();
+        let back = CategoricalAccumulator::read_state(&mut Cursor::new(bytes), 2048).unwrap();
+        assert_eq!(back.unique_classes(), 40);
+        assert_eq!(back.total_count.to_bits(), acc.total_count.to_bits());
+        for k in 0..40 {
+            assert_eq!(back.get_class_count(k), acc.get_class_count(k));
+        }
+        let partial = crate::aggregator::multi_horizon::partial::encode_partial_state(&acc);
+        let decoded: CategoricalAccumulator =
+            crate::aggregator::multi_horizon::partial::decode_partial_state(&partial, 2048)
+                .unwrap();
+        assert_eq!(decoded.unique_classes(), 40);
+    }
+
+    #[test]
+    fn oversized_categorical_state_is_refused_while_decoding() {
+        let mut acc = CategoricalAccumulator::new();
+        for k in 0..2000 {
+            acc.update(k);
+        }
+        let mut bytes = Vec::new();
+        acc.write_state(&mut bytes).unwrap();
+        assert!(CategoricalAccumulator::read_state(&mut Cursor::new(bytes), 2048).is_err());
+    }
+
+    #[test]
     fn oversized_merged_state_fails_without_discarding_categories() {
+        // 40 classes fit the limit; the 80 of the merged state do not.
         let mut runs = SpillRuns::<CategoricalAccumulator>::new(2048, None);
         for offset in [0, 100] {
             let mut acc = CategoricalAccumulator::new();
-            for k in offset..offset + 16 {
+            for k in offset..offset + 40 {
                 acc.update(k);
             }
+            // Each input decodes on its own, so the error below comes from the merge.
+            let mut bytes = Vec::new();
+            acc.write_state(&mut bytes).unwrap();
+            CategoricalAccumulator::read_state(&mut Cursor::new(bytes), 2048).unwrap();
             let result = runs.push_sorted([(1, acc)]);
             if offset == 0 {
                 result.unwrap();

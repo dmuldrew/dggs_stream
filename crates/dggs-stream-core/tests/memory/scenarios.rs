@@ -52,7 +52,7 @@ pub fn all() -> Vec<Scenario> {
         },
         Scenario {
             name: "categorical_high_cardinality",
-            about: "Categorical res-9 stream over 3,000 classes (about 46 per cell, past the 16-class inline array, so cells use the heap class map), in memory and forced to spill.",
+            about: "Categorical res-9 stream over 3,000 classes (about 46 per cell, past inline storage, so cells use the heap class list), in memory and forced to spill.",
             variants: &["in_memory", "spill"],
             columns: &["cells", "spill_runs", "peak_active_bytes", "budget_bytes"],
             run: categorical_high_cardinality,
