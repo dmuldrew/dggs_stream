@@ -12,7 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-raster-h3-core = { version = "0.7.0", path = "../crates/raster-h3-core" }
+dggs-stream-core = { version = "0.7.0", path = "../crates/dggs-stream-core" }
 tempfile = "3.10"
 tiff = "0.11"
 

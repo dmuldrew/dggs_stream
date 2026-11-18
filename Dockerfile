@@ -28,8 +28,8 @@ RUN cargo build --release --workspace && \
     PLAT=$(cargo run --quiet --release --bin package_extension -- \
         --print-platform --duckdb-version "${DUCKDB_VERSION}") && \
     cargo run --release --bin package_extension -- \
-        --input target/release/libraster_h3.so \
-        --output target/release/raster_h3.duckdb_extension \
+        --input target/release/libdggs_stream.so \
+        --output target/release/dggs_stream.duckdb_extension \
         --platform "${PLAT}" \
         --duckdb-version v1.2.0
 
@@ -83,8 +83,8 @@ RUN set -eux; \
 RUN mkdir -p /extensions /data /app /root
 
 # Copy extension library, CLI tools, and sample data from builder
-COPY --from=builder /build/target/release/raster_h3.duckdb_extension /extensions/raster_h3.duckdb_extension
-COPY --from=builder /build/target/release/libraster_h3.so /extensions/libraster_h3.so
+COPY --from=builder /build/target/release/dggs_stream.duckdb_extension /extensions/dggs_stream.duckdb_extension
+COPY --from=builder /build/target/release/libdggs_stream.so /extensions/libdggs_stream.so
 COPY --from=builder /build/target/release/examples/raster_to_pmtiles /usr/local/bin/raster_to_pmtiles
 COPY --from=builder /build/target/release/examples/parquet_to_pmtiles /usr/local/bin/parquet_to_pmtiles
 COPY --from=builder /build/sample_sf.tif /data/sample_sf.tif

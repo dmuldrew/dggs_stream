@@ -1,7 +1,7 @@
 #![no_main]
 
+use dggs_stream_core::aggregator::remap::CategoryRemapper;
 use libfuzzer_sys::fuzz_target;
-use raster_h3_core::aggregator::remap::CategoryRemapper;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(spec) = std::str::from_utf8(data) else {

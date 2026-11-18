@@ -35,10 +35,10 @@ lost per cell is a density map. The areas themselves come from pixel counts: NLC
 equal-area projection (EPSG:5070), so every pixel covers exactly 900 m².
 
 ```python
-# pip install "./crates/raster-h3-python[polars]" geopandas
+# pip install "./crates/dggs-stream-python[polars]" geopandas
 import geopandas as gpd
 import polars as pl
-import raster_h3
+import dggs_stream
 import shapely
 
 RES = 14                                        # A5 cells of about 0.127 km² (~140 NLCD pixels)
@@ -51,7 +51,7 @@ BBOX = (-93.9, 28.9, -88.8, 30.6)               # coastal Louisiana, lon/lat
 #    `fraction` is a share of the pixels observed, not of the whole cell).
 def wetland_area(path, year):
     return (
-        raster_h3.scan_raster_h3(
+        dggs_stream.scan_raster_h3(
             path, RES, grid="a5", categorical=True, format="long",
             remap={90: 1, 95: 1, "else": 0},  # woody + emergent wetland -> 1, everything else -> 0
             bbox=BBOX, columns=["a5_index", "category", "count"],
@@ -77,7 +77,7 @@ padus = gpd.read_file(
 padus = padus[padus["GAP_Sts"].isin(["1", "2"])]
 protected = pl.DataFrame(
     {"a5_index": [c for g in padus.geometry
-                  for c in raster_h3.polygon_to_cells(g.wkb, RES, grid="a5") or []]},
+                  for c in dggs_stream.polygon_to_cells(g.wkb, RES, grid="a5") or []]},
     schema={"a5_index": pl.UInt64},
 ).unique().with_columns(protected=pl.lit(True))
 
@@ -204,16 +204,16 @@ to coarse cells with no gaps or overlaps. Each cell is also given to exactly one
 sub-basins add up to the basin.
 
 ```python
-# Build the bindings: cd crates/raster-h3-sedona/python && maturin develop --release
+# Build the bindings: cd crates/dggs-stream-sedona/python && maturin develop --release
 # pip install "sedonadb==0.5.0" geoarrow-pyarrow pandas pyogrio pyproj geopandas
 import geopandas as gpd
 import sedonadb
 import shapely
-import raster_h3_sedona
-from raster_h3_sedona import RasterH3Table
+import dggs_stream_sedona
+from dggs_stream_sedona import RasterH3Table
 
 sd = sedonadb.connect()
-sd.register(raster_h3_sedona.scalar_functions())
+sd.register(dggs_stream_sedona.scalar_functions())
 
 # HUC8 sub-basins of the Colorado Headwaters basin (HUC6 140100)
 huc8_path = "wbd_huc8_140100.geojson"
@@ -261,7 +261,7 @@ by_basin = sd.sql("""
 #    child that touches the box, so a parent lying wholly inside the box has all its children
 #    here, and its pixel-weighted mean equals a direct level-9 scan. Parents cut by the box's
 #    edge would be missing children, so they are left out. Tile the rest for a web map.
-raster_h3_sedona.write_pmtiles(sd.sql(f"""
+dggs_stream_sedona.write_pmtiles(sd.sql(f"""
     SELECT s2_cell_to_parent(s2_index, 9) AS s2_index,
            sum(swe_mm * count) / sum(count) AS mean_swe_mm
     FROM swe_cells
@@ -293,13 +293,13 @@ too much weight.
 ```bash
 # 1. Aggregate the global raster onto HEALPix depth-8 cells (786,432 cells of ~649 km² each),
 #    straight to GeoParquet. No database, no Python.
-raster-h3-cli parquet wc2.1_10m_bio_1.tif --grid healpix -r 8 -o bio1_healpix8.parquet
+dggs-stream-cli parquet wc2.1_10m_bio_1.tif --grid healpix -r 8 -o bio1_healpix8.parquet
 
 # 2. The same scan as a web map: one PMTiles archive, zooming from depth 4 to depth 8
-raster-h3-cli pmtiles wc2.1_10m_bio_1.tif --grid healpix -r 4,5,6,7,8 -o bio1_healpix.pmtiles
+dggs-stream-cli pmtiles wc2.1_10m_bio_1.tif --grid healpix -r 4,5,6,7,8 -o bio1_healpix.pmtiles
 
 # 3. Summarise by 10° band with any Parquet reader; here the DuckDB CLI, which needs only
-#    its spatial extension to read the cells' latitude, not raster_h3
+#    its spatial extension to read the cells' latitude, not dggs_stream
 duckdb -c "
 INSTALL spatial; LOAD spatial;
 SELECT floor(ST_Y(ST_Centroid(geometry)) / 10) * 10   AS band_south_deg,
@@ -313,7 +313,7 @@ ORDER BY band_south_deg DESC"
 
 The CLI's advantage is that it needs nothing else installed: one executable (also put on `PATH`
 by the Python wheel) that suits shell scripts, cron jobs and CI. It writes GeoParquet or PMTiles
-directly, or streams NDJSON to stdout (`raster-h3-cli jsonl ... | jq`). It has no SQL of its own,
+directly, or streams NDJSON to stdout (`dggs-stream-cli jsonl ... | jq`). It has no SQL of its own,
 so the band summary runs in whatever reads Parquet next. The CLI exposes the common options
 (grid, resolutions, CRS, NoData, bbox, categorical layout); see the [CLI deep dive](engines/cli.md).
 

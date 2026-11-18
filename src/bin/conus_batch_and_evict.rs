@@ -23,11 +23,11 @@ use std::time::{Duration, Instant};
 use parquet::basic::Compression;
 use rayon::prelude::*;
 
-use raster_h3::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
-use raster_h3::aggregator::sampling::SamplingPattern;
-use raster_h3::parquet::{H3ParquetWriter, ParquetExportConfig};
-use raster_h3::pmtiles::H3PmtilesTiler;
-use raster_h3::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
+use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream::aggregator::sampling::SamplingPattern;
+use dggs_stream::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream::pmtiles::H3PmtilesTiler;
+use dggs_stream::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
 const BASE_URL: &str = "https://imagery.geoplatform.gov/iipp/rest/services/Fire_Aviation/USFS_EDW_RMRS_WRC_BurnProbability/ImageServer/exportImage";
 

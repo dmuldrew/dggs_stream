@@ -1,0 +1,587 @@
+//! Binary Columnar IPC Stream (`write_ipc_stream` / `read_ipc_stream`) and JSONL
+//! (`JSONEachRow`) streaming serializers for [`RecordBatch`].
+//!
+//! Used by `dggs-stream-cli` (for ClickHouse executable table functions and shell pipelines)
+//! and `dggs-stream-python` for zero-dependency binary batch exchange.
+
+use std::io::{Read, Write};
+use std::sync::Arc;
+
+use crate::columnar::{ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch};
+use crate::error::{RasterH3Error, Result};
+
+const IPC_MAGIC: &[u8; 8] = b"RH3IPC01";
+
+fn write_u8<W: Write>(w: &mut W, v: u8) -> Result<()> {
+    w.write_all(&[v])?;
+    Ok(())
+}
+
+fn read_u8<R: Read>(r: &mut R) -> Result<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
+}
+
+fn write_u32<W: Write>(w: &mut W, v: u32) -> Result<()> {
+    w.write_all(&v.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_u32<R: Read>(r: &mut R) -> Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
+}
+
+fn write_u64<W: Write>(w: &mut W, v: u64) -> Result<()> {
+    w.write_all(&v.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_u64<R: Read>(r: &mut R) -> Result<u64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(u64::from_le_bytes(b))
+}
+
+fn encode_dtype(dt: ArrowDataType) -> u8 {
+    match dt {
+        ArrowDataType::UInt64 => 1,
+        ArrowDataType::Int64 => 2,
+        ArrowDataType::UInt8 => 3,
+        ArrowDataType::Float64 => 4,
+        ArrowDataType::Boolean => 5,
+        ArrowDataType::Utf8 => 6,
+        ArrowDataType::Binary => 7,
+        ArrowDataType::ValueHistogram => 8,
+        ArrowDataType::BinHistogram => 9,
+    }
+}
+
+fn decode_dtype(tag: u8) -> Result<ArrowDataType> {
+    match tag {
+        1 => Ok(ArrowDataType::UInt64),
+        2 => Ok(ArrowDataType::Int64),
+        3 => Ok(ArrowDataType::UInt8),
+        4 => Ok(ArrowDataType::Float64),
+        5 => Ok(ArrowDataType::Boolean),
+        6 => Ok(ArrowDataType::Utf8),
+        7 => Ok(ArrowDataType::Binary),
+        8 => Ok(ArrowDataType::ValueHistogram),
+        9 => Ok(ArrowDataType::BinHistogram),
+        other => Err(RasterH3Error::InvalidParameter(format!(
+            "Unknown IPC data type tag: {}",
+            other
+        ))),
+    }
+}
+
+fn write_validity<W: Write>(w: &mut W, validity: &Option<Vec<bool>>) -> Result<()> {
+    match validity {
+        None => write_u8(w, 0),
+        Some(v) => {
+            write_u8(w, 1)?;
+            write_u32(w, v.len() as u32)?;
+            let bytes: Vec<u8> = v.iter().map(|&b| u8::from(b)).collect();
+            w.write_all(&bytes)?;
+            Ok(())
+        }
+    }
+}
+
+/// Read exactly `len` bytes, growing the buffer only as data actually arrives.
+/// Declared lengths in an untrusted stream may far exceed the real payload, so
+/// this must not pre-allocate `len` bytes the way `vec![0u8; len]` would.
+fn read_exact_vec<R: Read>(r: &mut R, len: usize) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut take = r.take(len as u64);
+    take.read_to_end(&mut buf)?;
+    if buf.len() != len {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "IPC stream truncated").into(),
+        );
+    }
+    Ok(buf)
+}
+
+/// Bound for `Vec::with_capacity` on declared row counts: the read loop grows
+/// the vec to the real number of rows anyway, so the pre-allocation is only a
+/// fast path and must stay small enough to be harmless on a hostile stream.
+const MAX_ROW_PREALLOC: usize = 1 << 16;
+
+fn read_validity<R: Read>(r: &mut R) -> Result<Option<Vec<bool>>> {
+    let has = read_u8(r)?;
+    if has == 0 {
+        return Ok(None);
+    }
+    let len = read_u32(r)? as usize;
+    let bytes = read_exact_vec(r, len)?;
+    Ok(Some(bytes.into_iter().map(|b| b != 0).collect()))
+}
+
+/// Write a stream of [`RecordBatch`]es in binary columnar IPC format to `writer`.
+pub fn write_ipc_stream<W, I>(writer: &mut W, schema: &ColumnSchema, batches: I) -> Result<usize>
+where
+    W: Write,
+    I: IntoIterator<Item = Result<RecordBatch>>,
+{
+    writer.write_all(IPC_MAGIC)?;
+    write_u32(writer, schema.fields.len() as u32)?;
+    for field in &schema.fields {
+        let name_bytes = field.name.as_bytes();
+        write_u32(writer, name_bytes.len() as u32)?;
+        writer.write_all(name_bytes)?;
+        write_u8(writer, encode_dtype(field.data_type))?;
+        write_u8(writer, u8::from(field.nullable))?;
+    }
+
+    let mut total_rows = 0usize;
+    for batch_res in batches {
+        let batch = batch_res?;
+        if batch.num_rows == 0 {
+            continue;
+        }
+        write_u8(writer, 1)?; // RecordBatch marker
+        write_u32(writer, batch.num_rows as u32)?;
+        for col in &batch.columns {
+            write_validity(writer, &col.validity().map(|s| s.to_vec()))?;
+            match col {
+                ColumnArray::UInt64 { values, .. } => {
+                    for &v in values {
+                        write_u64(writer, v)?;
+                    }
+                }
+                ColumnArray::Int64 { values, .. } => {
+                    for &v in values {
+                        writer.write_all(&v.to_le_bytes())?;
+                    }
+                }
+                ColumnArray::UInt8 { values, .. } => {
+                    writer.write_all(values)?;
+                }
+                ColumnArray::Float64 { values, .. } => {
+                    for &v in values {
+                        writer.write_all(&v.to_le_bytes())?;
+                    }
+                }
+                ColumnArray::Boolean { values, .. } => {
+                    let bytes: Vec<u8> = values.iter().map(|&b| u8::from(b)).collect();
+                    writer.write_all(&bytes)?;
+                }
+                ColumnArray::Utf8 { values, .. } => {
+                    for s in values {
+                        let b = s.as_bytes();
+                        write_u32(writer, b.len() as u32)?;
+                        writer.write_all(b)?;
+                    }
+                }
+                ColumnArray::Binary { values, .. } => {
+                    for b in values {
+                        write_u32(writer, b.len() as u32)?;
+                        writer.write_all(b)?;
+                    }
+                }
+                // Per row: an entry count, then `class, weight` or `lower, upper,
+                // weight` per entry.
+                ColumnArray::Histogram(column) => {
+                    for row in 0..column.len() {
+                        let entries = column.row(row);
+                        write_u32(writer, entries.len() as u32)?;
+                        for e in entries {
+                            if column.binned {
+                                writer.write_all(&e.lower.to_le_bytes())?;
+                                writer.write_all(&e.upper.to_le_bytes())?;
+                            } else {
+                                writer.write_all(&e.class.to_le_bytes())?;
+                            }
+                            writer.write_all(&e.weight.to_le_bytes())?;
+                        }
+                    }
+                }
+            }
+        }
+        total_rows += batch.num_rows;
+    }
+
+    write_u8(writer, 0)?; // End-of-stream marker
+    writer.flush()?;
+    Ok(total_rows)
+}
+
+/// Read a binary columnar IPC stream from `reader` into `(Arc<ColumnSchema>, Vec<RecordBatch>)`.
+/// [`IpcStreamReader`] reads it one batch at a time instead.
+pub fn read_ipc_stream<R: Read>(reader: &mut R) -> Result<(Arc<ColumnSchema>, Vec<RecordBatch>)> {
+    let stream = IpcStreamReader::new(reader)?;
+    let schema = stream.schema();
+    let batches = stream.collect::<Result<Vec<_>>>()?;
+    Ok((schema, batches))
+}
+
+/// Incremental reader of a binary columnar IPC stream: the header is parsed by
+/// [`Self::new`], then each [`Iterator::next`] decodes one batch, so memory is bounded by
+/// the largest batch rather than the stream.
+pub struct IpcStreamReader<R: Read> {
+    reader: R,
+    schema: Arc<ColumnSchema>,
+    done: bool,
+}
+
+impl<R: Read> IpcStreamReader<R> {
+    /// Read and validate the stream header (magic and schema).
+    pub fn new(mut reader: R) -> Result<Self> {
+        let mut magic = [0u8; 8];
+        reader.read_exact(&mut magic)?;
+        if &magic != IPC_MAGIC {
+            return Err(RasterH3Error::InvalidParameter(
+                "Invalid IPC stream magic header".into(),
+            ));
+        }
+
+        let num_fields = read_u32(&mut reader)? as usize;
+        let mut fields = Vec::with_capacity(num_fields.min(1024));
+        for _ in 0..num_fields {
+            let name_len = read_u32(&mut reader)? as usize;
+            let name_bytes = read_exact_vec(&mut reader, name_len)?;
+            let name = String::from_utf8(name_bytes).map_err(|e| {
+                RasterH3Error::InvalidParameter(format!("Invalid UTF-8 field name in IPC: {e}"))
+            })?;
+            let dt = decode_dtype(read_u8(&mut reader)?)?;
+            let nullable = read_u8(&mut reader)? != 0;
+            fields.push(ColumnField::new(name, dt, nullable));
+        }
+        Ok(Self {
+            reader,
+            schema: Arc::new(ColumnSchema::new(fields)),
+            done: false,
+        })
+    }
+
+    /// The stream's schema.
+    pub fn schema(&self) -> Arc<ColumnSchema> {
+        Arc::clone(&self.schema)
+    }
+
+    fn read_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let reader = &mut self.reader;
+        let schema = &self.schema;
+        let marker = read_u8(reader)?;
+        if marker == 0 {
+            return Ok(None);
+        }
+        if marker != 1 {
+            return Err(RasterH3Error::InvalidParameter(format!(
+                "Invalid IPC batch marker: {}",
+                marker
+            )));
+        }
+        let num_rows = read_u32(reader)? as usize;
+        let mut columns = Vec::with_capacity(schema.fields.len());
+
+        for field in &schema.fields {
+            let validity = read_validity(reader)?;
+            let col = match field.data_type {
+                ArrowDataType::UInt64 => {
+                    let mut values = Vec::with_capacity(num_rows.min(MAX_ROW_PREALLOC));
+                    for _ in 0..num_rows {
+                        values.push(read_u64(reader)?);
+                    }
+                    ColumnArray::UInt64 { values, validity }
+                }
+                ArrowDataType::Int64 => {
+                    let mut values = Vec::with_capacity(num_rows.min(MAX_ROW_PREALLOC));
+                    for _ in 0..num_rows {
+                        let mut b = [0u8; 8];
+                        reader.read_exact(&mut b)?;
+                        values.push(i64::from_le_bytes(b));
+                    }
+                    ColumnArray::Int64 { values, validity }
+                }
+                ArrowDataType::UInt8 => {
+                    let values = read_exact_vec(reader, num_rows)?;
+                    ColumnArray::UInt8 { values, validity }
+                }
+                ArrowDataType::Float64 => {
+                    let mut values = Vec::with_capacity(num_rows.min(MAX_ROW_PREALLOC));
+                    for _ in 0..num_rows {
+                        let mut b = [0u8; 8];
+                        reader.read_exact(&mut b)?;
+                        values.push(f64::from_le_bytes(b));
+                    }
+                    ColumnArray::Float64 { values, validity }
+                }
+                ArrowDataType::Boolean => {
+                    let bytes = read_exact_vec(reader, num_rows)?;
+                    let values = bytes.into_iter().map(|b| b != 0).collect();
+                    ColumnArray::Boolean { values, validity }
+                }
+                ArrowDataType::Utf8 => {
+                    let mut values = Vec::with_capacity(num_rows.min(MAX_ROW_PREALLOC));
+                    for _ in 0..num_rows {
+                        let slen = read_u32(reader)? as usize;
+                        let sb = read_exact_vec(reader, slen)?;
+                        values.push(String::from_utf8_lossy(&sb).into_owned());
+                    }
+                    ColumnArray::Utf8 { values, validity }
+                }
+                ArrowDataType::Binary => {
+                    let mut values = Vec::with_capacity(num_rows.min(MAX_ROW_PREALLOC));
+                    for _ in 0..num_rows {
+                        let blen = read_u32(reader)? as usize;
+                        let bb = read_exact_vec(reader, blen)?;
+                        values.push(bb);
+                    }
+                    ColumnArray::Binary { values, validity }
+                }
+                ArrowDataType::ValueHistogram | ArrowDataType::BinHistogram => {
+                    let binned = field.data_type == ArrowDataType::BinHistogram;
+                    let mut column = super::HistogramColumn::new(binned);
+                    let mut entries = Vec::new();
+                    for _ in 0..num_rows {
+                        entries.clear();
+                        for i in 0..read_u32(reader)? {
+                            let mut entry = crate::histogram::HistogramEntry {
+                                class: i64::from(i),
+                                lower: 0.0,
+                                upper: 0.0,
+                                weight: 0.0,
+                            };
+                            if binned {
+                                entry.lower = f64::from_bits(read_u64(reader)?);
+                                entry.upper = f64::from_bits(read_u64(reader)?);
+                            } else {
+                                entry.class = read_u64(reader)? as i64;
+                            }
+                            entry.weight = f64::from_bits(read_u64(reader)?);
+                            entries.push(entry);
+                        }
+                        column.push(&entries);
+                    }
+                    ColumnArray::Histogram(column)
+                }
+            };
+            columns.push(col);
+        }
+        Ok(Some(RecordBatch::try_new(Arc::clone(schema), columns)?))
+    }
+}
+
+impl<R: Read> Iterator for IpcStreamReader<R> {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let batch = self.read_batch();
+        if !matches!(batch, Ok(Some(_))) {
+            self.done = true;
+        }
+        batch.transpose()
+    }
+}
+
+/// Write a stream of [`RecordBatch`]es as newline-delimited JSON (`JSONEachRow` / NDJSON),
+/// ideal for ClickHouse executable table functions (`FORMAT JSONEachRow`) and CLI piping.
+pub fn write_jsonl_stream<W, I>(writer: &mut W, batches: I) -> Result<usize>
+where
+    W: Write,
+    I: IntoIterator<Item = Result<RecordBatch>>,
+{
+    let mut total_rows = 0usize;
+    for batch_res in batches {
+        let batch = batch_res?;
+        for row in 0..batch.num_rows {
+            let mut map = serde_json::Map::with_capacity(batch.columns.len());
+            for (col_idx, field) in batch.schema.fields.iter().enumerate() {
+                let col = &batch.columns[col_idx];
+                if let Some(val) = col.validity() {
+                    if !val[row] {
+                        map.insert(field.name.clone(), serde_json::Value::Null);
+                        continue;
+                    }
+                }
+                let json_val = match col {
+                    ColumnArray::UInt64 { values, .. } => serde_json::json!(values[row]),
+                    ColumnArray::Int64 { values, .. } => serde_json::json!(values[row]),
+                    ColumnArray::UInt8 { values, .. } => serde_json::json!(values[row]),
+                    ColumnArray::Float64 { values, .. } => {
+                        let v = values[row];
+                        if v.is_finite() {
+                            serde_json::json!(v)
+                        } else {
+                            serde_json::Value::Null
+                        }
+                    }
+                    ColumnArray::Boolean { values, .. } => serde_json::json!(values[row]),
+                    ColumnArray::Utf8 { values, .. } => serde_json::json!(values[row]),
+                    ColumnArray::Binary { values, .. } => {
+                        let mut hex = String::with_capacity(values[row].len() * 2);
+                        for &b in &values[row] {
+                            use std::fmt::Write as _;
+                            let _ = write!(&mut hex, "{:02x}", b);
+                        }
+                        serde_json::Value::String(hex)
+                    }
+                    ColumnArray::Histogram(column) => serde_json::from_str(&column.row_json(row))
+                        .unwrap_or(serde_json::Value::Null),
+                };
+                map.insert(field.name.clone(), json_val);
+            }
+            let line = serde_json::to_string(&serde_json::Value::Object(map))
+                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+            writer.write_all(line.as_bytes())?;
+            writer.write_all(b"\n")?;
+            total_rows += 1;
+        }
+    }
+    writer.flush()?;
+    Ok(total_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipc_stream_and_jsonl_roundtrip() {
+        let schema = Arc::new(ColumnSchema::new(vec![
+            ColumnField::new("h3_index", ArrowDataType::UInt64, false),
+            ColumnField::new("h3_hex", ArrowDataType::Utf8, false),
+            ColumnField::new("mean", ArrowDataType::Float64, false),
+            ColumnField::new("stddev", ArrowDataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                ColumnArray::UInt64 {
+                    values: vec![0x8828308281fffff, 0x8828308283fffff],
+                    validity: None,
+                },
+                ColumnArray::Utf8 {
+                    values: vec!["8828308281fffff".into(), "8828308283fffff".into()],
+                    validity: None,
+                },
+                ColumnArray::Float64 {
+                    values: vec![10.5, 20.25],
+                    validity: None,
+                },
+                ColumnArray::Float64 {
+                    values: vec![0.0, 1.5],
+                    validity: Some(vec![false, true]),
+                },
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        let rows = write_ipc_stream(&mut buf, &schema, vec![Ok(batch.clone())]).expect("write ipc");
+        assert_eq!(rows, 2);
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let (out_schema, out_batches) = read_ipc_stream(&mut cursor).expect("read ipc");
+        assert_eq!(*out_schema, *schema);
+        assert_eq!(out_batches, vec![batch.clone()]);
+
+        let mut jsonl_buf = Vec::new();
+        let jrows = write_jsonl_stream(&mut jsonl_buf, vec![Ok(batch)]).expect("write jsonl");
+        assert_eq!(jrows, 2);
+        let jsonl_str = String::from_utf8(jsonl_buf).unwrap();
+        let lines: Vec<&str> = jsonl_str.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"8828308281fffff\""));
+        assert!(lines[0].contains("\"stddev\":null"));
+    }
+
+    #[test]
+    fn test_ipc_stream_reader_yields_batches_one_at_a_time() {
+        let schema = Arc::new(ColumnSchema::new(vec![ColumnField::new(
+            "h3_index",
+            ArrowDataType::UInt64,
+            false,
+        )]));
+        let batch = |v: Vec<u64>| {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![ColumnArray::UInt64 {
+                    values: v,
+                    validity: None,
+                }],
+            )
+            .unwrap()
+        };
+        let batches = vec![batch(vec![1, 2]), batch(vec![3])];
+        let mut buf = Vec::new();
+        write_ipc_stream(&mut buf, &schema, batches.clone().into_iter().map(Ok)).unwrap();
+
+        let mut reader = IpcStreamReader::new(buf.as_slice()).unwrap();
+        assert_eq!(*reader.schema(), *schema);
+        assert_eq!(reader.next().unwrap().unwrap(), batches[0]);
+        assert_eq!(reader.next().unwrap().unwrap(), batches[1]);
+        assert!(reader.next().is_none());
+        assert!(reader.next().is_none());
+
+        // A truncated stream yields its complete batches, then one error.
+        let truncated = &buf[..buf.len() - 3];
+        let mut reader = IpcStreamReader::new(truncated).unwrap();
+        assert_eq!(reader.next().unwrap().unwrap(), batches[0]);
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+        assert!(IpcStreamReader::new(&b"RH3IPC00"[..]).is_err());
+    }
+
+    /// Header bytes for a one-field stream; `dtype`/`name` pick the column.
+    fn ipc_header(dtype: u8, name: &str) -> Vec<u8> {
+        let mut buf = IPC_MAGIC.to_vec();
+        buf.extend_from_slice(&1u32.to_le_bytes()); // num_fields
+        buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.push(dtype);
+        buf.push(0); // not nullable
+        buf
+    }
+
+    /// A declared string length of `u32::MAX` used to demand a 4 GiB
+    /// allocation before any data was read; the reader must instead fail on
+    /// the real (truncated) payload.
+    #[test]
+    fn test_ipc_inflated_string_length_fails_without_huge_alloc() {
+        let mut buf = ipc_header(6, "s"); // Utf8
+        buf.push(1); // batch marker
+        buf.extend_from_slice(&1u32.to_le_bytes()); // num_rows
+        buf.push(0); // no validity
+        buf.extend_from_slice(&u32::MAX.to_le_bytes()); // slen
+        buf.extend_from_slice(b"tiny"); // far fewer than u32::MAX payload bytes
+
+        let mut reader = IpcStreamReader::new(buf.as_slice()).unwrap();
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+    }
+
+    /// A declared row count of `u32::MAX` used to pre-allocate a ~34 GiB value
+    /// vector; the reader must instead fail on the first missing row.
+    #[test]
+    fn test_ipc_inflated_row_count_fails_without_huge_alloc() {
+        let mut buf = ipc_header(1, "v"); // UInt64
+        buf.push(1); // batch marker
+        buf.extend_from_slice(&u32::MAX.to_le_bytes()); // num_rows
+        buf.push(0); // no validity
+        buf.extend_from_slice(&42u64.to_le_bytes()); // one real row, not billions
+
+        let mut reader = IpcStreamReader::new(buf.as_slice()).unwrap();
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+    }
+
+    /// An inflated field-name length must fail on truncation, not allocate
+    /// gigabytes before noticing the stream ended.
+    #[test]
+    fn test_ipc_inflated_field_name_fails_without_huge_alloc() {
+        let mut buf = IPC_MAGIC.to_vec();
+        buf.extend_from_slice(&1u32.to_le_bytes()); // num_fields
+        buf.extend_from_slice(&u32::MAX.to_le_bytes()); // name_len
+        buf.extend_from_slice(b"s");
+
+        assert!(IpcStreamReader::new(buf.as_slice()).is_err());
+    }
+}

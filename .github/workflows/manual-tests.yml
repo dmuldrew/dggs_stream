@@ -105,7 +105,7 @@ jobs:
       PROFILE: ${{ inputs.profile }}
       TEST_ARGS: ${{ inputs.test_args }}
       # The pg fmgr suites need a target major; they run against in-process stand-ins.
-      RASTER_H3_PG_MAJOR: '16'
+      DGGS_STREAM_PG_MAJOR: '16'
       # SHA-256 of DuckDB v1.2.0's libduckdb-windows-amd64.zip
       LIBDUCKDB_WINDOWS_SHA256: 6327f8443ff8744a6753819e1ca874a82f1944a603d6dbc3bc564dada39b6337
     steps:
@@ -149,12 +149,12 @@ jobs:
         run: |
           case "$ENGINE" in
             all)        pkgs=(--workspace) ;;
-            core)       pkgs=(-p raster-h3-core) ;;
-            duckdb)     pkgs=(-p raster-h3-duckdb) ;;
-            cli)        pkgs=(-p raster-h3-cli) ;;
-            python)     pkgs=(-p raster-h3-python) ;;
-            pg)         pkgs=(-p raster-h3-pg) ;;
-            root)       pkgs=(-p raster_h3) ;;
+            core)       pkgs=(-p dggs-stream-core) ;;
+            duckdb)     pkgs=(-p dggs-stream-duckdb) ;;
+            cli)        pkgs=(-p dggs-stream-cli) ;;
+            python)     pkgs=(-p dggs-stream-python) ;;
+            pg)         pkgs=(-p dggs-stream-pg) ;;
+            root)       pkgs=(-p dggs_stream) ;;
             *) echo "unknown engine '$ENGINE'"; exit 1 ;;
           esac
           profile=()
@@ -176,7 +176,7 @@ jobs:
           # shellcheck disable=SC2206
           extra=($TEST_ARGS)
           set -x
-          cargo test --locked "${profile[@]}" --no-fail-fast -p raster-h3-pg --features pg-extension -- "${extra[@]}"
+          cargo test --locked "${profile[@]}" --no-fail-fast -p dggs-stream-pg --features pg-extension -- "${extra[@]}"
 
       - name: Set up Python
         if: inputs.engine == 'python-polars'
@@ -196,8 +196,8 @@ jobs:
           python -m pip install pytest h3 "${specs[@]}"
           python -m pip list | grep -iE '^(polars|pyarrow|numpy|h3|pytest) '
 
-      # pytest loads the in-tree package from crates/raster-h3-python/python with the
-      # freshly built cdylib (RASTER_H3_PYTHON_LIB), not an installed wheel.
+      # pytest loads the in-tree package from crates/dggs-stream-python/python with the
+      # freshly built cdylib (DGGS_STREAM_PYTHON_LIB), not an installed wheel.
       - name: Run pytest against Polars and PyArrow
         if: inputs.engine == 'python-polars'
         shell: bash
@@ -205,14 +205,14 @@ jobs:
           profile=()
           dir=debug
           if [ "$PROFILE" = release ]; then profile=(--release); dir=release; fi
-          cargo build --locked "${profile[@]}" -p raster-h3-python --lib
+          cargo build --locked "${profile[@]}" -p dggs-stream-python --lib
           case "$RUNNER_OS" in
-            macOS)   lib=libraster_h3_python.dylib ;;
-            Windows) lib=raster_h3_python.dll ;;
-            *)       lib=libraster_h3_python.so ;;
+            macOS)   lib=libdggs_stream_python.dylib ;;
+            Windows) lib=dggs_stream_python.dll ;;
+            *)       lib=libdggs_stream_python.so ;;
           esac
-          export RASTER_H3_PYTHON_LIB="$PWD/target/$dir/$lib"
+          export DGGS_STREAM_PYTHON_LIB="$PWD/target/$dir/$lib"
           # shellcheck disable=SC2206
           extra=($TEST_ARGS)
           set -x
-          python -m pytest crates/raster-h3-python/tests/pytest -ra -p no:cacheprovider "${extra[@]}"
+          python -m pytest crates/dggs-stream-python/tests/pytest -ra -p no:cacheprovider "${extra[@]}"

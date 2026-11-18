@@ -4,10 +4,10 @@
 //!
 //! Run with: `cargo run --example test_hawaii_files`
 
-use raster_h3::aggregator::multi_horizon::{
+use dggs_stream::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 use std::path::Path;
 use std::time::Instant;
 
@@ -16,7 +16,7 @@ fn main() {
         "========================================================================================="
     );
     println!(
-        "                 raster_h3 Comprehensive Real-World Test: Hawaii Datasets                "
+        "                 dggs_stream Comprehensive Real-World Test: Hawaii Datasets                "
     );
     println!(
         "========================================================================================="
@@ -126,7 +126,7 @@ fn main() {
         .unwrap()
         .to_cell(h3o::Resolution::Eight);
     let ll: h3o::LatLng = target_cell.into();
-    let r = raster_h3::pmtiles::tiler::max_hex_radius_deg(target_cell.resolution().into());
+    let r = dggs_stream::pmtiles::tiler::max_hex_radius_deg(target_cell.resolution().into());
     let mut config_cfl_cell = MultiResolutionConfig::new(vec![8]);
     config_cfl_cell.bbox = Some([ll.lng() - r, ll.lat() - r, ll.lng() + r, ll.lat() + r]);
 

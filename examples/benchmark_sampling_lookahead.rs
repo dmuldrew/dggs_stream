@@ -4,14 +4,14 @@
 //!
 //! Run with: `cargo run --example benchmark_sampling_lookahead`
 
-use raster_h3::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
-use raster_h3::aggregator::sampling::SamplingPattern;
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream::aggregator::sampling::SamplingPattern;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 use std::time::Instant;
 
 fn main() {
     println!("=========================================================================");
-    println!("     raster_h3 Benchmarking: Super-Sampling Lookahead Acceleration      ");
+    println!("     dggs_stream Benchmarking: Super-Sampling Lookahead Acceleration      ");
     println!("=========================================================================");
 
     let cfl_path = "data/CFL_HI.tif";
@@ -123,7 +123,7 @@ fn main() {
 
             let t0 = Instant::now();
             let mut streamer =
-                raster_h3::aggregator::multi_horizon::MultiCategoricalHorizonStreamer::new(
+                dggs_stream::aggregator::multi_horizon::MultiCategoricalHorizonStreamer::new(
                     reader, &cfg,
                 )
                 .unwrap();

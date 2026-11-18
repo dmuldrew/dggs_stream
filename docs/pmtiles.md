@@ -245,8 +245,8 @@ SELECT * FROM h3_raster_to_pmtiles(
 Without DuckDB (default `center` sampling):
 
 ```bash
-raster-h3-cli pmtiles nlcd_landcover_2021.tif -c -r 5,6,7,8 -o landcover.pmtiles
-# or: python -c "import raster_h3; raster_h3.raster_to_pmtiles('nlcd_landcover_2021.tif', 'landcover.pmtiles', [5, 6, 7, 8], categorical=True)"
+dggs-stream-cli pmtiles nlcd_landcover_2021.tif -c -r 5,6,7,8 -o landcover.pmtiles
+# or: python -c "import dggs_stream; dggs_stream.raster_to_pmtiles('nlcd_landcover_2021.tif', 'landcover.pmtiles', [5, 6, 7, 8], categorical=True)"
 ```
 
 ### Step 2 — Upload to Cloud Storage

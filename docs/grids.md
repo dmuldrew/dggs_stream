@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-`raster_h3` indexes raster pixels onto four discrete global grids. They all go through the
+`dggs_stream` indexes raster pixels onto four discrete global grids. They all go through the
 same pipeline, but their cells, resolutions and cell ids differ. Every engine supports
 every grid.
 
@@ -25,12 +25,12 @@ each one. To ask for the same cell size on any grid, use [`auto`](#automatic-res
 | Python / Polars | `grid=` on `scan_raster_h3` (alias `scan_raster`), `read_raster`, `merge_partials`, the exporters and the scalar helpers (`lonlat_to_cell`, `cell_to_parent`, `polygon_to_cells`, ...); `GRIDS` maps each grid to its finest resolution |
 | DataFusion / SedonaDB | `{grid}_raster_{continuous,categorical}_aggregate`, or a grid-name argument (`'s2'`) on any table function; `with_grid(GridKind::S2)` on the providers; per-grid scalar UDFs under DuckDB's names |
 | CLI | `--grid h3\|a5\|s2\|healpix`; `-r` is checked against that grid's range |
-| Rust (`raster-h3-core`) | `MultiResolutionConfig::with_grid(GridKind::S2)`; `scalar_ops::grid_*` helpers |
+| Rust (`dggs-stream-core`) | `MultiResolutionConfig::with_grid(GridKind::S2)`; `scalar_ops::grid_*` helpers |
 
 The output always names its cell columns after the grid: `h3_index` / `h3_hex`, `a5_index` /
 `a5_hex`, `s2_index` / `s2_hex`, `healpix_index` / `healpix_hex`.
 
-Apache Spark's `raster_h3.spark` data source still hard-codes `h3_index`.
+Apache Spark's `dggs_stream.spark` data source still hard-codes `h3_index`.
 
 ## Cell ids and their types
 
@@ -48,7 +48,7 @@ that form back.
 ## `GridSpec`: one table of grid properties
 
 Each grid's fixed properties live in one place, `GridKind::spec()` in
-[`grid.rs`](../crates/raster-h3-core/src/grid.rs). Pipeline stages and engine adapters read
+[`grid.rs`](../crates/dggs-stream-core/src/grid.rs). Pipeline stages and engine adapters read
 the spec instead of matching on the grid:
 
 | Field | Meaning | H3 | A5 | S2 | HEALPix |
@@ -87,7 +87,7 @@ targets a size rather than an index, `auto` gives comparable cells on every grid
 | Python | `resolutions="auto"`; `auto_resolution(path, grid=...)` returns the choice |
 | DataFusion / SedonaDB | an `'auto'` resolution argument; `ResolutionSpec` in Rust |
 | PostgreSQL | `{grid}_auto_resolution(path [, offset [, crs]])` |
-| Rust | `raster_h3_core::resolution` (`ResolutionSpec::parse`, `area_matched_resolution`) |
+| Rust | `dggs_stream_core::resolution` (`ResolutionSpec::parse`, `area_matched_resolution`) |
 
 ## Poles and the antimeridian
 

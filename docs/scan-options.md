@@ -40,7 +40,7 @@ How they run:
   compaction, spectral formulas or sub-pixel sampling.
 - **PostgreSQL.** It does not expose transfer modes yet.
 
-The code is in [`transfer/`](../crates/raster-h3-core/src/transfer): `window.rs` reads bands,
+The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands,
 `interp.rs` holds the interpolation kernels, `clip.rs` does the exact polygon-pixel overlap,
 and `stream.rs` holds the band scheduler and the open-cell bookkeeping.
 
@@ -75,7 +75,7 @@ a spec it stays JSON text of class fractions.
 | DuckDB | `VARCHAR` holding the histogram as JSON: `{"class": weight}` or `[[lower, upper, weight], ...]` |
 
 Histograms are not available in the Parquet and PMTiles exports, in partitioned scans, or in
-PostgreSQL. The spec lives in [`histogram.rs`](../crates/raster-h3-core/src/histogram.rs). The
+PostgreSQL. The spec lives in [`histogram.rs`](../crates/dggs-stream-core/src/histogram.rs). The
 nested column type is `ArrowDataType::ValueHistogram` / `BinHistogram` with
 `ColumnArray::Histogram`, carried through the Arrow C Data Interface, the `RH3IPC01` stream and
 JSON Lines.
@@ -106,7 +106,7 @@ Details:
   to the boundary cells it builds. Partitions of scans with different settings don't merge.
 
 The policy is `OutputPolicy` in
-[`output_policy.rs`](../crates/raster-h3-core/src/aggregator/output_policy.rs), set through
+[`output_policy.rs`](../crates/dggs-stream-core/src/aggregator/output_policy.rs), set through
 `MultiResolutionConfig`.
 
 ## Runtime profile
@@ -131,7 +131,7 @@ a profile takes no clock readings for it.
 | DataFusion / SedonaDB | `with_profile(Arc<RunProfile>)` on the table providers |
 | Rust | `MultiResolutionConfig::profile`; `ProfileReport::to_json()` |
 
-The code is in [`run_profile.rs`](../crates/raster-h3-core/src/run_profile.rs).
+The code is in [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs).
 
 ## Option names by engine
 

@@ -1,0 +1,551 @@
+//! DuckDB Table Function for Direct GeoTIFF-to-PMTiles v3 Generation
+//!
+//! Exposes:
+//!   SELECT * FROM h3_raster_to_pmtiles('california_dem.tif', 'california_elevation.pmtiles', resolution := 8);
+
+use std::ffi::c_void;
+use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+use crate::aggregator::multi_horizon::MultiResolutionConfig;
+use crate::aggregator::sampling::SamplingPattern;
+use crate::ffi::duckdb_c::*;
+use crate::ffi::{ffi_bind_guard, ffi_init_guard, ffi_scan_guard, to_c_string};
+use crate::functions::bind_utils::lifecycle::set_table_function_init_data;
+use crate::functions::bind_utils::{
+    add_named_parameter, add_positional_parameter, delete_boxed,
+    register_common_raster_named_parameters, BindHelper, ChunkWriter, ExecutionParams,
+};
+use crate::grid::GridKind;
+use crate::pmtiles::tiler::{grid_res_to_zoom, H3PmtilesTiler};
+use crate::raster::mosaic::OverlapRule;
+
+/// Bind data parsed during SQL query planning
+pub struct PmtilesBindData {
+    pub file_path: String,
+    pub output_pmtiles: String,
+    pub grid: GridKind,
+    pub resolutions: Vec<u8>,
+    pub band: usize,
+    pub source_crs: Option<String>,
+    pub custom_nodata: Option<f64>,
+    pub scale_offset: bool,
+    pub sampling: SamplingPattern,
+    pub overlap_rule: OverlapRule,
+    pub bbox: Option<[f64; 4]>,
+    pub is_categorical: bool,
+    pub properties: Option<String>,
+    pub execution: ExecutionParams,
+    /// Routes raster reads through the DuckDB file system (v1.5.6 build).
+    pub remote_source_factory: Option<dggs_stream_core::raster::http_range::RemoteSourceFactory>,
+}
+
+/// Global execution state for the single-row generator
+pub struct PmtilesGlobalData {
+    pub executed: AtomicBool,
+}
+
+/// Declare output columns matching the PMTiles summary schema
+fn add_pmtiles_summary_columns(bind: &BindHelper) {
+    bind.add_result_column("total_hexagons", DuckDBType::BigInt);
+    bind.add_result_column("pmtiles_size_bytes", DuckDBType::BigInt);
+    bind.add_result_column("min_zoom", DuckDBType::BigInt);
+    bind.add_result_column("max_zoom", DuckDBType::BigInt);
+    bind.add_result_column("elapsed_ms", DuckDBType::Double);
+    bind.add_result_column("output_path", DuckDBType::Varchar);
+    bind.add_result_column("status", DuckDBType::Varchar);
+    // Valid samples dropped by failed coordinate transforms (0 for Parquet input).
+    bind.add_result_column("transform_failures", DuckDBType::BigInt);
+    // SAFETY: a `BindHelper` always wraps the live bind handle of the current
+    // bind callback (its construction contract).
+    unsafe { duckdb_bind_set_cardinality(bind.info(), 1, true) };
+}
+
+/// Bind callback: parses input arguments and defines output table schema
+///
+/// # Safety
+/// `info` must be the valid bind info DuckDB passes to this callback.
+pub unsafe extern "C" fn pmtiles_bind(info: duckdb_bind_info) {
+    // SAFETY: forwarded with `GridKind::H3` as default.
+    unsafe { pmtiles_bind_for::<{ GridKind::H3 as u8 }>(info) }
+}
+
+/// Bind callback for `a5_raster_to_pmtiles` (defaulting `grid` to `GridKind::A5`).
+///
+/// # Safety
+/// `info` must be the valid bind info DuckDB passes to this callback.
+pub unsafe extern "C" fn a5_pmtiles_bind(info: duckdb_bind_info) {
+    // SAFETY: forwarded with `GridKind::A5` as default.
+    unsafe { pmtiles_bind_for::<{ GridKind::A5 as u8 }>(info) }
+}
+
+/// Bind callback for `<grid>_raster_to_pmtiles`, defaulting `grid` to the grid whose
+/// discriminant is `GRID`.
+///
+/// # Safety
+/// `info` must be the valid bind info DuckDB passes to this callback.
+pub unsafe extern "C" fn grid_pmtiles_bind<const GRID: u8>(info: duckdb_bind_info) {
+    // SAFETY: forwarded with the same contract.
+    unsafe { pmtiles_bind_for::<GRID>(info) }
+}
+
+unsafe fn pmtiles_bind_for<const GRID: u8>(info: duckdb_bind_info) {
+    // SAFETY: DuckDB passes this bind callback a live `info` (contract above), and the
+    // `BindHelper` wrapping it is only used inside this callback. Logical types we create
+    // are destroyed once after DuckDB copies them. The boxed `PmtilesBindData` is handed to
+    // DuckDB together with `delete_boxed::<PmtilesBindData>`, its matching destructor,
+    // which DuckDB calls exactly once.
+    unsafe {
+        ffi_bind_guard(info, || {
+            let bind = BindHelper::new(info);
+            let default_grid = GridKind::from_index(GRID);
+            let func_name = format!("{default_grid}_raster_to_pmtiles");
+
+            if bind.parameter_count() < 2 {
+                bind.set_error(&format!(
+                    "{func_name} requires at least 2 arguments: file_path and output_pmtiles",
+                ));
+                return;
+            }
+
+            // 0: file_path (VARCHAR)
+            let file_path = match bind.get_string_param(0) {
+                Some(s) => s,
+                None => {
+                    bind.set_error("Invalid file_path parameter");
+                    return;
+                }
+            };
+
+            // 1: output_pmtiles (VARCHAR)
+            let output_pmtiles = match bind.get_string_param(1) {
+                Some(s) => s,
+                None => {
+                    bind.set_error("Invalid output_pmtiles parameter");
+                    return;
+                }
+            };
+
+            let Some(grid) = bind.parse_grid(default_grid) else {
+                return;
+            };
+            let band = bind.get_named_int("band").unwrap_or(1).max(1) as usize;
+            let source_crs = bind.parse_source_crs();
+            let Some(resolutions) =
+                bind.resolve_resolutions_for(grid, 8, None, &file_path, source_crs.as_deref())
+            else {
+                return;
+            };
+            let custom_nodata = bind.get_named_double("nodata");
+            let scale_offset = bind.parse_scale_offset();
+            let Some(sampling) = bind.parse_sampling() else {
+                return;
+            };
+            let overlap_rule = bind.parse_overlap_rule();
+            let bbox = bind.parse_bbox();
+            let is_categorical = bind.get_named_bool("categorical").unwrap_or(false);
+            let properties = bind.get_named_string("properties");
+            let Some(execution) = bind.parse_execution() else {
+                return;
+            };
+            // SAFETY: `info` is the live bind handle (callback contract).
+            let remote_source_factory =
+                crate::functions::config::raster_source_factory_for_bind(info);
+
+            add_pmtiles_summary_columns(&bind);
+
+            let bind_data = Box::new(PmtilesBindData {
+                file_path,
+                output_pmtiles,
+                grid,
+                resolutions,
+                band,
+                source_crs,
+                custom_nodata,
+                scale_offset,
+                sampling,
+                overlap_rule,
+                bbox,
+                is_categorical,
+                properties,
+                execution,
+                remote_source_factory,
+            });
+            duckdb_bind_set_bind_data(
+                info,
+                Box::into_raw(bind_data) as *mut c_void,
+                Some(delete_boxed::<PmtilesBindData>),
+            );
+        });
+    }
+}
+
+/// Init callback
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passes to this callback.
+pub unsafe extern "C" fn pmtiles_init(info: duckdb_init_info) {
+    // SAFETY: DuckDB passes this init callback a live `info`; the `PmtilesGlobalData`
+    // handed over is `Send + Sync` (only an atomic flag).
+    unsafe {
+        ffi_init_guard(info, || {
+            set_table_function_init_data(
+                info,
+                PmtilesGlobalData {
+                    executed: AtomicBool::new(false),
+                },
+            );
+        });
+    }
+}
+
+/// Scan callback: runs GeoTIFF-to-PMTiles conversion and streams the single summary row
+///
+/// # Safety
+/// `info` and `output` must be the handles DuckDB passes to this scan
+/// callback, with `output` laid out as the columns declared at bind time.
+pub unsafe extern "C" fn pmtiles_scan(info: duckdb_function_info, output: duckdb_data_chunk) {
+    // SAFETY: DuckDB passes this scan callback live `info`/`output` handles. The bind/init
+    // pointers are the `Box<PmtilesBindData>`/`Box<PmtilesGlobalData>` installed earlier
+    // (null-checked), alive until the query ends and only borrowed immutably;
+    // `PmtilesGlobalData` synchronizes its own mutable state. `output` has the summary
+    // columns declared at bind, and the single row's values match their declared types
+    // (BIGINT `i64`, DOUBLE `f64`, VARCHAR strings).
+    unsafe {
+        ffi_scan_guard(info, output, || {
+            let bind_data_ptr = duckdb_function_get_bind_data(info) as *const PmtilesBindData;
+            let global_data_ptr = duckdb_function_get_init_data(info) as *const PmtilesGlobalData;
+            if bind_data_ptr.is_null() || global_data_ptr.is_null() {
+                duckdb_data_chunk_set_size(output, 0);
+                return;
+            }
+            let bind_data = &*bind_data_ptr;
+            let global_data = &*global_data_ptr;
+
+            if global_data.executed.swap(true, Ordering::SeqCst) {
+                duckdb_data_chunk_set_size(output, 0);
+                return;
+            }
+
+            let mut config =
+                MultiResolutionConfig::new(bind_data.resolutions.clone()).with_grid(bind_data.grid);
+            config.band = bind_data.band;
+            config.custom_crs = bind_data.source_crs.clone();
+            config.custom_nodata = bind_data.custom_nodata;
+            config.apply_scale_offset = bind_data.scale_offset;
+            config.sampling = bind_data.sampling.clone();
+            config.overlap_rule = bind_data.overlap_rule;
+            config.bbox = bind_data.bbox;
+            config.properties = bind_data.properties.clone();
+            bind_data.execution.apply(&mut config);
+            config.remote_source_factory = bind_data.remote_source_factory.clone();
+            let failures = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            config.transform_failure_counter = Some(std::sync::Arc::clone(&failures));
+
+            let start = Instant::now();
+            let result = if bind_data.is_categorical {
+                H3PmtilesTiler::process_categorical_geotiff_to_pmtiles(
+                    &bind_data.file_path,
+                    &bind_data.output_pmtiles,
+                    config,
+                )
+            } else {
+                H3PmtilesTiler::process_geotiff_to_pmtiles(
+                    &bind_data.file_path,
+                    &bind_data.output_pmtiles,
+                    config,
+                )
+            };
+            let elapsed = start.elapsed();
+
+            let (total_hexagons, size_bytes, status) = match result {
+                Ok(count) => {
+                    let sz = File::open(&bind_data.output_pmtiles)
+                        .and_then(|f| f.metadata())
+                        .map(|m| m.len() as i64)
+                        .unwrap_or(0);
+                    (count as i64, sz, "SUCCESS".to_string())
+                }
+                Err(e) => (0i64, 0i64, format!("ERROR: {}", e)),
+            };
+
+            let mut min_z = 255u8;
+            let mut max_z = 0u8;
+            for &r in &bind_data.resolutions {
+                let z = grid_res_to_zoom(bind_data.grid, r);
+                if z < min_z {
+                    min_z = z;
+                }
+                if z > max_z {
+                    max_z = z;
+                }
+            }
+
+            // Populate the 1 output summary row
+            let writer = ChunkWriter::new(output);
+            writer.set_int64(0, 0, total_hexagons);
+            writer.set_int64(1, 0, size_bytes);
+            writer.set_int64(2, 0, min_z as i64);
+            writer.set_int64(3, 0, max_z as i64);
+            writer.set_double(4, 0, elapsed.as_secs_f64() * 1000.0);
+            writer.set_string(5, 0, &bind_data.output_pmtiles);
+            writer.set_string(6, 0, &status);
+            writer.set_int64(7, 0, failures.load(Ordering::Relaxed) as i64);
+            writer.set_size(1);
+        });
+    }
+}
+
+/// Bind data parsed during SQL query planning for Parquet to PMTiles
+pub struct ParquetPmtilesBindData {
+    pub parquet_path: String,
+    pub output_pmtiles: String,
+    pub h3_column: Option<String>,
+}
+
+/// Global execution state for the single-row generator
+pub struct ParquetPmtilesGlobalData {
+    pub executed: AtomicBool,
+}
+
+/// Bind callback: parses input arguments for `h3_parquet_to_pmtiles`
+///
+/// # Safety
+/// `info` must be the valid bind info DuckDB passes to this callback.
+pub unsafe extern "C" fn parquet_pmtiles_bind(info: duckdb_bind_info) {
+    // SAFETY: DuckDB passes this bind callback a live `info` (contract above), and the
+    // `BindHelper` wrapping it is only used inside this callback. Logical types we create
+    // are destroyed once after DuckDB copies them. The boxed `ParquetPmtilesBindData` is
+    // handed to DuckDB together with `delete_boxed::<ParquetPmtilesBindData>`, its matching
+    // destructor, which DuckDB calls exactly once.
+    unsafe {
+        ffi_bind_guard(info, || {
+            let bind = BindHelper::new(info);
+
+            if bind.parameter_count() < 2 {
+                bind.set_error(
+                    "h3_parquet_to_pmtiles requires at least 2 arguments: parquet_path and output_pmtiles",
+                );
+                return;
+            }
+
+            // 0: parquet_path (VARCHAR)
+            let parquet_path = match bind.get_string_param(0) {
+                Some(s) => s,
+                None => {
+                    bind.set_error("Invalid parquet_path parameter");
+                    return;
+                }
+            };
+
+            // 1: output_pmtiles (VARCHAR)
+            let output_pmtiles = match bind.get_string_param(1) {
+                Some(s) => s,
+                None => {
+                    bind.set_error("Invalid output_pmtiles parameter");
+                    return;
+                }
+            };
+
+            let h3_column = bind
+                .get_named_string("h3_column")
+                .or_else(|| bind.get_named_string("h3_col"));
+
+            add_pmtiles_summary_columns(&bind);
+
+            let bind_data = Box::new(ParquetPmtilesBindData {
+                parquet_path,
+                output_pmtiles,
+                h3_column,
+            });
+            duckdb_bind_set_bind_data(
+                info,
+                Box::into_raw(bind_data) as *mut c_void,
+                Some(delete_boxed::<ParquetPmtilesBindData>),
+            );
+        });
+    }
+}
+
+/// Init callback for `h3_parquet_to_pmtiles`
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passes to this callback.
+pub unsafe extern "C" fn parquet_pmtiles_init(info: duckdb_init_info) {
+    // SAFETY: DuckDB passes this init callback a live `info`; the
+    // `ParquetPmtilesGlobalData` handed over is `Send + Sync` (only an atomic flag).
+    unsafe {
+        ffi_init_guard(info, || {
+            set_table_function_init_data(
+                info,
+                ParquetPmtilesGlobalData {
+                    executed: AtomicBool::new(false),
+                },
+            );
+        });
+    }
+}
+
+/// Scan callback: runs Parquet-to-PMTiles conversion and streams the single summary row
+///
+/// # Safety
+/// `info` and `output` must be the handles DuckDB passes to this scan
+/// callback, with `output` laid out as the columns declared at bind time.
+pub unsafe extern "C" fn parquet_pmtiles_scan(
+    info: duckdb_function_info,
+    output: duckdb_data_chunk,
+) {
+    // SAFETY: DuckDB passes this scan callback live `info`/`output` handles. The bind/init
+    // pointers are the `Box<ParquetPmtilesBindData>`/`Box<ParquetPmtilesGlobalData>`
+    // installed earlier (null-checked), alive until the query ends and only borrowed
+    // immutably; `ParquetPmtilesGlobalData` synchronizes its own mutable state. `output`
+    // has the summary columns declared at bind, and the single row's values match their
+    // declared types (BIGINT `i64`, DOUBLE `f64`, VARCHAR strings).
+    unsafe {
+        ffi_scan_guard(info, output, || {
+            let bind_data_ptr =
+                duckdb_function_get_bind_data(info) as *const ParquetPmtilesBindData;
+            let global_data_ptr =
+                duckdb_function_get_init_data(info) as *const ParquetPmtilesGlobalData;
+            if bind_data_ptr.is_null() || global_data_ptr.is_null() {
+                duckdb_data_chunk_set_size(output, 0);
+                return;
+            }
+            let bind_data = &*bind_data_ptr;
+            let global_data = &*global_data_ptr;
+
+            if global_data.executed.swap(true, Ordering::SeqCst) {
+                duckdb_data_chunk_set_size(output, 0);
+                return;
+            }
+
+            let start = Instant::now();
+            let result = H3PmtilesTiler::process_parquet_to_pmtiles(
+                &bind_data.parquet_path,
+                &bind_data.output_pmtiles,
+                bind_data.h3_column.as_deref(),
+            );
+            let elapsed = start.elapsed();
+
+            let (total_hexagons, min_z, max_z, size_bytes, status) = match result {
+                Ok(summary) => {
+                    let sz = File::open(&bind_data.output_pmtiles)
+                        .and_then(|f| f.metadata())
+                        .map(|m| m.len() as i64)
+                        .unwrap_or(0);
+                    (
+                        summary.valid_features as i64,
+                        summary.min_zoom as i64,
+                        summary.max_zoom as i64,
+                        sz,
+                        "SUCCESS".to_string(),
+                    )
+                }
+                Err(e) => (0i64, 0i64, 0i64, 0i64, format!("ERROR: {}", e)),
+            };
+
+            // Populate the 1 output summary row
+            let writer = ChunkWriter::new(output);
+            writer.set_int64(0, 0, total_hexagons);
+            writer.set_int64(1, 0, size_bytes);
+            writer.set_int64(2, 0, min_z);
+            writer.set_int64(3, 0, max_z);
+            writer.set_double(4, 0, elapsed.as_secs_f64() * 1000.0);
+            writer.set_string(5, 0, &bind_data.output_pmtiles);
+            writer.set_string(6, 0, &status);
+            writer.set_int64(7, 0, 0);
+            writer.set_size(1);
+        });
+    }
+}
+
+/// Register `h3_raster_to_pmtiles` and `h3_parquet_to_pmtiles` Table Functions with DuckDB
+///
+/// # Safety
+/// `con` must be a valid, open DuckDB connection.
+pub unsafe fn register_pmtiles_table_function(con: duckdb_connection) -> Result<(), String> {
+    // SAFETY: `con` is a live connection (caller contract). Each table function created
+    // here is configured with NUL-terminated names that outlive the calls, parameter types
+    // that DuckDB copies, and callbacks with the C ABI DuckDB expects (bind/init/scan for
+    // both functions). It is destroyed exactly once after `duckdb_register_table_function`
+    // has copied it into the catalog.
+    unsafe {
+        // 1. Register h3_raster_to_pmtiles and a5_raster_to_pmtiles
+        for (name, bind_fn) in [
+            (
+                "h3_raster_to_pmtiles",
+                pmtiles_bind as duckdb_table_function_bind_t,
+            ),
+            (
+                "a5_raster_to_pmtiles",
+                a5_pmtiles_bind as duckdb_table_function_bind_t,
+            ),
+            (
+                "s2_raster_to_pmtiles",
+                grid_pmtiles_bind::<{ GridKind::S2 as u8 }> as duckdb_table_function_bind_t,
+            ),
+            (
+                "healpix_raster_to_pmtiles",
+                grid_pmtiles_bind::<{ GridKind::Healpix as u8 }> as duckdb_table_function_bind_t,
+            ),
+        ] {
+            let fn_name = to_c_string(name);
+            let tf = duckdb_create_table_function();
+            duckdb_table_function_set_name(tf, fn_name.as_ptr());
+
+            // Positional parameters:
+            add_positional_parameter(tf, DuckDBType::Varchar);
+            add_positional_parameter(tf, DuckDBType::Varchar);
+
+            // Named parameters:
+            register_common_raster_named_parameters(tf);
+            add_named_parameter(tf, "categorical", DuckDBType::Boolean);
+            add_named_parameter(tf, "properties", DuckDBType::Varchar);
+
+            // Set callbacks
+            duckdb_table_function_set_bind(tf, bind_fn);
+            duckdb_table_function_set_init(tf, pmtiles_init);
+            duckdb_table_function_set_function(tf, pmtiles_scan);
+
+            let state = duckdb_register_table_function(con, tf);
+
+            let mut tf_mut = tf;
+            duckdb_destroy_table_function(&mut tf_mut);
+
+            if state != DuckDBState::Success {
+                return Err(format!("Failed to register {name} table function"));
+            }
+        }
+
+        // 2. Register h3_parquet_to_pmtiles
+        let fn_parquet_name = to_c_string("h3_parquet_to_pmtiles");
+        let tf_parquet = duckdb_create_table_function();
+        duckdb_table_function_set_name(tf_parquet, fn_parquet_name.as_ptr());
+
+        // Positional parameters:
+        add_positional_parameter(tf_parquet, DuckDBType::Varchar);
+        add_positional_parameter(tf_parquet, DuckDBType::Varchar);
+
+        // Named parameters:
+        add_named_parameter(tf_parquet, "h3_column", DuckDBType::Varchar);
+        add_named_parameter(tf_parquet, "h3_col", DuckDBType::Varchar);
+        add_named_parameter(tf_parquet, "properties", DuckDBType::Varchar);
+
+        // Set callbacks
+        duckdb_table_function_set_bind(tf_parquet, parquet_pmtiles_bind);
+        duckdb_table_function_set_init(tf_parquet, parquet_pmtiles_init);
+        duckdb_table_function_set_function(tf_parquet, parquet_pmtiles_scan);
+
+        let state2 = duckdb_register_table_function(con, tf_parquet);
+
+        let mut tf_parquet_mut = tf_parquet;
+        duckdb_destroy_table_function(&mut tf_parquet_mut);
+
+        if state2 != DuckDBState::Success {
+            return Err("Failed to register h3_parquet_to_pmtiles table function".to_string());
+        }
+
+        Ok(())
+    }
+}

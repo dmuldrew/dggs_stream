@@ -1,4 +1,4 @@
-"""Partitioned raster_h3 scans on Apache Sedona (Spark), through the demo's own pipeline.
+"""Partitioned dggs_stream scans on Apache Sedona (Spark), through the demo's own pipeline.
 
 Each test plans partitions on the driver, scans every partition in its own Spark task
 (`mapInArrow`), shuffles the partial rows by cell, merges them with `merge_partials`, and
@@ -12,8 +12,8 @@ import os
 import subprocess
 import sys
 
+import dggs_stream_spark_demo as demo
 import pytest
-import raster_h3_spark_demo as demo
 
 
 def run(sedona, paths, resolutions, target_chunks):
@@ -69,8 +69,8 @@ def test_raster_in_one_partition_needs_no_merge(sedona, terrain):
 
 
 def test_sedona_reads_raster_h3_cells(sedona, terrain):
-    """raster_h3's WKB loads as Sedona geometry, and Sedona's H3 functions (h3-java) agree
-    with raster_h3 on every cell id: the cell of each centroid, and the polygon of each id."""
+    """dggs_stream's WKB loads as Sedona geometry, and Sedona's H3 functions (h3-java) agree
+    with dggs_stream on every cell id: the cell of each centroid, and the polygon of each id."""
     path = terrain()
     tasks = demo.plan([path], 8)
     cells, _, _ = demo.distributed_cells(sedona, tasks, [9])

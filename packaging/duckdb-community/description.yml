@@ -1,6 +1,6 @@
 extension:
-  name: raster_h3
-  description: High-performance GeoTIFF to H3 hexagonal aggregation and PMTiles v3 vector pyramids
+  name: dggs_stream
+  description: Streams GeoTIFF rasters onto discrete global grids (H3, A5, S2, HEALPix) and PMTiles v3 vector pyramids
   version: 0.7.0
   language: Rust
   build: cargo
@@ -11,7 +11,7 @@ extension:
     - dmuldrew
 
 repo:
-  github: dmuldrew/raster_h3
+  github: dmuldrew/dggs_stream
   ref: 25ec308af4db4bdbf29050c00eae79c2b1685d84
 
 docs:
@@ -35,7 +35,7 @@ docs:
     );
 
   extended_description: |
-    `raster_h3` is a high-performance, native DuckDB extension written in pure Rust that aggregates multi-gigabyte geospatial raster files (GeoTIFF, Cloud-Optimized GeoTIFFs) directly into Uber H3 hexagonal grid cells and generates cloud-native PMTiles v3 vector pyramids.
+    `dggs_stream` is a high-performance, native DuckDB extension written in pure Rust that aggregates multi-gigabyte geospatial raster files (GeoTIFF, Cloud-Optimized GeoTIFFs) directly into Uber H3 hexagonal grid cells and generates cloud-native PMTiles v3 vector pyramids.
 
     ### Key Features:
     - **Zero Python / Zero GDAL C++ Dependencies**: 100% self-contained pure Rust engine.

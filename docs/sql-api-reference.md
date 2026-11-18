@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [Polars API Reference →](polars-api-reference.md)
 
-This document is the complete **SQL** reference for the `raster_h3` DuckDB extension ([DuckDB deep dive](engines/duckdb.md)), including table functions for continuous and categorical raster aggregation, direct Parquet and PMTiles v3 vector export, and scalar utility functions. For the Python package (Polars `LazyFrame`s, Arrow streams and Python helpers) see the [Polars API Reference](polars-api-reference.md).
+This document is the complete **SQL** reference for the `dggs_stream` DuckDB extension ([DuckDB deep dive](engines/duckdb.md)), including table functions for continuous and categorical raster aggregation, direct Parquet and PMTiles v3 vector export, and scalar utility functions. For the Python package (Polars `LazyFrame`s, Arrow streams and Python helpers) see the [Polars API Reference](polars-api-reference.md).
 
 The other engines accept a subset of these parameters; see their deep dives under [Engines](engines/README.md). Statistic definitions and output column meanings apply to every engine.
 
@@ -397,10 +397,10 @@ SELECT current_setting('raster_h3_fetch_workers');
 
 | Option | Type | Default | Environment fallback | Effect |
 | :--- | :--- | :--- | :--- | :--- |
-| `raster_h3_use_duckdb_fs` | `BOOLEAN` | `false` | `RASTER_H3_USE_DUCKDB_FS` (`1`, `true`, `on`, `yes`) | Open every raster through DuckDB's file system instead of the built-in readers. Remote paths then use the loaded `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works (`s3://`, `gs://`, `az://`, `abfss://`, `hf://`, `http(s)://`, …). Local files are read through DuckDB too, so they lose the memory-mapped fast path. See [DuckDB file system](engines/duckdb.md#duckdb-file-system--secrets-duckdb-20-build). |
-| `raster_h3_fetch_workers` | `BIGINT` | `0` (unset) | `RASTER_H3_FETCH_WORKERS` | Default for the `fetch_workers` argument. |
-| `raster_h3_decode_budget_mb` | `BIGINT` | `0` (unset) | `RASTER_H3_DECODE_BUDGET_MB` | Default for the `decode_budget_mb` argument. |
-| `raster_h3_workers` | `BIGINT` | `0` (unset) | `RASTER_H3_WORKERS` | Default for the `workers` argument. |
+| `raster_h3_use_duckdb_fs` | `BOOLEAN` | `false` | `DGGS_STREAM_USE_DUCKDB_FS` (`1`, `true`, `on`, `yes`) | Open every raster through DuckDB's file system instead of the built-in readers. Remote paths then use the loaded `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works (`s3://`, `gs://`, `az://`, `abfss://`, `hf://`, `http(s)://`, …). Local files are read through DuckDB too, so they lose the memory-mapped fast path. See [DuckDB file system](engines/duckdb.md#duckdb-file-system--secrets-duckdb-20-build). |
+| `raster_h3_fetch_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_FETCH_WORKERS` | Default for the `fetch_workers` argument. |
+| `raster_h3_decode_budget_mb` | `BIGINT` | `0` (unset) | `DGGS_STREAM_DECODE_BUDGET_MB` | Default for the `decode_budget_mb` argument. |
+| `raster_h3_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_WORKERS` | Default for the `workers` argument. |
 
 They apply to `h3_raster_continuous_aggregate`, `h3_raster_categorical_aggregate`, `h3_raster_to_parquet` and `h3_raster_to_pmtiles`, and are read when the query is planned. For the worker and budget options the order is: the function's own argument, then a positive session value, then the environment variable, then the built-in default. `raster_h3_use_duckdb_fs` is on when the session sets it to `true` or the environment variable is set. The environment variables are read only by the DuckDB 2.0 build.
 
@@ -435,8 +435,8 @@ ascending with duplicates removed. It wraps h3o's
 counterpart of H3's `polygonToCells`).
 
 The same function is available in Apache DataFusion and SedonaDB through
-[`raster-h3-sedona`](engines/datafusion.md#using-with-apache-datafusion-and-sedonadb)
-(`register_all` in Rust, `sd.register(raster_h3_sedona.scalar_functions())` in Python). There it
+[`dggs-stream-sedona`](engines/datafusion.md#using-with-apache-datafusion-and-sedonadb)
+(`register_all` in Rust, `sd.register(dggs_stream_sedona.scalar_functions())` in Python). There it
 returns `List<UInt64>`, takes `Binary` WKB or a geometry column, and refuses at planning a
 geometry whose CRS is set to something other than lon/lat. The containment modes, NULL
 handling and limits below are the same, except that an out-of-range `resolution` is always

@@ -1,6 +1,6 @@
-//! Cross-engine and packaging tests that need the root `raster_h3` cdylib or bins.
+//! Cross-engine and packaging tests that need the root `dggs_stream` cdylib or bins.
 
-#[path = "../../crates/raster-h3-core/tests/it/helpers.rs"]
+#[path = "../../crates/dggs-stream-core/tests/it/helpers.rs"]
 mod helpers;
 
 // Linux only (uses `nm`); with the `python` or `pg` feature the cdylib exports their symbols by design.

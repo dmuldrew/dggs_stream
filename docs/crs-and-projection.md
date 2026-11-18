@@ -135,7 +135,7 @@ Built-in codes with a Helmert shift, chosen from the EPSG registry:
 
 PROJ itself may prefer a different transformation for these CRSs, for example
 a national grid (OSTN15 for OSGB36) or a regional ED50 Helmert. The tests in
-`crates/raster-h3-core/tests/it/datum_shifts.rs` check agreement with PROJ for the same parameters
+`crates/dggs-stream-core/tests/it/datum_shifts.rs` check agreement with PROJ for the same parameters
 (≤ 0.01 m) and with PROJ's preferred transformation (within the published
 accuracy above).
 

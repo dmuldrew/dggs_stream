@@ -12,7 +12,7 @@ Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) a
 
 Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
-> **About the name.** This documentation calls the project dggs_stream: it streams raster files onto a DGGS in one pass (it is not a real-time event-stream system). The packages, crates, extension and functions keep their `raster_h3` / `raster-h3` names: `LOAD raster_h3`, `import raster_h3`, `pip install raster-h3`, `raster-h3-cli`, and SQL functions such as `h3_raster_continuous_aggregate` (each also takes `grid :=`, and `a5_`, `s2_` and `healpix_` versions exist).
+> **About the name.** dggs_stream streams raster files onto a DGGS in one pass (it is not a real-time event-stream system). It was previously called raster_h3, and the old names still work for now: `import raster_h3` (with a deprecation warning), `spark.read.format("raster_h3")`, the `raster-h3-cli` and `raster-h3` binaries, `RASTER_H3_*` environment variables, `CREATE EXTENSION raster_h3` in PostgreSQL, and DuckDB's `LOAD raster_h3` for a copy of the extension file named `raster_h3.duckdb_extension`. SQL function and setting names did not change (`h3_raster_continuous_aggregate`, `raster_h3_workers`, ...).
 
 | Output | Use Case | Available In |
 | :--- | :--- | :--- |
@@ -100,7 +100,7 @@ A city planning department has two datasets:
 Without a shared spatial index, answering this requires an expensive GIS overlay: reprojecting rasters, clipping polygons, rasterizing geometries, and managing gigabytes of temporary scratch files. With dggs_stream, both datasets meet on the H3 hexagonal grid. In DuckDB:
 
 ```sql
--- Reading and polyfilling the tracts uses DuckDB's spatial extension alongside raster_h3:
+-- Reading and polyfilling the tracts uses DuckDB's spatial extension alongside dggs_stream:
 -- INSTALL spatial; LOAD spatial;
 
 -- 1. Aggregate the 30m land cover raster into H3 hexagons (with budgeted aggregation)
@@ -260,11 +260,11 @@ Materializing both raster and vector datasets into intermediate cell tables (or 
 dggs_stream can export results directly to a **PMTiles v3** single-file vector tile archive — a multi-resolution pyramid ready for MapLibre, Kepler.gl, or Felt with zero intermediate files and zero tile servers:
 
 ```bash
-raster-h3-cli pmtiles nlcd_landcover_2021.tif -c -r 5,6,7,8 -o landcover_canopy.pmtiles
+dggs-stream-cli pmtiles nlcd_landcover_2021.tif -c -r 5,6,7,8 -o landcover_canopy.pmtiles
 ```
 
 ```python
-raster_h3.raster_to_pmtiles("nlcd_landcover_2021.tif", "landcover_canopy.pmtiles", [5, 6, 7, 8], categorical=True)
+dggs_stream.raster_to_pmtiles("nlcd_landcover_2021.tif", "landcover_canopy.pmtiles", [5, 6, 7, 8], categorical=True)
 ```
 
 ```sql
@@ -300,7 +300,7 @@ changing `url` selects an independent validator, and returning to a previous URL
 retains its original pin. Servers with weak or missing ETags have no snapshot
 guarantee; use immutable/versioned URLs. A server that ignores `Range` sends the
 whole file into memory, so such downloads are capped at 1 GiB; raise the cap with
-`RASTER_H3_MAX_FULL_BODY_BYTES`. See [remote COG streaming](docs/engines/core.md#remote-cog-prefetching).
+`DGGS_STREAM_MAX_FULL_BODY_BYTES`. See [remote COG streaming](docs/engines/core.md#remote-cog-prefetching).
 
 ---
 
@@ -337,19 +337,19 @@ implemented.
 
 ## Engines
 
-The repository is a Cargo workspace: `raster-h3-core` does all decoding, reprojection,
+The repository is a Cargo workspace: `dggs-stream-core` does all decoding, reprojection,
 aggregation and export, and each engine crate is a thin adapter over it, so every engine
 returns the same cells and statistics for the same input.
 
 | Engine | Crate | Get it | Docs |
 | :--- | :--- | :--- | :--- |
-| **DuckDB** | `raster-h3-duckdb` | Pre-built `.duckdb_extension` from [Releases](https://github.com/dmuldrew/raster_h3/releases), Docker, or `cargo build --release` → `libraster_h3.{so,dylib,dll}` | [DuckDB deep dive](docs/engines/duckdb.md) · [SQL API Reference](docs/sql-api-reference.md) |
-| **Python / Polars** | `raster-h3-python` | `pip install ./crates/raster-h3-python` (wheels are built in CI; not yet on PyPI) | [Python & Polars](docs/engines/python-polars.md) · [Polars API Reference](docs/polars-api-reference.md) |
-| **PostgreSQL 13–18** | `raster-h3-pg` | `cargo build -p raster-h3-pg --features pg-extension` | [PostgreSQL](docs/engines/postgresql.md) |
-| **Apache DataFusion / SedonaDB** | `raster-h3-sedona` | Cargo dependency (DataFusion pinned to SedonaDB's version); SedonaDB Python: `maturin build` in `crates/raster-h3-sedona/python` | [DataFusion & SedonaDB](docs/engines/datafusion.md#using-with-apache-datafusion-and-sedonadb) |
-| **Apache Spark / Apache Sedona** | `raster-h3-python` (on every executor) | The `raster-h3` wheel (`raster_h3.spark` data source on Spark 4.0+); or `docker compose up --build sedona` (Apache Sedona 1.9.1, Spark 4.0) | [Spark & Apache Sedona](docs/engines/spark.md) |
-| **CLI** | `raster-h3-cli` | `cargo build --release -p raster-h3-cli` (also in the Python wheel) | [CLI](docs/engines/cli.md) |
-| **Rust library** | `raster-h3-core` | Cargo dependency | [Core Engine](docs/engines/core.md) |
+| **DuckDB** | `dggs-stream-duckdb` | Pre-built `.duckdb_extension` from [Releases](https://github.com/dmuldrew/dggs_stream/releases), Docker, or `cargo build --release` → `libdggs_stream.{so,dylib,dll}` | [DuckDB deep dive](docs/engines/duckdb.md) · [SQL API Reference](docs/sql-api-reference.md) |
+| **Python / Polars** | `dggs-stream-python` | `pip install ./crates/dggs-stream-python` (wheels are built in CI; not yet on PyPI) | [Python & Polars](docs/engines/python-polars.md) · [Polars API Reference](docs/polars-api-reference.md) |
+| **PostgreSQL 13–18** | `dggs-stream-pg` | `cargo build -p dggs-stream-pg --features pg-extension` | [PostgreSQL](docs/engines/postgresql.md) |
+| **Apache DataFusion / SedonaDB** | `dggs-stream-sedona` | Cargo dependency (DataFusion pinned to SedonaDB's version); SedonaDB Python: `maturin build` in `crates/dggs-stream-sedona/python` | [DataFusion & SedonaDB](docs/engines/datafusion.md#using-with-apache-datafusion-and-sedonadb) |
+| **Apache Spark / Apache Sedona** | `dggs-stream-python` (on every executor) | The `dggs-stream` wheel (`dggs_stream.spark` data source on Spark 4.0+); or `docker compose up --build sedona` (Apache Sedona 1.9.1, Spark 4.0) | [Spark & Apache Sedona](docs/engines/spark.md) |
+| **CLI** | `dggs-stream-cli` | `cargo build --release -p dggs-stream-cli` (also in the Python wheel) | [CLI](docs/engines/cli.md) |
+| **Rust library** | `dggs-stream-core` | Cargo dependency | [Core Engine](docs/engines/core.md) |
 
 **Grids.** Every engine indexes pixels onto Uber H3 hexagons (resolutions 0–15, the default), A5
 pentagons (0–30), Google S2 cells (levels 0–30, 64-bit cell ids) and HEALPix
@@ -377,7 +377,7 @@ internals and troubleshooting.
 **DuckDB**
 
 ```sql
-LOAD 'target/release/libraster_h3.dylib'; -- or INSTALL from a release, see the DuckDB deep dive
+LOAD 'target/release/libdggs_stream.dylib'; -- or INSTALL from a release, see the DuckDB deep dive
 SELECT h3_hex, mean, count
 FROM h3_raster_continuous_aggregate('dem.tif', resolution := 8)
 LIMIT 5;
@@ -387,15 +387,15 @@ SELECT h3_polygon_to_cells(ST_AsWKB(geom), 8, 'covers') AS cells FROM areas;
 ```
 
 See [`h3_polygon_to_cells`](docs/sql-api-reference.md#h3_polygon_to_cells) for the containment modes
-(also available in Python as `raster_h3.h3_polygon_to_cells`).
+(also available in Python as `dggs_stream.h3_polygon_to_cells`).
 
 **Python / Polars**
 
 ```python
 import polars as pl
-import raster_h3
+import dggs_stream
 
-df = (raster_h3.scan_raster_h3("dem.tif", 8)
+df = (dggs_stream.scan_raster_h3("dem.tif", 8)
         .filter(pl.col("count") > 10)
         .select("h3_hex", "mean", "count")
         .collect())
@@ -404,21 +404,21 @@ df = (raster_h3.scan_raster_h3("dem.tif", 8)
 **PostgreSQL**
 
 ```sql
-CREATE EXTENSION raster_h3;
+CREATE EXTENSION dggs_stream;
 SELECT h3_hex, mean, count FROM h3_raster_continuous_aggregate('/data/dem.tif', 8) LIMIT 5;
 ```
 
 **CLI**
 
 ```bash
-raster-h3-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 5
-raster-h3-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
+dggs-stream-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 5
+dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
 ```
 
-**Raster scans without a `SessionContext`** (`raster_h3_sedona::scan`)
+**Raster scans without a `SessionContext`** (`dggs_stream_sedona::scan`)
 
 ```rust
-use raster_h3_sedona::scan::{ContinuousRasterTableProvider, FilterPredicate, RasterScan};
+use dggs_stream_sedona::scan::{ContinuousRasterTableProvider, FilterPredicate, RasterScan};
 
 let provider = ContinuousRasterTableProvider::try_new("dem.tif", vec![8])?;
 let plan = provider.scan(Some(&[0, 2]), &[FilterPredicate::MinCount(10.0)], Some(1000))?;
@@ -435,7 +435,7 @@ pushdowns. See [filter pushdown](docs/engines/datafusion.md).
 
 ```rust
 let ctx = sedona::context::SedonaContext::new_local_interactive().await?;
-raster_h3_sedona::register_all(&ctx.ctx); // or a plain datafusion SessionContext
+dggs_stream_sedona::register_all(&ctx.ctx); // or a plain datafusion SessionContext
 ctx.sql("SELECT h3_index, mean FROM h3_raster_continuous_aggregate('dem.tif', 8) WHERE count >= 10")
     .await?
     .show()
@@ -445,9 +445,9 @@ ctx.sql("SELECT h3_index, mean FROM h3_raster_continuous_aggregate('dem.tif', 8)
 **Rust library**
 
 ```rust
-use raster_h3_core::aggregator::multi_horizon::MultiResolutionConfig;
-use raster_h3_core::columnar::ContinuousBatchReader;
-use raster_h3_core::raster::mosaic::resolve_raster_sources;
+use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream_core::columnar::ContinuousBatchReader;
+use dggs_stream_core::raster::mosaic::resolve_raster_sources;
 
 let paths = resolve_raster_sources("dem.tif")?;
 let reader = ContinuousBatchReader::open(&paths, &MultiResolutionConfig::new(vec![8]), None, 2048, None)?;
@@ -470,14 +470,14 @@ a partition edge. Rows whose `partial_state` column is null are final; the other
 merged per cell.
 
 ```python
-import pyarrow as pa, pyarrow.compute as pc, raster_h3
+import pyarrow as pa, pyarrow.compute as pc, dggs_stream
 
-specs = raster_h3.plan_partitions("dem.tif", target_chunks=256)          # driver
-parts = [pa.table(raster_h3.RasterH3ArrowStream("dem.tif", 8, partition=s))  # workers
+specs = dggs_stream.plan_partitions("dem.tif", target_chunks=256)          # driver
+parts = [pa.table(dggs_stream.RasterH3ArrowStream("dem.tif", 8, partition=s))  # workers
          for s in specs]
 cells = pa.concat_tables(parts)
 final = cells.filter(pc.is_null(cells["partial_state"])).drop(["partial_state"])
-merged = raster_h3.merge_partials(cells.filter(pc.is_valid(cells["partial_state"])))
+merged = dggs_stream.merge_partials(cells.filter(pc.is_valid(cells["partial_state"])))
 ```
 
 The SQL engines merge with an aggregate, so a `GROUP BY` gathers each cell's partial rows:
@@ -490,7 +490,7 @@ SELECT h3_index, resolution, h3_merge_partials(partial_state) AS cell
 FROM partial_rows GROUP BY h3_index, resolution;   -- cell.mean, cell.count, ...
 ```
 
-From a shell, `raster-h3-cli plan` / `ipc --partition` / `merge` fan out with `xargs -P`
+From a shell, `dggs-stream-cli plan` / `ipc --partition` / `merge` fan out with `xargs -P`
 or batch jobs ([CLI guide](docs/engines/cli.md#partitioned-scans)).
 
 In Rust the same steps are `plan_partitions`, `MultiResolutionConfig::partition` and
@@ -543,7 +543,7 @@ flowchart TD
         POOL <.->|"Steal / Recycle"| QUEUE
     end
 
-    subgraph PIPELINE ["raster-h3-core: Scanline Horizon Processing Engine"]
+    subgraph PIPELINE ["dggs-stream-core: Scanline Horizon Processing Engine"]
         CHUNK["Decompressed Strip / Tile Batch Stream"]
         QUEUE --> CHUNK
 
@@ -637,9 +637,9 @@ This prevents silent spatial corruption — meter-based coordinates treated as d
 | Engine | Override |
 | :--- | :--- |
 | DuckDB | `h3_raster_continuous_aggregate('grid.tif', resolution := 8, source_crs := 'EPSG:32610')` |
-| Python | `raster_h3.scan_raster_h3("grid.tif", 8, crs="EPSG:32610")` |
+| Python | `dggs_stream.scan_raster_h3("grid.tif", 8, crs="EPSG:32610")` |
 | PostgreSQL | `h3_raster_continuous_aggregate('/data/grid.tif', 8, source_crs => 'EPSG:32610')` |
-| CLI | `raster-h3-cli jsonl grid.tif -r 8 --crs EPSG:32610` |
+| CLI | `dggs-stream-cli jsonl grid.tif -r 8 --crs EPSG:32610` |
 | DataFusion | `ContinuousRasterTableProvider::try_new("grid.tif", vec![8])?.with_crs("EPSG:32610")` |
 
 Valid pixels whose transform fails or lands outside the valid latitude/longitude range are dropped rather than aborting the stream; they are counted by `transform_failures()` (core streamers and batch readers) and reported by the engines: a `transform_failures` column in DuckDB's export summaries, a PostgreSQL `WARNING`, a Python `RuntimeWarning` from the exporters and `scan_raster_h3`, and a CLI warning on stderr. DuckDB (`strict_transforms := true`), Python (`strict_transforms=True`) and DataFusion (`with_strict_transforms(true)`) can fail the query instead. See [transform-failure diagnostics](docs/engines/core.md#transform-failure-diagnostics).
@@ -658,7 +658,7 @@ To aggregate stored values from files with valid metadata instead:
 | Engine | Opt-out |
 | :--- | :--- |
 | DuckDB | `h3_raster_continuous_aggregate('lst.tif', resolution := 8, scale_offset := false)` |
-| CLI | `raster-h3-cli jsonl lst.tif -r 8 --raw-values` |
+| CLI | `dggs-stream-cli jsonl lst.tif -r 8 --raw-values` |
 | DataFusion | `ContinuousRasterTableProvider::try_new("lst.tif", vec![8])?.with_scale_offset(false)` |
 
 Python and PostgreSQL always calibrate. See [Band calibration and validity](docs/sql-api-reference.md#band-calibration-and-validity).
@@ -693,23 +693,23 @@ dggs_stream uses `memmap2` for virtual memory mapping. Ensure container runtimes
 ```bash
 cargo build --release
 ```
-Outputs: `target/release/libraster_h3.dylib` (macOS) / `.so` (Linux) / `.dll` (Windows) — the DuckDB extension — and the `raster-h3` CLI.
+Outputs: `target/release/libdggs_stream.dylib` (macOS) / `.so` (Linux) / `.dll` (Windows) — the DuckDB extension — and the `dggs-stream` CLI.
 
-To build the packaged `build/release/raster_h3.duckdb_extension` the way the DuckDB community-extensions CI does, run `git submodule update --init && make configure && make release` ([Community Extension Build](docs/engines/duckdb.md#community-extension-build)).
+To build the packaged `build/release/dggs_stream.duckdb_extension` the way the DuckDB community-extensions CI does, run `git submodule update --init && make configure && make release` ([Community Extension Build](docs/engines/duckdb.md#community-extension-build)).
 
 To package, sign and verify the extension yourself, use the `package_extension` binary:
 
 ```bash
 # Append the 534-byte DuckDB metadata footer (unsigned; load with allow_unsigned_extensions)
 cargo run --release --bin package_extension -- \
-    -i target/release/libraster_h3.so -o target/release/raster_h3.duckdb_extension
+    -i target/release/libdggs_stream.so -o target/release/dggs_stream.duckdb_extension
 
 # Sign with an RSA-2048 key (-k, or DUCKDB_EXTENSION_SIGNING_KEY), write DuckDB 2.0's
 # .well-known/duckdb-extension-repo.json (-m) for CREATE EXTENSION REPOSITORY, and verify
 cargo run --release --bin package_extension -- \
-    -i target/release/libraster_h3.so -o target/release/raster_h3.duckdb_extension \
+    -i target/release/libdggs_stream.so -o target/release/dggs_stream.duckdb_extension \
     -k signing_key.pem -m dist/.well-known/duckdb-extension-repo.json \
-    --verify target/release/raster_h3.duckdb_extension
+    --verify target/release/dggs_stream.duckdb_extension
 ```
 
 `--help` lists every flag (`--gzip`, `--public-key`, `--platform`, `--print-platform`, …); the DuckDB deep dive covers the [signing scheme](docs/engines/duckdb.md#build-package-load) and the [trusted-repository workflow](docs/engines/duckdb.md#option-b-install-via-custom-repository).
@@ -717,19 +717,19 @@ cargo run --release --bin package_extension -- \
 Other workspace members build individually:
 
 ```bash
-cargo build --release -p raster-h3-cli                         # raster-h3-cli executable
-cargo build --release -p raster-h3-python                      # libraster_h3_python (Python ctypes library)
-cargo build --release -p raster-h3-pg --features pg-extension  # PostgreSQL module (needs pg_config or RASTER_H3_PG_MAJOR)
+cargo build --release -p dggs-stream-cli                         # dggs-stream-cli executable
+cargo build --release -p dggs-stream-python                      # libdggs_stream_python (Python ctypes library)
+cargo build --release -p dggs-stream-pg --features pg-extension  # PostgreSQL module (needs pg_config or DGGS_STREAM_PG_MAJOR)
 ```
 
 | Crate | Path |
 | :--- | :--- |
-| `raster-h3-core` | [`crates/raster-h3-core`](crates/raster-h3-core) |
-| `raster-h3-duckdb` | [`crates/raster-h3-duckdb`](crates/raster-h3-duckdb) |
-| `raster-h3-sedona` | [`crates/raster-h3-sedona`](crates/raster-h3-sedona) (standalone workspace; Python bindings in `python/`) |
-| `raster-h3-python` | [`crates/raster-h3-python`](crates/raster-h3-python) |
-| `raster-h3-pg` | [`crates/raster-h3-pg`](crates/raster-h3-pg) |
-| `raster-h3-cli` | [`crates/raster-h3-cli`](crates/raster-h3-cli) |
+| `dggs-stream-core` | [`crates/dggs-stream-core`](crates/dggs-stream-core) |
+| `dggs-stream-duckdb` | [`crates/dggs-stream-duckdb`](crates/dggs-stream-duckdb) |
+| `dggs-stream-sedona` | [`crates/dggs-stream-sedona`](crates/dggs-stream-sedona) (standalone workspace; Python bindings in `python/`) |
+| `dggs-stream-python` | [`crates/dggs-stream-python`](crates/dggs-stream-python) |
+| `dggs-stream-pg` | [`crates/dggs-stream-pg`](crates/dggs-stream-pg) |
+| `dggs-stream-cli` | [`crates/dggs-stream-cli`](crates/dggs-stream-cli) |
 
 ### Test
 
@@ -739,10 +739,10 @@ See [Test Coverage](docs/testing.md) for what each suite checks and which tests 
 cargo test --release --workspace
 
 # Cross-engine parity (core, CLI, DataFusion, Python, PostgreSQL in-process, DuckDB if on PATH)
-cargo test -p raster_h3 --test it multi_engine_e2e
+cargo test -p dggs_stream --test it multi_engine_e2e
 
-# Real PostgreSQL servers in Docker (RASTER_H3_PG_VERSIONS=14,16,18 to pick majors)
-cargo test -p raster_h3 --test it pg_extension_e2e -- --ignored --nocapture
+# Real PostgreSQL servers in Docker (DGGS_STREAM_PG_VERSIONS=14,16,18 to pick majors)
+cargo test -p dggs_stream --test it pg_extension_e2e -- --ignored --nocapture
 
 # Or in Docker
 docker run --rm -v "$(pwd)":/build -w /build rust:bookworm cargo test --release --workspace
@@ -752,7 +752,7 @@ docker run --rm -v "$(pwd)":/build -w /build rust:bookworm cargo test --release 
 ```bash
 cargo run --release --example benchmark_bottleneck path/to/raster.tif
 cargo run --release --example benchmark_scaling
-cargo run --release -p raster-h3-core --example worker_scaling -- --quick  # kernel vs. serial-merge time per worker count
+cargo run --release -p dggs-stream-core --example worker_scaling -- --quick  # kernel vs. serial-merge time per worker count
 cargo run --release --example raster_to_pmtiles -- --input data/sample_sf.tif --output data/sample_sf.pmtiles
 cargo run --release --example benchmark_grids -- --h3-res 8,10 --runs 3  # time and peak RSS per grid (Hawaii rasters in data/)
 ```

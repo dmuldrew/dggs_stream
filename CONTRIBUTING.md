@@ -11,21 +11,21 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 ### Build & Test
 ```bash
-# Build the DuckDB extension (root crate) and the `raster-h3` CLI
+# Build the DuckDB extension (root crate) and the `dggs-stream` CLI
 cargo build --release
 
 # Run the full workspace test suite
 cargo test --release --workspace
 
 # Core engine only (does not compile DuckDB, DataFusion, PostgreSQL or Python)
-cargo test -p raster-h3-core
+cargo test -p dggs-stream-core
 
 # One module of a crate's integration binary (tests/it/<module>.rs)
-cargo test -p raster-h3-core --test it pmtiles
+cargo test -p dggs-stream-core --test it pmtiles
 
 # Cross-engine parity and the Docker-based PostgreSQL test (root crate)
-cargo test -p raster_h3 --test it multi_engine_e2e
-cargo test -p raster_h3 --test it pg_extension_e2e -- --ignored --nocapture
+cargo test -p dggs_stream --test it multi_engine_e2e
+cargo test -p dggs_stream --test it pg_extension_e2e -- --ignored --nocapture
 
 # Run tests with output visible
 cargo test --workspace -- --nocapture
@@ -39,17 +39,17 @@ The Docker build automatically runs the entire test suite in an isolated contain
 
 ```bash
 # Build and run test suite in Docker
-docker build -t raster_h3:latest .
+docker build -t dggs_stream:latest .
 
 # Run the interactive DuckDB CLI container with the preloaded extension and demo dataset
-docker run -it --rm raster_h3:latest
+docker run -it --rm dggs_stream:latest
 ```
 
 ## Project Structure
 
 ```
-Cargo.toml                   # Workspace manifest + root `raster_h3` facade crate
-src/                         # Root crate: libraster_h3 (DuckDB extension) and `raster-h3` CLI binary
+Cargo.toml                   # Workspace manifest + root `dggs_stream` facade crate
+src/                         # Root crate: libdggs_stream (DuckDB extension) and `dggs-stream` CLI binary
 ├── lib.rs                   # Re-exports workspace crates, keeps DuckDB entry symbols
 └── bin/                     # Standalone CLI utilities
     ├── conus_batch_and_evict.rs  # CONUS-scale batch ingestion with eviction tracking
@@ -59,15 +59,15 @@ src/                         # Root crate: libraster_h3 (DuckDB extension) and `
     └── package_extension.rs # Pure-Rust DuckDB extension packager, RSA-2048 signer & repo manifest generator
 
 crates/
-├── raster-h3-core/          # Engine: raster I/O, CRS, aggregation, columnar, Parquet, PMTiles
-├── raster-h3-duckdb/        # DuckDB C-API extension (ffi/, functions/)
-├── raster-h3-python/        # C-ABI cdylib, python/raster_h3 package, hatch wheel build
-├── raster-h3-pg/            # PostgreSQL fmgr extension, raster_h3.control, sql/
-└── raster-h3-cli/           # raster-h3-cli executable (ipc, jsonl, parquet, pmtiles)
+├── dggs-stream-core/          # Engine: raster I/O, CRS, aggregation, columnar, Parquet, PMTiles
+├── dggs-stream-duckdb/        # DuckDB C-API extension (ffi/, functions/)
+├── dggs-stream-python/        # C-ABI cdylib, python/dggs_stream package, hatch wheel build
+├── dggs-stream-pg/            # PostgreSQL fmgr extension, dggs_stream.control, sql/
+└── dggs-stream-cli/           # dggs-stream-cli executable (ipc, jsonl, parquet, pmtiles)
 
 scripts/pg_e2e.sh            # Build + run the PostgreSQL extension in Docker
 
-crates/raster-h3-core/src/
+crates/dggs-stream-core/src/
 ├── aggregator/              # Core aggregation & scanline horizon streaming
 │   ├── accumulator.rs       # Welford online statistics (continuous)
 │   ├── categorical.rs       # Categorical frequency accumulator & streamer
@@ -139,7 +139,7 @@ crates/raster-h3-core/src/
 ├── error.rs                 # Error types & conversions
 └── lib.rs                   # Engine module declarations
 
-crates/raster-h3-duckdb/src/
+crates/dggs-stream-duckdb/src/
 ├── ffi/                     # DuckDB C-FFI bindings
 │   ├── duckdb_c.rs          # Low-level DuckDB C API types & function pointers
 │   ├── spatial_detect.rs    # DuckDB Spatial extension detection & geometry interop
@@ -159,9 +159,9 @@ crates/raster-h3-duckdb/src/
 │   ├── scalar.rs            # Scalar helper functions (h3_to_string, string_to_h3, etc.)
 │   ├── table_function.rs    # h3_raster_continuous_aggregate registration
 │   └── mod.rs               # Re-exports fast_hex and wkb from crate::encoding
-└── lib.rs                   # DuckDB entry points (raster_h3_init, raster_h3_init_c_api, raster_h3_version)
+└── lib.rs                   # DuckDB entry points (dggs_stream_init, dggs_stream_init_c_api, dggs_stream_version, plus `raster_h3_*` aliases)
 
-crates/raster-h3-core/tests/it/      # Core engine suites (no DuckDB/DataFusion/pg)
+crates/dggs-stream-core/tests/it/      # Core engine suites (no DuckDB/DataFusion/pg)
 ├── main.rs                  # One test binary per crate: declares every module below
 ├── helpers.rs               # TestGeoTiffBuilder & shared fixtures (also used by duckdb and root)
 ├── support/mvt.rs           # MVT protobuf decoder for PMTiles assertions
@@ -195,14 +195,14 @@ crates/raster-h3-core/tests/it/      # Core engine suites (no DuckDB/DataFusion/
 ├── super_sampling.rs        # Super-sampling conservation & fused path parity
 └── threading.rs             # Multi-threaded determinism & stress tests
 
-crates/raster-h3-duckdb/tests/it/    # DuckDB binding suites
+crates/dggs-stream-duckdb/tests/it/    # DuckDB binding suites
 ├── cell_bbox_pushdown.rs    # cell_wgs84_bbox pushdown soundness
 ├── ffi_sql/                 # Mock C-API callbacks for every registered function
 ├── prefetch_resilience.rs   # Prefetch queues under panics and remote mosaics
 ├── record_queue.rs          # Bind-side record queue propagates stream failures
 └── spatial_geometry.rs      # WKB geometry emission and hex formatting
 
-tests/it/                    # Root crate: needs the raster_h3 cdylib or bins
+tests/it/                    # Root crate: needs the dggs_stream cdylib or bins
 ├── duckdb_sql_smoke.rs      # Real SQL through the DuckDB CLI (ignored by default)
 ├── multi_engine_e2e.rs      # Cross-engine parity (core, CLI, DataFusion, Python, PostgreSQL, DuckDB)
 ├── package_extension.rs     # DuckDB extension packaging tests
@@ -279,10 +279,10 @@ Open a GitHub Issue describing:
 
 ### Dependency and package policy
 
-- Only `raster-h3-core` is intended to be packageable for crates.io. The facade, CLI,
+- Only `dggs-stream-core` is intended to be packageable for crates.io. The facade, CLI,
   and database/Python adapters are `publish = false`; distribute them through GitHub
   release assets and Python wheels, not independent crates.io packages.
-- Package verification does **not** publish anything: run `cargo package --locked -p raster-h3-core`.
+- Package verification does **not** publish anything: run `cargo package --locked -p dggs-stream-core`.
   Publishing the core is a separate maintainer decision; no workflow publishes to crates.io or PyPI.
 - Workspace path dependencies also carry the workspace version. Run
   `python3 scripts/check_versions.py` before a version bump PR.
@@ -298,7 +298,7 @@ Open a GitHub Issue describing:
 
 1. Bump the workspace version, every internal path requirement, Python wheel metadata,
    PostgreSQL control/magic/install SQL, and community-extension manifest together.
-   DuckDB's C-API `raster_h3_version()` is separate and must not be synchronized blindly.
+   DuckDB's C-API `dggs_stream_version()` is separate and must not be synchronized blindly.
 2. Update the changelog and run `python3 scripts/check_versions.py`, package verification,
    formatting, strict Clippy/rustdoc, and tests (including the PostgreSQL feature).
 3. Merge the reviewed release PR, then tag that commit `v<workspace version>`.
@@ -309,7 +309,7 @@ Open a GitHub Issue describing:
    and GitHub artifact attestations. After downloading assets, verify:
    ```bash
    sha256sum --check SHA256SUMS
-   gh attestation verify <downloaded-asset> --repo dmuldrew/raster_h3
+   gh attestation verify <downloaded-asset> --repo dmuldrew/dggs_stream
    ```
    Checksums detect corruption; attestations establish the publishing workflow's identity,
    not a guarantee of correctness. PyPI/crates.io publication remains a separate decision.

@@ -19,5 +19,5 @@ for n in $(seq 1 "$MAX"); do
     sleep 2
   done
   docker compose exec -T spark-client sh -c \
-    'SPARK_LOCAL_IP=$(hostname -i) python3 /opt/raster_h3/examples/cluster/benchmark.py "$@"' sh --workers "$n" "$@"
+    'SPARK_LOCAL_IP=$(hostname -i) python3 /opt/dggs_stream/examples/cluster/benchmark.py "$@"' sh --workers "$n" "$@"
 done

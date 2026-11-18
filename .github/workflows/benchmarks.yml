@@ -19,7 +19,7 @@ jobs:
           toolchain: '1.97.1'
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Record streaming baselines
-        run: cargo bench --locked -p raster-h3-core --bench streaming
+        run: cargo bench --locked -p dggs-stream-core --bench streaming
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: criterion-${{ github.sha }}

@@ -1,9 +1,9 @@
 services:
-  raster_h3:
+  dggs_stream:
     build:
       context: .
       dockerfile: Dockerfile
-    image: raster_h3:latest
+    image: dggs_stream:latest
     volumes:
       - ./data:/data
     stdin_open: true
@@ -18,12 +18,12 @@ services:
     ports:
       - "8080:8080"
 
-  # Apache Sedona (Spark) with the raster-h3 Python package installed. Behind a
+  # Apache Sedona (Spark) with the dggs-stream Python package installed. Behind a
   # profile so `docker compose up` doesn't build it; naming the service enables it:
   #   docker compose up --build sedona     # JupyterLab on http://localhost:8888
-  #   docker compose exec sedona python3 /opt/raster_h3/examples/raster_h3_spark_demo.py --verify
+  #   docker compose exec sedona python3 /opt/dggs_stream/examples/dggs_stream_spark_demo.py --verify
   #   docker compose exec sedona sh -c "pip3 install --break-system-packages pytest \
-  #     && python3 -m pytest -v /opt/raster_h3/examples/tests"   # the Spark tests
+  #     && python3 -m pytest -v /opt/dggs_stream/examples/tests"   # the Spark tests
   sedona:
     profiles: ["sedona"]
     build:
@@ -31,14 +31,14 @@ services:
       dockerfile: Dockerfile.sedona
       args:
         SEDONA_VERSION: ${SEDONA_VERSION:-1.9.1}
-    image: raster_h3-sedona:latest
+    image: dggs_stream-sedona:latest
     environment:
       # Read by the image's entrypoint; it refuses to start if the two exceed host RAM.
       DRIVER_MEM: ${SEDONA_DRIVER_MEM:-4g}
       EXECUTOR_MEM: ${SEDONA_EXECUTOR_MEM:-4g}
     volumes:
       - ./data:/data
-      - ./examples/sedona_spark:/opt/raster_h3/examples
+      - ./examples/sedona_spark:/opt/dggs_stream/examples
     ports:
       - "8888:8888"   # JupyterLab
       - "8090:8080"   # Spark master UI (8080 is the viewer's)
@@ -53,12 +53,12 @@ services:
   #   docker compose build sedona                       # the image all three use
   #   docker compose --profile spark-cluster up -d --no-build \
   #     spark-master spark-worker spark-client --scale spark-worker=3
-  #   docker compose exec spark-client sh /opt/raster_h3/examples/cluster/run_tests.sh
+  #   docker compose exec spark-client sh /opt/dggs_stream/examples/cluster/run_tests.sh
   #   sh examples/sedona_spark/cluster/scaling.sh 4       # on the host: time 1..4 workers
   #   docker compose --profile spark-cluster rm -sf spark-master spark-worker spark-client
   spark-master:
     profiles: ["spark-cluster"]
-    image: raster_h3-sedona:latest
+    image: dggs_stream-sedona:latest
     hostname: spark-master
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -70,7 +70,7 @@ services:
   spark-worker:
     profiles: ["spark-cluster"]
     init: true   # reap the Python workers and JVMs that finished drivers leave
-    image: raster_h3-sedona:latest
+    image: dggs_stream-sedona:latest
     depends_on: [spark-master]
     cpus: 2
     environment:
@@ -85,17 +85,17 @@ services:
     volumes:
       - spark-shared:/shared
       - ./data:/data:ro
-      - ./examples/sedona_spark:/opt/raster_h3/examples:ro
+      - ./examples/sedona_spark:/opt/dggs_stream/examples:ro
 
   spark-client:
     profiles: ["spark-cluster"]
     init: true   # reap the Python workers and JVMs that finished drivers leave
-    image: raster_h3-sedona:latest
+    image: dggs_stream-sedona:latest
     hostname: spark-client
     depends_on: [spark-master]
     environment:
       SPARK_MASTER: spark://spark-master:7077
-      RASTER_H3_SHARED_DIR: /shared
+      DGGS_STREAM_SHARED_DIR: /shared
       PYSPARK_DRIVER_PYTHON: python3
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -103,7 +103,7 @@ services:
     volumes:
       - spark-shared:/shared
       - ./data:/data:ro
-      - ./examples/sedona_spark:/opt/raster_h3/examples
+      - ./examples/sedona_spark:/opt/dggs_stream/examples
     ports:
       - "4041:4040"   # application UI of the running driver
 

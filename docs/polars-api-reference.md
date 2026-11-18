@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [← SQL API Reference](sql-api-reference.md)
 
-This document is the complete reference for the `raster_h3` Python package
+This document is the complete reference for the `dggs_stream` Python package
 ([Python & Polars deep dive](engines/python-polars.md)): the Polars IO source
 (`scan_raster_h3`, `read_raster_h3`), the Arrow PyCapsule stream (`RasterH3ArrowStream`),
 the direct Parquet and PMTiles v3 exporters, and the H3 helper functions. For the DuckDB
@@ -14,9 +14,9 @@ engine and documented once in the SQL reference.
 
 ```python
 import polars as pl
-import raster_h3
+import dggs_stream
 
-lf = raster_h3.scan_raster_h3("elevation.tif", 8)          # pl.LazyFrame
+lf = dggs_stream.scan_raster_h3("elevation.tif", 8)          # pl.LazyFrame
 df = lf.filter(pl.col("count") > 10).select("h3_index", "mean").collect()
 ```
 
@@ -114,7 +114,7 @@ when the scan object is created. The one empty value that falls back to a defaul
 | A resolution outside 0–15, an unparsable `resolutions` string, or an empty one (`""` or `[]`) | `Invalid resolutions '16': expected H3 resolutions between 0 and 15, e.g. 7,8` |
 | `format` other than `wide` / `long` | `Invalid format 'tall': expected 'wide' or 'long'` |
 | `bbox` without exactly four numbers | `Invalid bbox '1,2,3': expected four numbers min_lon,min_lat,max_lon,max_lat` |
-| Unknown name in `columns` | `Column 'nope' not found in raster_h3 schema` |
+| Unknown name in `columns` | `Column 'nope' not found in dggs_stream schema` |
 | Unknown `sampling`, `overlap_rule` or `spectral_formula` name, invalid `quantiles` or `remap` | `Invalid sampling 'bilinear': expected one of center, 5point, ...` |
 | `band` (or a spectral formula band) the raster does not have | `band 3 does not exist: the raster has 2 band(s), numbered from 1` |
 | An option on the wrong kind of scan (`min_majority_fraction` or `remap` on a continuous scan; `spectral_formula`, `quantiles`, `min_mean` or `max_mean` on a categorical one) | `min_majority_fraction applies to categorical scans only` |
@@ -182,7 +182,7 @@ later to get filter and slice pushdown back.
 ### Example
 
 ```python
-lf = raster_h3.scan_raster_h3(
+lf = dggs_stream.scan_raster_h3(
     "temperature.tif",
     [7, 8],
     crs="EPSG:4326",
@@ -213,7 +213,7 @@ Eager form of `scan_raster_h3`, equivalent to
 is not installed.
 
 ```python
-df = raster_h3.read_raster_h3("landcover.tif", 8, categorical=True, format="long")
+df = dggs_stream.read_raster_h3("landcover.tif", 8, categorical=True, format="long")
 ```
 
 ---
@@ -252,7 +252,7 @@ The constructor arguments are kept as attributes of the same names (`path` as `s
 Any PyCapsule-aware library can read the stream directly:
 
 ```python
-stream = raster_h3.RasterH3ArrowStream("dem.tif", 8, columns=["h3_index", "mean", "wkb"])
+stream = dggs_stream.RasterH3ArrowStream("dem.tif", 8, columns=["h3_index", "mean", "wkb"])
 
 pl.from_arrow(stream)          # Polars
 pa.table(stream)               # PyArrow
@@ -380,7 +380,7 @@ Files written by releases before the Parquet footer fix fail in Polars with
 To write the scan schema itself, or a projection of it, use Polars:
 
 ```python
-(raster_h3.scan_raster_h3("elevation.tif", 8, columns=["h3_index", "mean", "count"])
+(dggs_stream.scan_raster_h3("elevation.tif", 8, columns=["h3_index", "mean", "count"])
     .sink_parquet("elevation_h3_slim.parquet"))
 ```
 
@@ -431,11 +431,11 @@ valid cell are skipped.
 | `h3_column` | `str \| None` | `None` | Older name of `cell_column`. |
 
 ```python
-(raster_h3.scan_raster_h3("landcover.tif", 9, categorical=True)
+(dggs_stream.scan_raster_h3("landcover.tif", 9, categorical=True)
     .filter(pl.col("majority_fraction") > 0.6)
     .select("h3_index", "majority_class")
     .sink_parquet("landcover.parquet"))
-raster_h3.parquet_to_pmtiles("landcover.parquet", "landcover.pmtiles")
+dggs_stream.parquet_to_pmtiles("landcover.parquet", "landcover.pmtiles")
 ```
 
 ### Exporter errors and warnings
@@ -446,7 +446,7 @@ their coordinate transform failed or fell outside the valid latitude/longitude r
 still write the file and emit a `RuntimeWarning`:
 
 ```
-raster_h3: N valid sample(s) were dropped because their coordinate transform failed or
+dggs_stream: N valid sample(s) were dropped because their coordinate transform failed or
 fell outside the valid latitude/longitude range; check crs
 ```
 
@@ -481,12 +481,12 @@ other engine. Invalid input returns a sentinel rather than raising.
   [cell geometry](sql-api-reference.md#cell-geometry).
 
 ```python
-cell = raster_h3.string_to_h3("8828308281fffff")   # 613196570331971583
-raster_h3.h3_to_string(cell)                        # '8828308281fffff'
-raster_h3.h3_get_resolution(cell)                   # 8
-raster_h3.h3_cell_to_parent(cell, 6)                # 604189371209351167
-raster_h3.h3_cell_to_parent("8828308281fffff", 6)   # '86283082fffffff'
-raster_h3.h3_is_valid("not a cell")                 # False
+cell = dggs_stream.string_to_h3("8828308281fffff")   # 613196570331971583
+dggs_stream.h3_to_string(cell)                        # '8828308281fffff'
+dggs_stream.h3_get_resolution(cell)                   # 8
+dggs_stream.h3_cell_to_parent(cell, 6)                # 604189371209351167
+dggs_stream.h3_cell_to_parent("8828308281fffff", 6)   # '86283082fffffff'
+dggs_stream.h3_is_valid("not a cell")                 # False
 ```
 
 ### Applying helpers to columns
@@ -495,12 +495,12 @@ The helpers are not Polars expressions. Apply them to a column with `map_element
 avoid them where the scan already provides the value (`h3_hex`, `resolution`, `wkb`):
 
 ```python
-df = raster_h3.read_raster_h3("elevation.tif", 8, columns=["h3_index", "mean"])
+df = dggs_stream.read_raster_h3("elevation.tif", 8, columns=["h3_index", "mean"])
 df = df.with_columns(
-    pl.col("h3_index").map_elements(raster_h3.h3_to_lat, return_dtype=pl.Float64).alias("lat"),
-    pl.col("h3_index").map_elements(raster_h3.h3_to_lng, return_dtype=pl.Float64).alias("lng"),
+    pl.col("h3_index").map_elements(dggs_stream.h3_to_lat, return_dtype=pl.Float64).alias("lat"),
+    pl.col("h3_index").map_elements(dggs_stream.h3_to_lng, return_dtype=pl.Float64).alias("lng"),
     pl.col("h3_index")
-      .map_elements(lambda c: raster_h3.h3_cell_to_parent(c, 6), return_dtype=pl.UInt64)
+      .map_elements(lambda c: dggs_stream.h3_cell_to_parent(c, 6), return_dtype=pl.UInt64)
       .alias("parent_6"),
 )
 ```
@@ -544,11 +544,11 @@ how they share cells between adjacent polygons.
 import shapely
 
 aoi = shapely.box(-122.47, 37.73, -122.37, 37.81)
-cells = raster_h3.h3_polygon_to_cells(shapely.to_wkb(aoi), 8)
+cells = dggs_stream.h3_polygon_to_cells(shapely.to_wkb(aoi), 8)
 
 # Keep only the raster cells inside the area of interest
 inside = (
-    raster_h3.scan_raster_h3("elevation.tif", 8, bbox=aoi.bounds)
+    dggs_stream.scan_raster_h3("elevation.tif", 8, bbox=aoi.bounds)
     .filter(pl.col("h3_index").is_in(cells))
     .collect()
 )
@@ -556,7 +556,7 @@ inside = (
 # One row per (region, cell) from a GeoDataFrame
 regions = pl.DataFrame({
     "name": gdf["name"],
-    "h3_index": [raster_h3.h3_polygon_to_cells(shapely.to_wkb(g), 7, "covers") for g in gdf.geometry],
+    "h3_index": [dggs_stream.h3_polygon_to_cells(shapely.to_wkb(g), 7, "covers") for g in gdf.geometry],
 }).explode("h3_index").with_columns(pl.col("h3_index").cast(pl.UInt64))
 ```
 
@@ -570,4 +570,4 @@ regions = pl.DataFrame({
 | `polars.exceptions.ComputeError` | `LazyFrame.collect()` / `sink_*` on a `scan_raster_h3` frame | The same `RuntimeError`, raised inside the Polars IO source |
 | `ValueError` | `h3_polygon_to_cells` | Unknown containment mode, or too many cells |
 | `RuntimeWarning` | `raster_to_parquet`, `raster_to_pmtiles` | Valid pixels dropped by failed coordinate transforms |
-| `RuntimeError: Could not locate libraster_h3_python shared library` | First call of any function | Native library not found; see [Install](engines/python-polars.md#install) |
+| `RuntimeError: Could not locate libdggs_stream_python shared library` | First call of any function | Native library not found; see [Install](engines/python-polars.md#install) |

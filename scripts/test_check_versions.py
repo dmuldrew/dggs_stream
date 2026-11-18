@@ -18,7 +18,7 @@ class VersionChecks(unittest.TestCase):
             cwd=cls.root, text=True,
         ))
         cls.version = next(p["version"] for p in cls.metadata["packages"]
-                           if p["name"] == "raster-h3-core")
+                           if p["name"] == "dggs-stream-core")
 
     def test_matching_release(self):
         self.assertEqual(check(self.root, self.metadata, f"refs/tags/v{self.version}"), [])
@@ -28,7 +28,7 @@ class VersionChecks(unittest.TestCase):
 
     def test_mismatched_package_and_path_requirement(self):
         metadata = deepcopy(self.metadata)
-        cli = next(p for p in metadata["packages"] if p["name"] == "raster-h3-cli")
+        cli = next(p for p in metadata["packages"] if p["name"] == "dggs-stream-cli")
         cli["version"] = "99.0.0"
         next(d for d in cli["dependencies"] if d.get("path"))["req"] = "*"
         errors = check(self.root, metadata)
@@ -37,7 +37,7 @@ class VersionChecks(unittest.TestCase):
 
     def test_private_adapter_policy(self):
         metadata = deepcopy(self.metadata)
-        next(p for p in metadata["packages"] if p["name"] == "raster-h3-python")["publish"] = None
+        next(p for p in metadata["packages"] if p["name"] == "dggs-stream-python")["publish"] = None
         self.assertTrue(any("publishable" in e for e in check(self.root, metadata)))
 
     def test_missing_and_duplicate_fields_fail_closed(self):

@@ -1,18 +1,18 @@
 //! Real-server PostgreSQL extension test. Requires Docker; builds the module in a Linux
 //! container via `scripts/pg_e2e.sh` and loads it into `postgres:<major>`.
 //!
-//! `cargo test -p raster_h3 --test it pg_extension_e2e -- --ignored --nocapture`
+//! `cargo test -p dggs_stream --test it pg_extension_e2e -- --ignored --nocapture`
 //!
-//! RASTER_H3_PG_VERSIONS picks the server majors (comma separated, default `16`);
-//! RASTER_H3_PG_E2E_KEEP=1 leaves the containers running for manual `psql` sessions.
+//! DGGS_STREAM_PG_VERSIONS picks the server majors (comma separated, default `16`);
+//! DGGS_STREAM_PG_E2E_KEEP=1 leaves the containers running for manual `psql` sessions.
 use crate::helpers;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use raster_h3::core::scalar_ops;
-use raster_h3_pg::{PgCategoricalRow, PgCategoricalSrf, PgContinuousRow, PgContinuousSrf};
+use dggs_stream::core::scalar_ops;
+use dggs_stream_pg::{PgCategoricalRow, PgCategoricalSrf, PgContinuousRow, PgContinuousSrf};
 
 const CELL: u64 = 0x8828308281fffff;
 const CRS: &str = "EPSG:4326";
@@ -111,7 +111,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if std::env::var_os("RASTER_H3_PG_E2E_KEEP").is_none() {
+        if std::env::var_os("DGGS_STREAM_PG_E2E_KEEP").is_none() {
             let _ = Command::new(repo_root().join("scripts/pg_e2e.sh"))
                 .args([&self.major, "--stop"])
                 .status();
@@ -172,7 +172,9 @@ fn continuous_rows(
         bbox,
     )
     .unwrap();
-    let mut rows: Vec<_> = srf.collect::<raster_h3::core::error::Result<_>>().unwrap();
+    let mut rows: Vec<_> = srf
+        .collect::<dggs_stream::core::error::Result<_>>()
+        .unwrap();
     rows.sort_by_key(|r| r.h3_index);
     rows
 }
@@ -186,7 +188,9 @@ fn categorical_rows(path: &Path) -> Vec<PgCategoricalRow> {
         None,
     )
     .unwrap();
-    let mut rows: Vec<_> = srf.collect::<raster_h3::core::error::Result<_>>().unwrap();
+    let mut rows: Vec<_> = srf
+        .collect::<dggs_stream::core::error::Result<_>>()
+        .unwrap();
     rows.sort_by_key(|r| r.h3_index);
     rows
 }
@@ -219,8 +223,8 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
     // Loading the library checks the magic block; CREATE EXTENSION resolves every symbol.
     assert_eq!(
         server.query(
-            "CREATE EXTENSION raster_h3;
-             SELECT extversion FROM pg_extension WHERE extname = 'raster_h3';"
+            "CREATE EXTENSION dggs_stream;
+             SELECT extversion FROM pg_extension WHERE extname = 'dggs_stream';"
         ),
         ["0.7.0"]
     );
@@ -365,6 +369,23 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
         );
     }
 
+    // The extension under its former name, in a database of its own: its functions record
+    // `$libdir/raster_h3_pg` in pg_proc.probin, which is also what databases upgraded from
+    // earlier raster_h3 versions keep, and must load the library installed under that name.
+    let legacy = server.query(&format!(
+        "CREATE DATABASE legacy_name;
+         \\c legacy_name
+         CREATE EXTENSION raster_h3;
+         SELECT extversion FROM pg_extension WHERE extname = 'raster_h3';
+         SELECT DISTINCT probin FROM pg_proc WHERE proname = 'h3_to_string';
+         SELECT h3_to_string({cell});"
+    ));
+    assert_eq!(
+        legacy,
+        ["0.7.0", "$libdir/raster_h3_pg", cell_hex.as_str()],
+        "raster_h3 under its former name"
+    );
+
     // No backend crashed along the way.
     let logs = server.logs();
     assert!(
@@ -377,7 +398,7 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
 #[test]
 #[ignore = "requires Docker; builds and loads the extension into postgres containers"]
 fn pg_extension_in_real_server() {
-    let versions = std::env::var("RASTER_H3_PG_VERSIONS").unwrap_or_else(|_| "16".into());
+    let versions = std::env::var("DGGS_STREAM_PG_VERSIONS").unwrap_or_else(|_| "16".into());
 
     let builder = helpers::TestGeoTiffBuilder::new(32, 32).with_geokeys(true);
     let (_cont_file, cont_tif) = builder.create_f32_tempfile(|c, r| (c + 2 * r) as f32);

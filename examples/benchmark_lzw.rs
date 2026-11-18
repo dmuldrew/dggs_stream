@@ -9,10 +9,10 @@ use std::path::Path;
 use std::time::Instant;
 use tiff::decoder::{Decoder, DecodingResult};
 
-use raster_h3::aggregator::multi_horizon::{
+use dggs_stream::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 
 fn benchmark_file(path: &str, sample_count_limit: Option<usize>) {
     println!("\n=========================================================================================");
@@ -123,7 +123,7 @@ fn main() {
     println!(
         "========================================================================================="
     );
-    println!("       raster_h3 Benchmark: Accelerated Zero-Allocation LZW Decompression                 ");
+    println!("       dggs_stream Benchmark: Accelerated Zero-Allocation LZW Decompression                 ");
     println!(
         "========================================================================================="
     );

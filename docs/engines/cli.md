@@ -1,31 +1,31 @@
-# CLI Deep Dive: `raster-h3-cli`
+# CLI Deep Dive: `dggs-stream-cli`
 
 [← Engines Overview](README.md) · [← Back to README](../../README.md)
 
-`raster-h3-cli` ([`crates/raster-h3-cli`](../../crates/raster-h3-cli)) is a single
+`dggs-stream-cli` ([`crates/dggs-stream-cli`](../../crates/dggs-stream-cli)) is a single
 executable that streams raster aggregations to stdout or writes Parquet/PMTiles files. It
 is meant for shell pipelines, batch jobs and engines that can run an external command,
 such as ClickHouse executable table functions.
 
-The same source ([`src/bin/raster_h3.rs`](../../crates/raster-h3-cli/src/bin/raster_h3.rs))
+The same source ([`src/bin/dggs_stream.rs`](../../crates/dggs-stream-cli/src/bin/dggs_stream.rs))
 builds two binaries:
 
 | Binary | Built by |
 | :--- | :--- |
-| `raster-h3-cli` | `cargo build --release -p raster-h3-cli`; also installed onto `PATH` by the `raster-h3` Python wheel |
-| `raster-h3` | the root crate (`cargo build --release` / `cargo install --path .`) |
+| `dggs-stream-cli` | `cargo build --release -p dggs-stream-cli`; also installed onto `PATH` by the `dggs-stream` Python wheel |
+| `dggs-stream` | the root crate (`cargo build --release` / `cargo install --path .`) |
 
 ## Usage
 
 ```text
-raster-h3-cli ipc     <input> [options]        Stream RH3IPC01 batches to stdout or -o <file>
-raster-h3-cli jsonl   <input> [options]        Stream JSONEachRow (NDJSON) to stdout or -o <file>
-raster-h3-cli parquet <input> -o <out> [opts]  Write GeoParquet
-raster-h3-cli pmtiles <input> -o <out> [opts]  Write a PMTiles v3 archive
-raster-h3-cli parquet-to-pmtiles <in.parquet> -o <out> [--h3-column NAME]
+dggs-stream-cli ipc     <input> [options]        Stream RH3IPC01 batches to stdout or -o <file>
+dggs-stream-cli jsonl   <input> [options]        Stream JSONEachRow (NDJSON) to stdout or -o <file>
+dggs-stream-cli parquet <input> -o <out> [opts]  Write GeoParquet
+dggs-stream-cli pmtiles <input> -o <out> [opts]  Write a PMTiles v3 archive
+dggs-stream-cli parquet-to-pmtiles <in.parquet> -o <out> [--h3-column NAME]
                                                Transcode any H3-indexed Parquet file to PMTiles v3
-raster-h3-cli plan    <input> [options]        Print partition specs (JSON Lines), see Partitioned scans
-raster-h3-cli merge   <part>... [options]      Combine partitioned `ipc` outputs into final cells
+dggs-stream-cli plan    <input> [options]        Print partition specs (JSON Lines), see Partitioned scans
+dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outputs into final cells
 ```
 
 `<input>` can be a path, glob, comma-separated list or VRT (it may also be given with
@@ -79,14 +79,14 @@ hex string. Keys are emitted in alphabetical order (not `--columns` order); cons
 match by name, such as ClickHouse `JSONEachRow`, are unaffected.
 
 ```bash
-raster-h3-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 3
+dggs-stream-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 3
 # {"count":64.0,"h3_hex":"8828308281fffff","mean":42.0}
 ```
 
 ### `ipc`
 
 `RH3IPC01`, the workspace's binary columnar stream. It is **not** Apache Arrow IPC; read it
-with `raster_h3_core::columnar::ipc::read_ipc_stream` or against the layout in the
+with `dggs_stream_core::columnar::ipc::read_ipc_stream` or against the layout in the
 [Core deep dive](core.md#rh3ipc01-stream-and-ndjson). Use `jsonl`, or the Python Arrow
 stream, when the consumer expects standard formats.
 
@@ -97,8 +97,8 @@ on stdout. `pmtiles` writes one zoom range per requested resolution (see
 [PMTiles & Multi-Resolution](../pmtiles.md)).
 
 ```bash
-raster-h3-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
-raster-h3-cli pmtiles landcover.tif -c -r 5,6,7,8 -o landcover.pmtiles
+dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
+dggs-stream-cli pmtiles landcover.tif -c -r 5,6,7,8 -o landcover.pmtiles
 ```
 
 ### `parquet-to-pmtiles`
@@ -106,7 +106,7 @@ raster-h3-cli pmtiles landcover.tif -c -r 5,6,7,8 -o landcover.pmtiles
 Turns any Parquet file with an H3 column into a PMTiles v3 archive, one hexagon feature per
 row with the other columns as properties, the same transcoder as DuckDB's
 [`h3_parquet_to_pmtiles`](../sql-api-reference.md#parquet-pmtiles-v3-export-h3_parquet_to_pmtilesparquet_path-output_pmtiles-)
-and Python's `parquet_to_pmtiles`. The input can come from `raster-h3-cli parquet`, or from
+and Python's `parquet_to_pmtiles`. The input can come from `dggs-stream-cli parquet`, or from
 any engine that writes Parquet (DuckDB `COPY`, Spark, Polars), so cells can be filtered,
 joined or aggregated there before tiling. Zoom levels follow the cells' resolutions (see
 [PMTiles & Multi-Resolution](../pmtiles.md)). Raster options (`-r`, `--crs`, ...) do not
@@ -116,7 +116,7 @@ Rows whose H3 value is null or not a valid cell are skipped, and their count is 
 on stderr; nothing is written to stdout.
 
 ```bash
-raster-h3-cli parquet-to-pmtiles census_h3.parquet -o census_h3.pmtiles --h3-column cell_id
+dggs-stream-cli parquet-to-pmtiles census_h3.parquet -o census_h3.pmtiles --h3-column cell_id
 ```
 
 ## Recipes
@@ -127,13 +127,13 @@ exposes.
 ### Basic continuous aggregation
 
 ```bash
-raster-h3-cli jsonl elevation.tif -r 8 --columns h3_index,h3_hex,mean,count,min,max,sum
+dggs-stream-cli jsonl elevation.tif -r 8 --columns h3_index,h3_hex,mean,count,min,max,sum
 ```
 
 ### CRS, NoData and bounding box
 
 ```bash
-raster-h3-cli jsonl temperature_global.tif -r 9 \
+dggs-stream-cli jsonl temperature_global.tif -r 9 \
   --crs EPSG:4326 --nodata -9999 \
   --bbox -122.50,37.70,-122.35,37.85 \
   --columns h3_hex,mean,count
@@ -142,50 +142,50 @@ raster-h3-cli jsonl temperature_global.tif -r 9 \
 ### Multiple resolutions in one pass
 
 ```bash
-raster-h3-cli jsonl elevation.tif -r 6,7,8 --columns resolution,h3_hex,mean \
+dggs-stream-cli jsonl elevation.tif -r 6,7,8 --columns resolution,h3_hex,mean \
   | jq -c 'select(.resolution == 8)'
 ```
 
 ### Other grids and pixel-sized cells
 
 ```bash
-raster-h3-cli jsonl elevation.tif --grid s2 -r 15 --columns s2_index,mean
-raster-h3-cli jsonl elevation.tif --grid healpix -r auto      # cells about one pixel in size
-raster-h3-cli parquet elevation.tif --grid a5 -r auto-1 -o a5.parquet
+dggs-stream-cli jsonl elevation.tif --grid s2 -r 15 --columns s2_index,mean
+dggs-stream-cli jsonl elevation.tif --grid healpix -r auto      # cells about one pixel in size
+dggs-stream-cli parquet elevation.tif --grid a5 -r auto-1 -o a5.parquet
 ```
 
 ### Fine cells, area weighting, histograms and empty cells
 
 ```bash
 # Cells finer than the pixels: interpolate a value at each cell centre
-raster-h3-cli jsonl elevation.tif -r auto+2 --transfer sample --sample-method bicubic
+dggs-stream-cli jsonl elevation.tif -r auto+2 --transfer sample --sample-method bicubic
 # Population counts: split each pixel across the cells it overlaps, keeping the total
-raster-h3-cli parquet population.tif -r 7 --transfer overlay --mass-preserve -o pop.parquet
+dggs-stream-cli parquet population.tif -r 7 --transfer overlay --mass-preserve -o pop.parquet
 # Per-cell histogram of a continuous raster in four bins, as fractions
-raster-h3-cli jsonl elevation.tif -r 8 --histogram 4:0:2000 --histogram-normalize fraction
+dggs-stream-cli jsonl elevation.tif -r 8 --histogram 4:0:2000 --histogram-normalize fraction
 # Keep all-NoData cells (count 0), round statistics, and see where the time went
-raster-h3-cli jsonl elevation.tif -r 8 --nodata-policy emit --decimals 2 --profile
+dggs-stream-cli jsonl elevation.tif -r 8 --nodata-policy emit --decimals 2 --profile
 ```
 
 ### Sampling the output
 
 ```bash
-raster-h3-cli jsonl elevation.tif -r 8 --limit 5      # stops aggregation after 5 rows
+dggs-stream-cli jsonl elevation.tif -r 8 --limit 5      # stops aggregation after 5 rows
 ```
 
 ### Categorical aggregation
 
 ```bash
 # Wide: majority class, dominance and the JSON histogram
-raster-h3-cli jsonl worldcover_2021.tif -c -r 8 \
+dggs-stream-cli jsonl worldcover_2021.tif -c -r 8 \
   --columns h3_hex,majority_class,majority_fraction,unique_classes,total_count,histogram
 
 # Histogram lookups with jq (histogram is a JSON string)
-raster-h3-cli jsonl worldcover_2021.tif -c -r 8 --columns h3_hex,histogram \
+dggs-stream-cli jsonl worldcover_2021.tif -c -r 8 --columns h3_hex,histogram \
   | jq -c '{h3_hex, urban: (.histogram | fromjson | .["50"])} | select(.urban != null)'
 
 # Long: one row per (cell, class)
-raster-h3-cli jsonl worldcover_2021.tif -c --format long -r 8 \
+dggs-stream-cli jsonl worldcover_2021.tif -c --format long -r 8 \
   --columns h3_hex,category,count,fraction \
   | jq -c 'select(.category == 50 and .fraction >= 0.25)'
 ```
@@ -193,22 +193,22 @@ raster-h3-cli jsonl worldcover_2021.tif -c --format long -r 8 \
 ### Export to GeoParquet and PMTiles
 
 ```bash
-raster-h3-cli parquet elevation.tif -r 8 -o elevation_h3.parquet
-raster-h3-cli pmtiles california_elevation.tif -r 6,7,8 -o california_elevation.pmtiles
-raster-h3-cli pmtiles worldcover_2021.tif -c -r 5,6,7,8 -o worldcover.pmtiles
+dggs-stream-cli parquet elevation.tif -r 8 -o elevation_h3.parquet
+dggs-stream-cli pmtiles california_elevation.tif -r 6,7,8 -o california_elevation.pmtiles
+dggs-stream-cli pmtiles worldcover_2021.tif -c -r 5,6,7,8 -o worldcover.pmtiles
 
 # Filter or join in another engine, then tile the result
-raster-h3-cli parquet elevation.tif -r 8 -o elevation_h3.parquet
+dggs-stream-cli parquet elevation.tif -r 8 -o elevation_h3.parquet
 duckdb -c "COPY (SELECT h3_index, mean FROM 'elevation_h3.parquet' WHERE mean > 500)
            TO 'highlands.parquet'"
-raster-h3-cli parquet-to-pmtiles highlands.parquet -o highlands.pmtiles
+dggs-stream-cli parquet-to-pmtiles highlands.parquet -o highlands.pmtiles
 ```
 
 ### Remote COG & S3 streaming
 
 ```bash
-raster-h3-cli jsonl https://example.com/rasters/cog_elevation.tif -r 8 --limit 10
-raster-h3-cli parquet s3://my-geospatial-bucket/landsat/scene_01.tif -r 9 -o scene_01_h3.parquet
+dggs-stream-cli jsonl https://example.com/rasters/cog_elevation.tif -r 8 --limit 10
+dggs-stream-cli parquet s3://my-geospatial-bucket/landsat/scene_01.tif -r 9 -o scene_01_h3.parquet
 ```
 
 ### Multi-file mosaics
@@ -216,8 +216,8 @@ raster-h3-cli parquet s3://my-geospatial-bucket/landsat/scene_01.tif -r 9 -o sce
 Quote globs so the shell does not expand them; overlaps use the `cutline` rule.
 
 ```bash
-raster-h3-cli jsonl 'tiles/tile_*.tif' -r 8
-raster-h3-cli jsonl tile_west.tif,tile_east.tif -c -r 8
+dggs-stream-cli jsonl 'tiles/tile_*.tif' -r 8
+dggs-stream-cli jsonl tile_west.tif,tile_east.tif -c -r 8
 ```
 
 ### Joins
@@ -226,7 +226,7 @@ The CLI has no join of its own; stream into an engine that does. With DuckDB (no
 needed):
 
 ```bash
-raster-h3-cli jsonl california_elevation.tif -r 8 --columns h3_index,mean | duckdb -c "
+dggs-stream-cli jsonl california_elevation.tif -r 8 --columns h3_index,mean | duckdb -c "
   SELECT r.h3_index, r.mean, p.total_population
   FROM read_ndjson_auto('/dev/stdin') r
   JOIN 'population_h3.parquet' p USING (h3_index)
@@ -240,7 +240,7 @@ raster-h3-cli jsonl california_elevation.tif -r 8 --columns h3_index,mean | duck
 ```sql
 SELECT h3_hex, mean, count
 FROM executable(
-    'raster-h3-cli jsonl /data/dem.tif -r 8 --columns h3_hex,mean,count',
+    'dggs-stream-cli jsonl /data/dem.tif -r 8 --columns h3_hex,mean,count',
     JSONEachRow,
     'h3_hex String, mean Float64, count Float64'
 )
@@ -259,14 +259,14 @@ cells and values of a single scan.
 
 ```bash
 # 1. Plan from metadata: one JSON spec per line, ~256 tiles/strips each.
-raster-h3-cli plan dem.tif --target-chunks 256 -o plan.jsonl
+dggs-stream-cli plan dem.tif --target-chunks 256 -o plan.jsonl
 
 # 2. Scan each partition (any process or machine that can read dem.tif).
 seq 0 $(( $(wc -l < plan.jsonl) - 1 )) | xargs -P 8 -I{} \
-  raster-h3-cli ipc dem.tif -r 8 --partition @plan.jsonl --partition-index {} -o parts/{}.rh3
+  dggs-stream-cli ipc dem.tif -r 8 --partition @plan.jsonl --partition-index {} -o parts/{}.rh3
 
 # 3. Merge: final rows pass through, cells split across partitions are combined.
-raster-h3-cli merge parts/*.rh3 -o dem_r8.rh3          # or --jsonl
+dggs-stream-cli merge parts/*.rh3 -o dem_r8.rh3          # or --jsonl
 ```
 
 - `plan` takes `--target-chunks <N>` (default 256), `--crs`, `--bbox` and `-o`. Plan and
@@ -297,15 +297,15 @@ raster-h3-cli merge parts/*.rh3 -o dem_r8.rh3          # or --jsonl
 ### Shell pipelines
 
 ```bash
-raster-h3-cli jsonl dem.tif -r 8 --columns h3_index,mean | duckdb -c \
+dggs-stream-cli jsonl dem.tif -r 8 --columns h3_index,mean | duckdb -c \
   "SELECT count(*), avg(mean) FROM read_ndjson_auto('/dev/stdin')"
 
-raster-h3-cli jsonl dem.tif -r 8 | jq -c 'select(.count > 100)'
+dggs-stream-cli jsonl dem.tif -r 8 | jq -c 'select(.count > 100)'
 ```
 
 ## Library API
 
-The binary is a thin wrapper over [`src/lib.rs`](../../crates/raster-h3-cli/src/lib.rs):
+The binary is a thin wrapper over [`src/lib.rs`](../../crates/dggs-stream-cli/src/lib.rs):
 
 | Item | Purpose |
 | :--- | :--- |
@@ -320,6 +320,6 @@ The binary is a thin wrapper over [`src/lib.rs`](../../crates/raster-h3-cli/src/
 ## Testing
 
 ```bash
-cargo test -p raster-h3-cli        # argument parsing, IPC round trip, JSONL, plan/partition/merge vs one scan
-cargo test -p raster_h3 --test it multi_engine_e2e # runs the built binary for all four subcommands
+cargo test -p dggs-stream-cli        # argument parsing, IPC round trip, JSONL, plan/partition/merge vs one scan
+cargo test -p dggs_stream --test it multi_engine_e2e # runs the built binary for all four subcommands
 ```
