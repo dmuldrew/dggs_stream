@@ -1,4 +1,4 @@
-"""dggs_stream_sedona.RasterH3Table scanned by SedonaDB through its table provider capsule."""
+"""dggs_stream_sedona.RasterTable scanned by SedonaDB through its table provider capsule."""
 
 import re
 import struct
@@ -8,7 +8,7 @@ import pytest
 sedonadb = pytest.importorskip("sedonadb")
 
 import dggs_stream_sedona  # noqa: E402
-from dggs_stream_sedona import RasterH3Table  # noqa: E402
+from dggs_stream_sedona import RasterTable  # noqa: E402
 
 
 def write_gradient_tif(path, width, height):
@@ -88,7 +88,7 @@ def rows(sd, sql):
 
 
 def test_scan_project_limit_and_count(sd, raster):
-    table = RasterH3Table.continuous(raster, 8)
+    table = RasterTable.continuous(raster, 8)
     assert "continuous" in repr(table)
     sd.create_data_frame(table).to_view("cells")
 
@@ -104,7 +104,7 @@ def test_scan_project_limit_and_count(sd, raster):
 
 
 def test_cells_are_sedona_geometry(sd, raster):
-    sd.create_data_frame(RasterH3Table.continuous(raster, [7, 8])).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, [7, 8])).to_view("cells")
     kinds = rows(
         sd, "SELECT DISTINCT ST_GeometryType(wkb), ST_SRID(wkb) FROM cells"
     )
@@ -130,7 +130,7 @@ POINT = "ST_SetSRID(ST_GeomFromWKT('POINT (-122.35 37.70)'), 4326)"
     ],
 )
 def test_spatial_filters_match_an_unpruned_scan(sd, raster, predicate):
-    sd.create_data_frame(RasterH3Table.continuous(raster, 8)).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, 8)).to_view("cells")
     # A materialised copy cannot push anything down: the reference answer.
     sd.sql("SELECT * FROM cells").to_memtable().to_view("full_scan")
 
@@ -141,7 +141,7 @@ def test_spatial_filters_match_an_unpruned_scan(sd, raster, predicate):
 
 
 def test_spatial_filter_off_the_raster_is_empty(sd, raster):
-    sd.create_data_frame(RasterH3Table.continuous(raster, 8)).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, 8)).to_view("cells")
     far = "ST_SetSRID(ST_GeomFromWKT('POINT (-100 40)'), 4326)"
     assert scalar(sd, f"SELECT COUNT(*) FROM cells WHERE ST_Intersects(wkb, {far})") == 0
 
@@ -152,7 +152,7 @@ def test_spatial_filter_prunes_the_scan(sd, raster):
     `datafusion-proto` strips the literal's `geoarrow.wkb` tag on the way, so this checks
     that the table still accepts the untagged geometry and pushes its box down.
     """
-    sd.create_data_frame(RasterH3Table.continuous(raster, 8)).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, 8)).to_view("cells")
     total = scalar(sd, "SELECT COUNT(*) FROM cells")
     plan = "\n".join(
         sd.sql(
@@ -179,7 +179,7 @@ def test_scalar_functions_register():
 
 
 def test_scalar_functions(sd, raster):
-    sd.create_data_frame(RasterH3Table.continuous(raster, 8)).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, 8)).to_view("cells")
     assert scalar(sd, "SELECT h3_to_string(599686042433355775)") == "85283473fffffff"
     mismatches = scalar(
         sd,
@@ -195,7 +195,7 @@ def test_scalar_functions(sd, raster):
 
 
 def test_polygon_to_cells_joins_on_h3_index(sd, raster):
-    sd.create_data_frame(RasterH3Table.continuous(raster, 8)).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, 8)).to_view("cells")
     sd.sql(f"SELECT 'aoi' AS name, {POLYGON} AS geom").to_view("areas")
     joined = rows(
         sd,
@@ -245,16 +245,16 @@ def test_polygon_to_cells_rejects_projected_geometry(sd):
 
 
 def test_categorical(sd, raster):
-    sd.create_data_frame(RasterH3Table.categorical(raster, 8)).to_view("classes")
+    sd.create_data_frame(RasterTable.categorical(raster, 8)).to_view("classes")
     assert scalar(sd, "SELECT SUM(total_count) FROM classes") == 200 * 200
     assert scalar(sd, "SELECT MIN(majority_fraction) FROM classes") > 0
 
 
 def test_invalid_arguments():
     with pytest.raises(ValueError, match="between 0 and 15"):
-        RasterH3Table.continuous("x.tif", 16)
+        RasterTable.continuous("x.tif", 16)
     with pytest.raises(ValueError):
-        RasterH3Table.continuous("/nonexistent/raster.tif", 8)
+        RasterTable.continuous("/nonexistent/raster.tif", 8)
 
 
 # -----------------------------------------------------------------------------
@@ -274,7 +274,7 @@ def pmtiles_metadata(path):
 
 
 def test_write_pmtiles_from_a_sedonadb_query(sd, raster, tmp_path):
-    sd.create_data_frame(RasterH3Table.continuous(raster, [7, 8])).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, [7, 8])).to_view("cells")
     query = "SELECT h3_index, mean, count, resolution, wkb FROM cells WHERE count >= 4"
     expected = scalar(sd, f"SELECT COUNT(*) FROM ({query})")
     out = tmp_path / "cells.pmtiles"
@@ -337,7 +337,7 @@ def test_every_grid_scans_tiles_and_has_scalar_functions(raster, tmp_path, grid)
     res = GRID_RESOLUTIONS[grid]
     sd = sedonadb.connect()
     sd.register(dggs_stream_sedona.scalar_functions())
-    table = RasterH3Table.continuous(raster, res, grid=grid)
+    table = RasterTable.continuous(raster, res, grid=grid)
     if grid != "h3":
         assert f"grid='{grid}'" in repr(table) or f'grid="{grid}"' in repr(table)
     sd.create_data_frame(table).to_view("cells")
@@ -373,24 +373,24 @@ def test_every_grid_scans_tiles_and_has_scalar_functions(raster, tmp_path, grid)
 
 def test_grid_arguments_are_validated(raster, tmp_path):
     with pytest.raises(ValueError, match="unknown grid"):
-        RasterH3Table.continuous(raster, 8, grid="hexagons")
+        RasterTable.continuous(raster, 8, grid="hexagons")
     with pytest.raises(ValueError, match="between 0 and 15"):
-        RasterH3Table.continuous(raster, 20)
-    RasterH3Table.continuous(raster, 20, grid="a5")
+        RasterTable.continuous(raster, 20)
+    RasterTable.continuous(raster, 20, grid="a5")
     with pytest.raises(ValueError, match="between 0 and 29"):
-        RasterH3Table.categorical(raster, 30, grid="healpix")
+        RasterTable.categorical(raster, 30, grid="healpix")
 
 
 @pytest.mark.parametrize("grid", sorted(GRID_RESOLUTIONS))
 def test_auto_resolution(raster, grid):
     sd = sedonadb.connect()
-    sd.create_data_frame(RasterH3Table.continuous(raster, "auto", grid=grid)).to_view("cells")
+    sd.create_data_frame(RasterTable.continuous(raster, "auto", grid=grid)).to_view("cells")
     auto = sd.sql("SELECT resolution, count FROM cells").to_arrow_table()
     [res] = set(auto.column("resolution").to_pylist())
     # About one 0.001 degree pixel per cell.
     assert 0.3 < 200 * 200 / auto.num_rows < 4.0
-    sd.create_data_frame(RasterH3Table.continuous(raster, "auto-1", grid=grid)).to_view("coarse")
+    sd.create_data_frame(RasterTable.continuous(raster, "auto-1", grid=grid)).to_view("coarse")
     coarse = sd.sql("SELECT resolution FROM coarse").to_arrow_table()
     assert set(coarse.column("resolution").to_pylist()) == {res - 1}
     with pytest.raises(ValueError, match="auto"):
-        RasterH3Table.continuous(raster, "auto+x", grid=grid)
+        RasterTable.continuous(raster, "auto+x", grid=grid)

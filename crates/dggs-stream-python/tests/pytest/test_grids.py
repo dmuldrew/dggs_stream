@@ -4,7 +4,9 @@ each pixel centre with the scalar `lonlat_to_cell`, a path separate from the sca
 
 from __future__ import annotations
 
+import gzip
 import json
+import struct
 from collections import defaultdict
 
 import pytest
@@ -28,9 +30,9 @@ except ImportError:
 
 
 class _EagerScans:
-    """`dggs_stream` whose `scan_raster` / `scan_raster_h3` always return a `LazyFrame`.
+    """`dggs_stream` whose `scan_raster` always returns a `LazyFrame`.
 
-    Without `register_io_source` (Polars < 1.4) they return a `RasterH3ArrowStream`; it
+    Without `register_io_source` (Polars < 1.4) it returns a `RasterArrowStream`; it
     is read here, so the grid checks below still run (pushdown is then Polars' own)."""
 
     def __init__(self, module):
@@ -39,15 +41,9 @@ class _EagerScans:
     def __getattr__(self, name):
         return getattr(self._module, name)
 
-    def _lazy(self, fn, *args, **kwargs):
-        out = fn(*args, **kwargs)
-        return out if isinstance(out, pl.LazyFrame) else frame(pa.table(out)).lazy()
-
     def scan_raster(self, *args, **kwargs):
-        return self._lazy(self._module.scan_raster, *args, **kwargs)
-
-    def scan_raster_h3(self, *args, **kwargs):
-        return self._lazy(self._module.scan_raster_h3, *args, **kwargs)
+        out = self._module.scan_raster(*args, **kwargs)
+        return out if isinstance(out, pl.LazyFrame) else frame(pa.table(out)).lazy()
 
 
 @pytest.fixture
@@ -67,7 +63,7 @@ def expected(dggs_stream, grid, width, height, value):
 
 @pytest.mark.parametrize("grid", GRIDS)
 def test_continuous_scan_matches_pixel_centres(dggs_stream, gradient_tif, grid):
-    df = frame(pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES[grid], grid=grid)))
+    df = frame(pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES[grid], grid=grid)))
     index, hex_ = f"{grid}_index", f"{grid}_hex"
     assert df.columns[:2] == [index, hex_]
     want = expected(dggs_stream, grid, 64, 48, gradient_value)
@@ -88,7 +84,7 @@ def test_continuous_scan_matches_pixel_centres(dggs_stream, gradient_tif, grid):
 def test_categorical_scan_matches_pixel_centres(dggs_stream, classes_tif, grid, format):
     df = frame(
         pa.table(
-            dggs_stream.RasterH3ArrowStream(
+            dggs_stream.RasterArrowStream(
                 classes_tif, RES[grid], grid=grid, categorical=True, format=format
             )
         )
@@ -136,7 +132,7 @@ def test_polars_pushdown_is_the_same_on_every_grid(dggs_stream, gradient_tif, gr
 @pytest.mark.parametrize("grid", GRIDS)
 def test_multi_resolution_and_resolution_filter(dggs_stream, gradient_tif, grid):
     res = [RES[grid] - 2, RES[grid]]
-    lazy = dggs_stream.scan_raster_h3(gradient_tif, res, grid=grid)
+    lazy = dggs_stream.scan_raster(gradient_tif, res, grid=grid)
     df = lazy.collect()
     assert sorted(df["resolution"].unique()) == res
     coarse = lazy.filter(pl.col("resolution") == res[0]).collect()
@@ -149,7 +145,7 @@ def test_multi_resolution_and_resolution_filter(dggs_stream, gradient_tif, grid)
 def test_resolution_filter_above_h3_range(dggs_stream, gradient_tif, grid):
     """Resolutions past H3's 15 survive a pushed-down `resolution` predicate."""
     res = [RES[grid], 17]
-    lazy = dggs_stream.scan_raster_h3(gradient_tif, res, grid=grid)
+    lazy = dggs_stream.scan_raster(gradient_tif, res, grid=grid)
     fine = lazy.filter(pl.col("resolution") == 17).collect()
     assert fine.height > 0 and set(fine["resolution"]) == {17}
     assert lazy.filter(pl.col("resolution") > 15).collect().height == fine.height
@@ -159,9 +155,9 @@ def test_resolution_filter_above_h3_range(dggs_stream, gradient_tif, grid):
 @pytest.mark.parametrize("grid", GRIDS)
 def test_mean_filter_sees_rounded_means(dggs_stream, gradient_tif, grid):
     """With `decimals`, a mean predicate compares the rounded means the rows show."""
-    lazy = dggs_stream.scan_raster_h3(gradient_tif, RES[grid], grid=grid, decimals=1)
+    lazy = dggs_stream.scan_raster(gradient_tif, RES[grid], grid=grid, decimals=1)
     df = lazy.collect()
-    raw = dggs_stream.scan_raster_h3(gradient_tif, RES[grid], grid=grid).collect()
+    raw = dggs_stream.scan_raster(gradient_tif, RES[grid], grid=grid).collect()
     joined = raw.join(df, on=f"{grid}_index", suffix="_shown")
     # A mean that rounds up to the threshold must be kept.
     candidates = joined.filter(pl.col("mean") < pl.col("mean_shown"))
@@ -174,20 +170,20 @@ def test_mean_filter_sees_rounded_means(dggs_stream, gradient_tif, grid):
 @pytest.mark.parametrize("grid,finest", [("h3", 15), ("a5", 30), ("s2", 30), ("healpix", 29)])
 def test_resolution_range_follows_the_grid(dggs_stream, gradient_tif, grid, finest):
     assert dggs_stream.GRIDS[grid] == finest
-    stream = dggs_stream.RasterH3ArrowStream(gradient_tif, finest, grid=grid, limit=1)
+    stream = dggs_stream.RasterArrowStream(gradient_tif, finest, grid=grid, limit=1)
     assert frame(pa.table(stream)).height == 1
     with pytest.raises(RuntimeError, match=f"between 0 and {finest}"):
-        pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, finest + 1, grid=grid))
+        pa.table(dggs_stream.RasterArrowStream(gradient_tif, finest + 1, grid=grid))
 
 
 def test_unknown_grid_is_rejected(dggs_stream, gradient_tif):
     with pytest.raises(ValueError, match="unknown grid"):
-        dggs_stream.RasterH3ArrowStream(gradient_tif, 9, grid="s9")
+        dggs_stream.RasterArrowStream(gradient_tif, 9, grid="s9")
     with pytest.raises(TypeError):
-        dggs_stream.scan_raster_h3(gradient_tif, 9, grid=2)
+        dggs_stream.scan_raster(gradient_tif, 9, grid=2)
     # The default and an explicit H3 are the same scan.
-    a = frame(pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, 9)))
-    b = frame(pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, 9, grid="H3")))
+    a = frame(pa.table(dggs_stream.RasterArrowStream(gradient_tif, 9)))
+    b = frame(pa.table(dggs_stream.RasterArrowStream(gradient_tif, 9, grid="H3")))
     assert a.equals(b)
 
 
@@ -203,11 +199,11 @@ def test_partitions_merge_to_the_single_scan(dggs_stream, tmp_path, grid, catego
         write_geotiff(tif, 48, 48, gradient_value, rows_per_strip=4)
     index = f"{grid}_index"
     kwargs = dict(grid=grid, categorical=categorical)
-    single = frame(pa.table(dggs_stream.RasterH3ArrowStream(tif, RES[grid], **kwargs))).sort(index)
+    single = frame(pa.table(dggs_stream.RasterArrowStream(tif, RES[grid], **kwargs))).sort(index)
     specs = dggs_stream.plan_partitions(tif, target_chunks=3)
     assert len(specs) > 1
     parts = [
-        frame(pa.table(dggs_stream.RasterH3ArrowStream(tif, RES[grid], partition=s, **kwargs)))
+        frame(pa.table(dggs_stream.RasterArrowStream(tif, RES[grid], partition=s, **kwargs)))
         for s in specs
     ]
     rows = pl.concat(parts)
@@ -227,7 +223,7 @@ def test_parquet_and_pmtiles_exports(dggs_stream, gradient_tif, classes_tif, tmp
     tif = classes_tif if categorical else gradient_tif
     index = f"{grid}_index"
     scanned = frame(
-        pa.table(dggs_stream.RasterH3ArrowStream(tif, RES[grid], grid=grid, categorical=categorical))
+        pa.table(dggs_stream.RasterArrowStream(tif, RES[grid], grid=grid, categorical=categorical))
     )
 
     out = tmp_path / "cells.parquet"
@@ -238,7 +234,14 @@ def test_parquet_and_pmtiles_exports(dggs_stream, gradient_tif, classes_tif, tmp
 
     direct = tmp_path / "direct.pmtiles"
     assert dggs_stream.raster_to_pmtiles(tif, direct, RES[grid], grid=grid, categorical=categorical) == written
-    assert direct.read_bytes()[:7] == b"PMTiles"
+    archive = direct.read_bytes()
+    assert archive[:7] == b"PMTiles"
+    offset, length = struct.unpack_from("<QQ", archive, 24)
+    metadata = json.loads(gzip.decompress(archive[offset : offset + length]))
+    name = "dggs_stream_categorical_pmtiles" if categorical else "dggs_stream_pmtiles"
+    assert metadata["name"] == name
+    assert grid in metadata["description"].split()
+    assert metadata["resolution_stats"][str(RES[grid])]["cell_count"] == written
 
     # The grid is detected from the cell column's name...
     tiles = tmp_path / "cells.pmtiles"
@@ -350,7 +353,7 @@ def test_auto_resolution(dggs_stream, gradient_tif, classes_tif, tmp_path, grid)
     for text, offset in [("auto+1", 1), ("AUTO-2", -2), ("auto + 1", 1), ("auto+60", 60)]:
         want = max(0, min(finest, matched + offset))
         assert dggs_stream.auto_resolution(gradient_tif, grid, offset=offset) == want
-        stream = dggs_stream.RasterH3ArrowStream(gradient_tif, text, grid=grid, limit=1)
+        stream = dggs_stream.RasterArrowStream(gradient_tif, text, grid=grid, limit=1)
         assert frame(pa.table(stream))["resolution"].to_list() == [want]
 
     # Categorical scans and the exporters take it too.
@@ -370,7 +373,7 @@ def test_auto_resolution(dggs_stream, gradient_tif, classes_tif, tmp_path, grid)
 
     for bad in ["auto+", "auto1", "automatic", "auto+1.5"]:
         with pytest.raises(RuntimeError, match="auto"):
-            pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, bad, grid=grid))
+            pa.table(dggs_stream.RasterArrowStream(gradient_tif, bad, grid=grid))
     with pytest.raises(RuntimeError):
         dggs_stream.auto_resolution(tmp_path / "missing.tif", grid)
     with pytest.raises(TypeError):
@@ -471,7 +474,7 @@ def test_nodata_policy_emit_and_decimals(dggs_stream, holes_tif, tmp_path, grid)
 
     # The arrow stream carries the nulls too.
     table = pa.table(
-        dggs_stream.RasterH3ArrowStream(
+        dggs_stream.RasterArrowStream(
             holes_tif, RES[grid], grid=grid, nodata=NODATA, nodata_policy="emit"
         )
     )
@@ -519,7 +522,7 @@ def test_nodata_policy_emit_categorical(dggs_stream, tmp_path, grid, format):
 
 def test_output_option_errors(dggs_stream, gradient_tif, tmp_path):
     def scan(**kw):
-        return pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, 9, **kw))
+        return pa.table(dggs_stream.RasterArrowStream(gradient_tif, 9, **kw))
 
     with pytest.raises(RuntimeError, match="nodata_policy"):
         scan(nodata_policy="drop")
@@ -594,7 +597,7 @@ def test_transfer_sample(dggs_stream, plane_tif, grid):
     lazy = dggs_stream.scan_raster(plane_tif, res, grid=grid, transfer="bicubic")
     assert lazy.select(pl.len()).collect().item() == df.height
     assert lazy.select(index, "mean").head(5).collect().shape == (5, 2)
-    table = pa.table(dggs_stream.RasterH3ArrowStream(plane_tif, res, grid=grid, transfer="sample", limit=7))
+    table = pa.table(dggs_stream.RasterArrowStream(plane_tif, res, grid=grid, transfer="sample", limit=7))
     assert table.num_rows == 7
 
 
@@ -656,7 +659,7 @@ def test_transfer_categorical(dggs_stream, classes_tif, grid):
 
 def test_transfer_option_errors(dggs_stream, gradient_tif):
     def scan(**kw):
-        return pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, 9, **kw))
+        return pa.table(dggs_stream.RasterArrowStream(gradient_tif, 9, **kw))
 
     for kw, needle in [
         (dict(transfer="smear"), "transfer"),
@@ -675,7 +678,7 @@ def test_transfer_option_errors(dggs_stream, gradient_tif):
 @pytest.mark.parametrize("grid", GRIDS)
 @pytest.mark.parametrize("transfer", ["assign_centers", "overlay"])
 def test_profile_raster(dggs_stream, gradient_tif, grid, transfer):
-    rows = dggs_stream.scan_raster_h3(gradient_tif, RES[grid], grid=grid, transfer=transfer).collect().height
+    rows = dggs_stream.scan_raster(gradient_tif, RES[grid], grid=grid, transfer=transfer).collect().height
     out = dggs_stream.profile_raster(gradient_tif, RES[grid], grid=grid, transfer=transfer)
     profile = out["profile"]
     assert out["rows"] == rows == profile["cells"]
@@ -719,7 +722,7 @@ def test_binned_histogram(dggs_stream, bins_tif, grid):
         for v in values:
             if v <= 8.0:
                 want[cell][min(int(v // 2), 3)] += 1.0
-    lf = dggs_stream.scan_raster_h3(bins_tif, RES[grid], grid=grid, histogram="4:0:8")
+    lf = dggs_stream.scan_raster(bins_tif, RES[grid], grid=grid, histogram="4:0:8")
     assert lf.collect_schema()["histogram"] == pl.List(
         pl.Struct({"lower": pl.Float64, "upper": pl.Float64, "weight": pl.Float64})
     )
@@ -732,10 +735,10 @@ def test_binned_histogram(dggs_stream, bins_tif, grid):
     assert got == dict(want)
 
     # Explicit edges are the same bins; fractions sum to one, densities integrate to one.
-    same = dggs_stream.scan_raster_h3(bins_tif, RES[grid], grid=grid, histogram=edges).collect()
+    same = dggs_stream.scan_raster(bins_tif, RES[grid], grid=grid, histogram=edges).collect()
     assert same["histogram"].to_list() == df["histogram"].to_list()
     for normalize, width in (("fraction", 1.0), ("density", 2.0)):
-        scaled = dggs_stream.scan_raster_h3(
+        scaled = dggs_stream.scan_raster(
             bins_tif, RES[grid], grid=grid, histogram=edges, histogram_normalize=normalize
         ).collect()
         totals = scaled.select(
@@ -744,7 +747,7 @@ def test_binned_histogram(dggs_stream, bins_tif, grid):
         assert all(abs(t * width - 1.0) < 1e-12 for t in totals)
 
     # Area weights spread each pixel over the cells it overlaps; every bin keeps its pixels.
-    area = dggs_stream.scan_raster_h3(
+    area = dggs_stream.scan_raster(
         bins_tif, RES[grid], grid=grid, histogram="4:0:8", histogram_weight="area"
     ).collect()
     per_bin = [0.0] * 4
@@ -764,7 +767,7 @@ def test_value_histogram(dggs_stream, classes_tif, grid):
         cell: sorted((v, float(values.count(v))) for v in set(values))
         for cell, values in expected(dggs_stream, grid, 48, 48, class_value).items()
     }
-    df = dggs_stream.scan_raster_h3(classes_tif, RES[grid], grid=grid, histogram="values").collect()
+    df = dggs_stream.scan_raster(classes_tif, RES[grid], grid=grid, histogram="values").collect()
     assert df.schema["histogram"] == pl.List(pl.Struct({"class": pl.Int64, "weight": pl.Float64}))
     got = {
         cell: [(e["class"], e["weight"]) for e in hist.to_list()]
@@ -772,7 +775,7 @@ def test_value_histogram(dggs_stream, classes_tif, grid):
     }
     assert got == want
     # The Arrow stream carries the same list of structs, and JSON the same numbers.
-    stream = dggs_stream.RasterH3ArrowStream(classes_tif, RES[grid], grid=grid, histogram="values")
+    stream = dggs_stream.RasterArrowStream(classes_tif, RES[grid], grid=grid, histogram="values")
     table = pa.table(stream)
     assert pa.types.is_list(table.schema.field("histogram").type)
     assert pa.types.is_struct(table.schema.field("histogram").type.value_type)
@@ -780,7 +783,7 @@ def test_value_histogram(dggs_stream, classes_tif, grid):
         map(str, df["histogram"].to_list())
     )
     # Without a spec the column is still JSON text (class fractions).
-    plain = dggs_stream.scan_raster_h3(classes_tif, RES[grid], grid=grid, categorical=True).collect()
+    plain = dggs_stream.scan_raster(classes_tif, RES[grid], grid=grid, categorical=True).collect()
     assert plain.schema["histogram"] == pl.String
     assert set(plain[f"{grid}_index"]) == set(want)
     assert all(text.startswith("{") for text in plain["histogram"])
@@ -797,6 +800,6 @@ def test_histogram_option_errors(dggs_stream, classes_tif):
         (dict(histogram="2:0:9", remap={1: 2}), "remap"),
     ]:
         with pytest.raises(Exception, match=message):
-            dggs_stream.scan_raster_h3(classes_tif, 9, **options).collect()
+            dggs_stream.scan_raster(classes_tif, 9, **options).collect()
     with pytest.raises(TypeError, match="numbers"):
-        dggs_stream.scan_raster_h3(classes_tif, 9, histogram=["a", "b"])
+        dggs_stream.scan_raster(classes_tif, 9, histogram=["a", "b"])

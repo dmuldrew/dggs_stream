@@ -388,21 +388,21 @@ Option names are case-insensitive. Any other option is rejected with an error na
 The DuckDB 2.0 build registers these options, so a session can `SET` them once instead of passing arguments to every call:
 
 ```sql
-SET raster_h3_use_duckdb_fs = true;   -- read rasters through DuckDB's file system
-SET raster_h3_fetch_workers = 16;
-SET raster_h3_decode_budget_mb = 512;
-SET raster_h3_workers = 8;
-SELECT current_setting('raster_h3_fetch_workers');
+SET dggs_stream_use_duckdb_fs = true;   -- read rasters through DuckDB's file system
+SET dggs_stream_fetch_workers = 16;
+SET dggs_stream_decode_budget_mb = 512;
+SET dggs_stream_workers = 8;
+SELECT current_setting('dggs_stream_fetch_workers');
 ```
 
 | Option | Type | Default | Environment fallback | Effect |
 | :--- | :--- | :--- | :--- | :--- |
-| `raster_h3_use_duckdb_fs` | `BOOLEAN` | `false` | `DGGS_STREAM_USE_DUCKDB_FS` (`1`, `true`, `on`, `yes`) | Open every raster through DuckDB's file system instead of the built-in readers. Remote paths then use the loaded `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works (`s3://`, `gs://`, `az://`, `abfss://`, `hf://`, `http(s)://`, …). Local files are read through DuckDB too, so they lose the memory-mapped fast path. See [DuckDB file system](engines/duckdb.md#duckdb-file-system--secrets-duckdb-20-build). |
-| `raster_h3_fetch_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_FETCH_WORKERS` | Default for the `fetch_workers` argument. |
-| `raster_h3_decode_budget_mb` | `BIGINT` | `0` (unset) | `DGGS_STREAM_DECODE_BUDGET_MB` | Default for the `decode_budget_mb` argument. |
-| `raster_h3_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_WORKERS` | Default for the `workers` argument. |
+| `dggs_stream_use_duckdb_fs` | `BOOLEAN` | `false` | `DGGS_STREAM_USE_DUCKDB_FS` (`1`, `true`, `on`, `yes`) | Open every raster through DuckDB's file system instead of the built-in readers. Remote paths then use the loaded `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works (`s3://`, `gs://`, `az://`, `abfss://`, `hf://`, `http(s)://`, …). Local files are read through DuckDB too, so they lose the memory-mapped fast path. See [DuckDB file system](engines/duckdb.md#duckdb-file-system--secrets-duckdb-20-build). |
+| `dggs_stream_fetch_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_FETCH_WORKERS` | Default for the `fetch_workers` argument. |
+| `dggs_stream_decode_budget_mb` | `BIGINT` | `0` (unset) | `DGGS_STREAM_DECODE_BUDGET_MB` | Default for the `decode_budget_mb` argument. |
+| `dggs_stream_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_WORKERS` | Default for the `workers` argument. |
 
-They apply to `h3_raster_continuous_aggregate`, `h3_raster_categorical_aggregate`, `h3_raster_to_parquet` and `h3_raster_to_pmtiles`, and are read when the query is planned. For the worker and budget options the order is: the function's own argument, then a positive session value, then the environment variable, then the built-in default. `raster_h3_use_duckdb_fs` is on when the session sets it to `true` or the environment variable is set. The environment variables are read only by the DuckDB 2.0 build.
+They apply to `h3_raster_continuous_aggregate`, `h3_raster_categorical_aggregate`, `h3_raster_to_parquet` and `h3_raster_to_pmtiles`, and are read when the query is planned. For the worker and budget options the order is: the function's own argument, then a positive session value, then the environment variable, then the built-in default. `dggs_stream_use_duckdb_fs` is on when the session sets it to `true` or the environment variable is set. The environment variables are read only by the DuckDB 2.0 build.
 
 ---
 

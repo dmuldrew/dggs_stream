@@ -9,7 +9,7 @@
 //! of the chosen Helmert transformation.
 
 use dggs_stream_core::crs::transformer::CrsTransformer;
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 
 /// Ground distance in metres (equirectangular; fine at these separations).
 fn ground_m(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -163,7 +163,7 @@ fn grid_shift_datums_are_rejected_clearly() {
         "+proj=longlat +ellps=clrk66 +nadgrids=conus",
     ] {
         match CrsTransformer::from_proj_string(def) {
-            Err(RasterH3Error::CrsError(msg)) => assert!(msg.contains("grid"), "{def}: {msg}"),
+            Err(DggsStreamError::CrsError(msg)) => assert!(msg.contains("grid"), "{def}: {msg}"),
             other => panic!("{def}: expected CrsError, got {:?}", other.map(|_| ())),
         }
     }

@@ -16,7 +16,7 @@ use crate::aggregator::multi_horizon::{
 };
 use crate::aggregator::output_policy::{CategoricalStats, ContinuousStats, OutputPolicy};
 use crate::encoding::{cell_index_to_wkb, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
 
@@ -218,7 +218,7 @@ impl ColumnSchema {
         let mut projected = Vec::with_capacity(indices.len());
         for &idx in indices {
             let field = self.fields.get(idx).ok_or_else(|| {
-                RasterH3Error::InvalidParameter(format!(
+                DggsStreamError::InvalidParameter(format!(
                     "Projected column index {} out of bounds (schema has {} fields)",
                     idx,
                     self.fields.len()
@@ -499,7 +499,7 @@ pub struct RecordBatch {
 impl RecordBatch {
     pub fn try_new(schema: Arc<ColumnSchema>, columns: Vec<ColumnArray>) -> Result<Self> {
         if schema.fields.len() != columns.len() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "Schema field count ({}) does not match column count ({})",
                 schema.fields.len(),
                 columns.len()
@@ -508,7 +508,7 @@ impl RecordBatch {
         let num_rows = columns.first().map(|c| c.len()).unwrap_or(0);
         for (i, col) in columns.iter().enumerate() {
             if col.len() != num_rows {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Column {} length ({}) does not match batch row count ({})",
                     i,
                     col.len(),
@@ -516,7 +516,7 @@ impl RecordBatch {
                 )));
             }
             if col.data_type() != schema.fields[i].data_type {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Column '{}' type {:?} does not match schema type {:?}",
                     schema.fields[i].name,
                     col.data_type(),
@@ -703,7 +703,7 @@ impl RecordBatch {
                     // `project` above rejected out-of-range columns, so every
                     // projected quantile column is in `q_targets`.
                     let slot = q_targets.binary_search(&(q_col - 10)).map_err(|_| {
-                        RasterH3Error::InvalidParameter(format!(
+                        DggsStreamError::InvalidParameter(format!(
                             "Quantile column {q_col} is not configured"
                         ))
                     })?;

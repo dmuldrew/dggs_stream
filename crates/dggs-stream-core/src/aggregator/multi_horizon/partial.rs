@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 
 use crate::aggregator::accumulator::H3Accumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 use super::controller::HorizonStreamKernel;
 use super::partition::PartialCell;
@@ -51,7 +51,7 @@ pub fn encode_partial_state<A: PartialState>(acc: &A) -> Vec<u8> {
 /// size in bytes (e.g. the aggregation budget), guarding against corrupt input.
 pub fn decode_partial_state<A: PartialState>(bytes: &[u8], limit: usize) -> Result<A> {
     let invalid =
-        |why: &str| RasterH3Error::InvalidParameter(format!("invalid partial state: {why}"));
+        |why: &str| DggsStreamError::InvalidParameter(format!("invalid partial state: {why}"));
     let Some(rest) = bytes.strip_prefix(MAGIC.as_slice()) else {
         return Err(invalid("missing RH3P prefix"));
     };

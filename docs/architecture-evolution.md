@@ -163,7 +163,7 @@ To validate the culmination of Phases 1–5 at full continental scale, we benchm
 
 #### 1. Native Projected Raster: `BP_CONUS.tif` (Albers EPSG:5070, 24.4 GB, 15.87B pixels)
 
-| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
+| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
 | :--- | :--- | :--- | :--- |
 | **Output Columns** | `h3_index`, `min_value`, `max_value`, `avg_value`, `sum_value`, `pixel_count`, `geometry` (WKB) | `h3_index`, `min`, `max`, `mean` | `h3_index`, `min`, `max`, `mean` |
 | **H3 Row Count** | **74,440,878** | **74,440,878** | **74,440,878** |
@@ -176,7 +176,7 @@ To validate the culmination of Phases 1–5 at full continental scale, we benchm
 
 #### 2. Tiled WGS84 Raster: `BP_CONUS_wgs84_tiled.tif` (WGS84 EPSG:4326, 21.0 GB, 18.22B pixels)
 
-| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
+| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
 | :--- | :--- | :--- | :--- |
 | **Output Columns** | `h3_index`, `min_value`, `max_value`, `avg_value`, `sum_value`, `pixel_count`, `geometry` (WKB) | `h3_index`, `min`, `max`, `mean` | `h3_index`, `min`, `max`, `mean` |
 | **H3 Row Count** | **74,441,152** | **74,441,152** | **74,441,152** |
@@ -226,7 +226,7 @@ PRs #42 and #70 added CI gates for lint (strict Clippy and rustdoc), MSRV `1.94`
 | #72 | `dggs-stream-sedona`: DataFusion 54 / SedonaDB adapter |
 
 ### Lesson 16: Ship Two ABIs Instead of Choosing One
-The v1.2.0 C extension API still covers DuckDB 1.2 through 1.5, but features like native `GEOMETRY`, `COPY ... TO (FORMAT pmtiles)`, session settings (`raster_h3_fetch_workers`, `raster_h3_decode_budget_mb`, `raster_h3_workers`) and reads through DuckDB's own file system (`raster_h3_use_duckdb_fs`, so `CREATE SECRET` credentials work for `s3://`, `gs://`, `azure://`) need the v1.5.6 API. Release bundles now carry both trees (`v1.2.0/<platform>` and `v2.0.0/<platform>`). Signing (`package_extension --signing-key`) and a generated `.well-known/duckdb-extension-repo.json` let users install a signed build through `CREATE EXTENSION REPOSITORY` with signature checks on, and CI verifies that unsigned and wrong-key builds are rejected.
+The v1.2.0 C extension API still covers DuckDB 1.2 through 1.5, but features like native `GEOMETRY`, `COPY ... TO (FORMAT pmtiles)`, session settings (`dggs_stream_fetch_workers`, `dggs_stream_decode_budget_mb`, `dggs_stream_workers`) and reads through DuckDB's own file system (`dggs_stream_use_duckdb_fs`, so `CREATE SECRET` credentials work for `s3://`, `gs://`, `azure://`) need the v1.5.6 API. Release bundles now carry both trees (`v1.2.0/<platform>` and `v2.0.0/<platform>`). Signing (`package_extension --signing-key`) and a generated `.well-known/duckdb-extension-repo.json` let users install a signed build through `CREATE EXTENSION REPOSITORY` with signature checks on, and CI verifies that unsigned and wrong-key builds are rejected.
 
 ### Lesson 17: Pushdown Must Be a Superset, Never a Clip
 DataFusion `Bbox` pushdown originally clipped pixels to the box, so a cell straddling the edge lost the pixels outside it and its `mean` changed depending on the query's `WHERE` clause (PR #73). The pushed box is now widened by more than the largest cell diameter at the coarsest resolution, so the scan returns an `Inexact` superset with unchanged statistics, and a box that misses every tile scans empty instead of failing. The same rule governs the SedonaDB adapter's `ST_Intersects` / `ST_DWithin` pushdown.

@@ -1,4 +1,4 @@
-"""Partitioned scans (`plan_partitions`, `RasterH3ArrowStream(partition=...)`,
+"""Partitioned scans (`plan_partitions`, `RasterArrowStream(partition=...)`,
 `merge_partials`) produce exactly the cells and values of one unpartitioned scan.
 """
 
@@ -40,7 +40,7 @@ def run_partitioned(dggs_stream, path, target_chunks, **kwargs):
     plan = dggs_stream.plan_partitions(path, target_chunks=target_chunks)
     finals, partials = [], []
     for spec in plan:
-        table = pa.table(dggs_stream.RasterH3ArrowStream(path, RESOLUTIONS, partition=spec, **kwargs))
+        table = pa.table(dggs_stream.RasterArrowStream(path, RESOLUTIONS, partition=spec, **kwargs))
         assert table.column_names[-1] == dggs_stream.PARTIAL_STATE_COLUMN
         is_partial = pc.is_valid(table.column(dggs_stream.PARTIAL_STATE_COLUMN))
         finals.append(table.filter(pc.invert(is_partial)).drop([dggs_stream.PARTIAL_STATE_COLUMN]))
@@ -76,14 +76,14 @@ def assert_tables_match(single, combined):
 
 @pytest.mark.parametrize("target_chunks", [1, 4, 1000])
 def test_continuous_partitions_match_single_scan(dggs_stream, striped_gradient, target_chunks):
-    single = sort(pa.table(dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS)))
+    single = sort(pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS)))
     combined, partitions, partials = run_partitioned(dggs_stream, striped_gradient, target_chunks)
     assert_tables_match(single, combined)
     assert (partials > 0) == (partitions > 1)
 
 
 def test_categorical_partitions_match_single_scan(dggs_stream, striped_classes):
-    single = sort(pa.table(dggs_stream.RasterH3ArrowStream(striped_classes, RESOLUTIONS, categorical=True)))
+    single = sort(pa.table(dggs_stream.RasterArrowStream(striped_classes, RESOLUTIONS, categorical=True)))
     combined, partitions, _ = run_partitioned(dggs_stream, striped_classes, 3, categorical=True)
     assert partitions > 1
     assert_tables_match(single, combined)
@@ -91,7 +91,7 @@ def test_categorical_partitions_match_single_scan(dggs_stream, striped_classes):
 
 def test_projection_carries_through_the_merge(dggs_stream, striped_gradient):
     columns = ["h3_index", "resolution", "mean", "count"]
-    single = sort(pa.table(dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS, columns=columns)))
+    single = sort(pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, columns=columns)))
     combined, _, _ = run_partitioned(dggs_stream, striped_gradient, 4, columns=columns)
     assert_tables_match(single, combined)
 
@@ -99,7 +99,7 @@ def test_projection_carries_through_the_merge(dggs_stream, striped_gradient):
 def test_merge_accepts_spark_style_types_and_inputs(dggs_stream, striped_gradient):
     """Spark has no unsigned types: h3_index arrives as int64 and resolution as int16."""
     spec = dggs_stream.plan_partitions(striped_gradient, target_chunks=4)[1]
-    table = pa.table(dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS, partition=spec))
+    table = pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, partition=spec))
     partial = table.filter(pc.is_valid(table.column("partial_state")))
     assert partial.num_rows > 0
     spark_like = pa.table(
@@ -118,7 +118,7 @@ def test_merge_accepts_spark_style_types_and_inputs(dggs_stream, striped_gradien
 def test_batches_and_dict_output(dggs_stream, striped_gradient):
     pytest.importorskip("polars")
     spec = dggs_stream.plan_partitions(striped_gradient, target_chunks=4)[0]
-    stream = dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS, partition=spec)
+    stream = dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, partition=spec)
     rows = sum(df.height for df in stream.iter_batches(64))
     as_dict = stream.to_dict()
     assert rows == len(as_dict["h3_index"]) == pa.table(stream).num_rows
@@ -129,7 +129,7 @@ def test_batches_and_dict_output(dggs_stream, striped_gradient):
 def test_merge_accepts_the_scans_columns_including_partial_state(dggs_stream, striped_gradient):
     columns = ["h3_index", "resolution", "mean", "partial_state"]
     spec = dggs_stream.plan_partitions(striped_gradient, target_chunks=4)[1]
-    table = pa.table(dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS, columns=columns, partition=spec))
+    table = pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, columns=columns, partition=spec))
     assert table.column_names == columns
     partial = table.filter(pc.is_valid(table.column("partial_state")))
     merged = dggs_stream.merge_partials(partial, columns=columns)
@@ -142,7 +142,7 @@ def test_partitioned_to_dict_warns_about_dropped_samples(dggs_stream, tmp_path):
     path = tmp_path / "past_pole.tif"
     write_geotiff(path, 10, 20, lambda c, r: 3.0, origin=(0.0, 95.0), pixel=1.0, rows_per_strip=4)
     spec = dggs_stream.plan_partitions(path, target_chunks=100)[0]
-    stream = dggs_stream.RasterH3ArrowStream(path, 3, partition=spec)
+    stream = dggs_stream.RasterArrowStream(path, 3, partition=spec)
     with pytest.warns(RuntimeWarning, match=r"50 valid sample\(s\) were dropped"):
         result = stream.to_dict()
     assert len(result["h3_index"]) > 0 and "partial_state" in result
@@ -150,7 +150,7 @@ def test_partitioned_to_dict_warns_about_dropped_samples(dggs_stream, tmp_path):
 
 def test_misuse_raises(dggs_stream, striped_gradient, striped_classes, tmp_path):
     spec = dggs_stream.plan_partitions(striped_gradient, target_chunks=4)[0]
-    stream = dggs_stream.RasterH3ArrowStream
+    stream = dggs_stream.RasterArrowStream
     with pytest.raises(RuntimeError, match="limit"):
         pa.table(stream(striped_gradient, 9, partition=spec, limit=5))
     with pytest.raises(RuntimeError, match="h3_index"):
@@ -182,7 +182,7 @@ def test_misuse_raises(dggs_stream, striped_gradient, striped_classes, tmp_path)
     ids=["quantiles", "filters", "quantiles-filters-projection"],
 )
 def test_continuous_options_survive_the_merge(dggs_stream, striped_gradient, options):
-    single = sort(pa.table(dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS, **options)))
+    single = sort(pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, **options)))
     combined, partitions, partials = run_partitioned(dggs_stream, striped_gradient, 4, **options)
     assert partitions > 1 and partials > 0
     assert_tables_match(single, combined)
@@ -196,7 +196,7 @@ def test_continuous_options_survive_the_merge(dggs_stream, striped_gradient, opt
 def test_categorical_options_survive_the_merge(dggs_stream, striped_classes, options):
     single = sort(
         pa.table(
-            dggs_stream.RasterH3ArrowStream(striped_classes, RESOLUTIONS, categorical=True, **options)
+            dggs_stream.RasterArrowStream(striped_classes, RESOLUTIONS, categorical=True, **options)
         )
     )
     combined, partitions, partials = run_partitioned(
@@ -212,7 +212,7 @@ def test_merge_without_the_scans_filters_keeps_merged_cells(dggs_stream, striped
     partials = []
     for spec in plan:
         table = pa.table(
-            dggs_stream.RasterH3ArrowStream(striped_gradient, RESOLUTIONS, partition=spec, min_count=1e9)
+            dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, partition=spec, min_count=1e9)
         )
         partials.append(table.filter(pc.is_valid(table.column(dggs_stream.PARTIAL_STATE_COLUMN))))
         # No interior cell has a billion samples.

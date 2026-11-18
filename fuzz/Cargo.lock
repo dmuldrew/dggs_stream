@@ -280,6 +280,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dggs-stream-fuzz"
+version = "0.0.0"
+dependencies = [
+ "dggs-stream-core",
+ "libfuzzer-sys",
+ "tempfile",
+ "tiff",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1017,16 +1027,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core",
-]
-
-[[package]]
-name = "raster-h3-fuzz"
-version = "0.0.0"
-dependencies = [
- "dggs-stream-core",
- "libfuzzer-sys",
- "tempfile",
- "tiff",
 ]
 
 [[package]]

@@ -84,11 +84,6 @@ crate-type = ["cdylib", "rlib"]
 name = "dggs-stream"
 path = "crates/dggs-stream-cli/src/bin/dggs_stream.rs"
 
-# The binary's former name, kept so existing scripts keep working.
-[[bin]]
-name = "raster-h3"
-path = "crates/dggs-stream-cli/src/bin/dggs_stream.rs"
-
 [features]
 default = []
 # Facade re-exports of the non-DuckDB adapters. Off by default so the root cdylib

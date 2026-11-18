@@ -35,14 +35,14 @@ import polars as pl
 import dggs_stream
 
 # Lazy Polars scan
-lf = dggs_stream.scan_raster_h3("dem.tif", resolutions=[7, 8], crs="EPSG:4326")
+lf = dggs_stream.scan_raster("dem.tif", resolutions=[7, 8], crs="EPSG:4326")
 df = lf.filter(pl.col("count") > 10).select("h3_index", "mean").collect()
 
 # Eager
-df = dggs_stream.read_raster_h3("landcover.tif", 8, categorical=True, format="long")
+df = dggs_stream.read_raster("landcover.tif", 8, categorical=True, format="long")
 
 # Arrow PyCapsule producer
-stream = dggs_stream.RasterH3ArrowStream("dem.tif", 8, columns=["h3_index", "mean"])
+stream = dggs_stream.RasterArrowStream("dem.tif", 8, columns=["h3_index", "mean"])
 table = stream.to_pyarrow()                 # pyarrow.table(stream)
 for batch in stream.iter_batches(batch_size=50_000):
     ...                                     # Polars DataFrames
@@ -54,8 +54,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 
 ### Scan parameters
 
-`RasterH3ArrowStream`, `scan_raster_h3` (alias `scan_raster`) and `read_raster_h3` (alias
-`read_raster`) share these arguments:
+`RasterArrowStream`, `scan_raster` and `read_raster` share these arguments:
 
 | Argument | Type | Default | Meaning |
 | :--- | :--- | :--- | :--- |
@@ -104,7 +103,7 @@ Columns are the canonical core schemas (see the [overview](README.md#output-sche
 Compaction, single-cell pushdown (`h3_cell`), resource budgets and the `geom` column are
 DuckDB-only; see the [fixed behaviour](../polars-api-reference.md#fixed-behaviour) table.
 
-### `RasterH3ArrowStream`
+### `RasterArrowStream`
 
 A lazy description of a scan. Nothing runs until a method is called, and each call starts
 a new scan.
@@ -124,9 +123,9 @@ can take the stream directly, e.g. `polars.from_arrow(stream)`, `pyarrow.table(s
 
 ### Polars IO source
 
-When Polars with `polars.io.plugins.register_io_source` is importable, `scan_raster_h3`
+When Polars with `polars.io.plugins.register_io_source` is importable, `scan_raster`
 returns a `LazyFrame` backed by an IO source; otherwise it returns the
-`RasterH3ArrowStream`.
+`RasterArrowStream`.
 
 | Polars hint | Handling |
 | :--- | :--- |
@@ -136,13 +135,13 @@ returns a `LazyFrame` backed by an IO source; otherwise it returns the
 | `batch_size` | Passed to `iter_batches` |
 
 Before Polars 1.22 neither `predicate` nor `n_rows` reaches the engine: those versions drop
-some filters they hand to IO sources, so `scan_raster_h3` keeps all filters in Polars. See
+some filters they hand to IO sources, so `scan_raster` keeps all filters in Polars. See
 [Query optimisation](../polars-api-reference.md#query-optimisation).
 
 The declared `LazyFrame` schema has no quantile columns, which matches the Python API
 (quantiles cannot be requested from Python).
 
-`read_raster_h3(path, resolutions, **kwargs)` is `RasterH3ArrowStream(...).to_polars()`,
+`read_raster(path, resolutions, **kwargs)` is `RasterArrowStream(...).to_polars()`,
 falling back to the stream object if Polars is missing.
 
 ### Scalar helpers
@@ -189,14 +188,14 @@ Python API exposes. Every scan below returns a `LazyFrame` when Polars is instal
 import polars as pl
 import dggs_stream
 
-df = dggs_stream.read_raster_h3("elevation.tif", 8)
+df = dggs_stream.read_raster("elevation.tif", 8)
 df.select("h3_index", "h3_hex", "mean", "count", "min", "max", "sum")
 ```
 
 ### CRS, NoData and bounding box
 
 ```python
-lf = dggs_stream.scan_raster_h3(
+lf = dggs_stream.scan_raster(
     "temperature_global.tif",
     9,
     crs="EPSG:4326",
@@ -213,7 +212,7 @@ top = (
 ### Multiple resolutions in one pass
 
 ```python
-lf = dggs_stream.scan_raster_h3("elevation.tif", [6, 7, 8])
+lf = dggs_stream.scan_raster("elevation.tif", [6, 7, 8])
 per_res = lf.group_by("resolution").agg(pl.len().alias("cells"), pl.col("mean").mean()).collect()
 res8 = lf.filter(pl.col("resolution") == 8).collect()
 ```
@@ -229,17 +228,17 @@ s2 = dggs_stream.scan_raster("dem.tif", "auto", grid="s2").collect()      # s2_i
 print(dggs_stream.auto_resolution("dem.tif", grid="healpix"))
 
 # Cells finer than the pixels, interpolated; or pixels split by overlap, keeping the total
-fine = dggs_stream.scan_raster_h3("dem.tif", "auto+2", transfer="sample", sample_method="bicubic")
-pop = dggs_stream.scan_raster_h3("population.tif", 7, transfer="overlay", mass_preserve=True)
+fine = dggs_stream.scan_raster("dem.tif", "auto+2", transfer="sample", sample_method="bicubic")
+pop = dggs_stream.scan_raster("population.tif", 7, transfer="overlay", mass_preserve=True)
 
 # Per-cell histograms as a List(Struct) column
-hist = dggs_stream.scan_raster_h3(
+hist = dggs_stream.scan_raster(
     "dem.tif", 8, categorical=True, histogram="4:0:2000", histogram_normalize="fraction"
 ).collect()
 hist.explode("histogram").unnest("histogram")                            # lower, upper, weight
 
 # Keep all-NoData cells and round; profile where the time went
-lf = dggs_stream.scan_raster_h3("dem.tif", 8, nodata_policy="emit", decimals=2)
+lf = dggs_stream.scan_raster("dem.tif", 8, nodata_policy="emit", decimals=2)
 report = dggs_stream.profile_raster("dem.tif", 8)["profile"]
 ```
 
@@ -248,7 +247,7 @@ report = dggs_stream.profile_raster("dem.tif", 8)["profile"]
 The helpers take single values; apply them to a column with `map_elements`:
 
 ```python
-df = dggs_stream.read_raster_h3("elevation.tif", 8, columns=["h3_index", "mean"])
+df = dggs_stream.read_raster("elevation.tif", 8, columns=["h3_index", "mean"])
 df = df.with_columns(
     pl.col("h3_index").map_elements(dggs_stream.h3_to_lat, return_dtype=pl.Float64).alias("center_lat"),
     pl.col("h3_index").map_elements(dggs_stream.h3_to_lng, return_dtype=pl.Float64).alias("center_lng"),
@@ -265,7 +264,7 @@ dggs_stream.string_to_h3("8828308281fffff")   # 613196570331971583
 ```python
 population = pl.scan_parquet("population_h3.parquet")   # h3_index: UInt64
 joined = (
-    dggs_stream.scan_raster_h3("california_elevation.tif", 8, columns=["h3_index", "h3_hex", "mean"])
+    dggs_stream.scan_raster("california_elevation.tif", 8, columns=["h3_index", "h3_hex", "mean"])
     .join(population, on="h3_index")
     .filter(pl.col("mean") > 500.0)
     .select("h3_hex", pl.col("mean").alias("avg_elevation"), "total_population", "median_income")
@@ -283,15 +282,15 @@ for a full two-year raster × protected-area join in Polars on the A5 grid.
 dggs_stream.raster_to_parquet("elevation.tif", "elevation_h3.parquet", 8)
 
 # Or write a projected frame with Polars itself
-(dggs_stream.scan_raster_h3("elevation.tif", 8, columns=["h3_index", "mean", "count"])
+(dggs_stream.scan_raster("elevation.tif", 8, columns=["h3_index", "mean", "count"])
     .sink_parquet("elevation_h3_slim.parquet"))
 ```
 
 ### Remote COG & S3 streaming
 
 ```python
-lf = dggs_stream.scan_raster_h3("https://example.com/rasters/cog_elevation.tif", 8)
-lf = dggs_stream.scan_raster_h3("s3://my-geospatial-bucket/landsat/scene_01.tif", 9)
+lf = dggs_stream.scan_raster("https://example.com/rasters/cog_elevation.tif", 8)
+lf = dggs_stream.scan_raster("s3://my-geospatial-bucket/landsat/scene_01.tif", 9)
 ```
 
 ### Multi-file mosaics
@@ -300,26 +299,26 @@ Globs, comma-separated lists and VRTs are accepted; overlaps use the `cutline` r
 `overlap_rule` says otherwise.
 
 ```python
-lf = dggs_stream.scan_raster_h3("tiles/tile_*.tif", 8)
-lf = dggs_stream.scan_raster_h3("tile_west.tif,tile_east.tif", 8, categorical=True)
+lf = dggs_stream.scan_raster("tiles/tile_*.tif", 8)
+lf = dggs_stream.scan_raster("tile_west.tif,tile_east.tif", 8, categorical=True)
 ```
 
 ### Bands, sub-pixel sampling and spectral indices
 
 ```python
 # Band 2 of a multi-band raster
-lf = dggs_stream.scan_raster_h3("sentinel2.tif", 9, band=2)
+lf = dggs_stream.scan_raster("sentinel2.tif", 9, band=2)
 
 # NDVI per pixel from bands 8 (NIR) and 4 (red), then aggregated per cell
-ndvi = dggs_stream.scan_raster_h3(
+ndvi = dggs_stream.scan_raster(
     "sentinel2.tif", 9, spectral_formula="ndvi", nir_band=8, red_band=4
 )
 
 # Anti-aliased cell edges: four rotated-grid samples per pixel
-lf = dggs_stream.scan_raster_h3("dem.tif", 10, sampling="rgss")
+lf = dggs_stream.scan_raster("dem.tif", 10, sampling="rgss")
 
 # Mosaic where earlier files win in overlaps; categorical cells with a clear majority
-lf = dggs_stream.scan_raster_h3(
+lf = dggs_stream.scan_raster(
     "newest.tif,older.tif", 8, categorical=True,
     overlap_rule="first", min_majority_fraction=0.5,
 )
@@ -343,7 +342,7 @@ Each worker scans one spec with the same path, `crs` and `bbox` (and `overlap_ru
 plan was made with one: `plan_partitions(..., overlap_rule="first")`):
 
 ```python
-cells = pa.table(dggs_stream.RasterH3ArrowStream("dem.tif", 8, partition=spec))
+cells = pa.table(dggs_stream.RasterArrowStream("dem.tif", 8, partition=spec))
 ```
 
 The table has the usual columns plus a nullable `partial_state` (binary) column:
@@ -388,7 +387,7 @@ of the output and shrink as partitions grow; partitioning adds no measurable CPU
 
 ```python
 # Wide: majority class and dominance
-wide = dggs_stream.read_raster_h3("worldcover_2021.tif", 8, categorical=True)
+wide = dggs_stream.read_raster("worldcover_2021.tif", 8, categorical=True)
 wide.select(
     "h3_hex", "majority_class",
     (pl.col("majority_fraction") * 100).round(1).alias("dominance_pct"),
@@ -403,7 +402,7 @@ wide.with_columns(
 
 # Long: one row per (cell, class)
 urban = (
-    dggs_stream.scan_raster_h3("worldcover_2021.tif", 8, categorical=True, format="long")
+    dggs_stream.scan_raster("worldcover_2021.tif", 8, categorical=True, format="long")
     .filter((pl.col("category") == 50) & (pl.col("fraction") >= 0.25))
     .sort("fraction", descending=True)
     .collect()
@@ -426,7 +425,7 @@ dggs_stream.parquet_to_pmtiles("elevation_h3.parquet", "elevation.pmtiles", h3_c
 import duckdb
 import geopandas as gpd
 
-stream = dggs_stream.RasterH3ArrowStream("elevation.tif", 8)
+stream = dggs_stream.RasterArrowStream("elevation.tif", 8)
 
 tbl = stream.to_pyarrow()                                  # pyarrow.Table
 duckdb.sql("SELECT avg(mean) FROM tbl").show()            # DuckDB reads the Arrow table
@@ -444,8 +443,8 @@ gdf = gpd.GeoDataFrame(
 | Symptom | Cause / fix |
 | :--- | :--- |
 | `RuntimeError: Could not locate libdggs_stream_python shared library` on first call | The native library is not next to the package. Install a wheel, run `cargo build --release -p dggs-stream-python` in the workspace, or set `DGGS_STREAM_PYTHON_LIB` to the library path. |
-| `scan_raster_h3` returns a `RasterH3ArrowStream`, not a `LazyFrame` | Polars is not installed or is too old to have `polars.io.plugins.register_io_source`. Install the `polars` extra. |
-| `RuntimeWarning: dggs_stream: N valid sample(s) were dropped ...` from `raster_to_parquet` / `raster_to_pmtiles` / `scan_raster_h3` | Some valid pixels could not be placed because their coordinate transform failed or fell outside the valid latitude/longitude range. Check `crs`; see [transform-failure diagnostics](core.md#transform-failure-diagnostics). |
+| `scan_raster` returns a `RasterArrowStream`, not a `LazyFrame` | Polars is not installed or is too old to have `polars.io.plugins.register_io_source`. Install the `polars` extra. |
+| `RuntimeWarning: dggs_stream: N valid sample(s) were dropped ...` from `raster_to_parquet` / `raster_to_pmtiles` / `scan_raster` | Some valid pixels could not be placed because their coordinate transform failed or fell outside the valid latitude/longitude range. Check `crs`; see [transform-failure diagnostics](core.md#transform-failure-diagnostics). |
 | `RuntimeError: ... No CRS detected ...` | Pass `crs="EPSG:…"`. See the README's [Troubleshooting](../../README.md#troubleshooting--common-pitfalls). |
 | Need compaction or `h3_cell` pushdown | Not exposed in Python. Use [DuckDB](duckdb.md) (for example via `duckdb` from Python) or the Rust [DataFusion](datafusion.md) / [Core](core.md) APIs. |
 

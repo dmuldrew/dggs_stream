@@ -16,7 +16,7 @@ use super::super::spill::SpillRuns;
 use super::pipeline::{shared_aggregation_pool, worker_map_fixed_bytes};
 use super::{HorizonStreamKernel, MultiHorizonStreamer, PartitionOutput};
 use crate::aggregator::cell_hash::H3BuildHasher;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::mosaic::MosaicReader;
@@ -38,7 +38,7 @@ fn check_bands_exist(mosaic: &MosaicReader, config: &MultiResolutionConfig) -> R
             } else {
                 "band"
             };
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "{what} {band} does not exist: the raster has {available} band(s), numbered from 1"
             )));
         }
@@ -93,7 +93,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         for &res_u8 in &config.resolutions {
             if config.grid == GridKind::H3 {
                 let res = Resolution::try_from(res_u8).map_err(|_| {
-                    RasterH3Error::InvalidParameter(format!("Invalid H3 resolution: {}", res_u8))
+                    DggsStreamError::InvalidParameter(format!("Invalid H3 resolution: {}", res_u8))
                 })?;
                 resolutions.push(res);
             }
@@ -183,7 +183,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             .saturating_mul(config.sampling.points.len());
         let worker_budget = config.aggregation_budget_bytes / 4;
         if per_pixel > worker_budget {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "sampling pattern exceeds worker allowance; increase aggregation_budget_bytes"
                     .into(),
             ));

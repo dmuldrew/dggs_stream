@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use dggs_stream_core::aggregator::multi_horizon::{plan_partitions, QuantileTarget};
 use dggs_stream_core::columnar::{ArrowArrayStream, ArrowSchema};
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader};
 
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
             // Category- or value-specific options are checked against the scan, not here.
             if let Some(json) = opt_cstr(options) {
                 let opts: PyScanOptions = serde_json::from_str(&json).map_err(|e| {
-                    RasterH3Error::InvalidParameter(format!("Invalid scan options: {e}"))
+                    DggsStreamError::InvalidParameter(format!("Invalid scan options: {e}"))
                 })?;
                 if let Some(name) = &opts.overlap_rule {
                     cfg.overlap_rule = parse_overlap_rule_strict(name)?;
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
                 .ok()
                 .filter(|&n| n > 0)
                 .ok_or_else(|| {
-                    RasterH3Error::InvalidParameter("target_chunks must be at least 1".into())
+                    DggsStreamError::InvalidParameter("target_chunks must be at least 1".into())
                 })?;
             // Open the mosaic exactly as the scans do, so the fingerprints match.
             let paths = resolve_raster_sources(&cfg.path)?;
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
                 MosaicReader::open(&paths, cfg.bbox, cfg.crs.as_deref(), cfg.overlap_rule)?;
             let plan = plan_partitions(&mosaic, target)?;
             let json = serde_json::to_string(&plan)
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
             Ok(CString::new(json).unwrap_or_default().into_raw())
         })
         .unwrap_or(ptr::null_mut())
@@ -310,7 +310,7 @@ pub unsafe extern "C" fn raster_h3_py_quantile_columns(
             };
             let names: Vec<&str> = targets.iter().map(QuantileTarget::column_name).collect();
             let json = serde_json::to_string(&names)
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
             Ok(CString::new(json).unwrap_or_default().into_raw())
         })
         .unwrap_or(ptr::null_mut())

@@ -1,4 +1,4 @@
-//! [`RasterH3Table`]: a DataFusion `TableProvider` over the [`scan`](crate::scan) providers.
+//! [`RasterTable`]: a DataFusion `TableProvider` over the [`scan`](crate::scan) providers.
 
 use std::fmt;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ pub enum TableKind {
 /// modules). `LIMIT` is deferred whenever a filter still needs caller-side evaluation.
 /// Aggregation runs on DataFusion's blocking thread pool and streams batches back through
 /// the Arrow C Stream Interface without copying.
-pub struct RasterH3Table {
+pub struct RasterTable {
     inner: Arc<dyn crate::scan::RasterScan>,
     kind: TableKind,
     grid: GridKind,
@@ -51,7 +51,7 @@ pub struct RasterH3Table {
     untagged: Untagged,
 }
 
-impl RasterH3Table {
+impl RasterTable {
     /// Wrap a configured continuous provider (grid, CRS, nodata, quantiles, ...).
     pub fn continuous(provider: ContinuousRasterTableProvider) -> Self {
         let grid = provider.grid();
@@ -98,7 +98,7 @@ impl RasterH3Table {
     }
 }
 
-impl RasterH3Table {
+impl RasterTable {
     /// Translate a filter for pushdown, capped by what the wrapped provider accepts.
     ///
     /// The provider may refuse predicates its scan would ignore or misapply: a partitioned
@@ -119,16 +119,16 @@ impl RasterH3Table {
     }
 }
 
-impl fmt::Debug for RasterH3Table {
+impl fmt::Debug for RasterTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RasterH3Table")
+        f.debug_struct("RasterTable")
             .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl TableProvider for RasterH3Table {
+impl TableProvider for RasterTable {
     fn schema(&self) -> arrow::datatypes::SchemaRef {
         Arc::clone(&self.schema)
     }

@@ -26,7 +26,7 @@ pub use interp::{interpolate, SampleMethod};
 pub use stream::{TransferAccumulator, TransferStream};
 pub use window::RowWindow;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 /// How pixels are transferred onto cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -68,7 +68,7 @@ impl TransferMode {
         overlay_weighted: Option<bool>,
         mass_preserve: Option<bool>,
     ) -> Result<Self> {
-        let invalid = |message: String| RasterH3Error::InvalidParameter(message);
+        let invalid = |message: String| DggsStreamError::InvalidParameter(message);
         let name = transfer.map(|t| t.trim().to_ascii_lowercase().replace('-', "_"));
         let mode = match name.as_deref() {
             None | Some("assign_centers" | "assign" | "centers" | "centres") => Self::AssignCenters,

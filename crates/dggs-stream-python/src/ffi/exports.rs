@@ -9,7 +9,7 @@ use std::sync::Arc;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use dggs_stream_core::error::{safe_panic_payload_to_string, RasterH3Error, Result};
+use dggs_stream_core::error::{safe_panic_payload_to_string, DggsStreamError, Result};
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
 use dggs_stream_core::pmtiles::H3PmtilesTiler;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
@@ -107,7 +107,7 @@ impl PyExportOptions {
     fn parse(json: Option<&str>) -> Result<Self> {
         json.map_or(Ok(Self::default()), |json| {
             serde_json::from_str(json).map_err(|e| {
-                RasterH3Error::InvalidParameter(format!("Invalid export options: {e}"))
+                DggsStreamError::InvalidParameter(format!("Invalid export options: {e}"))
             })
         })
     }
@@ -197,9 +197,9 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
         let failures = Arc::new(AtomicU64::new(0));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<usize> {
             let in_str = opt_cstr(input_path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing input_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing input_path".into()))?;
             let out_str = opt_cstr(output_path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing output_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing output_path".into()))?;
             let opts = PyExportOptions::parse(opt_cstr(options).as_deref())?;
             let grid = opts.grid()?;
             let crs_opt = opt_cstr(crs);
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
                     Path::new(&out_str),
                     pq_cfg,
                 )
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
             } else {
                 let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)?;
                 H3ParquetWriter::write_categorical_streamer_to_parquet(
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
                     Path::new(&out_str),
                     pq_cfg,
                 )
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
             }
         }));
         finish_export(
@@ -342,9 +342,9 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
         let failures = Arc::new(AtomicU64::new(0));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<usize> {
             let in_str = opt_cstr(input_path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing input_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing input_path".into()))?;
             let out_str = opt_cstr(output_path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing output_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing output_path".into()))?;
             let opts = PyExportOptions::parse(opt_cstr(options).as_deref())?;
             let grid = opts.grid()?;
             let crs_opt = opt_cstr(crs);
@@ -364,14 +364,14 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
                     Path::new(&out_str),
                     config,
                 )
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
             } else {
                 H3PmtilesTiler::process_categorical_source_to_pmtiles(
                     &in_str,
                     Path::new(&out_str),
                     config,
                 )
-                .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
             }
         }));
         finish_export(
@@ -434,9 +434,9 @@ pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles_v2(
     unsafe {
         ffi_call("parquet_to_pmtiles", out_err, || {
             let in_str = opt_cstr(parquet_path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing parquet_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing parquet_path".into()))?;
             let out_str = opt_cstr(pmtiles_path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing pmtiles_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing pmtiles_path".into()))?;
             let column = opt_cstr(cell_column);
             let grid = match opt_cstr(grid) {
                 None => None,
@@ -448,7 +448,7 @@ pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles_v2(
                 column.as_deref(),
                 grid,
             )
-            .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+            .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
             Ok(summary.valid_features as i64)
         })
         .unwrap_or(-1)

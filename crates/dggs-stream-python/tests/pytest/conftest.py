@@ -161,7 +161,7 @@ def eager(dggs_stream, gradient_tif):
     """Full continuous scan of `gradient_tif`, read through `pyarrow.table`, sorted by cell."""
     pa = pytest.importorskip("pyarrow")
     pytest.importorskip("polars")
-    return sort(frame(pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES))))
+    return sort(frame(pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES))))
 
 
 @pytest.fixture(scope="session")

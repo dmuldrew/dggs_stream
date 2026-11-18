@@ -1,6 +1,6 @@
 //! Crate-wide error type and [`Result`] alias for `dggs_stream`.
 //!
-//! This module defines [`RasterH3Error`](crate::error::RasterH3Error), representing all recoverable errors that can
+//! This module defines [`DggsStreamError`](crate::error::DggsStreamError), representing all recoverable errors that can
 //! occur during raster decoding, coordinate reprojection, H3 aggregation, and DuckDB
 //! extension lifecycle management.
 
@@ -8,7 +8,7 @@ use thiserror::Error;
 
 /// Comprehensive error enumeration for the `dggs_stream` crate.
 #[derive(Error, Debug)]
-pub enum RasterH3Error {
+pub enum DggsStreamError {
     /// A terminal failure while reading or aggregating a raster stream.
     #[error("Raster stream failed: {0}")]
     StreamFailed(String),
@@ -72,8 +72,8 @@ pub enum RasterH3Error {
     DuckDbError(String),
 }
 
-/// Specialized [`Result`] type alias using [`RasterH3Error`].
-pub type Result<T> = std::result::Result<T, RasterH3Error>;
+/// Specialized [`Result`] type alias using [`DggsStreamError`].
+pub type Result<T> = std::result::Result<T, DggsStreamError>;
 
 /// Extracts a human-readable panic message from a panic payload while ensuring
 /// payload disposal does not escape with a secondary panic across FFI or thread boundaries.

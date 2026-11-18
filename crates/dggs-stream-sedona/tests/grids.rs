@@ -19,7 +19,7 @@ use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::pmtiles::pyramid::grid_res_to_zoom;
 use dggs_stream_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
 use dggs_stream_sedona::{
-    register_all, write_pmtiles, write_record_batches, PmtilesWriteOptions, RasterH3Table,
+    register_all, write_pmtiles, write_record_batches, PmtilesWriteOptions, RasterTable,
     GEOARROW_WKB_EXTENSION,
 };
 
@@ -221,7 +221,7 @@ async fn providers_take_a_grid_and_push_filters_down() {
             .unwrap()
             .with_grid(grid);
         assert_eq!(provider.grid(), grid);
-        let table = RasterH3Table::continuous(provider);
+        let table = RasterTable::continuous(provider);
         assert_eq!(table.grid(), grid);
         let exact = [
             col("count").gt_eq(lit(2.0)),
@@ -274,7 +274,7 @@ async fn providers_take_a_grid_and_push_filters_down() {
             let provider = ContinuousRasterTableProvider::try_new(&src, vec![res])
                 .unwrap()
                 .with_grid(grid);
-            ctx.register_table("cells", Arc::new(RasterH3Table::continuous(provider)))
+            ctx.register_table("cells", Arc::new(RasterTable::continuous(provider)))
                 .unwrap();
             let kept = collect(&ctx, &sql).await;
             let ids: Vec<u64> = kept
@@ -292,7 +292,7 @@ async fn providers_take_a_grid_and_push_filters_down() {
         let categorical = CategoricalRasterTableProvider::try_new(&src, vec![res])
             .unwrap()
             .with_grid(grid);
-        assert_eq!(RasterH3Table::categorical(categorical).grid(), grid);
+        assert_eq!(RasterTable::categorical(categorical).grid(), grid);
     }
 }
 
@@ -716,7 +716,7 @@ async fn nodata_policy_and_decimals_on_every_grid() {
                 .with_crs("EPSG:4326")
                 .with_nodata(f64::from(NODATA))
                 .with_output_policy(policy);
-            RasterH3Table::continuous(provider)
+            RasterTable::continuous(provider)
         };
         let query = |policy: OutputPolicy, sql: String| {
             let ctx = context();
@@ -874,7 +874,7 @@ async fn nodata_policy_and_decimals_on_every_grid() {
                     decimals: Some(2),
                 });
             let ctx = context();
-            ctx.register_table("classes", Arc::new(RasterH3Table::categorical(provider)))
+            ctx.register_table("classes", Arc::new(RasterTable::categorical(provider)))
                 .unwrap();
             let out = collect(&ctx, "SELECT majority_class, total_count FROM classes").await;
             let field = out[0]
@@ -996,7 +996,7 @@ async fn transfer_modes_on_every_grid() {
             .with_transfer(TransferMode::Sample(SampleMethod::Nearest));
         let table_ctx = context();
         table_ctx
-            .register_table("sampled", Arc::new(RasterH3Table::continuous(provider)))
+            .register_table("sampled", Arc::new(RasterTable::continuous(provider)))
             .unwrap();
         let nearest = collect(
             &table_ctx,
@@ -1057,7 +1057,7 @@ async fn providers_report_a_run_profile() {
             .with_grid(grid)
             .with_profile(Arc::clone(&profile));
         let ctx = context();
-        ctx.register_table("cells", Arc::new(RasterH3Table::continuous(provider)))
+        ctx.register_table("cells", Arc::new(RasterTable::continuous(provider)))
             .unwrap();
         let batches = collect(
             &ctx,

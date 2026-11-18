@@ -20,7 +20,7 @@ use std::thread::{self, JoinHandle};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::http_range::RemoteHttpSource;
 use crate::raster::mosaic::MosaicReader;
@@ -652,7 +652,7 @@ impl RemoteChunkPrefetchQueue {
 
             if let Ok(err_guard) = self.error.lock() {
                 if let Some(ref e) = *err_guard {
-                    break Err(RasterH3Error::InvalidParameter(e.clone()));
+                    break Err(DggsStreamError::InvalidParameter(e.clone()));
                 }
             }
 

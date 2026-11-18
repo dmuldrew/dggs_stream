@@ -18,7 +18,7 @@
 //!   Available bytes are copied and the number of actual bytes read is returned without error.
 //!   If `offset >= total_size`, `Ok(0)` is returned.
 //! - **Transport short reads are ERRORS**: If the remote server returns fewer bytes than requested
-//!   for an in-bounds byte range, [`HttpTransport`] returns an `Err(RasterH3Error::InvalidParameter)`
+//!   for an in-bounds byte range, [`HttpTransport`] returns an `Err(DggsStreamError::InvalidParameter)`
 //!   rather than returning a silent partial payload that would corrupt decoder state.
 //! - **Object consistency**: The built-in HTTP transport pins the first successful
 //!   response's strong ETag per URL and sends `If-Match` on subsequent requests. Changed or
@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use ureq::Agent;
 use url::Url;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 /// Default block cache size for header and tag reading (128 KB)
 pub const DEFAULT_BLOCK_SIZE: usize = 131072;
@@ -80,7 +80,7 @@ pub fn validate_range_response(
 ) -> Result<u64> {
     let total = validate_range_response_headers(status, content_range, start, end, expected_total)?;
     if body_len != (end - start + 1) as usize {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "Remote range response for bytes {}-{} has {} bytes, expected {}",
             start,
             end,
@@ -99,14 +99,14 @@ pub fn validate_range_response_headers(
     expected_total: Option<u64>,
 ) -> Result<u64> {
     if status != 206 {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "Remote server ignored byte range {}-{} (HTTP {})",
             start, end, status
         )));
     }
     let (actual_start, actual_end, total) =
         content_range.and_then(parse_content_range).ok_or_else(|| {
-            RasterH3Error::InvalidParameter(
+            DggsStreamError::InvalidParameter(
                 "Remote range response lacks a valid Content-Range header".to_string(),
             )
         })?;
@@ -114,7 +114,7 @@ pub fn validate_range_response_headers(
         || actual_end != end
         || expected_total.is_some_and(|size| size != total)
     {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "Remote range response does not match requested bytes {}-{}",
             start, end
         )));
@@ -157,7 +157,7 @@ pub fn normalize_url(raw_url: &str) -> Result<String> {
         let bucket = parts.next().unwrap_or("");
         let key = parts.next().unwrap_or("");
         if bucket.is_empty() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "Invalid S3 URL (missing bucket): {}",
                 raw_url
             )));
@@ -207,11 +207,11 @@ pub fn normalize_url(raw_url: &str) -> Result<String> {
         }
     } else if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         Url::parse(trimmed).map_err(|e| {
-            RasterH3Error::InvalidParameter(format!("Invalid remote URL '{}': {}", raw_url, e))
+            DggsStreamError::InvalidParameter(format!("Invalid remote URL '{}': {}", raw_url, e))
         })?;
         Ok(trimmed.to_string())
     } else {
-        Err(RasterH3Error::InvalidParameter(format!(
+        Err(DggsStreamError::InvalidParameter(format!(
             "Unsupported remote protocol in '{}': expected http://, https://, or s3://",
             raw_url
         )))
@@ -394,19 +394,19 @@ fn redirect_target(current: &str, resp: &HttpResponse) -> Result<Option<String>>
         return Ok(None);
     }
     let location = header_str(resp, "Location").ok_or_else(|| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "HTTP {status} redirect from '{current}' has no usable Location header"
         ))
     })?;
     let next = Url::parse(current)
         .and_then(|base| base.join(location))
         .map_err(|e| {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "HTTP {status} redirect from '{current}' has an invalid Location: {e}"
             ))
         })?;
     if !matches!(next.scheme(), "http" | "https") {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "HTTP {status} redirect from '{current}' leads to an unsupported '{}' URL",
             next.scheme()
         )));
@@ -451,7 +451,7 @@ type PinnedEtag = Arc<OnceLock<Option<String>>>;
 /// `Retry` carries the error to return if retries are exhausted.
 enum BodyAttempt<T> {
     Done(T),
-    Retry(RasterH3Error),
+    Retry(DggsStreamError),
 }
 
 /// Body expectation for `HttpTransport::read_body`: a 206 partial range
@@ -553,8 +553,8 @@ impl HttpTransport {
         self
     }
 
-    fn full_body_limit_error(&self) -> RasterH3Error {
-        RasterH3Error::InvalidParameter(format!(
+    fn full_body_limit_error(&self) -> DggsStreamError {
+        DggsStreamError::InvalidParameter(format!(
             "Remote server at '{}' ignored the Range request and the file exceeds the {}-byte full-download limit; raise DGGS_STREAM_MAX_FULL_BODY_BYTES to allow larger full downloads",
             self.url, self.max_full_body_bytes
         ))
@@ -581,7 +581,7 @@ impl HttpTransport {
 
     fn pinned_etag(&self) -> Result<PinnedEtag> {
         let mut etags = self.etags.write().map_err(|_| {
-            RasterH3Error::InvalidParameter("Remote HTTP validator lock poisoned".into())
+            DggsStreamError::InvalidParameter("Remote HTTP validator lock poisoned".into())
         })?;
         Ok(Arc::clone(
             etags
@@ -640,7 +640,7 @@ impl HttpTransport {
                 .map(|(k, v)| k.len() + v.len() + 4)
                 .sum::<usize>();
         if needed > AGENT_OUTPUT_BUFFER_BYTES {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "HTTP request headers for '{}' need about {} bytes, more than the {}-byte limit; check that DGGS_STREAM_AUTH_TOKEN or AWS_SESSION_TOKEN is not unusually long",
                 request.url, needed, AGENT_OUTPUT_BUFFER_BYTES
             )));
@@ -674,7 +674,7 @@ impl HttpTransport {
                 None => return Ok(resp),
             }
         }
-        Err(RasterH3Error::InvalidParameter(format!(
+        Err(DggsStreamError::InvalidParameter(format!(
             "Remote server at '{}' redirected more than {} times",
             self.url, MAX_REDIRECTS
         )))
@@ -699,7 +699,7 @@ impl HttpTransport {
         });
         if let Some(expected) = pinned {
             if response_etag != Some(expected.as_str()) {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "Remote raster changed during scan: ETag changed or disappeared".into(),
                 ));
             }
@@ -737,7 +737,7 @@ impl HttpTransport {
         let reader = resp.into_body().into_reader();
         let mut buf = Vec::with_capacity(capacity);
         if let Err(e) = reader.take(take_limit).read_to_end(&mut buf) {
-            return Ok(BodyAttempt::Retry(RasterH3Error::InvalidParameter(
+            return Ok(BodyAttempt::Retry(DggsStreamError::InvalidParameter(
                 format!("Failed reading {} from '{}': {}", what, self.url, e),
             )));
         }
@@ -745,7 +745,7 @@ impl HttpTransport {
             ExpectedBody::Range { start, end, .. } => {
                 let expected_len = (end - start + 1) as usize;
                 if buf.len() != expected_len {
-                    let err = RasterH3Error::InvalidParameter(format!(
+                    let err = DggsStreamError::InvalidParameter(format!(
                         "Remote range response for bytes {}-{} has {} bytes, expected {}",
                         start,
                         end,
@@ -763,7 +763,7 @@ impl HttpTransport {
                     return Err(self.full_body_limit_error());
                 }
                 if content_length > 0 && content_length != buf.len() as u64 {
-                    let err = RasterH3Error::InvalidParameter(format!(
+                    let err = DggsStreamError::InvalidParameter(format!(
                         "Remote response has {} bytes but Content-Length says {}",
                         buf.len(),
                         content_length
@@ -803,11 +803,11 @@ impl HttpTransport {
             if attempt >= self.max_retries || !failure.is_transient() {
                 return Err(match failure {
                     RequestFailure::Status(resp) => match resp.status().as_u16() {
-                        412 => RasterH3Error::InvalidParameter(
+                        412 => DggsStreamError::InvalidParameter(
                             "Remote raster changed during scan (HTTP 412 Precondition Failed)"
                                 .into(),
                         ),
-                        404 => RasterH3Error::InvalidParameter(format!(
+                        404 => DggsStreamError::InvalidParameter(format!(
                             "Remote raster not found (HTTP 404): {}",
                             self.url
                         )),
@@ -820,7 +820,7 @@ impl HttpTransport {
                                 }
                                 _ => String::new(),
                             };
-                            RasterH3Error::InvalidParameter(format!(
+                            DggsStreamError::InvalidParameter(format!(
                                 "HTTP request failed for '{}': HTTP {} - {}{}",
                                 self.url,
                                 status,
@@ -829,7 +829,7 @@ impl HttpTransport {
                             ))
                         }
                     },
-                    RequestFailure::Transport(t) => RasterH3Error::InvalidParameter(format!(
+                    RequestFailure::Transport(t) => DggsStreamError::InvalidParameter(format!(
                         "Network transport error connecting to '{}': {}",
                         self.url, t
                     )),
@@ -869,7 +869,7 @@ impl HttpTransport {
                 .as_deref()
                 .and_then(parse_content_range)
                 .ok_or_else(|| {
-                    RasterH3Error::InvalidParameter(
+                    DggsStreamError::InvalidParameter(
                         "Remote range response lacks a valid Content-Range header".to_string(),
                     )
                 })?;
@@ -918,7 +918,7 @@ impl HttpTransport {
                 total_size,
             }))
         } else {
-            Err(RasterH3Error::InvalidParameter(format!(
+            Err(DggsStreamError::InvalidParameter(format!(
                 "Unexpected HTTP status {} from '{}'",
                 status, self.url
             )))
@@ -937,7 +937,7 @@ impl HttpTransport {
             let total_msg = expected_total
                 .map(|t| format!(" of {} bytes", t))
                 .unwrap_or_default();
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "Requested remote byte range {}-{} lies outside file{}",
                 start, end, total_msg
             )));
@@ -1069,7 +1069,7 @@ impl ByteCache {
     /// Returns `Ok(Some(copied_bytes))` if the complete file is present, or `Ok(None)` otherwise.
     pub fn copy_from_complete(&self, offset: u64, out: &mut [u8]) -> Result<Option<usize>> {
         let guard = self.complete_file.read().map_err(|_| {
-            RasterH3Error::InvalidParameter("Remote HTTP cache lock poisoned".to_string())
+            DggsStreamError::InvalidParameter("Remote HTTP cache lock poisoned".to_string())
         })?;
         if let Some(ref full) = *guard {
             let offset = offset as usize;
@@ -1086,7 +1086,7 @@ impl ByteCache {
     /// Get a cached block by block index if present, marking it as recently used.
     pub fn get_block(&self, block_idx: u64) -> Result<Option<Arc<Vec<u8>>>> {
         let guard = self.blocks.read().map_err(|_| {
-            RasterH3Error::InvalidParameter("Remote HTTP cache lock poisoned".to_string())
+            DggsStreamError::InvalidParameter("Remote HTTP cache lock poisoned".to_string())
         })?;
         Ok(guard.get(&block_idx).map(|block| {
             block.last_used.store(self.tick(), Ordering::Relaxed);
@@ -1099,7 +1099,7 @@ impl ByteCache {
     /// recently used other blocks are dropped; readers holding them keep their `Arc`.
     pub fn insert_block(&self, block_idx: u64, data: Arc<Vec<u8>>) -> Result<Arc<Vec<u8>>> {
         let mut guard = self.blocks.write().map_err(|_| {
-            RasterH3Error::InvalidParameter("Remote HTTP cache lock poisoned".to_string())
+            DggsStreamError::InvalidParameter("Remote HTTP cache lock poisoned".to_string())
         })?;
         let now = self.tick();
         let kept = match guard.entry(block_idx) {
@@ -1223,7 +1223,7 @@ impl RemoteHttpSource {
                 // A custom transport may report a total_size beyond the body it
                 // delivered; never hand back a silently short range.
                 if n != buf.len() {
-                    return Err(RasterH3Error::InvalidParameter(format!(
+                    return Err(DggsStreamError::InvalidParameter(format!(
                         "Cached remote file holds {n} of {} requested bytes at offset {start}",
                         buf.len()
                     )));
@@ -1319,7 +1319,7 @@ impl RemoteHttpSource {
     /// the full requested range, it returns an error rather than a partial buffer.
     pub fn read_exact_range(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
         if offset > self.total_size {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "read_exact_range: offset {} extends beyond file of {} bytes",
                 offset, self.total_size
             )));
@@ -1328,14 +1328,14 @@ impl RemoteHttpSource {
             return Ok(Vec::new());
         }
         if len as u64 > self.total_size - offset {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "read_exact_range: requested {} bytes at offset {} extends beyond file of {} bytes",
                 len, offset, self.total_size
             )));
         }
         let buf = self.read_range(offset, len)?;
         if buf.len() != len {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "read_exact_range: expected {} bytes at offset {}, got {}",
                 len,
                 offset,

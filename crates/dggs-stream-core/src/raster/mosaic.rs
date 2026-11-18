@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::aggregator::horizon_streamer::bounds_intersect_bbox;
 use crate::aggregator::multi_horizon::coordinates::{is_point_in_bbox, rect_intersects_bbox};
 use crate::crs::transformer::CrsTransformer;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::http_range::is_remote_url;
 
@@ -97,7 +97,7 @@ fn collect_matching_files(dir: &Path, file_pattern: &str, results: &mut Vec<Path
 /// Parse GDAL VRT XML file and extract source file paths
 fn parse_vrt_sources(vrt_path: &Path) -> Result<Vec<PathBuf>> {
     let content = fs::read_to_string(vrt_path).map_err(|e| {
-        RasterH3Error::InvalidParameter(format!("Failed to read VRT file {:?}: {}", vrt_path, e))
+        DggsStreamError::InvalidParameter(format!("Failed to read VRT file {:?}: {}", vrt_path, e))
     })?;
 
     let parent_dir = vrt_path.parent().unwrap_or_else(|| Path::new("."));
@@ -130,7 +130,7 @@ fn parse_vrt_sources(vrt_path: &Path) -> Result<Vec<PathBuf>> {
     }
 
     if sources.is_empty() {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "No valid <SourceFilename> entries found in VRT: {:?}",
             vrt_path
         )));
@@ -160,7 +160,7 @@ pub fn resolve_raster_sources(input: &str) -> Result<Vec<PathBuf>> {
                 } else {
                     let p = PathBuf::from(p_str);
                     if !p.exists() {
-                        return Err(RasterH3Error::InvalidParameter(format!(
+                        return Err(DggsStreamError::InvalidParameter(format!(
                             "Source file does not exist: {:?}",
                             p
                         )));
@@ -206,7 +206,7 @@ pub fn resolve_raster_sources(input: &str) -> Result<Vec<PathBuf>> {
         collect_matching_files(base_dir, file_pattern, &mut results);
         results.sort();
         if results.is_empty() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "No files matched glob pattern: {}",
                 trimmed
             )));
@@ -218,7 +218,7 @@ pub fn resolve_raster_sources(input: &str) -> Result<Vec<PathBuf>> {
     if path.exists() {
         Ok(vec![path.to_path_buf()])
     } else {
-        Err(RasterH3Error::InvalidParameter(format!(
+        Err(DggsStreamError::InvalidParameter(format!(
             "Input file path does not exist: {}",
             trimmed
         )))
@@ -269,18 +269,20 @@ impl TileDescriptor {
 
         let crs_transformer =
             CrsTransformer::from_crs_or_epsg(epsg_to_use, proj_to_use).map_err(|e| match e {
-                RasterH3Error::CrsNotDetected(msg) => RasterH3Error::CrsNotDetected(format!(
+                DggsStreamError::CrsNotDetected(msg) => DggsStreamError::CrsNotDetected(format!(
                     "Tile {} ({:?}): {}",
                     tile_idx, reader.file_path, msg
                 )),
-                RasterH3Error::CrsError(msg) => RasterH3Error::CrsError(format!(
+                DggsStreamError::CrsError(msg) => DggsStreamError::CrsError(format!(
                     "Tile {} ({:?}): {}",
                     tile_idx, reader.file_path, msg
                 )),
-                RasterH3Error::UnsupportedEpsg { code, detail } => RasterH3Error::UnsupportedEpsg {
-                    code,
-                    detail: format!("Tile {} ({:?}): {}", tile_idx, reader.file_path, detail),
-                },
+                DggsStreamError::UnsupportedEpsg { code, detail } => {
+                    DggsStreamError::UnsupportedEpsg {
+                        code,
+                        detail: format!("Tile {} ({:?}): {}", tile_idx, reader.file_path, detail),
+                    }
+                }
                 other => other,
             })?;
 
@@ -424,7 +426,7 @@ pub struct MosaicReader {
     pub bbox: Option<[f64; 4]>,
 }
 
-/// The [`RasterH3Error::InvalidParameter`] message [`MosaicReader::open`] returns when
+/// The [`DggsStreamError::InvalidParameter`] message [`MosaicReader::open`] returns when
 /// the configured bbox misses every tile. Callers for which the bbox only narrows a scan
 /// (filter pushdown) match it to return an empty result instead.
 pub const NO_TILES_IN_BBOX: &str = "No mosaic tiles intersect the requested bounding box";
@@ -514,7 +516,7 @@ impl MosaicReader {
         remote_source_factory: Option<&crate::raster::http_range::RemoteSourceFactory>,
     ) -> Result<Self> {
         if paths.is_empty() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "Mosaic paths list cannot be empty".to_string(),
             ));
         }
@@ -549,7 +551,7 @@ impl MosaicReader {
         }
 
         if tiles.is_empty() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 NO_TILES_IN_BBOX.to_string(),
             ));
         }

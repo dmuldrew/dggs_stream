@@ -6,15 +6,15 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 use dggs_stream_core::error::Result;
 use dggs_stream_core::raster::http_range::{ProbeResult, RemoteTransport};
 
 use super::duckdb_c::*;
 use super::duckdb_c_v156::*;
 
-fn fs_err(message: String) -> RasterH3Error {
-    RasterH3Error::InvalidParameter(message)
+fn fs_err(message: String) -> DggsStreamError {
+    DggsStreamError::InvalidParameter(message)
 }
 
 /// Owned `duckdb_error_data` that formats its message on request and is

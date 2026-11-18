@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Read;
 use std::sync::atomic::Ordering;
 
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::http_range::{is_remote_url, normalize_url};
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader};
@@ -255,7 +255,7 @@ fn test_remote_error_handling_not_found() {
     let res = GeoTiffStreamReader::open(&not_found_url);
     assert!(res.is_err());
     match res.err().unwrap() {
-        RasterH3Error::InvalidParameter(msg) => {
+        DggsStreamError::InvalidParameter(msg) => {
             assert!(msg.contains("404") || msg.contains("not found"));
         }
         other => panic!("Expected InvalidParameter error, got {:?}", other),

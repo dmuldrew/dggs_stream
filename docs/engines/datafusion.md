@@ -310,10 +310,10 @@ ctx.sql(
 
 | Piece | What it does |
 | :--- | :--- |
-| `RasterH3Table` | `datafusion::catalog::TableProvider` over a configured `Continuous`/`CategoricalRasterTableProvider`. Aggregation runs on DataFusion's blocking pool and streams through the Arrow C Stream into a `StreamingTableExec` without copying. Projection (including empty, for `COUNT(*)`) is pushed down; `LIMIT` is pushed to the reader and `StreamingTableExec` only when every supplied filter is `Exact` (or there are none). Otherwise the caller applies the limit after residual filtering. A `WHERE` filter is pushed only as far as the wrapped provider's `supports_filters_pushdown` allows, so on compacted tables (and for non-`resolution` filters on partitioned ones) DataFusion evaluates it on the completed rows. |
+| `RasterTable` | `datafusion::catalog::TableProvider` over a configured `Continuous`/`CategoricalRasterTableProvider`. Aggregation runs on DataFusion's blocking pool and streams through the Arrow C Stream into a `StreamingTableExec` without copying. Projection (including empty, for `COUNT(*)`) is pushed down; `LIMIT` is pushed to the reader and `StreamingTableExec` only when every supplied filter is `Exact` (or there are none). Otherwise the caller applies the limit after residual filtering. A `WHERE` filter is pushed only as far as the wrapped provider's `supports_filters_pushdown` allows, so on compacted tables (and for non-`resolution` filters on partitioned ones) DataFusion evaluates it on the completed rows. |
 | Filter pushdown | `count`/`total_count >= x`, `mean >= x`, `mean <= x`, `mean BETWEEN a AND b`, `majority_fraction >= x` and `resolution = n` are `Exact`; the strict forms (`>`, `<`) push the inclusive bound as `Inexact` and DataFusion re-applies them. Anything else is `Unsupported`. |
 | Spatial pushdown | `ST_Intersects` / `ST_Contains` / `ST_Within` / `ST_Covers` / `ST_CoveredBy` / `ST_Overlaps` / `ST_Touches` / `ST_Crosses` / `ST_Equals`, and `ST_DWithin(..., d)` with a non-negative numeric literal `d`, between a cell's geometry (`wkb`, or `h3_to_wkb(h3_index)` / `h3_to_wkb(h3_hex)` under any alias) and a constant geometry push an `Inexact` `FilterPredicate::Bbox`. The constant is a `geoarrow.wkb` literal in `OGC:CRS84` / `EPSG:4326` with planar edges (what `ST_SetSRID(ST_GeomFromWKT(...), 4326)` folds to) or `h3_to_wkb(<cell literal>)`. The box is the constant's envelope, grown by `d` degrees for `ST_DWithin` (planar distance in CRS units) and clamped to lon/lat range. The `scan` layer then widens it past the largest cell before clipping samples (see `Bbox(b)` above), so every cell the predicate can match keeps its full aggregate; DataFusion re-applies the predicate to drop the extra cells. Compacted tables accept the filter but do not prune. |
-| Table functions | `h3_raster_continuous_aggregate(source [, resolution ...] [, crs] [, 'key=value' ...])` and `h3_raster_categorical_aggregate(...)` (wide format), and the same for the other grids (`a5_`, `s2_`, `healpix_` prefixes, or a grid-name argument such as `'s2'`). Resolutions are integers or `'auto'`, `'auto+N'`, `'auto-N'`. Option strings: `'nodata_policy=emit'`, `'emit_nodata_value=...'`, `'decimals=2'`, `'transfer=sample'` / `'transfer=overlay'` with `'sample_method=...'`, `'overlay_weighted=false'`, `'mass_preserve=true'`; on the categorical functions also `'histogram=...'`, `'histogram_weight=...'`, `'histogram_normalize=...'`. Use `RasterH3Table` with a configured provider for the other options (nodata, quantiles, categorical format, ...). |
+| Table functions | `h3_raster_continuous_aggregate(source [, resolution ...] [, crs] [, 'key=value' ...])` and `h3_raster_categorical_aggregate(...)` (wide format), and the same for the other grids (`a5_`, `s2_`, `healpix_` prefixes, or a grid-name argument such as `'s2'`). Resolutions are integers or `'auto'`, `'auto+N'`, `'auto-N'`. Option strings: `'nodata_policy=emit'`, `'emit_nodata_value=...'`, `'decimals=2'`, `'transfer=sample'` / `'transfer=overlay'` with `'sample_method=...'`, `'overlay_weighted=false'`, `'mass_preserve=true'`; on the categorical functions also `'histogram=...'`, `'histogram_weight=...'`, `'histogram_normalize=...'`. Use `RasterTable` with a configured provider for the other options (nodata, quantiles, categorical format, ...). |
 | Scalar UDFs | All eight H3 functions and their aliases, and the same set for each grid under DuckDB's names (`a5_to_string`, `s2_cell_to_parent`, `healpix_lonlat_to_cell`, ...), with SQL integer/string literals coerced to the core types, plus `{grid}_polygon_to_cells(geometry, resolution [, containment])` → `List<UInt64>`, with DuckDB's containment modes and NULL handling (see the [SQL reference](../sql-api-reference.md#h3_polygon_to_cells)). The geometry is WKB in lon/lat; a `geoarrow.wkb` argument tagged with another CRS is a planning error. The rows of each batch are polyfilled in parallel. |
 | Geometry | The `wkb` column and `h3_to_wkb` results are `geoarrow.wkb` fields with CRS `OGC:CRS84` (planar edges, as in the GeoParquet export), so Sedona's `ST_*` functions accept them directly. |
 | PMTiles output | `register_all` registers a `pmtiles` file format, so `COPY (query) TO 'cells.pmtiles'` writes any query's rows as cell features. The grid comes from the `{grid}_index` / `{grid}_hex` columns, or from the `grid` and `cell_column` options. See [PMTiles output](#pmtiles-output-copy--to-pmtiles). |
@@ -388,22 +388,22 @@ parallel. See [Partitioned scans](core.md#partitioned-scans).
 ### From SedonaDB's Python API
 
 [`crates/dggs-stream-sedona/python`](../../crates/dggs-stream-sedona/python) builds the
-`dggs_stream_sedona` Python module (maturin, abi3). Its `RasterH3Table` implements
+`dggs_stream_sedona` Python module (maturin, abi3). Its `RasterTable` implements
 `__sedonadb_table_provider__`, returning a `sedonadb_table_provider` capsule that wraps
-`RasterH3Table` in `sedona_extension::ExportedTableProvider`. Filters reach the scan
+`RasterTable` in `sedona_extension::ExportedTableProvider`. Filters reach the scan
 through SedonaDB's extension ABI, so the pushdown above applies unchanged:
 
 ```python
 import sedonadb
-from dggs_stream_sedona import RasterH3Table
+from dggs_stream_sedona import RasterTable
 
 sd = sedonadb.connect()
-sd.create_data_frame(RasterH3Table.continuous("dem.tif", [7, 8], crs="EPSG:4326")).to_view("dem")
+sd.create_data_frame(RasterTable.continuous("dem.tif", [7, 8], crs="EPSG:4326")).to_view("dem")
 sd.sql("SELECT h3_index, mean FROM dem WHERE ST_DWithin(wkb, ST_SetSRID(ST_Point(-122.42, 37.77), 4326), 0.01)").show()
 ```
 
-`RasterH3Table.continuous(source, resolutions=8, *, crs, nodata, band, bbox)` and
-`RasterH3Table.categorical(source, resolutions=8, *, crs, nodata, bbox)` take the common
+`RasterTable.continuous(source, resolutions=8, *, crs, nodata, band, bbox)` and
+`RasterTable.categorical(source, resolutions=8, *, crs, nodata, bbox)` take the common
 options. `dggs_stream_sedona.scalar_functions()` exports the scalar UDFs above, under every
 name and alias, as `sedonadb_scalar_kernel` capsules; `sd.register(...)` installs them all
 (`__sedonadb_extension__`), or register single entries by iterating. Geometry arguments

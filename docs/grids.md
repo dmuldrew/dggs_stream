@@ -22,7 +22,7 @@ each one. To ask for the same cell size on any grid, use [`auto`](#automatic-res
 | :--- | :--- |
 | DuckDB | Per-grid functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...), or `grid := 's2'` on the `h3_` table functions |
 | PostgreSQL | Per-grid functions: `{grid}_raster_continuous_aggregate`, `{grid}_raster_categorical_aggregate`, `{grid}_auto_resolution` and the scalar set |
-| Python / Polars | `grid=` on `scan_raster_h3` (alias `scan_raster`), `read_raster`, `merge_partials`, the exporters and the scalar helpers (`lonlat_to_cell`, `cell_to_parent`, `polygon_to_cells`, ...); `GRIDS` maps each grid to its finest resolution |
+| Python / Polars | `grid=` on `scan_raster`, `read_raster`, `merge_partials`, the exporters and the scalar helpers (`lonlat_to_cell`, `cell_to_parent`, `polygon_to_cells`, ...); `GRIDS` maps each grid to its finest resolution |
 | DataFusion / SedonaDB | `{grid}_raster_{continuous,categorical}_aggregate`, or a grid-name argument (`'s2'`) on any table function; `with_grid(GridKind::S2)` on the providers; per-grid scalar UDFs under DuckDB's names |
 | CLI | `--grid h3\|a5\|s2\|healpix`; `-r` is checked against that grid's range |
 | Rust (`dggs-stream-core`) | `MultiResolutionConfig::with_grid(GridKind::S2)`; `scalar_ops::grid_*` helpers |

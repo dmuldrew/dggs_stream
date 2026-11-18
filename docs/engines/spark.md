@@ -22,7 +22,7 @@ which has its own native adapter (`dggs-stream-sedona`, see
 
 ```mermaid
 flowchart LR
-    D["Driver<br/>plan_partitions()<br/>(metadata only)"] --> T1["Task 1<br/>RasterH3ArrowStream(partition=spec)"]
+    D["Driver<br/>plan_partitions()<br/>(metadata only)"] --> T1["Task 1<br/>RasterArrowStream(partition=spec)"]
     D --> T2["Task 2"]
     D --> TN["Task N"]
     T1 & T2 & TN --> F["Final cells<br/>(partial_state IS NULL)"]
@@ -34,7 +34,7 @@ flowchart LR
 1. **Plan on the driver.** `dggs_stream.plan_partitions(path, target_chunks=N)` reads only
    the raster's metadata and returns one JSON spec per partition: a rectangle of the TIFF
    chunk grid plus a fingerprint of the raster layout.
-2. **Scan one partition per task.** `RasterH3ArrowStream(path, resolutions, partition=spec)`
+2. **Scan one partition per task.** `RasterArrowStream(path, resolutions, partition=spec)`
    aggregates that partition's pixels and adds a nullable `partial_state` column.
 3. **Keep final cells, merge edge cells.** Rows with a null `partial_state` are complete.
    The others are cells that another partition also reaches: shuffle them by `h3_index` so
@@ -84,9 +84,9 @@ cells = dggs_stream.spark.read(spark, "dem.tif", resolutions=[8, 9], quantiles="
 CREATE TEMPORARY VIEW dem_parts USING dggs_stream
 OPTIONS (path 'dem.tif', resolutions '8,9', target_chunks '256');
 
--- Final cells in SQL alone: raster_h3_merge is registered by dggs_stream.spark.register
-SELECT * FROM raster_h3_merge(TABLE(dem_parts));
-SELECT * FROM raster_h3_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
+-- Final cells in SQL alone: dggs_stream_merge is registered by dggs_stream.spark.register
+SELECT * FROM dggs_stream_merge(TABLE(dem_parts));
+SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
 ```
 
 - **One Spark partition per raster partition.** The driver plans with `plan_partitions`
@@ -98,12 +98,12 @@ SELECT * FROM raster_h3_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
   through and merges the partial ones with `dggs_stream.merge_partials`; the raster is scanned
   once. Pass the scan's `categorical`, `columns`, `quantiles` and filters; `read` does this
   for you. Merge each raster's DataFrame on its own.
-- **`raster_h3_merge(TABLE(t) [, 'name=value, ...'])`** is the same merge as a SQL table
+- **`dggs_stream_merge(TABLE(t) [, 'name=value, ...'])`** is the same merge as a SQL table
   function (a Python UDTF). It hashes rows into `buckets` groups by `h3_index` (default 64)
   and merges each group in one call. Options: `quantiles`, `min_count`, `min_mean`,
   `max_mean`, `min_majority_fraction`, `categorical` (recognised from the columns when
   omitted) and `buckets`; the output columns are the input's without `partial_state`.
-- **Options** have the names and meanings of `RasterH3ArrowStream`: `resolutions`,
+- **Options** have the names and meanings of `RasterArrowStream`: `resolutions`,
   `target_chunks` (default 256), `categorical`, `columns`, `crs`, `nodata`, `bbox`, `band`,
   `sampling`, `overlap_rule`, `spectral_formula` and its `*_band` options, `quantiles`,
   `remap`, `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`,
@@ -128,7 +128,7 @@ and merged as one raster).
 The data source and its merge are H3-only for now: they key partial cells on `h3_index`,
 so the `grid` option and the other grids ([Grids](../grids.md)) are not available through
 `dggs_stream.spark`. A partitioned scan of another grid can use the Python package directly
-(`plan_partitions`, `RasterH3ArrowStream(..., grid=..., partition=...)` and
+(`plan_partitions`, `RasterArrowStream(..., grid=..., partition=...)` and
 `merge_partials(..., grid=...)`), as in the `mapInArrow` pipeline below. Transfer modes and
 histograms are not available in partitioned scans on any engine.
 
@@ -156,7 +156,7 @@ def scan(batches):                           # mapInArrow: (path, spec) rows in,
     import dggs_stream
     for batch in batches:
         for path, spec in zip(batch["path"].to_pylist(), batch["spec"].to_pylist()):
-            stream = dggs_stream.RasterH3ArrowStream(path, [8, 9], columns=COLUMNS, partition=spec)
+            stream = dggs_stream.RasterArrowStream(path, [8, 9], columns=COLUMNS, partition=spec)
             for cells in pa.RecordBatchReader.from_stream(stream):
                 yield to_spark(cells, path)
 
@@ -310,7 +310,7 @@ can start.
 ## Testing
 
 [`examples/sedona_spark/tests/`](../../examples/sedona_spark/tests) runs the data source,
-the `raster_h3_merge` table function and the demo's `mapInArrow` pipeline on local Spark 4.0
+the `dggs_stream_merge` table function and the demo's `mapInArrow` pipeline on local Spark 4.0
 with Sedona, and [`crates/dggs-stream-python/tests/spark/`](../../crates/dggs-stream-python/tests/spark)
 checks filter pushdown on Spark 4.1. Every result is compared with an unpartitioned scan.
 The `sedona-spark` CI job builds the `sedona` image and runs both suites in it (the second
