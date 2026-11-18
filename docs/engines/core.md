@@ -47,7 +47,16 @@ Every adapter follows the same steps:
 1. Build a `MultiResolutionConfig` from its own parameters (`resolutions`, `custom_crs`,
    `custom_nodata`, `apply_scale_offset`, `bbox`, `overlap_rule`, `sampling`, `quantiles`,
    filters, …). See [band calibration and validity](../sql-api-reference.md#band-calibration-and-validity).
-2. Open a mosaic and a horizon streamer.
+   Grid-independent options set more fields: `with_grid(GridKind)` ([Grids](../grids.md));
+   `ResolutionSpec::parse` and `ResolutionSpec::resolve` for `auto`; `transfer`;
+   `set_histogram`; `nodata_policy`, `emit_nodata_value` and `decimals` (or
+   `output_policy()` to read them back); and `profile`
+   ([Scan Options](../scan-options.md)). Combinations that can't work are refused when the scan
+   opens, such as `emit` with `min_count` (`validate()`) or a transfer mode with partitions
+   (the transfer stream).
+2. Open a mosaic and a horizon streamer. With `transfer` set to `Sample` or `Overlay`, the
+   streamer hands the scan to a `transfer::TransferStream`, which walks the raster in bands
+   of rows; the draining API below is the same.
 3. Drain completed cells with `drain_completed_into(max, |resolution, record| …)` until
    it returns `Ok(0)` (end of stream) or an error. Errors latch: a failed stream keeps
    returning the error instead of reporting a clean EOF.

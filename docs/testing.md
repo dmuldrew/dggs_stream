@@ -8,16 +8,16 @@ explains how to run each group and what CI runs. The counts below are the number
 
 | Location | Suites | Tests |
 | :--- | ---: | ---: |
-| [`crates/dggs-stream-core/tests/it/`](../crates/dggs-stream-core/tests/it) (`core/…`) | 40 modules, 1 binary | 447 |
+| [`crates/dggs-stream-core/tests/it/`](../crates/dggs-stream-core/tests/it) (`core/…`) | 43 modules, 1 binary | 476 |
 | [`crates/dggs-stream-core/tests/memory/`](../crates/dggs-stream-core/tests/memory) (`memory`, one child process per scenario variant) | 7 scenarios, 1 binary | 38 checks |
-| [`crates/dggs-stream-duckdb/tests/it/`](../crates/dggs-stream-duckdb/tests/it) (`duckdb/…`) | 5 modules, 1 binary | 25 |
+| [`crates/dggs-stream-duckdb/tests/it/`](../crates/dggs-stream-duckdb/tests/it) (`duckdb/…`) | 5 modules, 1 binary | 35 |
 | [`crates/dggs-stream-cli/tests/it/`](../crates/dggs-stream-cli/tests/it) (`cli/…`, runs the crate's `dggs-stream-cli` bin) | 2 modules, 1 binary | 14 |
-| [`crates/dggs-stream-python/tests/it/`](../crates/dggs-stream-python/tests/it) (`python/…`) | 7 modules, 1 binary | 24 |
-| [`crates/dggs-stream-pg/tests/it/`](../crates/dggs-stream-pg/tests/it) (`pg/…`) | 2 modules, 1 binary | 12 (8 need `pg-extension`) |
+| [`crates/dggs-stream-python/tests/it/`](../crates/dggs-stream-python/tests/it) (`python/…`) | 8 modules, 1 binary | 29 |
+| [`crates/dggs-stream-pg/tests/it/`](../crates/dggs-stream-pg/tests/it) (`pg/…`) | 3 modules, 1 binary | 22 (14 need `pg-extension`) |
 | [`tests/it/`](../tests/it) (`root/…`, needs the root cdylib or bins) | 6 modules, 1 binary | 20 |
-| [`crates/dggs-stream-sedona/tests/`](../crates/dggs-stream-sedona/tests) (`sedona/…`, standalone workspace; one binary per module, plus the [`tests/scan/`](../crates/dggs-stream-sedona/tests/scan) binary (`scan/…`) for the `scan` layer, formerly `dggs-stream-datafusion`) | 6 modules + `scan` (8 modules plus shared `rows.rs`) | 62 (5 need `sedona-e2e`) |
-| Crate unit tests (`#[cfg(test)]` in `crates/*/src`) | 6 crates | 308 (3 need `pg-extension`) |
-| [`crates/dggs-stream-python/tests/pytest/`](../crates/dggs-stream-python/tests/pytest) (`pytest/…`, needs `polars`, `pyarrow`, `h3`) | 7 modules | 84 |
+| [`crates/dggs-stream-sedona/tests/`](../crates/dggs-stream-sedona/tests) (`sedona/…`, standalone workspace; one binary per module, plus the [`tests/scan/`](../crates/dggs-stream-sedona/tests/scan) binary (`scan/…`) for the `scan` layer, formerly `dggs-stream-datafusion`) | 8 modules + `scan` (8 modules plus shared `rows.rs`) | 77 (5 need `sedona-e2e`) |
+| Crate unit tests (`#[cfg(test)]` in `crates/*/src`) | 6 crates | 386 (3 need `pg-extension`) |
+| [`crates/dggs-stream-python/tests/pytest/`](../crates/dggs-stream-python/tests/pytest) (`pytest/…`, needs `polars`, `pyarrow`, `h3`) | 8 modules | 114 |
 | [`crates/dggs-stream-sedona/python/tests/`](../crates/dggs-stream-sedona/python/tests) (`sedona-pytest/…`, needs the `sedonadb` 0.5.0 wheel) | 1 module | 14 |
 | [`examples/sedona_spark/tests/`](../examples/sedona_spark/tests) (`spark/…`, needs PySpark, Apache Sedona and `dggs_stream`, as in the `sedona` image) | 2 modules | 17 (23 cases) |
 | [`crates/dggs-stream-python/tests/spark/`](../crates/dggs-stream-python/tests/spark) (`spark41/…`, needs PySpark 4.1+ and `dggs_stream`) | 1 module | 4 (12 cases) |
@@ -59,6 +59,11 @@ its own raster, so the suites need no downloaded data. The few exceptions are li
 24. [Cross-engine parity](#24-cross-engine-parity)
 25. [Performance guards & benchmarks](#25-performance-guards--benchmarks)
 26. [Partitioned scans](#26-partitioned-scans)
+27. [Grids](#27-grids)
+28. [Automatic resolution](#28-automatic-resolution)
+29. [Transfer modes](#29-transfer-modes)
+30. [NoData policy, rounding & histograms](#30-nodata-policy-rounding--histograms)
+31. [Runtime profile](#31-runtime-profile)
 
 The former catch-all `tests/test_raster_h3.rs` (58 tests) was split by topic; rows that
 list individual test names come from it or from a suite that mostly covers another category.
@@ -386,6 +391,8 @@ One raster, every engine: per-cell results must agree.
 | Suite | What it checks |
 | :--- | :--- |
 | [`root/multi_engine_e2e.rs`](../tests/it/multi_engine_e2e.rs) (4) | Continuous and categorical per-cell parity across core batch readers, the Arrow C stream, the CLI binary (`ipc`, `jsonl`, `parquet`, `pmtiles`), Python (a `python3` subprocess loading the cdylib), the PostgreSQL SRFs and fmgr scalars in process, and DuckDB when `duckdb` is on `PATH`; continuous parity also covers EPSG:5070 and EPSG:27700 rasters, and polygon results are compared exactly across core, Python and DuckDB. |
+| [`sedona/cross_engine.rs`](../crates/dggs-stream-sedona/tests/cross_engine.rs) (1) | `engines_agree_on_every_grid_and_transfer_mode`: the same raster and options through the CLI binary, the Python scanner (through `dggs-stream-python`'s Rust API) and DataFusion SQL, on all four grids, return the same cells and statistics for centre assignment, `emit` with `decimals`, mass-preserving `overlay` and bilinear / bicubic `sample`. It also checks the shared result: centre-kernel counts and sums against the pixels, the raster's total conserved under `mass_preserve`, and a linear field reproduced at cell centres by interpolation. |
+| [`duckdb/ffi_sql/table_scans.rs`](../crates/dggs-stream-duckdb/tests/it/ffi_sql/table_scans.rs) `test_cross_engine_consistency_with_the_cli` | DuckDB's table function against the CLI binary for the same cases on every grid. The CLI is the hub: DuckDB is compared with it here, the Python scanner and SQL in `sedona/cross_engine.rs`. |
 | Unit: `dggs-stream-core` columnar (6), `scalar_ops.rs` (6) | Arrow C stream round trip, release callback null-safety/idempotence, cross-thread owned export release, `RH3IPC01` round trip, scalar helpers. |
 
 See the [engine deep dives](engines/README.md).
@@ -489,6 +496,55 @@ in every engine.
 
 See [Raster H3 Core](engines/core.md) for the protocol and its measured overhead, and
 [Spark & Apache Sedona](engines/spark.md) for the Spark pipeline.
+
+## 27. Grids
+
+Every grid must give the cells a reference indexer gives for each pixel centre, in every
+engine, with ids that survive each engine's integer types.
+
+| Suite | What it checks |
+| :--- | :--- |
+| Unit: `dggs-stream-core` [`grid.rs`](../crates/dggs-stream-core/src/grid.rs) (20) | S2 ids against the reference `s2` library; HEALPix ids are NUNIQ; S2 and HEALPix hierarchies round-trip, cell centres index back to their cell, and the per-sample backends agree with `cell_at` at every resolution; south-latitude and radius bounds cover each cell; `GridSpec` invariants (names and ranges, base cells and aperture against the hierarchy, the sign-bit flag against real ids, the pole model against the cells, the edge model bounding the true southern extent, the radius and zoom models); A5 curved edges inside their latitude bound, pole vertices spread along the neighbouring meridians, and A5 points near a pole not inheriting the previous cell. |
+| [`core/polygon_to_cells.rs`](../crates/dggs-stream-core/tests/it/polygon_to_cells.rs) (2) | H3 polygon fill against `h3o`'s tiler for every containment mode; S2 polar faces at level 0 cover every longitude in `Covers` and `IntersectsBoundary` (a sweep next to the closing meridian of both polar faces). |
+| [`python/grids.rs`](../crates/dggs-stream-python/tests/it/grids.rs) (5) | Through the C ABI: scans take the grid from the options, resolutions are bounded by the grid, exports write the requested grid, and the grid scalars and polygon fill match core. |
+| [`pytest/test_grids.py`](../crates/dggs-stream-python/tests/pytest/test_grids.py) (28) | Every grid through the Python API: continuous and categorical scans equal an independent per-pixel-centre reference built with `lonlat_to_cell`; Polars pushdown (including `resolution` filters above 15 and `mean` filters with `decimals`); resolution ranges; partitions; Parquet and PMTiles exports; scalar round trips; S2 ids with the top bit set as `UInt64`; polygon fill; and the auto resolution, transfer, NoData, histogram and profile options described in §28–31. With Polars older than 1.4 the scans return Arrow streams, which the module reads into `LazyFrame`s so the same checks run. |
+| [`pg/grids.rs`](../crates/dggs-stream-pg/tests/it/grids.rs) (4), [`pg/fmgr/grids.rs`](../crates/dggs-stream-pg/tests/it/fmgr/grids.rs) (6, `pg-extension` only) | The per-grid SRFs aggregate onto every grid and follow its resolution range; `bigint` scalars match core, and signed ids (S2 faces 4 and 5, half of A5) round-trip through text and `bytea`; the `fmgr` aggregate SRFs match the Rust SRFs; finfo records for every grid function. |
+| [`sedona/grids.rs`](../crates/dggs-stream-sedona/tests/grids.rs) (14) | Table functions and providers aggregate onto every grid and push filters down; resolutions are checked against the grid; scalar UDFs exist and work on columns for every grid; polygon fill matches core; `COPY ... TO '*.pmtiles'` detects every grid's columns and prefers the named grid when several are present; plus the auto resolution, NoData, transfer, histogram and profile options on every grid. |
+| [`duckdb/ffi_sql/table_scans.rs`](../crates/dggs-stream-duckdb/tests/it/ffi_sql/table_scans.rs), [`scalars.rs`](../crates/dggs-stream-duckdb/tests/it/ffi_sql/scalars.rs), [`registration.rs`](../crates/dggs-stream-duckdb/tests/it/ffi_sql/registration.rs) | A5, S2 and HEALPix table scans and cell filters, their scalar functions against core, and every per-grid function registered under its names. |
+| Unit: `dggs-stream-cli` | A5, S2 and HEALPix streaming, Parquet and PMTiles exports, and partition merges; `-r` checked against each grid's range. |
+
+## 28. Automatic resolution
+
+| Suite | What it checks |
+| :--- | :--- |
+| [`core/auto_resolution.rs`](../crates/dggs-stream-core/tests/it/auto_resolution.rs) (5) | The ground pixel area of geographic rasters is the ellipsoidal footprint and of projected rasters is measured on the ground; `auto` picks the area-matched resolution on every grid; a mosaic takes its finest tile; a raster that cannot be located is an error. |
+| Unit: `dggs-stream-core` [`resolution.rs`](../crates/dggs-stream-core/src/resolution.rs) (3) | `auto`, `auto+N`, `auto-N` and list parsing; the area match is the nearest resolution in ratio; the area of a lon/lat quad matches the ellipsoidal rectangle. |
+| Engines | `test_auto_resolution_on_every_grid` (DuckDB), `test_cli_auto_resolution_on_every_grid` (CLI), `auto_resolution_matches_core_on_every_grid` and `auto_resolution_entry_points` (PostgreSQL), `auto_resolution_matches_cells_to_pixels_on_every_grid` (SedonaDB), `test_auto_resolution` and `test_auto_resolution_is_comparable_across_grids` (pytest). |
+
+## 29. Transfer modes
+
+| Suite | What it checks |
+| :--- | :--- |
+| [`core/transfer_modes.rs`](../crates/dggs-stream-core/tests/it/transfer_modes.rs) (10) | Against analytic rasters on every grid: `sample` fills cells finer than the pixels with interpolated values (a linear field reproduced at cell centres) and follows a projected CRS; `overlay` is area-weighted and conserves mass under `mass_preserve`; an overlay of a constant is that constant and skips NoData; categorical transfers keep class codes (and refuse interpolation); options of the centre kernel are refused; cells larger than the raster or the bbox are kept; `advance_until_completed` drives the transfer stream; `emit` under a bbox lists only cells with selected pixels; zero-alpha pixels are skipped by `sample` and `overlay`. |
+| Unit: `dggs-stream-core` [`transfer/`](../crates/dggs-stream-core/src/transfer) (10) | Interpolation: kernel weights sum to one, every method returns pixel values at pixel centres, linear fields are reproduced, bicubic reproduces quadratics, NoData taps fall back and edges repeat. Overlap: areas of simple shapes, an aligned rectangle covers whole and partial pixels, overlaps sum to the polygon's area within the window, neighbouring polygons partition each pixel. Option validation. |
+| Engines | `test_cli_transfer_modes`, `test_transfer_modes` (DuckDB), `transfer_modes_on_every_grid` (SedonaDB), `test_transfer_sample`, `test_transfer_overlay_conserves_mass`, `test_transfer_categorical`, `test_transfer_option_errors` (pytest), and the cross-engine suite in §24. |
+
+## 30. NoData policy, rounding & histograms
+
+| Suite | What it checks |
+| :--- | :--- |
+| [`core/nodata_policy.rs`](../crates/dggs-stream-core/tests/it/nodata_policy.rs) (5) | `emit` keeps all-NoData cells on every grid, in continuous and categorical scans, with NULL statistics or the NoData value; `emit` refuses `min_count`, compaction and a remap to the reserved NoData class; continuous batches apply the NoData value and `decimals`; categorical batches keep empty cells in wide and long form. |
+| [`core/histogram.rs`](../crates/dggs-stream-core/tests/it/histogram.rs) (4) | Binned histograms count pixel centres per bin; area weights conserve the raster's area; the batch reader builds the structured list-of-struct columns; inconsistent specs are refused. |
+| Unit: `dggs-stream-core` [`output_policy.rs`](../crates/dggs-stream-core/src/aggregator/output_policy.rs) (4), [`histogram.rs`](../crates/dggs-stream-core/src/histogram.rs) (4) | Rounding half away from zero, policy names, continuous and categorical cells with and without samples; bins parse and locate values, options build a spec, area weights run a weighted overlay, entries follow the spec. |
+| Engines | `test_cli_nodata_policy_and_decimals`, `test_cli_partition_merge_keeps_the_output_policy`, `test_cli_histograms` (CLI); `test_nodata_policy_and_decimals`, `long_categorical_rows_are_rounded`, `test_histogram_parameters` (DuckDB); `nodata_policy_and_decimals_on_every_grid` and `srfs_take_nodata_policy_and_decimals` (PostgreSQL); `nodata_policy_and_decimals_on_every_grid` (including a rounded `mean` predicate left to DataFusion) and `categorical_functions_return_structured_histograms` (SedonaDB); `test_nodata_policy_emit_and_decimals`, `test_nodata_policy_emit_categorical`, `test_output_option_errors`, `test_binned_histogram`, `test_value_histogram`, `test_histogram_option_errors` (pytest). |
+
+## 31. Runtime profile
+
+| Suite | What it checks |
+| :--- | :--- |
+| Unit: `dggs-stream-core` [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs) (3) | Phases and counters accumulate across threads, the report prints and serialises, timers measure the calling thread. |
+| Engines | `test_profile_named_parameter` (DuckDB), `providers_report_a_run_profile` (SedonaDB), `test_profile_raster` (pytest: rows equal the scan's, pixels read equal the raster's, the expected phases are present for `assign_centers` and `overlay`). |
+| [`examples/benchmark_grids.rs`](../examples/benchmark_grids.rs) | Not a test: time and peak RSS per grid on the Hawaii rasters at area-matched resolutions, one child process per case. |
 
 ## Running the Tests
 

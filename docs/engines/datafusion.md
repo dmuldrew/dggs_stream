@@ -71,6 +71,10 @@ Schema: `ColumnSchema::continuous(&quantiles)` (see the [overview](README.md#out
 | `with_batch_size(n)` | rows per `RecordBatch` (default 2048) |
 | `with_strict_transforms(b)` | `strict_transforms`: fail the scan instead of skipping samples whose coordinate transform fails |
 | `with_transform_failure_counter(Arc<AtomicU64>)` | `transform_failure_counter`: receives the number of skipped samples |
+| `with_grid(GridKind)` | `grid`: `H3` (default), `A5`, `S2` or `Healpix`; the cell columns become `{grid}_index` / `{grid}_hex` ([Grids](../grids.md)) |
+| `with_output_policy(OutputPolicy)` | NoData policy, NoData value and `decimals` ([Scan Options](../scan-options.md#nodata-policy-and-rounding)) |
+| `with_transfer(TransferMode)` | `transfer`: `AssignCenters` (default), `Sample(SampleMethod)` or `Overlay { weighted, mass_preserve }` ([Scan Options](../scan-options.md#transfer-modes)) |
+| `with_profile(Arc<RunProfile>)` | runtime profile of the scan ([Scan Options](../scan-options.md#runtime-profile)) |
 
 ### `CategoricalRasterTableProvider`
 
@@ -82,6 +86,8 @@ Schema: `categorical_wide()` (default) or `categorical_long()`.
 | `with_crs`, `with_nodata`, `with_bbox`, `with_batch_size`, `with_strict_transforms`, `with_transform_failure_counter` | As above |
 | `with_remapper(Arc<CategoryRemapper>)` | Reclassify categories during ingestion |
 | `with_min_count`, `with_min_majority_fraction` | Value filters |
+| `with_grid`, `with_output_policy`, `with_transfer`, `with_profile` | As above (`Sample` takes `Nearest` only) |
+| `with_histogram(HistogramSpec)` | Per-cell histogram; the `histogram` column becomes `List<Struct>` ([Scan Options](../scan-options.md#histograms)) |
 
 ## Pushdown
 
@@ -270,6 +276,20 @@ with the same `MultiResolutionConfig`, or write the Arrow stream with any Arrow-
 In real DataFusion and SedonaDB, `dggs-stream-sedona` adds `COPY ... TO '*.pmtiles'`; see
 [PMTiles output](#pmtiles-output-copy--to-pmtiles).
 
+### Other grids and scan options in SQL
+
+```sql
+-- S2 cells about one pixel in size
+SELECT s2_index, mean FROM s2_raster_continuous_aggregate('dem.tif', 'auto');
+-- The H3 function with a grid argument, interpolated at cell centres, rounded
+SELECT healpix_index, mean
+FROM h3_raster_continuous_aggregate('dem.tif', 'auto+2', 'healpix',
+                                    'transfer=sample', 'sample_method=bicubic', 'decimals=2');
+-- Binned histograms as List<Struct>
+SELECT h3_index, histogram
+FROM h3_raster_categorical_aggregate('dem.tif', 8, 'histogram=4:0:2000');
+```
+
 ## Using with Apache DataFusion and SedonaDB
 
 [`crates/dggs-stream-sedona`](../../crates/dggs-stream-sedona) is the real DataFusion adapter.
@@ -293,10 +313,10 @@ ctx.sql(
 | `RasterH3Table` | `datafusion::catalog::TableProvider` over a configured `Continuous`/`CategoricalRasterTableProvider`. Aggregation runs on DataFusion's blocking pool and streams through the Arrow C Stream into a `StreamingTableExec` without copying. Projection (including empty, for `COUNT(*)`) is pushed down; `LIMIT` is pushed to the reader and `StreamingTableExec` only when every supplied filter is `Exact` (or there are none). Otherwise the caller applies the limit after residual filtering. A `WHERE` filter is pushed only as far as the wrapped provider's `supports_filters_pushdown` allows, so on compacted tables (and for non-`resolution` filters on partitioned ones) DataFusion evaluates it on the completed rows. |
 | Filter pushdown | `count`/`total_count >= x`, `mean >= x`, `mean <= x`, `mean BETWEEN a AND b`, `majority_fraction >= x` and `resolution = n` are `Exact`; the strict forms (`>`, `<`) push the inclusive bound as `Inexact` and DataFusion re-applies them. Anything else is `Unsupported`. |
 | Spatial pushdown | `ST_Intersects` / `ST_Contains` / `ST_Within` / `ST_Covers` / `ST_CoveredBy` / `ST_Overlaps` / `ST_Touches` / `ST_Crosses` / `ST_Equals`, and `ST_DWithin(..., d)` with a non-negative numeric literal `d`, between a cell's geometry (`wkb`, or `h3_to_wkb(h3_index)` / `h3_to_wkb(h3_hex)` under any alias) and a constant geometry push an `Inexact` `FilterPredicate::Bbox`. The constant is a `geoarrow.wkb` literal in `OGC:CRS84` / `EPSG:4326` with planar edges (what `ST_SetSRID(ST_GeomFromWKT(...), 4326)` folds to) or `h3_to_wkb(<cell literal>)`. The box is the constant's envelope, grown by `d` degrees for `ST_DWithin` (planar distance in CRS units) and clamped to lon/lat range. The `scan` layer then widens it past the largest cell before clipping samples (see `Bbox(b)` above), so every cell the predicate can match keeps its full aggregate; DataFusion re-applies the predicate to drop the extra cells. Compacted tables accept the filter but do not prune. |
-| Table functions | `h3_raster_continuous_aggregate(source [, resolution ...] [, crs])` and `h3_raster_categorical_aggregate(...)` (wide format). Use `RasterH3Table` with a configured provider for other options. |
-| Scalar UDFs | All eight H3 functions and their aliases, with SQL integer/string literals coerced to the core types, plus `h3_polygon_to_cells(geometry, resolution [, containment])` → `List<UInt64>`, with DuckDB's containment modes and NULL handling (see the [SQL reference](../sql-api-reference.md#h3_polygon_to_cells)). The geometry is WKB in lon/lat; a `geoarrow.wkb` argument tagged with another CRS is a planning error. The rows of each batch are polyfilled in parallel. |
+| Table functions | `h3_raster_continuous_aggregate(source [, resolution ...] [, crs] [, 'key=value' ...])` and `h3_raster_categorical_aggregate(...)` (wide format), and the same for the other grids (`a5_`, `s2_`, `healpix_` prefixes, or a grid-name argument such as `'s2'`). Resolutions are integers or `'auto'`, `'auto+N'`, `'auto-N'`. Option strings: `'nodata_policy=emit'`, `'emit_nodata_value=...'`, `'decimals=2'`, `'transfer=sample'` / `'transfer=overlay'` with `'sample_method=...'`, `'overlay_weighted=false'`, `'mass_preserve=true'`; on the categorical functions also `'histogram=...'`, `'histogram_weight=...'`, `'histogram_normalize=...'`. Use `RasterH3Table` with a configured provider for the other options (nodata, quantiles, categorical format, ...). |
+| Scalar UDFs | All eight H3 functions and their aliases, and the same set for each grid under DuckDB's names (`a5_to_string`, `s2_cell_to_parent`, `healpix_lonlat_to_cell`, ...), with SQL integer/string literals coerced to the core types, plus `{grid}_polygon_to_cells(geometry, resolution [, containment])` → `List<UInt64>`, with DuckDB's containment modes and NULL handling (see the [SQL reference](../sql-api-reference.md#h3_polygon_to_cells)). The geometry is WKB in lon/lat; a `geoarrow.wkb` argument tagged with another CRS is a planning error. The rows of each batch are polyfilled in parallel. |
 | Geometry | The `wkb` column and `h3_to_wkb` results are `geoarrow.wkb` fields with CRS `OGC:CRS84` (planar edges, as in the GeoParquet export), so Sedona's `ST_*` functions accept them directly. |
-| PMTiles output | `register_all` registers a `pmtiles` file format, so `COPY (query) TO 'cells.pmtiles'` writes any query's rows as H3 hexagon features. See [PMTiles output](#pmtiles-output-copy--to-pmtiles). |
+| PMTiles output | `register_all` registers a `pmtiles` file format, so `COPY (query) TO 'cells.pmtiles'` writes any query's rows as cell features. The grid comes from the `{grid}_index` / `{grid}_hex` columns, or from the `grid` and `cell_column` options. See [PMTiles output](#pmtiles-output-copy--to-pmtiles). |
 
 The crate is a standalone Cargo workspace (listed in the root `exclude`), so DataFusion
 never enters the root `Cargo.lock` or the `--workspace` CI jobs.
