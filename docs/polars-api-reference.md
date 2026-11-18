@@ -76,8 +76,8 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `nodata_policy` | `str \| None` | `"omit"` | `"emit"` keeps cells whose samples are all NoData: `count` 0, null statistics. Refused with `min_count`. |
 | `emit_nodata_value` | `float \| None` | `None` | Under `"emit"`, the value of those statistics instead of null. |
 | `decimals` | `int \| None` | `None` | Round floating-point statistics to 0–15 decimals. Polars filters on `mean` and `majority_fraction` are then not pushed into the engine. |
-| `transfer` | `str \| None` | `"assign_centers"` | `"sample"` (value interpolated at each cell centre) or `"overlay"` (pixels weighted by overlap). See [Scan Options](scan-options.md#transfer-modes). |
-| `sample_method` | `str \| None` | `"bilinear"` | With `"sample"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
+| `transfer` | `str \| None` | `"assign_centers"` | `"interpolate"` (value interpolated at each cell centre) or `"overlay"` (pixels weighted by overlap). See [Scan Options](scan-options.md#transfer-modes). |
+| `interpolation` | `str \| None` | `"bilinear"` | With `"interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
 | `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
 | `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
 | `histogram` | `str \| Sequence[float] \| None` | `None` | Categorical only: `"values"`, `"N:min:max"` or bin edges. The `histogram` column becomes `List(Struct({class, weight}))` or `List(Struct({lower, upper, weight}))`. |

@@ -55,6 +55,7 @@ tempfile = "3.10"
 ureq = { version = "3.5.1", default-features = false, features = ["rustls", "gzip"] }
 url = "2.5"
 weezl = "0.2"
+zstd = { version = "0.14", default-features = false }
 libc = "0.2"
 crossbeam-deque = "0.8"
 

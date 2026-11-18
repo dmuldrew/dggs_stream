@@ -309,7 +309,7 @@ A web map needs tiles at every zoom level — from hemispheric overview down to 
 | **Cloud-Native Streaming** | HTTP/S3 COG range prefetching — no local copies needed |
 | **Sub-Pixel Super-Sampling** | RGSS, Hex, Gaussian, 8-Rooks boundary anti-aliasing |
 | **Four Grids, One Pipeline** | H3, A5, S2 and HEALPix behind one `GridSpec` table, in every engine ([Grids](docs/grids.md)) |
-| **Choice of Pixel Transfer** | Pixel-centre assignment, interpolated sampling for fine cells, or exact area overlay; per-cell histograms, NoData emission, rounding and an opt-in runtime profile ([Scan Options](docs/scan-options.md)) |
+| **Choice of Pixel Transfer** | Pixel-centre assignment, interpolation at cell centres for fine cells, or exact area overlay; per-cell histograms, NoData emission, rounding and an opt-in runtime profile ([Scan Options](docs/scan-options.md)) |
 
 Built-in HTTP/S3 reads pin strong ETags per URL and use `If-Match`, failing if the
 object changes during a scan. Rust `HttpTransport` clones share each URL's pin:
@@ -342,7 +342,7 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
 - **One pass, every resolution.** Each pixel is located once and counted at every
   requested resolution, which is how a multi-zoom PMTiles pyramid comes from a
   single read.
-- **Fine cells and partial pixels.** For cells finer than the pixels, `transfer=sample`
+- **Fine cells and partial pixels.** For cells finer than the pixels, `transfer=interpolate`
   interpolates a value at each cell's centre; for exact area weighting, `transfer=overlay`
   splits each pixel across the cells it overlaps. Both stream the raster in bands of rows.
   See [Scan Options](docs/scan-options.md).
@@ -585,7 +585,7 @@ flowchart TD
             EVICT -- "No" --> KEEP["Retain in Active Front"]
         end
 
-        subgraph TRANSFER ["transfer = sample / overlay"]
+        subgraph TRANSFER ["transfer = interpolate / overlay"]
             BANDS["TransferStream: bands of rows, interpolation or exact pixel overlap"]
             OPEN["Cells open across band edges"]
             CHUNK -.->|"instead of the horizon kernel"| BANDS
@@ -686,7 +686,7 @@ For datasets spanning ±180° longitude, dggs_stream automatically wraps coordin
 
 ### BigTIFF & Codec Compatibility
 
-Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
+Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, ZSTD, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
 
 ```bash
 gdal_translate -co COMPRESS=DEFLATE input.tif output.tif
@@ -784,12 +784,13 @@ Topic guides that apply to every engine. Engine-specific documentation is listed
 | Document | What It Covers |
 | :--- | :--- |
 | [Grids](docs/grids.md) | H3, A5, S2 and HEALPix: resolutions, cell ids per engine, `GridSpec`, `auto` resolution, poles, polygon fill |
-| [Scan Options](docs/scan-options.md) | Transfer modes (`assign_centers`, `sample`, `overlay`), histograms, NoData policy, rounding, runtime profile, and each engine's names for them |
+| [Scan Options](docs/scan-options.md) | Transfer modes (`assign_centers`, `interpolate`, `overlay`), histograms, NoData policy, rounding, runtime profile, and each engine's names for them |
 | [Engineering Architecture](docs/engineering.md) | Streaming, memory budgets, disk spilling, and throughput |
 | [Module Architecture](docs/module-architecture.md) | File-by-file source code map with GitHub links |
 | [PMTiles & Multi-Resolution](docs/pmtiles.md) | Multi-resolution pyramids, zoom mapping, zero-server web maps |
 | [Optimal Raster Formats](docs/optimal-raster-format.md) | Why tiled WGS84 COGs are 4.5–6× faster, GDAL recipes |
 | [Worked Examples](docs/worked-examples.md) | One question per engine and grid: A5 wetland totals, H3 flood exposure, S2 snowpack roll-ups, HEALPix latitude bands |
+| [Transfer Modes](docs/transfer-modes.md) | Centre assignment, interpolation at cell centres (nearest, bilinear, bicubic, Lanczos), area-weighted and mass-preserving overlay |
 | [Super-Sampling](docs/super-sampling.md) | RGSS, Hex, Gaussian boundary anti-aliasing presets |
 | [CRS & Projections](docs/crs-and-projection.md) | Supported projections, detection, 3-tier transform hierarchy |
 | [Architecture Comparison](docs/architecture-comparison.md) | Benchmarks vs Python/PostGIS/GDAL, environment trade-offs |

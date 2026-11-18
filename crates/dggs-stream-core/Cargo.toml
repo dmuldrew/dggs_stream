@@ -46,6 +46,7 @@ tempfile.workspace = true
 ureq.workspace = true
 url.workspace = true
 weezl.workspace = true
+zstd.workspace = true
 libc.workspace = true
 crossbeam-deque.workspace = true
 

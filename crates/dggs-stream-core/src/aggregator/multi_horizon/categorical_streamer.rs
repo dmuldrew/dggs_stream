@@ -119,7 +119,7 @@ impl HorizonStreamKernel for CategoricalKernel {
 pub struct MultiCategoricalHorizonStreamer {
     inner: MultiHorizonStreamer<CategoricalKernel>,
     remapper: Option<Arc<CategoryRemapper>>,
-    /// The `sample` / `overlay` stream, when `config.transfer` is not the default; the
+    /// The `interpolate` / `overlay` stream, when `config.transfer` is not the default; the
     /// horizon kernel in `inner` is then idle.
     transfer: Option<Box<crate::transfer::TransferStream<CategoricalAccumulator>>>,
     transfer_mode: crate::transfer::TransferMode,

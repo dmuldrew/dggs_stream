@@ -481,7 +481,7 @@ impl BindHelper {
         let output = self.parse_output_policy()?;
         let transfer = match TransferMode::from_options(
             self.get_named_string("transfer").as_deref(),
-            self.get_named_string("sample_method").as_deref(),
+            self.get_named_string("interpolation").as_deref(),
             self.get_named_bool("overlay_weighted"),
             self.get_named_bool("mass_preserve"),
         ) {
@@ -623,7 +623,7 @@ pub struct ExecutionParams {
     /// `nodata_policy`, `emit_nodata_value` and `decimals`: what all-NoData cells and
     /// output precision look like.
     pub output: OutputPolicy,
-    /// `transfer`, `sample_method`, `overlay_weighted` and `mass_preserve`: how pixels
+    /// `transfer`, `interpolation`, `overlay_weighted` and `mass_preserve`: how pixels
     /// map onto cells.
     pub transfer: TransferMode,
     /// `profile`: print where the scan's time went on stderr when it ends, and keep the
