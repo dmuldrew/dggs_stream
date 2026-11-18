@@ -19,7 +19,7 @@ use dggs_stream_core::aggregator::H3Accumulator;
 use dggs_stream_core::columnar::{
     CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader,
 };
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
 
@@ -494,7 +494,7 @@ fn malformed_calibration_metadata_is_rejected_in_all_modes() {
             &tags
         );
         let error = GeoTiffStreamReader::open(&path).err().expect(name);
-        assert!(matches!(error, RasterH3Error::InvalidMetadata(_)));
+        assert!(matches!(error, DggsStreamError::InvalidMetadata(_)));
         for apply_scale_offset in [true, false] {
             let cfg = config(apply_scale_offset);
             let paths = [path.clone()];
@@ -512,7 +512,7 @@ fn malformed_calibration_metadata_is_rejected_in_all_modes() {
                     panic!("{name} accepted with apply_scale_offset={apply_scale_offset}")
                 });
                 assert!(
-                    matches!(&error, RasterH3Error::InvalidMetadata(message) if message.contains("GDAL_METADATA")),
+                    matches!(&error, DggsStreamError::InvalidMetadata(message) if message.contains("GDAL_METADATA")),
                     "{name} with apply_scale_offset={apply_scale_offset}: {error}"
                 );
             }

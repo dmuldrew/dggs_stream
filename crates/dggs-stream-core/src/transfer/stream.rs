@@ -12,7 +12,7 @@ use crate::aggregator::multi_horizon::MultiResolutionConfig;
 use crate::aggregator::output_policy::NodataPolicy;
 use crate::aggregator::remap::CategoryRemapper;
 use crate::crs::transformer::CrsTransformer;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::{wrap_lon_180, GridKind};
 use crate::raster::mosaic::{MosaicReader, TileDescriptor};
 use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError};
@@ -179,7 +179,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             .filter(|spec| A::CATEGORICAL && spec.is_binned())
             .map(|spec| Arc::new(spec.bins.clone()));
         let invalid = |message: &str| {
-            Err(RasterH3Error::InvalidParameter(format!(
+            Err(DggsStreamError::InvalidParameter(format!(
                 "transfer '{}' {message}",
                 mode.as_str()
             )))
@@ -325,7 +325,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             counter.fetch_add(failures, Ordering::Relaxed);
         }
         if self.strict_transforms {
-            return Err(RasterH3Error::TransformFailures(self.transform_failures));
+            return Err(DggsStreamError::TransformFailures(self.transform_failures));
         }
         Ok(())
     }
@@ -820,13 +820,13 @@ fn cells_in_bbox(
             {
                 Ok(()) => cells.extend_from_slice(&part),
                 Err(PolygonToCellsError::TooManyCells { estimate, limit }) => {
-                    return Err(RasterH3Error::InvalidParameter(format!(
+                    return Err(DggsStreamError::InvalidParameter(format!(
                         "transfer: a block of the raster holds about {estimate} cells at \
                          resolution {resolution} (limit {limit}); use a coarser resolution"
                     )))
                 }
                 Err(e) => {
-                    return Err(RasterH3Error::StreamFailed(format!(
+                    return Err(DggsStreamError::StreamFailed(format!(
                         "transfer: listing cells of [{w}, {south}, {e}, {north}] failed: {e}"
                     )))
                 }

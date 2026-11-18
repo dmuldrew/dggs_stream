@@ -22,7 +22,7 @@ use crate::convert::{from_column_array, geometry_field, to_arrow_type, to_column
 pub fn scalar_udfs() -> Vec<ScalarUDF> {
     default_scalar_udfs()
         .into_iter()
-        .map(|inner| ScalarUDF::new_from_impl(RasterH3ScalarUdf::new(inner)))
+        .map(|inner| ScalarUDF::new_from_impl(H3ScalarUdf::new(inner)))
         .chain(GridKind::ALL.into_iter().flat_map(|grid| {
             [
                 ScalarUDF::new_from_impl(crate::polyfill::H3PolygonToCells::for_grid(grid)),
@@ -37,13 +37,13 @@ pub fn scalar_udfs() -> Vec<ScalarUDF> {
 /// Arguments are coerced to the types the core functions take (`UInt64` cells, `Utf8`
 /// hex strings, `Int64` resolutions), so SQL integer and string literals work directly.
 /// Functions returning WKB return a `geoarrow.wkb` field.
-pub struct RasterH3ScalarUdf {
+pub struct H3ScalarUdf {
     inner: Arc<dyn crate::scan::H3ScalarFn>,
     aliases: Vec<String>,
     signature: Signature,
 }
 
-impl RasterH3ScalarUdf {
+impl H3ScalarUdf {
     pub fn new(inner: Arc<dyn crate::scan::H3ScalarFn>) -> Self {
         let aliases = inner.aliases().iter().map(|a| a.to_string()).collect();
         Self {
@@ -69,29 +69,29 @@ impl RasterH3ScalarUdf {
     }
 }
 
-impl PartialEq for RasterH3ScalarUdf {
+impl PartialEq for H3ScalarUdf {
     fn eq(&self, other: &Self) -> bool {
         self.inner.name() == other.inner.name()
     }
 }
 
-impl Eq for RasterH3ScalarUdf {}
+impl Eq for H3ScalarUdf {}
 
-impl Hash for RasterH3ScalarUdf {
+impl Hash for H3ScalarUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.inner.name().hash(state);
     }
 }
 
-impl std::fmt::Debug for RasterH3ScalarUdf {
+impl std::fmt::Debug for H3ScalarUdf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RasterH3ScalarUdf")
+        f.debug_struct("H3ScalarUdf")
             .field("name", &self.inner.name())
             .finish_non_exhaustive()
     }
 }
 
-impl ScalarUDFImpl for RasterH3ScalarUdf {
+impl ScalarUDFImpl for H3ScalarUdf {
     fn name(&self) -> &str {
         self.inner.name()
     }

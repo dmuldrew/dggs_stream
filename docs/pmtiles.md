@@ -197,12 +197,12 @@ For massive multi-resolution archives containing tens of thousands or millions o
 * **Root Always Fits**: `pmtiles::writer::build_directories(entries, max_root_bytes)` chooses the layout. If the compressed root of leaf pointers would exceed 16,257 bytes (about 30 million tiles), the leaf size grows in 20% steps until it fits, as go-pmtiles does; an archive whose root cannot fit fails instead of writing an out-of-spec root.
 * **Instant Scalability**: Compressed root directories remain under 150 bytes regardless of dataset size (e.g., 60,000+ tiles compressed from 87 KB down to 122 bytes), ensuring instantaneous startup and sub-millisecond viewport tile lookups.
 
-## Embedded Multi-Resolution Statistical Metadata (`h3_resolution_stats`)
+## Embedded Multi-Resolution Statistical Metadata (`resolution_stats`)
 
 dggs_stream automatically embeds rich statistical envelopes across all pyramid levels directly inside the PMTiles JSON metadata:
 ```json
 {
-  "h3_resolution_stats": {
+  "resolution_stats": {
     "5": {
       "cell_count": 512,
       "zooms": [5, 6],
@@ -221,7 +221,7 @@ This enables client applications to adaptively normalize color ramps, configure 
 | :--- | :--- |
 | **Host a serverless web map** | Upload to Amazon S3, Cloudflare R2, Google Cloud Storage, or GitHub Pages. No tile servers, no Docker, no infrastructure. |
 | **View offline** | Drag and drop into the [Hexagon Studio](../pmtiles_viewer/README.md) web viewer — works entirely client-side with no server or network connection. |
-| **Embed in dashboards** | Add as a MapLibre GL JS vector source. Embedded `h3_resolution_stats` auto-calibrate color ramps and slider bounds. |
+| **Embed in dashboards** | Add as a MapLibre GL JS vector source. Embedded `resolution_stats` auto-calibrate color ramps and slider bounds. |
 | **Share with stakeholders** | Email or Slack a single file. Recipients open it in any PMTiles-compatible viewer. |
 | **Version your maps** | `.pmtiles` files are immutable snapshots — ideal for Git LFS, S3 versioning, or CI/CD artifact pipelines. |
 

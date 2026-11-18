@@ -360,7 +360,7 @@ fn run_continuous_parity(
     // =========================================================================
     // Engine 2: dggs-stream-cli (Real subprocess for `ipc`, `jsonl`, `parquet`, `pmtiles`)
     // =========================================================================
-    let cli_bin = env!("CARGO_BIN_EXE_raster-h3");
+    let cli_bin = env!("CARGO_BIN_EXE_dggs-stream");
 
     // 2a. Subprocess `ipc` streaming over stdout
     let ipc_out = Command::new(cli_bin)
@@ -827,7 +827,7 @@ fn test_cross_engine_categorical_e2e_parity() {
     assert!(!core_map.is_empty());
 
     // 2. dggs-stream-cli subprocess (`ipc` categorical wide)
-    let cli_bin = env!("CARGO_BIN_EXE_raster-h3");
+    let cli_bin = env!("CARGO_BIN_EXE_dggs-stream");
     let ipc_out = Command::new(cli_bin)
         .args([
             "ipc",

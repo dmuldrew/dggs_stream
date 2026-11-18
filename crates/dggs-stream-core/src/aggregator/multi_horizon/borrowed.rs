@@ -1,6 +1,6 @@
 //! Native typed views of decoded TIFF data. Windows borrow storage and retain
 //! their physical row stride; no pixel values are copied by the built-in kernels.
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use tiff::decoder::DecodingResult;
 
 #[derive(Clone, Copy, Debug)]
@@ -38,7 +38,7 @@ impl<'a> BorrowedSamples<'a> {
     pub fn window(self, start: usize, len: usize) -> Result<Self> {
         let end = start
             .checked_add(len)
-            .ok_or_else(|| RasterH3Error::InvalidMetadata("sample window overflow".into()))?;
+            .ok_or_else(|| DggsStreamError::InvalidMetadata("sample window overflow".into()))?;
         match self {
             Self::U8(v) => v.get(start..end).map(Self::U8),
             Self::U16(v) => v.get(start..end).map(Self::U16),
@@ -52,7 +52,7 @@ impl<'a> BorrowedSamples<'a> {
             Self::F64(v) => v.get(start..end).map(Self::F64),
         }
         .ok_or_else(|| {
-            RasterH3Error::InvalidMetadata(
+            DggsStreamError::InvalidMetadata(
                 "decoded chunk shorter than its declared dimensions".into(),
             )
         })

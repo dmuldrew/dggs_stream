@@ -4,7 +4,9 @@ each pixel centre with the scalar `lonlat_to_cell`, a path separate from the sca
 
 from __future__ import annotations
 
+import gzip
 import json
+import struct
 from collections import defaultdict
 
 import pytest
@@ -232,7 +234,14 @@ def test_parquet_and_pmtiles_exports(dggs_stream, gradient_tif, classes_tif, tmp
 
     direct = tmp_path / "direct.pmtiles"
     assert dggs_stream.raster_to_pmtiles(tif, direct, RES[grid], grid=grid, categorical=categorical) == written
-    assert direct.read_bytes()[:7] == b"PMTiles"
+    archive = direct.read_bytes()
+    assert archive[:7] == b"PMTiles"
+    offset, length = struct.unpack_from("<QQ", archive, 24)
+    metadata = json.loads(gzip.decompress(archive[offset : offset + length]))
+    name = "dggs_stream_categorical_pmtiles" if categorical else "dggs_stream_pmtiles"
+    assert metadata["name"] == name
+    assert grid in metadata["description"].split()
+    assert metadata["resolution_stats"][str(RES[grid])]["cell_count"] == written
 
     # The grid is detected from the cell column's name...
     tiles = tmp_path / "cells.pmtiles"

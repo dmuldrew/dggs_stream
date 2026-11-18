@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tiff::decoder::{ChunkType, Decoder, DecodingResult};
 use tiff::tags::{CompressionMethod, PhotometricInterpretation, Predictor, SampleFormat, Tag};
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotransform::GeoTransform;
 use crate::raster::http_range::{
     is_remote_url, HttpRangeReader, ReadOverlay, RemoteHttpSource, RemoteSourceFactory,
@@ -199,18 +199,18 @@ impl<'a> DecoderSource<'a> {
         let offset = *info
             .chunk_offsets
             .get(idx)
-            .ok_or_else(|| RasterH3Error::InvalidMetadata("invalid chunk offset".into()))?;
+            .ok_or_else(|| DggsStreamError::InvalidMetadata("invalid chunk offset".into()))?;
         let len = *info
             .chunk_bytes
             .get(idx)
-            .ok_or_else(|| RasterH3Error::InvalidMetadata("invalid chunk bytes".into()))?
+            .ok_or_else(|| DggsStreamError::InvalidMetadata("invalid chunk bytes".into()))?
             as usize;
 
         match self {
             DecoderSource::Local(mmap) => {
                 let off = offset as usize;
                 if off.checked_add(len).is_none_or(|end| end > mmap.len()) {
-                    return Err(RasterH3Error::InvalidMetadata(
+                    return Err(DggsStreamError::InvalidMetadata(
                         "chunk offset out of bounds".into(),
                     ));
                 }
@@ -336,13 +336,13 @@ fn widen_f16(data: DecodingResult) -> DecodingResult {
 enum FastDecodeError {
     /// The accelerated kernels do not cover this layout; the generic TIFF
     /// decoder may still read it.
-    Unsupported(RasterH3Error),
+    Unsupported(DggsStreamError),
     /// The payload does not decode to the chunk's declared layout.
-    Failed(RasterH3Error),
+    Failed(DggsStreamError),
 }
 
 impl FastDecodeError {
-    fn into_inner(self) -> RasterH3Error {
+    fn into_inner(self) -> DggsStreamError {
         match self {
             Self::Unsupported(e) | Self::Failed(e) => e,
         }
@@ -375,7 +375,7 @@ impl<'a> ChunkDecoder<'a> {
         let info = self
             .chunk_info
             .as_ref()
-            .ok_or_else(|| RasterH3Error::InvalidMetadata("no chunk info".into()))?;
+            .ok_or_else(|| DggsStreamError::InvalidMetadata("no chunk info".into()))?;
         self.source.get_chunk_payload(chunk_index, info)
     }
 
@@ -438,7 +438,7 @@ impl<'a> ChunkDecoder<'a> {
             match (info.chunk_offsets.get(idx), info.chunk_bytes.get(idx)) {
                 (Some(&offset), Some(&byte_count)) => offset == 0 || byte_count == 0,
                 _ => {
-                    return Err(RasterH3Error::InvalidMetadata(format!(
+                    return Err(DggsStreamError::InvalidMetadata(format!(
                         "chunk {chunk_index} is outside the {} entries in the TIFF offset/byte-count arrays",
                         info.chunk_offsets.len().min(info.chunk_bytes.len())
                     )));
@@ -580,7 +580,7 @@ impl<'a> ChunkDecoder<'a> {
         } else {
             (
                 Err(FastDecodeError::Unsupported(
-                    RasterH3Error::InvalidMetadata("no chunk info".into()),
+                    DggsStreamError::InvalidMetadata("no chunk info".into()),
                 )),
                 false,
             )
@@ -662,8 +662,8 @@ impl<'a> ChunkDecoder<'a> {
         out: &mut [u8],
     ) -> std::result::Result<(), FastDecodeError> {
         let unsupported =
-            |why: &str| FastDecodeError::Unsupported(RasterH3Error::InvalidMetadata(why.into()));
-        let failed = |why: String| FastDecodeError::Failed(RasterH3Error::InvalidMetadata(why));
+            |why: &str| FastDecodeError::Unsupported(DggsStreamError::InvalidMetadata(why.into()));
+        let failed = |why: String| FastDecodeError::Failed(DggsStreamError::InvalidMetadata(why));
         match compression {
             CompressionMethod::None => {
                 // Uncompressed: the payload is the samples themselves. A strip or
@@ -746,7 +746,7 @@ impl<'a> ChunkDecoder<'a> {
         let info = self
             .chunk_info
             .as_ref()
-            .ok_or_else(|| RasterH3Error::InvalidMetadata("no chunk info".into()))?;
+            .ok_or_else(|| DggsStreamError::InvalidMetadata("no chunk info".into()))?;
 
         let payload = self.source.get_chunk_payload(chunk_index, info)?;
         self.decompress_chunk_fast_bytes(chunk_index, payload.as_ref(), target_buffer)
@@ -773,7 +773,7 @@ impl<'a> ChunkDecoder<'a> {
         target_buffer: Option<&mut DecodingResult>,
     ) -> std::result::Result<Option<DecodingResult>, FastDecodeError> {
         let unsupported =
-            |why: &str| FastDecodeError::Unsupported(RasterH3Error::InvalidMetadata(why.into()));
+            |why: &str| FastDecodeError::Unsupported(DggsStreamError::InvalidMetadata(why.into()));
         let info = self
             .chunk_info
             .as_ref()
@@ -897,7 +897,7 @@ impl<'a> ChunkDecoder<'a> {
         // unpack error means the decoded bytes do not match the declared layout.
         let float_predictor_supported =
             matches!(info.predictor, Predictor::None | Predictor::FloatingPoint);
-        let float_err = |e: RasterH3Error| {
+        let float_err = |e: DggsStreamError| {
             if float_predictor_supported {
                 FastDecodeError::Failed(e)
             } else {
@@ -1021,7 +1021,7 @@ impl GeoTiffStreamReader {
         let info = self
             .chunk_info
             .as_ref()
-            .ok_or_else(|| RasterH3Error::InvalidMetadata("no chunk info".into()))?;
+            .ok_or_else(|| DggsStreamError::InvalidMetadata("no chunk info".into()))?;
         self.source.get_chunk_payload(chunk_index, info)
     }
 
@@ -1044,7 +1044,7 @@ impl GeoTiffStreamReader {
         // silently decode the wrong samples.
         let planar_config = decoder.get_tag_u32(Tag::PlanarConfiguration).unwrap_or(1);
         if planar_config != 1 && samples_per_pixel > 1 {
-            return Err(RasterH3Error::InvalidMetadata(format!(
+            return Err(DggsStreamError::InvalidMetadata(format!(
                 "unsupported PlanarConfiguration {planar_config} for a {samples_per_pixel}-band raster: only chunky (interleaved) layouts are supported"
             )));
         }
@@ -1053,14 +1053,14 @@ impl GeoTiffStreamReader {
 
         let (chunk_w, chunk_h) = decoder.chunk_dimensions();
         if chunk_w == 0 || chunk_h == 0 {
-            return Err(RasterH3Error::InvalidMetadata(format!(
+            return Err(DggsStreamError::InvalidMetadata(format!(
                 "TIFF declares a zero-sized chunk ({chunk_w}x{chunk_h})"
             )));
         }
         let chunks_across = width.div_ceil(chunk_w);
         let chunks_down = height.div_ceil(chunk_h);
         let total_chunks = chunks_across.checked_mul(chunks_down).ok_or_else(|| {
-            RasterH3Error::InvalidMetadata(format!(
+            DggsStreamError::InvalidMetadata(format!(
                 "TIFF chunk grid {chunks_across}x{chunks_down} exceeds u32 chunk count"
             ))
         })?;
@@ -1095,7 +1095,7 @@ impl GeoTiffStreamReader {
             // An unrecognised predictor means the decoder would silently
             // interpret delta-encoded samples as literal values.
             Ok(v) => Predictor::from_u16(v as u16).ok_or_else(|| {
-                RasterH3Error::InvalidMetadata(format!("unrecognised Predictor tag value {v}"))
+                DggsStreamError::InvalidMetadata(format!("unrecognised Predictor tag value {v}"))
             })?,
             Err(_) => Predictor::None,
         };
@@ -1117,7 +1117,7 @@ impl GeoTiffStreamReader {
                 .map(|v| v.first().copied().unwrap_or(1) as u32)
         }) {
             Ok(v) => SampleFormat::from_u16(v as u16).ok_or_else(|| {
-                RasterH3Error::InvalidMetadata(format!("unrecognised SampleFormat tag value {v}"))
+                DggsStreamError::InvalidMetadata(format!("unrecognised SampleFormat tag value {v}"))
             })?,
             Err(_) => SampleFormat::Uint,
         };
@@ -1127,7 +1127,7 @@ impl GeoTiffStreamReader {
             // WhiteIsZero/BlackIsZero decision and reads colour-modelled data
             // (YCbCr, palette indices) as literal samples.
             Ok(v) => PhotometricInterpretation::from_u16(v as u16).ok_or_else(|| {
-                RasterH3Error::InvalidMetadata(format!(
+                DggsStreamError::InvalidMetadata(format!(
                     "unrecognised PhotometricInterpretation tag value {v}"
                 ))
             })?,
@@ -1171,7 +1171,7 @@ impl GeoTiffStreamReader {
                 // read as sparse (nodata fill) instead of surfacing the
                 // malformation.
                 if offs.len() < total_chunks as usize {
-                    return Err(RasterH3Error::InvalidMetadata(format!(
+                    return Err(DggsStreamError::InvalidMetadata(format!(
                         "TIFF offset/byte-count arrays hold {} entries but the image grid declares {total_chunks} chunks",
                         offs.len()
                     )));
@@ -1440,7 +1440,7 @@ mod tests {
             Err(e) => e,
         };
         assert!(
-            matches!(err, RasterH3Error::InvalidMetadata(_)),
+            matches!(err, DggsStreamError::InvalidMetadata(_)),
             "unexpected error: {err}"
         );
     }

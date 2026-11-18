@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::{MosaicReader, OverlapRule, TileDescriptor};
 use crate::scalar_ops::try_parse_resolutions_str_for;
@@ -49,7 +49,7 @@ impl ResolutionSpec {
         try_parse_resolutions_str_for(grid, trimmed)
             .map(Self::Fixed)
             .ok_or_else(|| {
-                RasterH3Error::InvalidParameter(format!(
+                DggsStreamError::InvalidParameter(format!(
                     "Invalid resolutions '{text}': expected 'auto', 'auto+N', 'auto-N' or {} \
                      resolutions between 0 and {}, e.g. 7,8",
                     grid.label(),
@@ -71,7 +71,7 @@ impl ResolutionSpec {
             return Some(Ok(Self::AUTO));
         }
         let bad = || {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "Invalid resolution '{text}': expected 'auto', 'auto+N' or 'auto-N' with N \
                  at most {}",
                 Self::MAX_OFFSET
@@ -230,7 +230,7 @@ pub fn pixel_ground_area_m2(tile: &TileDescriptor) -> Result<f64> {
     if area.is_finite() && area > 0.0 {
         Ok(area)
     } else {
-        Err(RasterH3Error::InvalidParameter(format!(
+        Err(DggsStreamError::InvalidParameter(format!(
             "cannot measure the ground size of a pixel of {}: its centre pixel has no area \
              in WGS84 (check the raster's geotransform and CRS); give an explicit resolution",
             tile.file_path.display()
@@ -254,7 +254,7 @@ pub fn mosaic_pixel_ground_area_m2(mosaic: &MosaicReader) -> Result<f64> {
     match (finest, first_error) {
         (Some(area), _) => Ok(area),
         (None, Some(e)) => Err(e),
-        (None, None) => Err(RasterH3Error::InvalidParameter(
+        (None, None) => Err(DggsStreamError::InvalidParameter(
             "cannot choose a resolution automatically: the mosaic has no tiles".into(),
         )),
     }

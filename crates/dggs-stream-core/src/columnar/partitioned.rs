@@ -21,7 +21,7 @@ use crate::aggregator::multi_horizon::{
     encode_partial_state, MultiCategoricalHorizonStreamer, MultiCategoricalRecord,
     MultiContinuousRecord, MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget,
 };
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
 
@@ -61,7 +61,7 @@ pub fn partitioned_output_schema(
     };
     for key in [index_col, "resolution"] {
         if schema.index_of(key).is_none() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "partitioned scans must output the '{key}' column: partial rows are merged by \
                  resolution and {index_col}"
             )));
@@ -330,7 +330,7 @@ struct PartialColumns<'a> {
 
 fn partial_columns(batch: &RecordBatch) -> Result<PartialColumns<'_>> {
     let missing = |name: &str| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "partial rows need a '{name}' column (resolution: UInt8, h3_index: UInt64, {PARTIAL_STATE_COLUMN}: Binary)"
         ))
     };
@@ -389,7 +389,7 @@ pub fn merge_partial_batches(
     let limit = config.aggregation_budget_bytes;
     let batch_size = batch_size.max(1);
     let null_state = || {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "null {PARTIAL_STATE_COLUMN}: pass only partial rows; rows without a state are already final"
         ))
     };

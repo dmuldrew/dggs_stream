@@ -21,11 +21,6 @@ crate-type = ["rlib"]
 name = "dggs-stream-cli"
 path = "src/bin/dggs_stream.rs"
 
-# The binary's former name, kept so existing scripts keep working.
-[[bin]]
-name = "raster-h3-cli"
-path = "src/bin/dggs_stream.rs"
-
 [dependencies]
 dggs-stream-core = { version = "0.7.0", path = "../dggs-stream-core" }
 h3o.workspace = true

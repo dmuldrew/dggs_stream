@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 /// Represents a single sub-pixel sample offset within the pixel unit box [0.0, 1.0] x [0.0, 1.0]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -203,7 +203,7 @@ impl SamplingPattern {
             "8rooks" | "rooks8" | "stratified8" | "8" => Self::eight_rooks(),
             "9point" | "9_point" | "3x3" | "grid3x3" | "9" => Self::nine_point(),
             "16point" | "16_point" | "4x4" | "grid4x4" | "16" => Self::sixteen_point(),
-            _ => return Err(RasterH3Error::InvalidParameter(format!(
+            _ => return Err(DggsStreamError::InvalidParameter(format!(
                 "Invalid sampling '{s}': expected one of center, 5point, gaussian, rgss, hex, 8rooks, 9point, 16point"
             ))),
         })

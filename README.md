@@ -427,7 +427,7 @@ for batch in plan.execute()? { /* RecordBatch with h3_index, mean */ }
 
 This is the layer under the DataFusion adapter below. Call `supports_filters_pushdown` to learn
 which predicates you still have to apply to the scan's rows. With compaction on, it reports every predicate `Unsupported` and the scan returns
-the full compacted table; `RasterH3Table` (below) then leaves those `WHERE` clauses to
+the full compacted table; `RasterTable` (below) then leaves those `WHERE` clauses to
 DataFusion. The adapter defers `LIMIT` until after all residual filters, including inexact
 pushdowns. See [filter pushdown](docs/engines/datafusion.md).
 

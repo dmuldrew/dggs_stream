@@ -20,7 +20,7 @@ pub(crate) use proj_tokens::tokenize_proj_string;
 use proj_tokens::{fast_path_accepts, parse_opt_f64};
 pub use tm::TmCertificate;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use proj4rs::proj::Proj;
 
 const WGS84_A: f64 = 6378137.0; // WGS84 semi-major axis in meters
@@ -150,7 +150,7 @@ impl CrsTransformer {
             return Self::from_proj_string(s);
         }
 
-        Err(RasterH3Error::CrsNotDetected(
+        Err(DggsStreamError::CrsNotDetected(
             "No CRS detected in raster metadata. A CRS must be specified explicitly (e.g. crs := 'EPSG:4326', crs := 'EPSG:5070').".into(),
         ))
     }
@@ -248,7 +248,7 @@ impl CrsTransformer {
             ),
             // proj4rs is built without an EPSG database, so any other code
             // must be supplied as a PROJ string.
-            _ => Err(RasterH3Error::UnsupportedEpsg {
+            _ => Err(DggsStreamError::UnsupportedEpsg {
                 code,
                 detail: format!(
                     "Unsupported or unrecognized EPSG code: {}. Supply the CRS as a PROJ string instead.",
@@ -285,14 +285,14 @@ impl CrsTransformer {
         // not: no grid files are bundled.
         if let Some(nadgrids) = tokens.get("nadgrids") {
             if nadgrids != "@null" && !nadgrids.is_empty() {
-                return Err(RasterH3Error::CrsError(format!(
+                return Err(DggsStreamError::CrsError(format!(
                     "Datum transformations via grid shifts (+nadgrids={}) are not supported",
                     nadgrids
                 )));
             }
         }
         if tokens.get("datum").map(|s| s.as_str()) == Some("nad27") {
-            return Err(RasterH3Error::CrsError(
+            return Err(DggsStreamError::CrsError(
                 "+datum=NAD27 requires NADCON/NTv2 grid shifts, which are not supported; \
                  supply an explicit +ellps=clrk66 +towgs84=... approximation instead"
                     .into(),
@@ -403,7 +403,7 @@ impl CrsTransformer {
 
         let parse = |def: &str| {
             Proj::from_proj_string(def).map_err(|e| {
-                RasterH3Error::CrsError(format!(
+                DggsStreamError::CrsError(format!(
                     "Failed to parse source PROJ string '{}': {:?}",
                     src_proj, e
                 ))
@@ -429,13 +429,13 @@ impl CrsTransformer {
         // proj4rs adds a degree-valued prime meridian to radian longitudes on
         // projected sources; refuse rather than shift by the wrong amount.
         if !from.is_latlong() && from.from_greenwich() != 0.0 {
-            return Err(RasterH3Error::CrsError(format!(
+            return Err(DggsStreamError::CrsError(format!(
                 "Non-Greenwich prime meridians on projected CRSs are not supported: '{}'",
                 src_proj
             )));
         }
         let to = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs").map_err(|e| {
-            RasterH3Error::CrsError(format!(
+            DggsStreamError::CrsError(format!(
                 "Failed to initialize WGS84 target projection: {:?}",
                 e
             ))
@@ -478,7 +478,7 @@ impl CrsTransformer {
                     None => (x, y, 0.0),
                 };
                 proj4rs::transform::transform(from, to, &mut point_3d).map_err(|e| {
-                    RasterH3Error::CrsError(format!(
+                    DggsStreamError::CrsError(format!(
                         "Reprojection error for point ({}, {}): {:?}",
                         x, y, e
                     ))
@@ -488,7 +488,7 @@ impl CrsTransformer {
                 // Reject results outside the geographic domain instead of
                 // handing callers coordinates that only look like degrees.
                 if !lon_deg.is_finite() || !lat_deg.is_finite() || lat_deg.abs() > 90.0 + 1e-9 {
-                    return Err(RasterH3Error::CrsError(format!(
+                    return Err(DggsStreamError::CrsError(format!(
                         "Reprojection of ({}, {}) left the geographic domain: ({}, {})",
                         x, y, lon_deg, lat_deg
                     )));
@@ -514,7 +514,7 @@ impl CrsTransformer {
             Self::Proj4 { from, to, geo, .. } => {
                 let mut point_3d = (lon / RAD_TO_DEG, lat / RAD_TO_DEG, 0.0);
                 proj4rs::transform::transform(to, from, &mut point_3d).map_err(|e| {
-                    RasterH3Error::CrsError(format!(
+                    DggsStreamError::CrsError(format!(
                         "Inverse reprojection error for point ({}, {}): {:?}",
                         lon, lat, e
                     ))
@@ -528,7 +528,7 @@ impl CrsTransformer {
                 if x.is_finite() && y.is_finite() {
                     Ok((x, y))
                 } else {
-                    Err(RasterH3Error::CrsError(format!(
+                    Err(DggsStreamError::CrsError(format!(
                         "Inverse reprojection of ({}, {}) is outside the source CRS domain",
                         lon, lat
                     )))

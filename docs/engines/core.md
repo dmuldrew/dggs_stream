@@ -91,7 +91,7 @@ For pipelines that own the streamer (`H3ParquetWriter`, `H3PmtilesTiler`), set
 stream built from that configuration adds its failures to it.
 
 `MultiResolutionConfig::strict_transforms` (default `false`) turns the count into an error:
-the stream fails with `RasterH3Error::TransformFailures(n)` after the first kernel wave that
+the stream fails with `DggsStreamError::TransformFailures(n)` after the first kernel wave that
 drops a sample, and later reads return the latched `StreamFailed` error. `n` covers the work
 done so far, not the whole raster. Records already emitted before that wave stay emitted,
 so a strict consumer must treat the error as fatal to the whole result.
@@ -698,7 +698,7 @@ floats become `null`; binary columns (`wkb`) are lowercase hex strings.
 
 ## Errors
 
-All fallible APIs return `dggs_stream_core::error::Result<T>` with `RasterH3Error`
+All fallible APIs return `dggs_stream_core::error::Result<T>` with `DggsStreamError`
 (`StreamFailed`, `Io`, `Tiff`, `InvalidMetadata`, `CrsNotDetected`, `CrsProjectionFailed`,
 `CrsError`, `UnsupportedEpsg`, `Proj`, `H3Error`, `InvalidParameter`, `DuckDbError`).
 `safe_panic_payload_to_string` turns a caught panic payload into a message without letting

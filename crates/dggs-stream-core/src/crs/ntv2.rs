@@ -5,13 +5,13 @@
 
 use std::io::Read;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 const HEADER: usize = 176;
 const RECORD: usize = 16;
 
-fn invalid(message: &str) -> RasterH3Error {
-    RasterH3Error::CrsError(format!("invalid NTv2 grid: {message}"))
+fn invalid(message: &str) -> DggsStreamError {
+    DggsStreamError::CrsError(format!("invalid NTv2 grid: {message}"))
 }
 
 #[derive(Clone, Copy)]

@@ -2,7 +2,7 @@
 
 - `dggs-stream-python` (cdylib) is placed inside the `dggs_stream` package, where
   `dggs_stream._find_native_library` loads it with ctypes.
-- `dggs-stream-cli` (executable, plus `raster-h3-cli`, its former name) goes into the
+- `dggs-stream-cli` (executable) goes into the
   wheel's `scripts` directory, so installers put it on PATH.
 
 The wheel is tagged `py3-none-<platform>`: the library never links against libpython.
@@ -106,8 +106,5 @@ class RustBuildHook(BuildHookInterface):
 
         build_data["force_include"][str(out / lib)] = f"dggs_stream/{lib}"
         build_data["shared_scripts"][str(out / exe)] = exe
-        # `raster-h3-cli`, the CLI's former name, is built from the same source.
-        legacy_exe = exe.replace("dggs-stream-cli", "raster-h3-cli")
-        build_data["shared_scripts"][str(out / legacy_exe)] = legacy_exe
         build_data["pure_python"] = False
         build_data["tag"] = f"py3-none-{_platform_tag()}"

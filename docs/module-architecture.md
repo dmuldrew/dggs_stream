@@ -18,7 +18,7 @@ Re-exports `dggs_stream_core::*` and declares the `ffi` and `functions` modules.
 Declares the engine modules below and re-exports `h3o` (`CellIndex`, `LatLng`, `Resolution`).
 
 ### [`dggs-stream-core/src/error.rs`](../crates/dggs-stream-core/src/error.rs) — Domain Error Types
-Defines `RasterH3Error` via `thiserror`, unifying all recoverable error types across the pipeline (I/O, TIFF decoding, metadata parsing, CRS detection, PROJ4, H3, invalid parameters, DuckDB C-FFI, and streaming failures). Exports the crate-wide `Result<T>` alias.
+Defines `DggsStreamError` via `thiserror`, unifying all recoverable error types across the pipeline (I/O, TIFF decoding, metadata parsing, CRS detection, PROJ4, H3, invalid parameters, DuckDB C-FFI, and streaming failures). Exports the crate-wide `Result<T>` alias.
 
 ---
 

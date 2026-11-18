@@ -1,4 +1,4 @@
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -170,7 +170,7 @@ impl CategoryRemapper {
     pub fn parse(spec: &str) -> Result<Self> {
         let trimmed = spec.trim();
         if trimmed.is_empty() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "Remap specification cannot be empty".to_string(),
             ));
         }
@@ -203,7 +203,7 @@ impl CategoryRemapper {
             } else if let Some(pos) = item.find(':') {
                 (&item[..pos], &item[pos + 1..])
             } else {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Invalid remap entry '{}': missing ':' separator (e.g. '101..109: 1')",
                     item
                 )));
@@ -261,7 +261,7 @@ fn parse_target(s: &str) -> Result<Option<i64>> {
         return Ok(None);
     }
     s.parse::<i64>().map(Some).map_err(|_| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "Invalid target category '{}': must be an integer or 'null'",
             s
         ))
@@ -294,10 +294,10 @@ fn parse_source_rules(src: &str, target: Option<i64>, rules: &mut Vec<RemapRule>
     // 2. Check for range: '101..=109', '101..109', or '101-109'
     if let Some(pos) = trimmed.find("..=") {
         let s = trimmed[..pos].trim().parse::<i64>().map_err(|_| {
-            RasterH3Error::InvalidParameter(format!("Invalid range start in '{}'", trimmed))
+            DggsStreamError::InvalidParameter(format!("Invalid range start in '{}'", trimmed))
         })?;
         let e = trimmed[pos + 3..].trim().parse::<i64>().map_err(|_| {
-            RasterH3Error::InvalidParameter(format!("Invalid range end in '{}'", trimmed))
+            DggsStreamError::InvalidParameter(format!("Invalid range end in '{}'", trimmed))
         })?;
         rules.push(RemapRule::Range(s, e, target));
         return Ok(());
@@ -305,10 +305,10 @@ fn parse_source_rules(src: &str, target: Option<i64>, rules: &mut Vec<RemapRule>
 
     if let Some(pos) = trimmed.find("..") {
         let s = trimmed[..pos].trim().parse::<i64>().map_err(|_| {
-            RasterH3Error::InvalidParameter(format!("Invalid range start in '{}'", trimmed))
+            DggsStreamError::InvalidParameter(format!("Invalid range start in '{}'", trimmed))
         })?;
         let e = trimmed[pos + 2..].trim().parse::<i64>().map_err(|_| {
-            RasterH3Error::InvalidParameter(format!("Invalid range end in '{}'", trimmed))
+            DggsStreamError::InvalidParameter(format!("Invalid range end in '{}'", trimmed))
         })?;
         rules.push(RemapRule::Range(s, e, target));
         return Ok(());
@@ -328,7 +328,7 @@ fn parse_source_rules(src: &str, target: Option<i64>, rules: &mut Vec<RemapRule>
 
     // 3. Single category integer
     let val = trimmed.parse::<i64>().map_err(|_| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "Invalid category specification '{}': must be an integer, range (e.g. 101..109), or 'else'",
             trimmed
         ))
