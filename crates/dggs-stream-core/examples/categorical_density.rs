@@ -98,7 +98,9 @@ fn rusage() -> (f64, f64, u64) {
         u
     };
     let t = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 * 1e-6;
-    (t(u.ru_utime), t(u.ru_stime), u.ru_maxrss as u64 * 1024)
+    // `ru_maxrss` is in kilobytes on Linux but already in bytes on macOS.
+    let scale = if cfg!(target_os = "macos") { 1 } else { 1024 };
+    (t(u.ru_utime), t(u.ru_stime), u.ru_maxrss as u64 * scale)
 }
 
 fn main() {
