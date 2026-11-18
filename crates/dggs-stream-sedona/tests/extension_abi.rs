@@ -1,4 +1,4 @@
-//! `RasterH3Table` exported through SedonaDB's C extension ABI (`ExportedTableProvider`, as
+//! `RasterTable` exported through SedonaDB's C extension ABI (`ExportedTableProvider`, as
 //! the Python bindings do) and imported back (`ImportedTableProvider`, as SedonaDB does).
 
 mod common;
@@ -17,7 +17,7 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::{col, lit, SessionContext};
 use dggs_stream_sedona::scan::ContinuousRasterTableProvider;
-use dggs_stream_sedona::{RasterH3Table, GEOARROW_WKB_EXTENSION, GEOARROW_WKB_METADATA};
+use dggs_stream_sedona::{RasterTable, GEOARROW_WKB_EXTENSION, GEOARROW_WKB_METADATA};
 use sedona_extension::extension::SedonaCTableProvider;
 use sedona_extension::runtime::RuntimeHandle;
 use sedona_extension::table_provider::{ExportedTableProvider, ImportedTableProvider};
@@ -25,7 +25,7 @@ use sedona_extension::table_provider::{ExportedTableProvider, ImportedTableProvi
 use common::{collect, gradient_tif, source};
 
 /// Export `table` over the C ABI and import it back.
-fn round_trip(table: RasterH3Table) -> Arc<dyn TableProvider> {
+fn round_trip(table: RasterTable) -> Arc<dyn TableProvider> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -39,8 +39,8 @@ fn round_trip(table: RasterH3Table) -> Arc<dyn TableProvider> {
     Arc::new(ImportedTableProvider::try_new(ffi).unwrap())
 }
 
-fn table(src: &str) -> RasterH3Table {
-    RasterH3Table::continuous(ContinuousRasterTableProvider::try_new(src, vec![8]).unwrap())
+fn table(src: &str) -> RasterTable {
+    RasterTable::continuous(ContinuousRasterTableProvider::try_new(src, vec![8]).unwrap())
 }
 
 /// `st_intersects(wkb, POINT (-122.42 37.77))` with a `geoarrow.wkb` literal in `OGC:CRS84`.

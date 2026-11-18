@@ -38,7 +38,7 @@ use super::spill::{RunReader, SpillAccumulator, SpillRuns};
 use super::walker::WalkContext;
 use crate::aggregator::cell_hash::H3BuildHasher;
 use crate::aggregator::sampling::SamplingPattern;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
 use crate::raster::prefetch::PrefetchedMosaicReader;
@@ -367,7 +367,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
     /// Record-only reads would silently lose a partitioned scan's partial cells.
     fn reject_partitioned(&self) -> Result<()> {
         if self.partition.is_some() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "partitioned scans emit partial cells; drain them with drain_partitioned_into"
                     .into(),
             ));

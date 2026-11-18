@@ -4,7 +4,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use tiff::decoder::DecodingResult;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::{ChunkDecoder, GeoTiffStreamReader};
 use crate::raster::mosaic::{MosaicChunkRef, MosaicReader};
 use crate::raster::remote_prefetch::RemoteChunkPrefetchQueue;
@@ -625,7 +625,7 @@ impl PrefetchedChunkReader {
                 let q = Arc::clone(&worker_queue);
                 let _panic_guard = WorkerPanicGuard {
                     on_panic: Some(move || {
-                        q.fail(Err(RasterH3Error::InvalidParameter(
+                        q.fail(Err(DggsStreamError::InvalidParameter(
                             "Decode worker panicked during chunk decompression".to_string(),
                         )));
                     }),
@@ -674,7 +674,7 @@ impl PrefetchedChunkReader {
 
                 if let Err(payload) = res {
                     let msg = crate::error::panic_payload_to_string(payload);
-                    worker_queue.fail(Err(RasterH3Error::InvalidParameter(format!(
+                    worker_queue.fail(Err(DggsStreamError::InvalidParameter(format!(
                         "Decode worker panicked during chunk decompression: {msg}"
                     ))));
                 }
@@ -878,7 +878,7 @@ impl PrefetchedMosaicReader {
                 let _panic_guard = WorkerPanicGuard {
                     on_panic: Some(move || {
                         b.close();
-                        q.fail(Err(RasterH3Error::InvalidParameter(
+                        q.fail(Err(DggsStreamError::InvalidParameter(
                             "Mosaic decode worker panicked during chunk decompression".to_string(),
                         )));
                     }),
@@ -911,7 +911,7 @@ impl PrefetchedMosaicReader {
                             let decoder = reader.open_decoder()?;
                             #[cfg(any(test, feature = "test-hooks"))]
                             worker_decoder_opens.fetch_add(1, Ordering::Relaxed);
-                            Ok::<_, RasterH3Error>(decoder)
+                            Ok::<_, DggsStreamError>(decoder)
                         }) {
                             Ok(d) => d,
                             Err(e) => {
@@ -971,7 +971,7 @@ impl PrefetchedMosaicReader {
                 if let Err(payload) = res {
                     let msg = crate::error::panic_payload_to_string(payload);
                     worker_budget.close();
-                    worker_queue.fail(Err(RasterH3Error::InvalidParameter(format!(
+                    worker_queue.fail(Err(DggsStreamError::InvalidParameter(format!(
                         "Mosaic decode worker panicked during chunk decompression: {msg}"
                     ))));
                 }

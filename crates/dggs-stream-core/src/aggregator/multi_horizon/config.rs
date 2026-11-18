@@ -10,7 +10,7 @@ use crate::aggregator::accumulator::H3Accumulator;
 use crate::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use crate::aggregator::remap::CategoryRemapper;
 use crate::aggregator::sampling::SamplingPattern;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::OverlapRule;
 
@@ -103,13 +103,13 @@ impl QuantileTarget {
                     if let Some(stripped) = token.strip_prefix('p') {
                         let num_str = stripped.replace('_', ".");
                         let val: f64 = num_str.parse().map_err(|_| {
-                            RasterH3Error::InvalidParameter(format!(
+                            DggsStreamError::InvalidParameter(format!(
                                 "Invalid percentile specification '{}'",
                                 raw_token
                             ))
                         })?;
                         if !val.is_finite() || val <= 0.0 || val >= 100.0 {
-                            return Err(RasterH3Error::InvalidParameter(format!(
+                            return Err(DggsStreamError::InvalidParameter(format!(
                                 "Percentile '{}' must be strictly between 0 and 100",
                                 raw_token
                             )));
@@ -123,7 +123,7 @@ impl QuantileTarget {
                         targets.push(Self::Percentile(q, name));
                     } else if let Ok(val) = token.parse::<f64>() {
                         if !val.is_finite() || val <= 0.0 || val >= 1.0 {
-                            return Err(RasterH3Error::InvalidParameter(format!(
+                            return Err(DggsStreamError::InvalidParameter(format!(
                                 "Decimal quantile '{}' must be strictly between 0 and 1",
                                 raw_token
                             )));
@@ -136,7 +136,7 @@ impl QuantileTarget {
                         };
                         targets.push(Self::Percentile(val, name));
                     } else {
-                        return Err(RasterH3Error::InvalidParameter(format!(
+                        return Err(DggsStreamError::InvalidParameter(format!(
                             "Unrecognized quantile/percentile target '{}'",
                             raw_token
                         )));
@@ -315,7 +315,7 @@ pub struct MultiResolutionConfig {
     /// streamers). Lets callers of pipelines that own the streamer, such as
     /// the Parquet and PMTiles exporters, read the count afterwards.
     pub transform_failure_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
-    /// Fail the stream with [`crate::error::RasterH3Error::TransformFailures`]
+    /// Fail the stream with [`crate::error::DggsStreamError::TransformFailures`]
     /// as soon as any valid sample point is dropped by a failed coordinate
     /// transform, instead of skipping it and only counting it.
     pub strict_transforms: bool,
@@ -447,38 +447,38 @@ impl MultiResolutionConfig {
         if let Some(spec) = &self.histogram {
             spec.validate()?;
             if spec.transfer_mode(self.transfer)? != self.transfer {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "histogram weight 'area' needs transfer 'overlay'".into(),
                 ));
             }
             if self.partition.is_some() {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "a histogram cannot be combined with a partition".into(),
                 ));
             }
             if spec.is_binned() && self.remapper.is_some() {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "a binned histogram cannot be combined with a category remap".into(),
                 ));
             }
         }
         if self.aggregation_budget_bytes < self.resolutions.len().max(1) * 64 * 1024 {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "aggregation budget must provide at least 64 KiB per resolution".into(),
             ));
         }
         if self.prefetch_chunks < 16 || self.decode_workers == 0 {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "prefetch_chunks must be >=16 and decode_workers >=1".into(),
             ));
         }
         if self.decode_budget_bytes == 0 || self.compaction_budget_bytes == Some(0) {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "decode_budget_bytes and compaction_budget_bytes must be positive".into(),
             ));
         }
         if self.aggregation_workers == Some(0) || self.fetch_workers == 0 {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "aggregation_workers and fetch_workers must be >=1".into(),
             ));
         }
@@ -492,38 +492,38 @@ impl MultiResolutionConfig {
                     || p.weight <= 0.0
             })
         {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "samples require finite offsets in [0,1] and positive finite weights".into(),
             ));
         }
         if self.resolutions.is_empty() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "Resolutions list cannot be empty".to_string(),
             ));
         }
         if let Some(decimals) = self.decimals {
             let max = crate::aggregator::output_policy::MAX_DECIMALS;
             if decimals > max {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "decimals must be between 0 and {max}, got {decimals}"
                 )));
             }
         }
         if self.emit_nodata_value.is_some_and(|v| !v.is_finite()) {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "emit_nodata_value must be finite; leave it unset for NULL".into(),
             ));
         }
         if self.nodata_policy == NodataPolicy::Emit {
             if self.should_compact_h3_children() {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "nodata_policy 'emit' cannot be combined with compaction: a parent of \
                      empty and non-empty children has no single NoData state"
                         .into(),
                 ));
             }
             if self.min_count.is_some_and(|c| c > 0.0) {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "nodata_policy 'emit' cannot be combined with min_count: all-NoData \
                      cells have count 0"
                         .into(),
@@ -534,7 +534,7 @@ impl MultiResolutionConfig {
                 .as_ref()
                 .is_some_and(|r| r.targets(super::categorical::NODATA_CLASS))
             {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "nodata_policy 'emit' reserves class {} for NoData pixels; remap to \
                      another class",
                     super::categorical::NODATA_CLASS
@@ -545,20 +545,20 @@ impl MultiResolutionConfig {
         let grid_label = self.grid.label();
         let unique: std::collections::HashSet<_> = self.resolutions.iter().collect();
         if unique.len() != self.resolutions.len() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "duplicate {grid_label} resolutions"
             )));
         }
         for &r in &self.resolutions {
             if r > max_res {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Invalid {grid_label} resolution: {}",
                     r
                 )));
             }
         }
         if self.partition.is_some() && self.should_compact_h3_children() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "partitioned scans cannot compact {grid_label} children: sibling groups may span partitions; \
                  compact after merging the partials"
             )));
@@ -571,7 +571,7 @@ impl MultiResolutionConfig {
                 .iter()
                 .find(|&&res| res > 0 && requested.contains(&(res - 1)))
             {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "compact output cannot combine {grid_label} resolutions {} and {}: compaction would emit duplicate parent cells",
                     child - 1,
                     child

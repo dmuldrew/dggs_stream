@@ -10,7 +10,7 @@ use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::prelude::{col, lit, SessionContext};
 use dggs_stream_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
-use dggs_stream_sedona::{register_all, RasterH3Table, GEOARROW_WKB_EXTENSION};
+use dggs_stream_sedona::{register_all, RasterTable, GEOARROW_WKB_EXTENSION};
 
 use common::{collect, gradient_tif, rows, source, write_tif};
 
@@ -177,7 +177,7 @@ async fn configured_provider_registers_as_table() {
         .unwrap()
         .with_crs("EPSG:4326")
         .with_min_mean(20.0);
-    ctx.register_table("dem", Arc::new(RasterH3Table::continuous(provider)))
+    ctx.register_table("dem", Arc::new(RasterTable::continuous(provider)))
         .unwrap();
 
     let batches = collect(&ctx, "SELECT MIN(mean) FROM dem").await;
@@ -213,8 +213,8 @@ async fn compacted_tables_filter_completed_rows() {
     let mut categorical = CategoricalRasterTableProvider::try_new(&src, vec![8]).unwrap();
     categorical.config.compact_h3_children = true;
     let tables = [
-        ("count", RasterH3Table::continuous(continuous)),
-        ("total_count", RasterH3Table::categorical(categorical)),
+        ("count", RasterTable::continuous(continuous)),
+        ("total_count", RasterTable::categorical(categorical)),
     ];
     for (count, table) in tables {
         let ctx = context();
@@ -275,8 +275,8 @@ async fn scan_defers_limits_until_residual_filters_are_applied() {
         continuous.batch_size = 2;
         categorical.batch_size = 2;
         for (count, table) in [
-            ("count", RasterH3Table::continuous(continuous)),
-            ("total_count", RasterH3Table::categorical(categorical)),
+            ("count", RasterTable::continuous(continuous)),
+            ("total_count", RasterTable::categorical(categorical)),
         ] {
             for (filters, mut expected_statuses) in [
                 (vec![], vec![]),

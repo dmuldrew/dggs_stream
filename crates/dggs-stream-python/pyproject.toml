@@ -30,8 +30,7 @@ pyarrow = ["pyarrow>=14.0"]
 # compiles `dggs-stream-python` (shared library) and `dggs-stream-cli` (installed onto PATH)
 # from the Cargo workspace two directories up; building requires a Rust toolchain.
 [tool.hatch.build.targets.wheel]
-# `raster_h3` is a deprecated alias of `dggs_stream`, the package's former name.
-packages = ["python/dggs_stream", "python/raster_h3"]
+packages = ["python/dggs_stream"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"

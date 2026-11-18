@@ -9,7 +9,7 @@ use dggs_stream_core::columnar::{
     CategoricalFormat, ColumnArray, ColumnSchema, ContinuousBatchReader, PartitionedBatchReader,
     RecordBatch, PARTIAL_STATE_COLUMN,
 };
-use dggs_stream_core::error::{RasterH3Error, Result};
+use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::raster::mosaic::resolve_raster_sources;
 
 use crate::config::PyScanConfig;
@@ -68,7 +68,7 @@ impl PyRasterScanner {
             .filter(|c| !(partitioned && *c == PARTIAL_STATE_COLUMN))
         {
             let idx = base.index_of(name).ok_or_else(|| {
-                RasterH3Error::InvalidParameter(format!(
+                DggsStreamError::InvalidParameter(format!(
                     "Column '{}' not found in dggs_stream schema (grid '{}')",
                     name, self.config.grid
                 ))
@@ -98,14 +98,14 @@ impl PyRasterScanner {
     /// Options a partitioned scan cannot honour.
     fn check_partitionable(&self) -> Result<()> {
         if self.config.categorical && self.config.format == CategoricalFormat::Long {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "partitioned scans support the wide categorical format only; \
                  reshape the merged result to long format afterwards"
                     .into(),
             ));
         }
         if self.config.limit.is_some() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "limit cannot be combined with a partition: a per-partition row limit has no \
                  meaning for the merged result"
                     .into(),
@@ -253,5 +253,5 @@ fn batches_to_columnar_json(schema: &ColumnSchema, batches: &[RecordBatch]) -> R
     }
 
     serde_json::to_string(&serde_json::Value::Object(map))
-        .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))
+        .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
 }

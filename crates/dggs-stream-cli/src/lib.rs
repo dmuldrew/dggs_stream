@@ -29,7 +29,7 @@ use dggs_stream_core::columnar::{
     CategoricalBatchReader, CategoricalFormat, ColumnArray, ColumnSchema, ContinuousBatchReader,
     RecordBatch,
 };
-use dggs_stream_core::error::{RasterH3Error, Result};
+use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::histogram::HistogramSpec;
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
@@ -121,7 +121,7 @@ fn resolve_projection_indices(
     let mut indices = Vec::with_capacity(cols.len());
     for name in cols {
         let idx = schema.index_of(name).ok_or_else(|| {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "Unknown column name in projection: '{}'",
                 name
             ))
@@ -177,7 +177,7 @@ fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<us
     config.transfer = opts.transfer;
     if let Some(spec) = &opts.histogram {
         if opts.partition.is_some() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "--histogram cannot be combined with --partition".into(),
             ));
         }
@@ -235,7 +235,7 @@ fn stream_partition<W: Write>(
     writer: &mut W,
 ) -> Result<usize> {
     let refuse = |why: &str| {
-        Err(RasterH3Error::InvalidParameter(format!(
+        Err(DggsStreamError::InvalidParameter(format!(
             "--partition {why}"
         )))
     };
@@ -326,7 +326,7 @@ fn header_output_policy(scan: &serde_json::Value) -> OutputPolicy {
 
 fn write_partition_header<W: Write>(writer: &mut W, header: &PartitionHeader) -> Result<()> {
     let json =
-        serde_json::to_vec(header).map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+        serde_json::to_vec(header).map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     writer.write_all(PARTITION_MAGIC)?;
     writer.write_all(&(json.len() as u32).to_le_bytes())?;
     writer.write_all(&json)?;
@@ -340,7 +340,7 @@ fn read_partition_header<R: Read>(reader: &mut R) -> Result<PartitionHeader> {
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
     if &magic != PARTITION_MAGIC {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "not a partition file (missing RH3PART1 header)".into(),
         ));
     }
@@ -348,14 +348,14 @@ fn read_partition_header<R: Read>(reader: &mut R) -> Result<PartitionHeader> {
     reader.read_exact(&mut len)?;
     let len = u32::from_le_bytes(len) as usize;
     if len > MAX_PARTITION_HEADER {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "partition header of {len} bytes is too large"
         )));
     }
     let mut json = vec![0u8; len];
     reader.read_exact(&mut json)?;
     serde_json::from_slice(&json)
-        .map_err(|e| RasterH3Error::InvalidParameter(format!("invalid partition header: {e}")))
+        .map_err(|e| DggsStreamError::InvalidParameter(format!("invalid partition header: {e}")))
 }
 
 /// Split a raster or mosaic scan into partitions of about `target_chunks` TIFF tiles or
@@ -368,7 +368,7 @@ pub fn plan_raster_partitions(
     bbox: Option<[f64; 4]>,
 ) -> Result<Vec<ScanPartition>> {
     if target_chunks == 0 {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "--target-chunks must be at least 1".into(),
         ));
     }
@@ -392,26 +392,26 @@ pub fn write_plan<W: Write>(plan: &[ScanPartition], writer: &mut W) -> Result<()
 pub fn read_partition_spec(spec: &str, index: Option<usize>) -> Result<ScanPartition> {
     let Some(path) = spec.strip_prefix('@') else {
         if index.is_some() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "--partition-index needs --partition @PLAN_FILE".into(),
             ));
         }
         return ScanPartition::from_json(spec);
     };
     let text = std::fs::read_to_string(path).map_err(|e| {
-        RasterH3Error::InvalidParameter(format!("cannot read partition file '{path}': {e}"))
+        DggsStreamError::InvalidParameter(format!("cannot read partition file '{path}': {e}"))
     })?;
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let line = match (index, lines.as_slice()) {
         (None, [only]) => *only,
         (None, _) => {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "'{path}' holds {} partition specs: pick one with --partition-index",
                 lines.len()
             )))
         }
         (Some(i), _) => *lines.get(i).ok_or_else(|| {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "--partition-index {i} is out of range: '{path}' holds {} partition specs",
                 lines.len()
             ))
@@ -442,7 +442,7 @@ pub struct CliMergeOptions {
 /// of rows written.
 pub fn merge_partition_files<W: Write>(opts: &CliMergeOptions, writer: &mut W) -> Result<usize> {
     if opts.inputs.is_empty() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "merge needs at least one partition file".into(),
         ));
     }
@@ -453,7 +453,7 @@ pub fn merge_partition_files<W: Write>(opts: &CliMergeOptions, writer: &mut W) -
         match &schema {
             None => schema = Some(stream.schema()),
             Some(first) if **first != *stream.schema() => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "'{}' has other columns than '{}'; merge the partitions of one scan",
                     path.display(),
                     opts.inputs[0].display()
@@ -470,7 +470,7 @@ pub fn merge_partition_files<W: Write>(opts: &CliMergeOptions, writer: &mut W) -
     let (_, first) = open_partition_file(&first_path)?;
     let input_schema = first.schema();
     let state_idx = input_schema.index_of(PARTIAL_STATE_COLUMN).ok_or_else(|| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "'{}' has no {PARTIAL_STATE_COLUMN} column",
             first_path.display()
         ))
@@ -506,7 +506,7 @@ pub fn merge_partition_files<W: Write>(opts: &CliMergeOptions, writer: &mut W) -
         .iter()
         .map(|n| {
             base.index_of(n).ok_or_else(|| {
-                RasterH3Error::InvalidParameter(format!(
+                DggsStreamError::InvalidParameter(format!(
                     "column '{n}' is not a {} scan column",
                     if categorical {
                         "categorical"
@@ -546,14 +546,14 @@ type PartitionStream = IpcStreamReader<BufReader<File>>;
 
 /// Open a partition file: its header, and a reader positioned at its first batch.
 fn open_partition_file(path: &Path) -> Result<(PartitionHeader, PartitionStream)> {
-    let context = |e: RasterH3Error| {
-        RasterH3Error::InvalidParameter(format!(
+    let context = |e: DggsStreamError| {
+        DggsStreamError::InvalidParameter(format!(
             "'{}' is not a partition file written by `ipc --partition`: {e}",
             path.display()
         ))
     };
     let file = File::open(path).map_err(|e| {
-        RasterH3Error::InvalidParameter(format!("cannot open '{}': {e}", path.display()))
+        DggsStreamError::InvalidParameter(format!("cannot open '{}': {e}", path.display()))
     })?;
     let mut reader = BufReader::new(file);
     let header = read_partition_header(&mut reader).map_err(context)?;
@@ -563,7 +563,7 @@ fn open_partition_file(path: &Path) -> Result<(PartitionHeader, PartitionStream)
 
 /// Check that `headers` are every partition of one plan exactly once, from one scan.
 fn check_partition_set(paths: &[PathBuf], headers: &[PartitionHeader]) -> Result<()> {
-    let invalid = |msg: String| Err(RasterH3Error::InvalidParameter(msg));
+    let invalid = |msg: String| Err(DggsStreamError::InvalidParameter(msg));
     let first = &headers[0];
     let name = |i: usize| paths[i].display().to_string();
     for (i, h) in headers.iter().enumerate().skip(1) {
@@ -692,7 +692,7 @@ impl PartitionMerge {
             if let Some(path) = self.files.pop_front() {
                 let (_, stream) = open_partition_file(&path)?;
                 if *stream.schema() != *self.input_schema {
-                    return Err(RasterH3Error::InvalidParameter(format!(
+                    return Err(DggsStreamError::InvalidParameter(format!(
                         "'{}' changed while merging",
                         path.display()
                     )));
@@ -728,7 +728,7 @@ impl PartitionMerge {
                 None => vec![true; batch.num_rows],
             },
             _ => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "{PARTIAL_STATE_COLUMN} must be a Binary column"
                 )))
             }
@@ -949,7 +949,7 @@ pub fn export_raster_to_parquet_with_transfer(
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)?;
         H3ParquetWriter::write_categorical_streamer_to_parquet(streamer, output_path, pq_cfg)
     }
-    .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+    .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
     print_profile(&report_profile);
     Ok(rows)
@@ -1071,7 +1071,7 @@ pub fn export_raster_to_pmtiles_with_transfer(
     } else {
         H3PmtilesTiler::process_categorical_source_to_pmtiles(input_path, output_path, config)
     }
-    .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))?;
+    .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
     print_profile(&report_profile);
     Ok(tiles)
@@ -1089,13 +1089,13 @@ pub fn transcode_parquet_to_pmtiles(
     h3_column: Option<&str>,
 ) -> Result<PmtilesExportSummary> {
     if !input_path.is_file() {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "Input Parquet file does not exist: {}",
             input_path.display()
         )));
     }
     H3PmtilesTiler::process_parquet_to_pmtiles(input_path, output_path, h3_column)
-        .map_err(|e| RasterH3Error::StreamFailed(e.to_string()))
+        .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
 }
 
 /// Arguments of the `parquet-to-pmtiles` subcommand.
@@ -1116,16 +1116,16 @@ pub fn parse_parquet_to_pmtiles_args(args: &[String]) -> Result<CliTranscodeArgs
     while let Some(arg) = iter.next() {
         let flag = arg.as_str();
         let mut value = || {
-            iter.next()
-                .cloned()
-                .ok_or_else(|| RasterH3Error::InvalidParameter(format!("Missing value for {flag}")))
+            iter.next().cloned().ok_or_else(|| {
+                DggsStreamError::InvalidParameter(format!("Missing value for {flag}"))
+            })
         };
         match flag {
             "-i" | "--input" => input_path = Some(value()?),
             "-o" | "--output" => {
                 let v = value()?;
                 if v == "-" {
-                    return Err(RasterH3Error::InvalidParameter(
+                    return Err(DggsStreamError::InvalidParameter(
                         "parquet-to-pmtiles cannot write to stdout: pass a file with -o".into(),
                     ));
                 }
@@ -1133,13 +1133,13 @@ pub fn parse_parquet_to_pmtiles_args(args: &[String]) -> Result<CliTranscodeArgs
             }
             "--h3-column" | "--h3-col" => h3_column = Some(value()?),
             _ if flag.starts_with('-') && flag != "-" => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unknown option '{flag}' for parquet-to-pmtiles"
                 )));
             }
             _ if input_path.is_none() => input_path = Some(flag.to_string()),
             _ => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unexpected argument '{flag}' (input path already set to '{}')",
                     input_path.unwrap_or_default()
                 )));
@@ -1147,10 +1147,12 @@ pub fn parse_parquet_to_pmtiles_args(args: &[String]) -> Result<CliTranscodeArgs
         }
     }
     let input_path = input_path.ok_or_else(|| {
-        RasterH3Error::InvalidParameter("Missing required input Parquet path".into())
+        DggsStreamError::InvalidParameter("Missing required input Parquet path".into())
     })?;
     let output_path = output_path.ok_or_else(|| {
-        RasterH3Error::InvalidParameter("Missing -o / --output path for parquet-to-pmtiles".into())
+        DggsStreamError::InvalidParameter(
+            "Missing -o / --output path for parquet-to-pmtiles".into(),
+        )
     })?;
     Ok(CliTranscodeArgs {
         input_path,
@@ -1180,7 +1182,7 @@ pub fn parse_stream_args(
     let mut histogram = [None::<String>, None, None];
 
     let invalid = |flag: &str, value: &str, expected: &str| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "Invalid value '{value}' for {flag}: expected {expected}"
         ))
     };
@@ -1189,9 +1191,9 @@ pub fn parse_stream_args(
     while let Some(arg) = iter.next() {
         let flag = arg.as_str();
         let mut value = || {
-            iter.next()
-                .map(String::as_str)
-                .ok_or_else(|| RasterH3Error::InvalidParameter(format!("Missing value for {flag}")))
+            iter.next().map(String::as_str).ok_or_else(|| {
+                DggsStreamError::InvalidParameter(format!("Missing value for {flag}"))
+            })
         };
         match flag {
             "-i" | "--input" => opts.input_path = value()?.to_string(),
@@ -1298,13 +1300,13 @@ pub fn parse_stream_args(
                 );
             }
             _ if flag.starts_with('-') && flag != "-" => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unknown option '{flag}'"
                 )));
             }
             _ if opts.input_path.is_empty() => opts.input_path = flag.to_string(),
             _ => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unexpected argument '{flag}' (input path already set to '{}')",
                     opts.input_path
                 )));
@@ -1345,12 +1347,12 @@ pub fn parse_stream_args(
         opts.transfer = spec.transfer_mode(opts.transfer)?;
     }
     if opts.output.nodata_value.is_some() && !opts.output.emits_nodata() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "--emit-nodata-value needs --nodata-policy emit".into(),
         ));
     }
     if opts.input_path.is_empty() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "Missing required input raster path".into(),
         ));
     }
@@ -1367,7 +1369,7 @@ pub fn parse_stream_args(
     match (partition_spec, partition_index) {
         (Some(spec), index) => opts.partition = Some(read_partition_spec(&spec, index)?),
         (None, Some(_)) => {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "--partition-index needs --partition @PLAN_FILE".into(),
             ))
         }
@@ -1401,12 +1403,12 @@ pub fn parse_plan_args(args: &[String]) -> Result<CliPlanArgs> {
     while let Some(arg) = iter.next() {
         let flag = arg.as_str();
         let mut value = || {
-            iter.next()
-                .map(String::as_str)
-                .ok_or_else(|| RasterH3Error::InvalidParameter(format!("Missing value for {flag}")))
+            iter.next().map(String::as_str).ok_or_else(|| {
+                DggsStreamError::InvalidParameter(format!("Missing value for {flag}"))
+            })
         };
         let invalid = |v: &str, expected: &str| {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "Invalid value '{v}' for {flag}: expected {expected}"
             ))
         };
@@ -1433,13 +1435,13 @@ pub fn parse_plan_args(args: &[String]) -> Result<CliPlanArgs> {
                 );
             }
             _ if flag.starts_with('-') && flag != "-" => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unknown option '{flag}' for plan"
                 )));
             }
             _ if out.input_path.is_empty() => out.input_path = flag.to_string(),
             _ => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unexpected argument '{flag}' (input path already set to '{}')",
                     out.input_path
                 )));
@@ -1447,7 +1449,7 @@ pub fn parse_plan_args(args: &[String]) -> Result<CliPlanArgs> {
         }
     }
     if out.input_path.is_empty() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "Missing required input raster path".into(),
         ));
     }
@@ -1469,14 +1471,14 @@ pub fn parse_merge_args(args: &[String]) -> Result<(CliMergeOptions, Option<Stri
         match arg.as_str() {
             "-o" | "--output" => {
                 let v = iter.next().ok_or_else(|| {
-                    RasterH3Error::InvalidParameter(format!("Missing value for {arg}"))
+                    DggsStreamError::InvalidParameter(format!("Missing value for {arg}"))
                 })?;
                 output = (v != "-").then(|| v.clone());
             }
             "-c" | "--categorical" => opts.categorical = true,
             "--jsonl" => opts.output_format = StreamOutputFormat::Jsonl,
             flag if flag.starts_with('-') => {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Unknown option '{flag}' for merge"
                 )));
             }
@@ -1484,7 +1486,7 @@ pub fn parse_merge_args(args: &[String]) -> Result<(CliMergeOptions, Option<Stri
         }
     }
     if opts.inputs.is_empty() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "merge needs at least one partition file".into(),
         ));
     }

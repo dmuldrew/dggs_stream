@@ -1,7 +1,7 @@
 # dggs-stream-sedona (Python)
 
 dggs_stream rasters as [SedonaDB](https://github.com/apache/sedona-db) tables.
-`RasterH3Table` implements SedonaDB's `__sedonadb_table_provider__` protocol, so
+`RasterTable` implements SedonaDB's `__sedonadb_table_provider__` protocol, so
 `create_data_frame` scans it directly, with projection, `LIMIT`, threshold and
 spatial filter pushdown. `scalar_functions()` exports the dggs_stream SQL functions
 (`h3_polygon_to_cells`, `h3_to_wkb`, `h3_cell_to_parent`, ...) as native SedonaDB kernels.
@@ -11,11 +11,11 @@ H3 hexagons.
 ```python
 import sedonadb
 import dggs_stream_sedona
-from dggs_stream_sedona import RasterH3Table
+from dggs_stream_sedona import RasterTable
 
 sd = sedonadb.connect()
 sd.register(dggs_stream_sedona.scalar_functions())
-sd.create_data_frame(RasterH3Table.continuous("dem.tif", [7, 8])).to_view("dem")
+sd.create_data_frame(RasterTable.continuous("dem.tif", [7, 8])).to_view("dem")
 sd.sql("""
     SELECT h3_index, mean
     FROM dem
@@ -36,8 +36,8 @@ sd.sql("""
 dggs_stream_sedona.write_pmtiles(sd.sql("SELECT h3_index, mean FROM dem WHERE count >= 4"), "dem.pmtiles")
 ```
 
-- `RasterH3Table.continuous(source, resolutions=8, *, crs=None, nodata=None, band=None, bbox=None, grid=None)`
-- `RasterH3Table.categorical(source, resolutions=8, *, crs=None, nodata=None, bbox=None, grid=None)`
+- `RasterTable.continuous(source, resolutions=8, *, crs=None, nodata=None, band=None, bbox=None, grid=None)`
+- `RasterTable.categorical(source, resolutions=8, *, crs=None, nodata=None, bbox=None, grid=None)`
 - `resolutions` is an int, a list of ints, or `"auto"` (`"auto+1"`, `"auto-2"`, ...): the
   resolution whose cells are closest in area to the raster's ground pixels.
 - `grid` is `"h3"` (default), `"a5"`, `"s2"` or `"healpix"`. The cell columns are named for

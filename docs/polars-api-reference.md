@@ -4,7 +4,7 @@
 
 This document is the complete reference for the `dggs_stream` Python package
 ([Python & Polars deep dive](engines/python-polars.md)): the Polars IO source
-(`scan_raster_h3`, `read_raster_h3`), the Arrow PyCapsule stream (`RasterH3ArrowStream`),
+(`scan_raster`, `read_raster`), the Arrow PyCapsule stream (`RasterArrowStream`),
 the direct Parquet and PMTiles v3 exporters, and the H3 helper functions. For the DuckDB
 extension, see the [SQL API Reference](sql-api-reference.md).
 
@@ -16,24 +16,23 @@ engine and documented once in the SQL reference.
 import polars as pl
 import dggs_stream
 
-lf = dggs_stream.scan_raster_h3("elevation.tif", 8)          # pl.LazyFrame
+lf = dggs_stream.scan_raster("elevation.tif", 8)          # pl.LazyFrame
 df = lf.filter(pl.col("count") > 10).select("h3_index", "mean").collect()
 ```
 
 Polars and PyArrow are optional dependencies. Without Polars, the scan functions return a
-[`RasterH3ArrowStream`](#rasterh3arrowstream) that any Arrow PyCapsule consumer can read.
+[`RasterArrowStream`](#rasterarrowstream) that any Arrow PyCapsule consumer can read.
 
 ## Function summary
 
 | Function | Returns | Purpose |
 | :--- | :--- | :--- |
-| [`scan_raster_h3(path, resolutions=8, **opts)`](#scan_raster_h3) | `pl.LazyFrame` | Lazy scan with projection, predicate and row-limit pushdown |
-| [`read_raster_h3(path, resolutions=8, **opts)`](#read_raster_h3) | `pl.DataFrame` | Eager scan |
-| [`RasterH3ArrowStream(path, resolutions=8, **opts)`](#rasterh3arrowstream) | stream object | Arrow PyCapsule producer, batch iterator, PyArrow / dict conversion |
+| [`scan_raster(path, resolutions=8, **opts)`](#scan_raster) | `pl.LazyFrame` | Lazy scan with projection, predicate and row-limit pushdown |
+| [`read_raster(path, resolutions=8, **opts)`](#read_raster) | `pl.DataFrame` | Eager scan |
+| [`RasterArrowStream(path, resolutions=8, **opts)`](#rasterarrowstream) | stream object | Arrow PyCapsule producer, batch iterator, PyArrow / dict conversion |
 | [`raster_to_parquet(input_path, output_path, resolutions=8, ...)`](#raster_to_parquet) | `int` | Stream a raster straight to Parquet / GeoParquet 1.1 |
 | [`raster_to_pmtiles(input_path, output_path, resolutions=8, ...)`](#raster_to_pmtiles) | `int` | Stream a raster straight to a PMTiles v3 vector archive |
 | [`parquet_to_pmtiles(parquet_path, output_path, *, cell_column=None, grid=None)`](#parquet_to_pmtiles) | `int` | Transcode any cell-indexed Parquet file to a PMTiles v3 vector archive |
-| `scan_raster`, `read_raster` | as above | Grid-neutral aliases of `scan_raster_h3` and `read_raster_h3` |
 | `profile_raster(path, resolutions=8, **opts)` | `dict` | Run a scan with a runtime profile: `{"rows": ..., "profile": {...}}` ([Scan Options](scan-options.md#runtime-profile)) |
 | `auto_resolution(path, grid="h3", *, offset=0, crs=None)` | `int` | The resolution `resolutions="auto"` picks ([Grids](grids.md#automatic-resolution)) |
 | [H3 helpers](#h3-helper-functions) | scalars | `h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`, `h3_get_resolution`, `h3_is_valid`, `h3_to_wkb`, `h3_cell_to_parent`, `h3_polygon_to_cells` |
@@ -43,7 +42,7 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 
 ## Scan options
 
-`scan_raster_h3`, `read_raster_h3` and `RasterH3ArrowStream` take the same arguments.
+`scan_raster`, `read_raster` and `RasterArrowStream` take the same arguments.
 `path` and `resolutions` may be positional; everything else is keyword-only.
 
 ### Positional parameters
@@ -120,20 +119,20 @@ when the scan object is created. The one empty value that falls back to a defaul
 | An option on the wrong kind of scan (`min_majority_fraction` or `remap` on a continuous scan; `spectral_formula`, `quantiles`, `min_mean` or `max_mean` on a categorical one) | `min_majority_fraction applies to categorical scans only` |
 | Missing file | `Input file path does not exist: nope.tif` |
 
-`read_raster_h3` and the `RasterH3ArrowStream` methods raise these directly.
-`scan_raster_h3` is lazy, so they surface when the frame is collected, wrapped by Polars in
+`read_raster` and the `RasterArrowStream` methods raise these directly.
+`scan_raster` is lazy, so they surface when the frame is collected, wrapped by Polars in
 a `polars.exceptions.ComputeError`.
 
 ---
 
-## `scan_raster_h3`
+## `scan_raster`
 
 ```python
-scan_raster_h3(
+scan_raster(
     path, resolutions=8, *,
     categorical=False, format="wide", crs=None, nodata=None,
     bbox=None, columns=None, limit=None,
-) -> pl.LazyFrame | RasterH3ArrowStream
+) -> pl.LazyFrame | RasterArrowStream
 ```
 
 Returns a Polars `LazyFrame` backed by an IO source
@@ -142,7 +141,7 @@ so `collect_schema()` is free. Nothing is read until the frame is collected, sun
 streamed, and each collection runs a new scan.
 
 If Polars is not installed, or is too old to provide `register_io_source`, it returns the
-[`RasterH3ArrowStream`](#rasterh3arrowstream) for the same arguments instead.
+[`RasterArrowStream`](#rasterarrowstream) for the same arguments instead.
 
 ### Query optimisation
 
@@ -174,7 +173,7 @@ without it fall back to filtering in Polars.
 **Polars before 1.22.** These versions hand an IO source no predicate for a filter they
 cannot pass down (a strict `cast`, string functions such as `str.ends_with`, ...) and then
 never apply that filter, so a plain IO source would return unfiltered rows. On these
-versions `scan_raster_h3` keeps every filter above the scan, where Polars applies it: results
+versions `scan_raster` keeps every filter above the scan, where Polars applies it: results
 are exact, projection is still pushed, but filters and `head(n)` no longer reach the engine,
 so a filtered or limited query aggregates the whole raster first. Upgrade to Polars 1.22 or
 later to get filter and slice pushdown back.
@@ -182,7 +181,7 @@ later to get filter and slice pushdown back.
 ### Example
 
 ```python
-lf = dggs_stream.scan_raster_h3(
+lf = dggs_stream.scan_raster(
     "temperature.tif",
     [7, 8],
     crs="EPSG:4326",
@@ -201,27 +200,27 @@ hot = (
 
 ---
 
-## `read_raster_h3`
+## `read_raster`
 
 ```python
-read_raster_h3(path, resolutions=8, **kwargs) -> pl.DataFrame | RasterH3ArrowStream
+read_raster(path, resolutions=8, **kwargs) -> pl.DataFrame | RasterArrowStream
 ```
 
-Eager form of `scan_raster_h3`, equivalent to
-`RasterH3ArrowStream(path, resolutions, **kwargs).to_polars()`. `kwargs` are the
-[keyword parameters](#keyword-parameters) above. Returns the `RasterH3ArrowStream` if Polars
+Eager form of `scan_raster`, equivalent to
+`RasterArrowStream(path, resolutions, **kwargs).to_polars()`. `kwargs` are the
+[keyword parameters](#keyword-parameters) above. Returns the `RasterArrowStream` if Polars
 is not installed.
 
 ```python
-df = dggs_stream.read_raster_h3("landcover.tif", 8, categorical=True, format="long")
+df = dggs_stream.read_raster("landcover.tif", 8, categorical=True, format="long")
 ```
 
 ---
 
-## `RasterH3ArrowStream`
+## `RasterArrowStream`
 
 ```python
-RasterH3ArrowStream(
+RasterArrowStream(
     path, resolutions=8, *,
     categorical=False, format="wide", crs=None, nodata=None,
     bbox=None, columns=None, limit=None,
@@ -252,7 +251,7 @@ The constructor arguments are kept as attributes of the same names (`path` as `s
 Any PyCapsule-aware library can read the stream directly:
 
 ```python
-stream = dggs_stream.RasterH3ArrowStream("dem.tif", 8, columns=["h3_index", "mean", "wkb"])
+stream = dggs_stream.RasterArrowStream("dem.tif", 8, columns=["h3_index", "mean", "wkb"])
 
 pl.from_arrow(stream)          # Polars
 pa.table(stream)               # PyArrow
@@ -380,7 +379,7 @@ Files written by releases before the Parquet footer fix fail in Polars with
 To write the scan schema itself, or a projection of it, use Polars:
 
 ```python
-(dggs_stream.scan_raster_h3("elevation.tif", 8, columns=["h3_index", "mean", "count"])
+(dggs_stream.scan_raster("elevation.tif", 8, columns=["h3_index", "mean", "count"])
     .sink_parquet("elevation_h3_slim.parquet"))
 ```
 
@@ -431,7 +430,7 @@ valid cell are skipped.
 | `h3_column` | `str \| None` | `None` | Older name of `cell_column`. |
 
 ```python
-(dggs_stream.scan_raster_h3("landcover.tif", 9, categorical=True)
+(dggs_stream.scan_raster("landcover.tif", 9, categorical=True)
     .filter(pl.col("majority_fraction") > 0.6)
     .select("h3_index", "majority_class")
     .sink_parquet("landcover.parquet"))
@@ -495,7 +494,7 @@ The helpers are not Polars expressions. Apply them to a column with `map_element
 avoid them where the scan already provides the value (`h3_hex`, `resolution`, `wkb`):
 
 ```python
-df = dggs_stream.read_raster_h3("elevation.tif", 8, columns=["h3_index", "mean"])
+df = dggs_stream.read_raster("elevation.tif", 8, columns=["h3_index", "mean"])
 df = df.with_columns(
     pl.col("h3_index").map_elements(dggs_stream.h3_to_lat, return_dtype=pl.Float64).alias("lat"),
     pl.col("h3_index").map_elements(dggs_stream.h3_to_lng, return_dtype=pl.Float64).alias("lng"),
@@ -548,7 +547,7 @@ cells = dggs_stream.h3_polygon_to_cells(shapely.to_wkb(aoi), 8)
 
 # Keep only the raster cells inside the area of interest
 inside = (
-    dggs_stream.scan_raster_h3("elevation.tif", 8, bbox=aoi.bounds)
+    dggs_stream.scan_raster("elevation.tif", 8, bbox=aoi.bounds)
     .filter(pl.col("h3_index").is_in(cells))
     .collect()
 )
@@ -566,8 +565,8 @@ regions = pl.DataFrame({
 
 | Exception | Raised by | Cause |
 | :--- | :--- | :--- |
-| `RuntimeError` | `read_raster_h3`, `RasterH3ArrowStream` methods, exporters | Invalid option, missing file, unreadable raster, missing or unsupported CRS (`No CRS detected`, `Unsupported EPSG code`), write failure |
-| `polars.exceptions.ComputeError` | `LazyFrame.collect()` / `sink_*` on a `scan_raster_h3` frame | The same `RuntimeError`, raised inside the Polars IO source |
+| `RuntimeError` | `read_raster`, `RasterArrowStream` methods, exporters | Invalid option, missing file, unreadable raster, missing or unsupported CRS (`No CRS detected`, `Unsupported EPSG code`), write failure |
+| `polars.exceptions.ComputeError` | `LazyFrame.collect()` / `sink_*` on a `scan_raster` frame | The same `RuntimeError`, raised inside the Polars IO source |
 | `ValueError` | `h3_polygon_to_cells` | Unknown containment mode, or too many cells |
 | `RuntimeWarning` | `raster_to_parquet`, `raster_to_pmtiles` | Valid pixels dropped by failed coordinate transforms |
 | `RuntimeError: Could not locate libdggs_stream_python shared library` | First call of any function | Native library not found; see [Install](engines/python-polars.md#install) |

@@ -6,7 +6,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::crs::CrsTransformer;
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 use dggs_stream_core::raster::GeoTiffStreamReader;
 use h3o::{LatLng, Resolution};
 use std::path::Path;
@@ -444,27 +444,27 @@ fn test_invalid_resolution_parameter_error() {
     let res_cont = MultiScanHorizonStreamer::new(reader.clone(), &invalid_config);
     assert!(res_cont.is_err());
     match res_cont {
-        Err(RasterH3Error::InvalidParameter(msg)) => {
+        Err(DggsStreamError::InvalidParameter(msg)) => {
             assert!(
                 msg.contains("Invalid H3 resolution: 16"),
                 "Unexpected message: {}",
                 msg
             );
         }
-        _ => panic!("Expected RasterH3Error::InvalidParameter"),
+        _ => panic!("Expected DggsStreamError::InvalidParameter"),
     }
 
     let res_cat = MultiCategoricalHorizonStreamer::new(reader, &invalid_config);
     assert!(res_cat.is_err());
     match res_cat {
-        Err(RasterH3Error::InvalidParameter(msg)) => {
+        Err(DggsStreamError::InvalidParameter(msg)) => {
             assert!(
                 msg.contains("Invalid H3 resolution: 16"),
                 "Unexpected message: {}",
                 msg
             );
         }
-        _ => panic!("Expected RasterH3Error::InvalidParameter"),
+        _ => panic!("Expected DggsStreamError::InvalidParameter"),
     }
 }
 
@@ -474,8 +474,8 @@ fn test_nonexistent_file_path_error() {
         GeoTiffStreamReader::open(Path::new("/nonexistent_directory/nonexistent_file.tif"));
     assert!(result.is_err());
     match result {
-        Err(RasterH3Error::Io(_)) => {}
-        _ => panic!("Expected RasterH3Error::Io"),
+        Err(DggsStreamError::Io(_)) => {}
+        _ => panic!("Expected DggsStreamError::Io"),
     }
 }
 

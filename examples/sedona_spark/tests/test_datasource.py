@@ -1,6 +1,6 @@
 """`dggs_stream.spark`: the Spark 4 Python data source and its partial-cell merge.
 
-Every result is compared with one unpartitioned `RasterH3ArrowStream` scan of the same
+Every result is compared with one unpartitioned `RasterArrowStream` scan of the same
 raster and options: the same cells, each once, with equal values (statistics within 1e-9
 relative, for summation order).
 """
@@ -25,7 +25,7 @@ def registered(sedona):
 
 def assert_matches_single_scan(cells, path, **options):
     got = cells.toArrow()
-    want = pa.table(dggs_stream.RasterH3ArrowStream(path, **options))
+    want = pa.table(dggs_stream.RasterArrowStream(path, **options))
     assert sorted(got.column_names) == sorted(want.column_names)
 
     def rows(table):
@@ -140,11 +140,11 @@ def _parts_view(sedona, name, path, **options):
 
 
 def test_sql_merge_table_function(sedona, terrain):
-    """`raster_h3_merge(TABLE(t))` merges a dggs_stream scan in SQL alone."""
+    """`dggs_stream_merge(TABLE(t))` merges a dggs_stream scan in SQL alone."""
     path = terrain()
     _parts_view(sedona, "sql_parts", path, resolutions="8,9")
     assert sedona.table("sql_parts").where("partial_state IS NOT NULL").count() > 0
-    cells = sedona.sql("SELECT * FROM raster_h3_merge(TABLE(sql_parts))")
+    cells = sedona.sql("SELECT * FROM dggs_stream_merge(TABLE(sql_parts))")
     assert "partial_state" not in cells.columns
     assert assert_matches_single_scan(cells, path, resolutions=[8, 9]) > 0
 
@@ -157,7 +157,7 @@ def test_sql_merge_options(sedona, terrain):
         resolutions="9", columns="h3_index,resolution,count,mean,p90", quantiles="p90", min_count="20",
     )
     cells = sedona.sql(
-        "SELECT * FROM raster_h3_merge(TABLE(sql_parts_q), 'quantiles=p90, min_count=20, buckets=1')"
+        "SELECT * FROM dggs_stream_merge(TABLE(sql_parts_q), 'quantiles=p90, min_count=20, buckets=1')"
     )
     assert assert_matches_single_scan(
         cells, path, resolutions=[9], columns=["h3_index", "resolution", "count", "mean", "p90"],
@@ -168,16 +168,16 @@ def test_sql_merge_options(sedona, terrain):
 def test_sql_merge_recognises_categorical_input(sedona, terrain):
     path = terrain("classes.tif", categorical=True)
     _parts_view(sedona, "sql_parts_c", path, resolutions="9", categorical="true")
-    cells = sedona.sql("SELECT * FROM raster_h3_merge(TABLE(sql_parts_c))")
+    cells = sedona.sql("SELECT * FROM dggs_stream_merge(TABLE(sql_parts_c))")
     assert assert_matches_single_scan(cells, path, resolutions=[9], categorical=True) > 0
 
 
 @pytest.mark.parametrize(
     "query, message",
     [
-        ("SELECT * FROM raster_h3_merge(TABLE(SELECT 1 AS h3_index))", "missing column"),
-        ("SELECT * FROM raster_h3_merge(TABLE(sql_parts_bad), 'colour=red')", "unknown raster_h3_merge option"),
-        ("SELECT * FROM raster_h3_merge(TABLE(sql_parts_bad), 'min_count')", "not name=value"),
+        ("SELECT * FROM dggs_stream_merge(TABLE(SELECT 1 AS h3_index))", "missing column"),
+        ("SELECT * FROM dggs_stream_merge(TABLE(sql_parts_bad), 'colour=red')", "unknown dggs_stream_merge option"),
+        ("SELECT * FROM dggs_stream_merge(TABLE(sql_parts_bad), 'min_count')", "not name=value"),
     ],
 )
 def test_sql_merge_rejects_bad_input(sedona, terrain, query, message):

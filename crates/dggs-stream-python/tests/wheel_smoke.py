@@ -84,7 +84,7 @@ def main() -> None:
         tif = Path(tmp) / "smoke.tif"
         write_geotiff(tif, 32, 32)
 
-        stream = dggs_stream.RasterH3ArrowStream(tif, 8)
+        stream = dggs_stream.RasterArrowStream(tif, 8)
         df = stream.to_polars()
         assert df.height > 0 and df["count"].sum() == 32 * 32, df
         table = pa.table(stream)
@@ -92,7 +92,7 @@ def main() -> None:
         batches = list(stream.iter_batches(batch_size=4))
         assert sum(b.height for b in batches) == df.height
 
-        lazy = dggs_stream.scan_raster_h3(tif, 8)
+        lazy = dggs_stream.scan_raster(tif, 8)
         assert lazy.filter(pl.col("mean") > 0).select("h3_index").collect().height > 0
         assert lazy.head(2).collect().height == 2
         print("python: rows", df.height)

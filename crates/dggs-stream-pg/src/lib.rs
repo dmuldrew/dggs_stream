@@ -29,7 +29,7 @@ pub use dggs_stream_core::aggregator::output_policy::NodataPolicy;
 use dggs_stream_core::aggregator::output_policy::OutputPolicy;
 use dggs_stream_core::encoding::{cell_index_to_wkb, fast_hex_u64, WkbBuf, WKB_BUF_LEN};
 use dggs_stream_core::error::{
-    catch_unwind_or, safe_panic_payload_to_string, RasterH3Error, Result,
+    catch_unwind_or, safe_panic_payload_to_string, DggsStreamError, Result,
 };
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
@@ -1005,7 +1005,7 @@ pub unsafe extern "C" fn pg_srf_continuous_open(
                 )
             };
             let path_str = raster_path
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing raster_path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing raster_path".into()))?;
             let res_vec = resolutions
                 .map(|s| parse_resolutions_str(&s))
                 .filter(|v| !v.is_empty())
@@ -1015,7 +1015,7 @@ pub unsafe extern "C" fn pg_srf_continuous_open(
             let bbox_opt = bbox
                 .map(|s| {
                     parse_bbox_str(&s).ok_or_else(|| {
-                        RasterH3Error::InvalidParameter(format!(
+                        DggsStreamError::InvalidParameter(format!(
                             "bbox must be 'min_lon,min_lat,max_lon,max_lat', got '{s}'"
                         ))
                     })
@@ -1067,7 +1067,7 @@ pub unsafe extern "C" fn pg_srf_continuous_next(
     // SAFETY: non-null and, per the caller contract, a live handle from
     // `pg_srf_continuous_open` that is not used concurrently.
     let srf = unsafe { &mut *srf };
-    let panicked = Err(RasterH3Error::StreamFailed(
+    let panicked = Err(DggsStreamError::StreamFailed(
         "panic in pg_srf_continuous_next".into(),
     ));
     match catch_unwind_or(panicked, || srf.next_row()) {

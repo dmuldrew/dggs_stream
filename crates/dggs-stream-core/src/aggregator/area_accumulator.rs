@@ -8,7 +8,7 @@ use crate::aggregator::accumulator::H3Accumulator;
 use crate::aggregator::multi_horizon::partial::PartialState;
 use crate::aggregator::multi_horizon::sharded_map::AccumulatorMerge;
 use crate::aggregator::multi_horizon::spill::SpillAccumulator;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 /// Pixel contribution count and area-weighted continuous statistics for one cell.
 ///
@@ -43,7 +43,7 @@ impl AreaAccumulator {
             || !(area * area).is_finite()
             || !(self.area_stats.sum_w2 + area * area).is_finite()
         {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "invalid or overflowing area-weighted pixel contribution".into(),
             ));
         }

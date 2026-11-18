@@ -93,7 +93,7 @@ For pipelines that own the streamer (`H3ParquetWriter`, `H3PmtilesTiler`), set
 stream built from that configuration adds its failures to it.
 
 `MultiResolutionConfig::strict_transforms` (default `false`) turns the count into an error:
-the stream fails with `RasterH3Error::TransformFailures(n)` after the first kernel wave that
+the stream fails with `DggsStreamError::TransformFailures(n)` after the first kernel wave that
 drops a sample, and later reads return the latched `StreamFailed` error. `n` covers the work
 done so far, not the whole raster. Records already emitted before that wave stay emitted,
 so a strict consumer must treat the error as fatal to the whole result.
@@ -104,7 +104,7 @@ The engines surface the count, and strict mode, as follows:
 | :--- | :--- | :--- |
 | DuckDB | `transform_failures` column of the `h3_raster_to_parquet` / `h3_raster_to_pmtiles` summary row. The streaming aggregate functions have no warnings channel and report nothing. | `strict_transforms := true` on every table function |
 | PostgreSQL | One `WARNING` at the end of `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate`. | — |
-| Python | `RuntimeWarning` from `raster_to_parquet` / `raster_to_pmtiles`, and from `scan_raster_h3` / `RasterH3ArrowStream.iter_batches()` / `.to_dict()` once the scan completes. `to_polars()` / `read_raster_h3()` / `__arrow_c_stream__` hand the stream to Arrow and report nothing. | `strict_transforms=True` on `scan_raster_h3`, `read_raster_h3` and `RasterH3ArrowStream` |
+| Python | `RuntimeWarning` from `raster_to_parquet` / `raster_to_pmtiles`, and from `scan_raster` / `RasterArrowStream.iter_batches()` / `.to_dict()` once the scan completes. `to_polars()` / `read_raster()` / `__arrow_c_stream__` hand the stream to Arrow and report nothing. | `strict_transforms=True` on `scan_raster`, `read_raster` and `RasterArrowStream` |
 | CLI | Warning on stderr from every subcommand. | — |
 | DataFusion | `with_transform_failure_counter(Arc<AtomicU64>)` on either provider. | `with_strict_transforms(true)` |
 
@@ -427,7 +427,7 @@ rejected by that client). An engine can supply its own byte source instead:
 
 When a factory is set it opens **every** path, local ones included, and the prefetcher,
 cache and coalescing work on top of it unchanged. The DuckDB 2.0 build uses this to read
-through DuckDB's file system (`SET raster_h3_use_duckdb_fs = true`).
+through DuckDB's file system (`SET dggs_stream_use_duckdb_fs = true`).
 
 ### Mosaic decoder cache
 
@@ -700,7 +700,7 @@ floats become `null`; binary columns (`wkb`) are lowercase hex strings.
 
 ## Errors
 
-All fallible APIs return `dggs_stream_core::error::Result<T>` with `RasterH3Error`
+All fallible APIs return `dggs_stream_core::error::Result<T>` with `DggsStreamError`
 (`StreamFailed`, `Io`, `Tiff`, `InvalidMetadata`, `CrsNotDetected`, `CrsProjectionFailed`,
 `CrsError`, `UnsupportedEpsg`, `Proj`, `H3Error`, `InvalidParameter`, `DuckDbError`).
 `safe_panic_payload_to_string` turns a caught panic payload into a message without letting

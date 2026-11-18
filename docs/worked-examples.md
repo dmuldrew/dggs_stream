@@ -51,7 +51,7 @@ BBOX = (-93.9, 28.9, -88.8, 30.6)               # coastal Louisiana, lon/lat
 #    `fraction` is a share of the pixels observed, not of the whole cell).
 def wetland_area(path, year):
     return (
-        dggs_stream.scan_raster_h3(
+        dggs_stream.scan_raster(
             path, RES, grid="a5", categorical=True, format="long",
             remap={90: 1, 95: 1, "else": 0},  # woody + emergent wetland -> 1, everything else -> 0
             bbox=BBOX, columns=["a5_index", "category", "count"],
@@ -210,7 +210,7 @@ import geopandas as gpd
 import sedonadb
 import shapely
 import dggs_stream_sedona
-from dggs_stream_sedona import RasterH3Table
+from dggs_stream_sedona import RasterTable
 
 sd = sedonadb.connect()
 sd.register(dggs_stream_sedona.scalar_functions())
@@ -221,7 +221,7 @@ basin_box = shapely.box(*gpd.read_file(huc8_path).to_crs(4326).total_bounds).wkt
 
 # 1. Snow water equivalent on S2 level-13 cells (~1.3 km²), scanned lazily by each query
 sd.create_data_frame(
-    RasterH3Table.continuous("snodas_swe_20260401.tif", 13, grid="s2", nodata=-9999)
+    RasterTable.continuous("snodas_swe_20260401.tif", 13, grid="s2", nodata=-9999)
 ).to_view("swe_s2")
 sd.read_pyogrio(huc8_path).to_view("huc8")
 

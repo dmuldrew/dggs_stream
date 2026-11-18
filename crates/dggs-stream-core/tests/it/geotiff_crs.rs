@@ -5,7 +5,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::crs::transformer::CrsTransformer;
-use dggs_stream_core::error::RasterH3Error;
+use dggs_stream_core::error::DggsStreamError;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::GeoTransform;
 use std::fs::File;
@@ -106,7 +106,7 @@ fn esri_pe_citation_with_datum_shift_is_not_detected() {
     assert_eq!(reader.metadata.epsg, None);
     assert_eq!(reader.metadata.proj_string, None);
     match MultiScanHorizonStreamer::new(reader, &MultiResolutionConfig::single(4)) {
-        Err(RasterH3Error::CrsNotDetected(_)) => {}
+        Err(DggsStreamError::CrsNotDetected(_)) => {}
         Err(e) => panic!("expected CrsNotDetected, got {e:?}"),
         Ok(_) => panic!("expected CrsNotDetected for a shifted datum"),
     }
@@ -196,14 +196,14 @@ fn test_crs_invalid_proj_string_error_handling() {
     let result = CrsTransformer::from_proj_string("+proj=totally_invalid_nonexistent_proj");
     assert!(result.is_err(), "Expected error on invalid PROJ string");
     match result {
-        Err(RasterH3Error::CrsError(msg)) => {
+        Err(DggsStreamError::CrsError(msg)) => {
             assert!(
                 msg.contains("Failed to parse source PROJ string"),
                 "Unexpected message: {}",
                 msg
             );
         }
-        _ => panic!("Expected RasterH3Error::CrsError"),
+        _ => panic!("Expected DggsStreamError::CrsError"),
     }
 }
 
@@ -233,14 +233,14 @@ fn test_crs_unspecified_fallback_and_invalid_proj_error() {
     let default_transformer = CrsTransformer::from_crs_or_epsg(None, None);
     assert!(default_transformer.is_err());
     match default_transformer {
-        Err(RasterH3Error::CrsNotDetected(msg)) => {
+        Err(DggsStreamError::CrsNotDetected(msg)) => {
             assert!(
                 msg.contains("No CRS detected in raster metadata"),
                 "Unexpected message: {}",
                 msg
             );
         }
-        _ => panic!("Expected RasterH3Error::CrsNotDetected for unspecified CRS"),
+        _ => panic!("Expected DggsStreamError::CrsNotDetected for unspecified CRS"),
     }
 
     // 2. Explicit invalid PROJ definition returns a typed CrsError
@@ -248,10 +248,10 @@ fn test_crs_unspecified_fallback_and_invalid_proj_error() {
         CrsTransformer::from_crs_or_epsg(None, Some("+proj=nonexistent_invalid_crs +units=m"));
     assert!(invalid_result.is_err());
     match invalid_result {
-        Err(RasterH3Error::CrsError(msg)) => {
+        Err(DggsStreamError::CrsError(msg)) => {
             assert!(msg.contains("Failed to parse") || msg.contains("nonexistent_invalid_crs"));
         }
-        _ => panic!("Expected RasterH3Error::CrsError for invalid PROJ string"),
+        _ => panic!("Expected DggsStreamError::CrsError for invalid PROJ string"),
     }
 }
 
@@ -265,10 +265,10 @@ fn test_plain_tiff_without_geokeys() {
     let unref_err = GeoTiffStreamReader::open(&unref_path);
     assert!(unref_err.is_err());
     match unref_err {
-        Err(RasterH3Error::InvalidParameter(msg)) => {
+        Err(DggsStreamError::InvalidParameter(msg)) => {
             assert!(msg.contains("no georeferencing tags"));
         }
-        _ => panic!("Expected RasterH3Error::InvalidParameter for unreferenced TIFF"),
+        _ => panic!("Expected DggsStreamError::InvalidParameter for unreferenced TIFF"),
     }
 
     // 2. TIFF with georeferencing tags but WITHOUT geokeys (no detected CRS)
@@ -286,14 +286,14 @@ fn test_plain_tiff_without_geokeys() {
     let err_res = MultiScanHorizonStreamer::new(reader.clone(), &unspec_config);
     assert!(err_res.is_err());
     match err_res {
-        Err(RasterH3Error::CrsNotDetected(msg)) => {
+        Err(DggsStreamError::CrsNotDetected(msg)) => {
             assert!(
                 msg.contains("No CRS detected in raster metadata"),
                 "Unexpected message: {}",
                 msg
             );
         }
-        _ => panic!("Expected RasterH3Error::CrsNotDetected when CRS is not detected"),
+        _ => panic!("Expected DggsStreamError::CrsNotDetected when CRS is not detected"),
     }
 
     // 2. When the user explicitly specifies a CRS, hexification succeeds

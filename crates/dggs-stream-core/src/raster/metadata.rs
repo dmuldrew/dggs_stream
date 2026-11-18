@@ -8,7 +8,7 @@ use std::io::{Read, Seek};
 use tiff::decoder::Decoder;
 use tiff::tags::Tag;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotransform::GeoTransform;
 
 /// Helper: GeoKey 1025 GTRasterTypeGeoKey: 1 = RasterPixelIsArea (default), 2 = RasterPixelIsPoint
@@ -32,7 +32,7 @@ pub fn extract_geotransform<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<
         if let Some(gt) = GeoTransform::from_model_transformation(&matrix) {
             gt
         } else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "GeoTIFF has no georeferencing tags (ModelTransformationTag or ModelTiepointTag+ModelPixelScaleTag); cannot map pixels to coordinates".into(),
             ));
         }
@@ -48,12 +48,12 @@ pub fn extract_geotransform<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<
             if let Some(gt) = GeoTransform::from_tiepoint_and_scale(&tiepoint, &scale) {
                 gt
             } else {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "GeoTIFF has no georeferencing tags (ModelTransformationTag or ModelTiepointTag+ModelPixelScaleTag); cannot map pixels to coordinates".into(),
                 ));
             }
         } else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "GeoTIFF has no georeferencing tags (ModelTransformationTag or ModelTiepointTag+ModelPixelScaleTag); cannot map pixels to coordinates".into(),
             ));
         }
@@ -74,7 +74,7 @@ pub fn extract_geotransform<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<
     // A non-finite or singular affine would surface later as whole-globe
     // bounds or an empty footprint; reject it here with a clear message.
     if !gt.is_valid() {
-        return Err(RasterH3Error::InvalidParameter(format!(
+        return Err(DggsStreamError::InvalidParameter(format!(
             "GeoTIFF georeferencing is not a finite, invertible affine transform: {gt:?}"
         )));
     }
@@ -183,7 +183,7 @@ pub fn parse_gdal_band_scaling(xml: &str, samples_per_pixel: u16) -> Result<Vec<
             .ok()
             .filter(|&b| b < bands.len())
             .ok_or_else(|| {
-                RasterH3Error::InvalidMetadata(format!(
+                DggsStreamError::InvalidMetadata(format!(
                     "GDAL_METADATA {} for sample {sample:?} does not name one of the {} bands",
                     if is_scale { "SCALE" } else { "OFFSET" },
                     bands.len()
@@ -194,7 +194,7 @@ pub fn parse_gdal_band_scaling(xml: &str, samples_per_pixel: u16) -> Result<Vec<
             .ok()
             .filter(|v| v.is_finite())
             .ok_or_else(|| {
-                RasterH3Error::InvalidMetadata(format!(
+                DggsStreamError::InvalidMetadata(format!(
                     "GDAL_METADATA band {} {} is not a finite number: {text:?}",
                     band + 1,
                     if is_scale { "SCALE" } else { "OFFSET" }
@@ -202,7 +202,7 @@ pub fn parse_gdal_band_scaling(xml: &str, samples_per_pixel: u16) -> Result<Vec<
             })?;
         if is_scale {
             if value == 0.0 {
-                return Err(RasterH3Error::InvalidMetadata(format!(
+                return Err(DggsStreamError::InvalidMetadata(format!(
                     "GDAL_METADATA band {} SCALE is zero",
                     band + 1
                 )));
@@ -840,7 +840,7 @@ mod tests {
             "Expected error when georeferencing tags are missing"
         );
         match res.err().unwrap() {
-            RasterH3Error::InvalidParameter(msg) => {
+            DggsStreamError::InvalidParameter(msg) => {
                 assert!(
                     msg.contains("no georeferencing tags"),
                     "Expected 'no georeferencing tags', got: {}",
