@@ -2,7 +2,7 @@ use crate::aggregator::cell_hash::H3BuildHasher;
 use std::collections::HashMap;
 use tiff::decoder::DecodingResult;
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::simd::SimdSpanAccumulate;
 
 use super::config::SpectralFormula;
@@ -18,7 +18,7 @@ pub struct MultiContinuousRecord {
     pub resolution: u8,
     /// Unsigned cell identifier in the selected grid.
     pub cell_id: u64,
-    pub accumulator: H3Accumulator,
+    pub accumulator: ContinuousAccumulator,
 }
 
 /// Per-stream options for continuous aggregation.
@@ -36,7 +36,7 @@ fn process_continuous_slice_into_maps<T: SimdSpanAccumulate + Default>(
     slice: &[T],
     native_nodata: Option<T>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
 ) {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("fma") {
@@ -60,7 +60,7 @@ unsafe fn process_continuous_slice_into_maps_fma<T: SimdSpanAccumulate + Default
     slice: &[T],
     native_nodata: Option<T>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
 ) {
     process_continuous_slice_into_maps_impl(ctx, slice, native_nodata, options, chunk_maps);
 }
@@ -71,7 +71,7 @@ fn process_continuous_slice_into_maps_impl<T: SimdSpanAccumulate + Default>(
     slice: &[T],
     native_nodata: Option<T>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
 ) {
     let emit = ctx.emit_nodata;
     let engine = ContinuousEngine {
@@ -140,7 +140,7 @@ impl<T: SimdSpanAccumulate> ContinuousEngine<T> {
     /// kernel sums stored values; use its affine image when representable.
     /// Otherwise calibrate individually so overflow cannot poison valid pixels.
     #[inline(always)]
-    fn span_accumulator(&self, slice: &[T]) -> H3Accumulator {
+    fn span_accumulator(&self, slice: &[T]) -> ContinuousAccumulator {
         let mut span_acc = T::accumulate_span(slice, self.native_nodata);
         if !self.scaling.is_identity() {
             span_acc.apply_affine(self.scaling.scale, self.scaling.offset);
@@ -150,7 +150,7 @@ impl<T: SimdSpanAccumulate> ContinuousEngine<T> {
                     && span_acc.max.is_finite()
                     && span_acc.m2.is_finite())
             {
-                span_acc = H3Accumulator::default();
+                span_acc = ContinuousAccumulator::default();
                 for &v in slice {
                     if let Some(value) = self.valid_sample(v) {
                         span_acc.update(value);
@@ -162,7 +162,7 @@ impl<T: SimdSpanAccumulate> ContinuousEngine<T> {
     }
 }
 
-impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngine<T> {
+impl<T: SimdSpanAccumulate> ScanlineEngine<T, ContinuousAccumulator> for ContinuousEngine<T> {
     type Sample = f64;
 
     /// A pixel is one observation of its cell: its samples in the same cell
@@ -174,32 +174,32 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
     }
 
     #[inline(always)]
-    fn new_acc(&self) -> H3Accumulator {
+    fn new_acc(&self) -> ContinuousAccumulator {
         if self.track_quantiles {
-            H3Accumulator::with_quantiles()
+            ContinuousAccumulator::with_quantiles()
         } else {
-            H3Accumulator::default()
+            ContinuousAccumulator::default()
         }
     }
 
     #[inline(always)]
-    fn clear_acc(&self, acc: &mut H3Accumulator) {
+    fn clear_acc(&self, acc: &mut ContinuousAccumulator) {
         acc.clear();
     }
 
     #[inline(always)]
-    fn has_samples(&self, acc: &H3Accumulator) -> bool {
+    fn has_samples(&self, acc: &ContinuousAccumulator) -> bool {
         // Under `emit` an empty run is kept: its cell was seen.
         acc.count > 0.0 || self.emit_nodata
     }
 
     #[inline(always)]
-    fn merge_acc(&self, dest: &mut H3Accumulator, src: &H3Accumulator) {
+    fn merge_acc(&self, dest: &mut ContinuousAccumulator, src: &ContinuousAccumulator) {
         dest.merge(src);
     }
 
     #[inline(always)]
-    fn accumulate_span(&self, acc: &mut H3Accumulator, slice: &[T]) {
+    fn accumulate_span(&self, acc: &mut ContinuousAccumulator, slice: &[T]) {
         let span_acc = self.span_accumulator(slice);
         if span_acc.count > 0.0 {
             acc.merge(&span_acc);
@@ -216,7 +216,7 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
     }
 
     #[inline(always)]
-    fn accumulate_span_multi(&self, run_accs: &mut [H3Accumulator], slice: &[T]) {
+    fn accumulate_span_multi(&self, run_accs: &mut [ContinuousAccumulator], slice: &[T]) {
         let span_acc = self.span_accumulator(slice);
         if span_acc.count > 0.0 {
             for acc in run_accs.iter_mut() {
@@ -245,7 +245,7 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, H3Accumulator> for ContinuousEngin
     }
 
     #[inline(always)]
-    fn update_sample(&self, acc: &mut H3Accumulator, sample: f64, weight: f64) {
+    fn update_sample(&self, acc: &mut ContinuousAccumulator, sample: f64, weight: f64) {
         if self.emit_nodata && sample.is_nan() {
             return;
         }
@@ -322,7 +322,7 @@ pub fn process_continuous_chunk_payload_into(
     decoding_result: &DecodingResult,
     nodata: Option<f64>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
 ) -> bool {
     process_continuous_borrowed_into(
         window,
@@ -339,7 +339,7 @@ pub fn process_continuous_borrowed_into(
     samples: super::borrowed::BorrowedSamples<'_>,
     nodata: Option<f64>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, H3Accumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
 ) -> bool {
     if !window.emit_nodata
         && window.samples_per_pixel <= 1
@@ -381,7 +381,7 @@ mod tests {
             spectral_formula: None,
             track_quantiles: true,
         };
-        let bits = |maps: &[HashMap<u64, H3Accumulator, H3BuildHasher>]| {
+        let bits = |maps: &[HashMap<u64, ContinuousAccumulator, H3BuildHasher>]| {
             let mut out: Vec<_> = maps
                 .iter()
                 .enumerate()

@@ -8,7 +8,7 @@ use dggs_stream_core::aggregator::multi_horizon::coordinates::eviction_north_bou
 use dggs_stream_core::aggregator::multi_horizon::{
     continuous_streamer::ContinuousKernel, MultiHorizonStreamer, MultiResolutionConfig,
 };
-use dggs_stream_core::aggregator::{H3Accumulator, SamplingPattern};
+use dggs_stream_core::aggregator::{ContinuousAccumulator, SamplingPattern};
 use dggs_stream_core::crs::transformer::CrsTransformer;
 use dggs_stream_core::raster::{
     geotiff::GeoTiffStreamReader, geotransform::GeoTransform, RasterChunk,
@@ -118,7 +118,7 @@ fn utm_raster_retains_cells_without_a_certificate() {
     assert!(stream.is_finished());
 
     // Compute ground-truth reference in memory
-    let mut expected = HashMap::<u64, H3Accumulator>::new();
+    let mut expected = HashMap::<u64, ContinuousAccumulator>::new();
     for r in 0..96 {
         for c in 0..128 {
             let val = ((c * 11 + r * 5) % 37) as f64 + 1.0;
@@ -210,7 +210,7 @@ fn albers_raster_evicts_early_soundly() {
     assert!(stream.is_finished());
 
     // Compute ground-truth reference in memory
-    let mut expected = HashMap::<u64, H3Accumulator>::new();
+    let mut expected = HashMap::<u64, ContinuousAccumulator>::new();
     for r in 0..96 {
         for c in 0..128 {
             let val = ((c * 11 + r * 5) % 37) as f64 + 1.0;
@@ -472,7 +472,7 @@ fn albers_wide_rows_evict_by_row_soundly_and_promptly() {
     assert!(stream.is_finished());
     assert_eq!(stream.spill_run_count(), 0);
 
-    let mut expected = HashMap::<u64, H3Accumulator>::new();
+    let mut expected = HashMap::<u64, ContinuousAccumulator>::new();
     for r in 0..height {
         for c in 0..width {
             let val = ((c * 7 + r * 13) % 29) as f64 + 1.0;
@@ -576,7 +576,7 @@ fn albers_raster_beyond_the_cut_aggregates_each_cell_once() {
     }
     assert!(stream.is_finished());
 
-    let mut expected = HashMap::<u64, H3Accumulator>::new();
+    let mut expected = HashMap::<u64, ContinuousAccumulator>::new();
     for r in 0..height {
         for c in 0..width {
             let val = ((c * 7 + r * 13) % 29) as f64 + 1.0;

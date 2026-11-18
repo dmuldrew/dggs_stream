@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use super::eviction_space::CellKeys;
 use super::spill::table_bytes;
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::aggregator::horizon_streamer::compute_cell_south_lat;
 use crate::aggregator::quantiles::QuantileSketch;
@@ -34,7 +34,7 @@ pub trait AccumulatorMerge: Clone + Send + Sync + 'static {
     }
 }
 
-impl AccumulatorMerge for H3Accumulator {
+impl AccumulatorMerge for ContinuousAccumulator {
     fn heap_bytes(&self) -> usize {
         self.quantiles.as_ref().map_or(0, |q| {
             size_of::<QuantileSketch>()
@@ -45,7 +45,7 @@ impl AccumulatorMerge for H3Accumulator {
 
     #[inline(always)]
     fn merge(&mut self, other: &Self) {
-        H3Accumulator::merge(self, other);
+        ContinuousAccumulator::merge(self, other);
     }
 }
 
@@ -418,7 +418,7 @@ mod tests {
     use super::*;
     use h3o::{LatLng, Resolution};
 
-    fn recounted(map: &ShardedResolutionMap<H3Accumulator>) -> usize {
+    fn recounted(map: &ShardedResolutionMap<ContinuousAccumulator>) -> usize {
         let dynamic: usize = map
             .shards
             .iter()
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn incremental_estimate_matches_full_recount() {
-        let mut map = ShardedResolutionMap::<H3Accumulator>::new();
+        let mut map = ShardedResolutionMap::<ContinuousAccumulator>::new();
         let res = Resolution::try_from(7).unwrap();
         let cells: Vec<u64> = (0..2000)
             .map(|i| {
@@ -440,9 +440,9 @@ mod tests {
             .collect();
         for (i, &cell) in cells.iter().enumerate() {
             let mut acc = if i % 3 == 0 {
-                H3Accumulator::with_quantiles()
+                ContinuousAccumulator::with_quantiles()
             } else {
-                H3Accumulator::default()
+                ContinuousAccumulator::default()
             };
             acc.update(i as f64);
             map.merge_owned(cell, acc);
@@ -454,7 +454,7 @@ mod tests {
         }
         assert_eq!(map.estimated_bytes(), 0);
         for &cell in &cells[..500] {
-            map.merge_owned(cell, H3Accumulator::new(1.0));
+            map.merge_owned(cell, ContinuousAccumulator::new(1.0));
         }
         map.set_eviction_enabled(false);
         assert_eq!(map.estimated_bytes(), recounted(&map));

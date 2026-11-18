@@ -16,7 +16,7 @@ use std::ffi::{c_char, c_void, CString};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::aggregator::multi_horizon::{
     decode_partial_state, encode_partial_state, plan_partitions, MultiCategoricalHorizonStreamer,
@@ -377,7 +377,7 @@ unsafe fn put<T>(v: duckdb_vector, row: usize, value: T) {
     unsafe { *(duckdb_vector_get_data(v) as *mut T).add(row) = value };
 }
 
-impl MergeState for H3Accumulator {
+impl MergeState for ContinuousAccumulator {
     const FIELDS: &'static [(&'static str, DuckDBType)] = CONTINUOUS_FIELDS;
 
     fn decode(bytes: &[u8]) -> Result<Self> {
@@ -385,7 +385,7 @@ impl MergeState for H3Accumulator {
     }
 
     fn merge(&mut self, other: &Self) {
-        H3Accumulator::merge(self, other);
+        ContinuousAccumulator::merge(self, other);
     }
 
     unsafe fn write(&self, c: &[duckdb_vector], row: usize) {
@@ -642,7 +642,7 @@ unsafe fn register_merge<S: MergeState>(
 pub unsafe fn register_merge_functions(con: duckdb_connection) -> std::result::Result<(), String> {
     // SAFETY: forwards the caller's live connection.
     unsafe {
-        register_merge::<H3Accumulator>(con, "h3_merge_partials")?;
+        register_merge::<ContinuousAccumulator>(con, "h3_merge_partials")?;
         register_merge::<CategoricalAccumulator>(con, "h3_merge_categorical_partials")
     }
 }

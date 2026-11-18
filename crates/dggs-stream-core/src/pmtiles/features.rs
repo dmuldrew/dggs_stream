@@ -6,7 +6,7 @@ use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BinaryHeap, HashMap};
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::pmtiles::mvt::{MercatorPoint, MvtFeature, MvtLayer, MvtValue, PropertyFilter};
 use crate::pmtiles::pyramid::{for_each_cell_tile_mercator, tile_xy_to_bbox};
 use crate::pmtiles::writer::PmtilesWriter;
@@ -62,7 +62,7 @@ impl ResolutionAccumulatorStats {
         }
     }
 
-    pub fn record(&mut self, acc: &H3Accumulator) {
+    pub fn record(&mut self, acc: &ContinuousAccumulator) {
         self.cell_count += 1;
         let mean = acc.mean();
         let sum = acc.sum;

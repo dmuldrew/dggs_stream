@@ -4,7 +4,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::multi_horizon::partial::PartialState;
 use crate::aggregator::multi_horizon::sharded_map::AccumulatorMerge;
 use crate::aggregator::multi_horizon::spill::SpillAccumulator;
@@ -18,7 +18,7 @@ use crate::error::{DggsStreamError, Result};
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AreaAccumulator {
     pixel_count: f64,
-    area_stats: H3Accumulator,
+    area_stats: ContinuousAccumulator,
 }
 
 impl AreaAccumulator {
@@ -58,7 +58,7 @@ impl AreaAccumulator {
     }
 
     /// Area-weighted statistics; `count` is retained area in square metres.
-    pub fn area_stats(&self) -> &H3Accumulator {
+    pub fn area_stats(&self) -> &ContinuousAccumulator {
         &self.area_stats
     }
 
@@ -95,7 +95,7 @@ impl SpillAccumulator for AreaAccumulator {
                 "invalid pixel count",
             ));
         }
-        let area_stats = H3Accumulator::read_state(input, limit)?;
+        let area_stats = ContinuousAccumulator::read_state(input, limit)?;
         if (pixel_count == 0.0) != (area_stats.count == 0.0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

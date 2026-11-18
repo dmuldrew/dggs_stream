@@ -71,7 +71,7 @@ impl CategoricalAccumulator {
     #[inline(always)]
     pub fn update_weighted(&mut self, category: i64, weight: f64) {
         // NaN slips past `weight <= 0.0`, and an infinite weight can never be
-        // outvoted: require a positive finite weight, as `H3Accumulator` does.
+        // outvoted: require a positive finite weight, as `ContinuousAccumulator` does.
         if !(weight.is_finite() && weight > 0.0) {
             return;
         }
