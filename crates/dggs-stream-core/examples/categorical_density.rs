@@ -90,6 +90,8 @@ fn class_at(x: u32, y: u32, speckle: f64, local: bool) -> u8 {
     class
 }
 
+/// User CPU, system CPU (seconds) and peak RSS (bytes) of this process.
+#[cfg(unix)]
 fn rusage() -> (f64, f64, u64) {
     // SAFETY: `getrusage` fills the zeroed struct it is given and has no other effect.
     let u = unsafe {
@@ -101,6 +103,12 @@ fn rusage() -> (f64, f64, u64) {
     // `ru_maxrss` is in kilobytes on Linux but already in bytes on macOS.
     let scale = if cfg!(target_os = "macos") { 1 } else { 1024 };
     (t(u.ru_utime), t(u.ru_stime), u.ru_maxrss as u64 * scale)
+}
+
+/// `getrusage` is Unix-only: CPU times and peak RSS are not measured here and print as 0.
+#[cfg(not(unix))]
+fn rusage() -> (f64, f64, u64) {
+    (0.0, 0.0, 0)
 }
 
 fn main() {
