@@ -213,7 +213,7 @@ fn stream_once(
                         sum.weight += a.count;
                         sum.digest = sum.digest.wrapping_add(cell_hash([
                             u64::from(r.resolution),
-                            r.h3_index,
+                            r.cell_id,
                             a.count.to_bits(),
                             a.sum.to_bits(),
                             a.min.to_bits(),
@@ -238,7 +238,7 @@ fn stream_once(
                         r.accumulator
                             .for_each_class(|class, count| classes.push((class, count.to_bits())));
                         classes.sort_unstable();
-                        let fields = [u64::from(r.resolution), r.h3_index]
+                        let fields = [u64::from(r.resolution), r.cell_id]
                             .into_iter()
                             .chain(classes.iter().flat_map(|&(c, n)| [c as u64, n]));
                         sum.weight += r.accumulator.total_count;

@@ -14,7 +14,8 @@ use super::walker::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiCategoricalRecord {
     pub resolution: u8,
-    pub h3_index: u64,
+    /// Unsigned cell identifier in the selected grid.
+    pub cell_id: u64,
     pub accumulator: CategoricalAccumulator,
 }
 
@@ -62,7 +63,7 @@ impl CategoricalLongCursor {
     /// Replace any remaining rows with the categories of `rec`, sorted by category.
     pub fn load(&mut self, rec: &MultiCategoricalRecord) {
         let acc = &rec.accumulator;
-        self.cell_u64 = rec.h3_index;
+        self.cell_u64 = rec.cell_id;
         self.resolution = rec.resolution;
         self.total_count = acc.total_count;
         self.distinct_classes = acc.unique_classes() as i64;

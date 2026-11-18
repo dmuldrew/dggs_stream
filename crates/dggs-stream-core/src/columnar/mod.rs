@@ -654,13 +654,13 @@ impl RecordBatch {
         for &col_idx in &active_indices {
             let col = match col_idx {
                 0 => ColumnArray::UInt64 {
-                    values: records.iter().map(|r| r.h3_index).collect(),
+                    values: records.iter().map(|r| r.cell_id).collect(),
                     validity: None,
                 },
                 1 => {
                     let mut values = Vec::with_capacity(n);
                     for r in records {
-                        let bytes = fast_hex_u64(r.h3_index, &mut hex_buf);
+                        let bytes = fast_hex_u64(r.cell_id, &mut hex_buf);
                         let s = std::str::from_utf8(bytes).unwrap_or_default().to_owned();
                         values.push(s);
                     }
@@ -688,7 +688,7 @@ impl RecordBatch {
                 9 => {
                     let mut values = Vec::with_capacity(n);
                     for r in records {
-                        if let Some(len) = cell_index_to_wkb(grid, r.h3_index, &mut wkb_buf) {
+                        if let Some(len) = cell_index_to_wkb(grid, r.cell_id, &mut wkb_buf) {
                             values.push(wkb_buf[..len].to_vec());
                         } else {
                             values.push(Vec::new());
@@ -799,13 +799,13 @@ impl RecordBatch {
         for &col_idx in &active_indices {
             let col = match col_idx {
                 0 => ColumnArray::UInt64 {
-                    values: records.iter().map(|r| r.h3_index).collect(),
+                    values: records.iter().map(|r| r.cell_id).collect(),
                     validity: None,
                 },
                 1 => {
                     let mut values = Vec::with_capacity(n);
                     for r in records {
-                        let bytes = fast_hex_u64(r.h3_index, &mut hex_buf);
+                        let bytes = fast_hex_u64(r.cell_id, &mut hex_buf);
                         values.push(std::str::from_utf8(bytes).unwrap_or_default().to_owned());
                     }
                     ColumnArray::Utf8 {
@@ -869,7 +869,7 @@ impl RecordBatch {
                 12 => {
                     let mut values = Vec::with_capacity(n);
                     for r in records {
-                        if let Some(len) = cell_index_to_wkb(grid, r.h3_index, &mut wkb_buf) {
+                        if let Some(len) = cell_index_to_wkb(grid, r.cell_id, &mut wkb_buf) {
                             values.push(wkb_buf[..len].to_vec());
                         } else {
                             values.push(Vec::new());
@@ -1169,7 +1169,7 @@ impl CategoricalBatchReader {
                 } else {
                     // Only `NodataPolicy::Emit` streams hold such cells: one row with
                     // no samples stands for the cell.
-                    empty_cell = Some((rec.h3_index, rec.resolution));
+                    empty_cell = Some((rec.cell_id, rec.resolution));
                 }
             }) {
                 Ok(0) => self.finished = true,

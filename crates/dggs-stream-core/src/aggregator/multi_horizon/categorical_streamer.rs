@@ -82,7 +82,7 @@ impl HorizonStreamKernel for CategoricalKernel {
     fn make_record(&self, resolution: u8, cell_u64: u64, acc: Self::Accumulator) -> Self::Record {
         MultiCategoricalRecord {
             resolution,
-            h3_index: cell_u64,
+            cell_id: cell_u64,
             accumulator: acc,
         }
     }
@@ -242,12 +242,12 @@ impl MultiCategoricalHorizonStreamer {
         };
         let drained = match &mut self.transfer {
             Some(transfer) => {
-                transfer.drain_into(max_rows, |i, resolution, h3_index, accumulator| {
+                transfer.drain_into(max_rows, |i, resolution, cell_id, accumulator| {
                     consumer(
                         i,
                         MultiCategoricalRecord {
                             resolution,
-                            h3_index,
+                            cell_id,
                             accumulator,
                         },
                     )

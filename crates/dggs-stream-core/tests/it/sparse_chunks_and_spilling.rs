@@ -216,12 +216,12 @@ fn test_low_budget_triggers_spill_runs_and_matches_reference() {
             assert!(
                 actual
                     .insert(
-                        record.h3_index,
+                        record.cell_id,
                         (record.accumulator.count, record.accumulator.sum)
                     )
                     .is_none(),
                 "Duplicate cell emitted: {:x}",
-                record.h3_index
+                record.cell_id
             );
         }
     }
@@ -319,8 +319,8 @@ fn stream_continuous(
         for rec in batch {
             let acc = &rec.accumulator;
             let row = (acc.count, acc.sum, acc.min, acc.max, acc.quantile(0.5));
-            let previous = cells.insert((rec.resolution, rec.h3_index), row);
-            assert!(previous.is_none(), "duplicate record {:x}", rec.h3_index);
+            let previous = cells.insert((rec.resolution, rec.cell_id), row);
+            assert!(previous.is_none(), "duplicate record {:x}", rec.cell_id);
         }
     }
     assert!(stream.is_finished());
@@ -391,8 +391,8 @@ fn stream_categorical(
             rec.accumulator.for_each_class(|class, count| {
                 classes.insert(class, count);
             });
-            let previous = cells.insert((rec.resolution, rec.h3_index), classes);
-            assert!(previous.is_none(), "duplicate record {:x}", rec.h3_index);
+            let previous = cells.insert((rec.resolution, rec.cell_id), classes);
+            assert!(previous.is_none(), "duplicate record {:x}", rec.cell_id);
         }
     }
     Streamed {

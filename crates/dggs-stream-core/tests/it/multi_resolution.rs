@@ -51,7 +51,7 @@ fn test_multi_resolution_direct_ground_truth_exact_match() {
             multi_res_map
                 .get_mut(&res)
                 .unwrap()
-                .insert(rec.h3_index, rec);
+                .insert(rec.cell_id, rec);
         }
     }
 
@@ -72,7 +72,7 @@ fn test_multi_resolution_direct_ground_truth_exact_match() {
             }
             for rec in batch {
                 total_single_mass += rec.accumulator.count;
-                single_cells.insert(rec.h3_index, rec.accumulator);
+                single_cells.insert(rec.cell_id, rec.accumulator);
             }
         }
 
@@ -148,7 +148,7 @@ fn test_multi_resolution_categorical_direct_ground_truth_exact_match() {
             multi_cat_map
                 .get_mut(&res)
                 .unwrap()
-                .insert(rec.h3_index, rec);
+                .insert(rec.cell_id, rec);
         }
     }
 
@@ -168,7 +168,7 @@ fn test_multi_resolution_categorical_direct_ground_truth_exact_match() {
             }
             for rec in batch {
                 total_single_mass += rec.accumulator.total_count;
-                single_cells.insert(rec.h3_index, rec.accumulator);
+                single_cells.insert(rec.cell_id, rec.accumulator);
             }
         }
 
@@ -264,7 +264,7 @@ fn test_multi_resolution_fusion_supersampling_exact_match() {
             multi_res_map
                 .get_mut(&res)
                 .unwrap()
-                .insert(rec.h3_index, rec);
+                .insert(rec.cell_id, rec);
         }
     }
 
@@ -286,7 +286,7 @@ fn test_multi_resolution_fusion_supersampling_exact_match() {
             }
             for rec in batch {
                 total_single_mass += rec.accumulator.count;
-                single_cells.insert(rec.h3_index, rec.accumulator);
+                single_cells.insert(rec.cell_id, rec.accumulator);
             }
         }
 
@@ -367,7 +367,7 @@ fn test_multi_resolution_categorical_supersampling_exact_match() {
             multi_cat_map
                 .get_mut(&res)
                 .unwrap()
-                .insert(rec.h3_index, rec);
+                .insert(rec.cell_id, rec);
         }
     }
 
@@ -388,7 +388,7 @@ fn test_multi_resolution_categorical_supersampling_exact_match() {
             }
             for rec in batch {
                 total_single_mass += rec.accumulator.total_count;
-                single_cells.insert(rec.h3_index, rec.accumulator);
+                single_cells.insert(rec.cell_id, rec.accumulator);
             }
         }
 

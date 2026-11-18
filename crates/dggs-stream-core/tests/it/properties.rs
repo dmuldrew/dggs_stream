@@ -103,7 +103,7 @@ proptest! {
             let batch = stream.fetch_next_batch(3).unwrap();
             if batch.is_empty() { break; }
             for rec in batch {
-                prop_assert!(seen.insert(rec.h3_index));
+                prop_assert!(seen.insert(rec.cell_id));
                 count += rec.accumulator.count;
                 sum += rec.accumulator.sum;
             }

@@ -196,7 +196,7 @@ impl PartitionedBatchReader {
                         states.push(encode_partial_state(&p.accumulator));
                         partials.push(MultiContinuousRecord {
                             resolution: p.resolution,
-                            h3_index: p.h3_index,
+                            cell_id: p.cell_id,
                             accumulator: p.accumulator,
                         });
                     },
@@ -233,7 +233,7 @@ impl PartitionedBatchReader {
                         states.push(encode_partial_state(&p.accumulator));
                         partials.push(MultiCategoricalRecord {
                             resolution: p.resolution,
-                            h3_index: p.h3_index,
+                            cell_id: p.cell_id,
                             accumulator: p.accumulator,
                         });
                     },

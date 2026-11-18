@@ -92,7 +92,7 @@ fn utm_raster_retains_cells_without_a_certificate() {
 
     for rec in first_batch {
         assert!(
-            actual.insert(rec.h3_index, rec.accumulator).is_none(),
+            actual.insert(rec.cell_id, rec.accumulator).is_none(),
             "Duplicate cell emitted"
         );
     }
@@ -104,7 +104,7 @@ fn utm_raster_retains_cells_without_a_certificate() {
         }
         for rec in batch {
             assert!(
-                actual.insert(rec.h3_index, rec.accumulator).is_none(),
+                actual.insert(rec.cell_id, rec.accumulator).is_none(),
                 "Duplicate cell emitted"
             );
         }
@@ -184,7 +184,7 @@ fn albers_raster_evicts_early_soundly() {
 
     for rec in first_batch {
         assert!(
-            actual.insert(rec.h3_index, rec.accumulator).is_none(),
+            actual.insert(rec.cell_id, rec.accumulator).is_none(),
             "Duplicate cell emitted"
         );
     }
@@ -196,7 +196,7 @@ fn albers_raster_evicts_early_soundly() {
         }
         for rec in batch {
             assert!(
-                actual.insert(rec.h3_index, rec.accumulator).is_none(),
+                actual.insert(rec.cell_id, rec.accumulator).is_none(),
                 "Duplicate cell emitted"
             );
         }
@@ -452,16 +452,16 @@ fn albers_wide_rows_evict_by_row_soundly_and_promptly() {
         let horizon_before = strictest;
         for rec in batch {
             // Records never lie north of a latitude horizon already published.
-            let south = dggs_stream_core::aggregator::compute_cell_south_lat(rec.h3_index);
+            let south = dggs_stream_core::aggregator::compute_cell_south_lat(rec.cell_id);
             assert!(
                 south <= horizon_before,
                 "cell {:x} (south {south}) emitted after the horizon reached {horizon_before}",
-                rec.h3_index
+                rec.cell_id
             );
             assert!(
-                actual.insert(rec.h3_index, rec.accumulator).is_none(),
+                actual.insert(rec.cell_id, rec.accumulator).is_none(),
                 "cell {:x} emitted twice",
-                rec.h3_index
+                rec.cell_id
             );
             if stream.processed_chunk_count() * 2 < chunks {
                 emitted_by_half += 1;
@@ -568,9 +568,9 @@ fn albers_raster_beyond_the_cut_aggregates_each_cell_once() {
         }
         for rec in batch {
             assert!(
-                actual.insert(rec.h3_index, rec.accumulator).is_none(),
+                actual.insert(rec.cell_id, rec.accumulator).is_none(),
                 "cell {:x} emitted twice",
-                rec.h3_index
+                rec.cell_id
             );
         }
     }

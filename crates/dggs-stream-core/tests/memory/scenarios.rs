@@ -190,7 +190,7 @@ impl Digest {
             values[4] = acc.quantile(0.5);
             values[5] = acc.quantile(0.9);
         }
-        self.add(record.h3_index, &values);
+        self.add(record.cell_id, &values);
     }
 
     fn record(&self, m: &mut Metrics) {
@@ -431,7 +431,7 @@ fn categorical_high_cardinality(variant: &str) -> Metrics {
                 values.clear();
                 values.push(acc.total_count);
                 values.extend(classes.iter().flat_map(|&(c, n)| [c as f64, n]));
-                digest.add(record.h3_index, &values);
+                digest.add(record.cell_id, &values);
             })
             .expect("stream");
         if n == 0 {

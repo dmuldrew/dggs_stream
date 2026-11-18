@@ -317,10 +317,10 @@ impl RasterTable for ContinuousTable {
                 .collect();
             for (out_idx, &orig_col) in proj_cols.iter().enumerate() {
                 match orig_col {
-                    0 => writer.fill_column(out_idx, batch_len, batch.iter().map(|r| r.h3_index)),
+                    0 => writer.fill_column(out_idx, batch_len, batch.iter().map(|r| r.cell_id)),
                     1 => writer.write_hex_column(
                         out_idx,
-                        batch.iter().map(|r| &r.h3_index),
+                        batch.iter().map(|r| &r.cell_id),
                         ctx.hex_buf,
                     ),
                     2 => fill_optional(&mut writer, out_idx, &stats, |s| s.mean),
@@ -362,7 +362,7 @@ impl RasterTable for ContinuousTable {
                 global.grid,
                 out_idx_wkb,
                 out_idx_geom,
-                batch.iter().map(|r| &r.h3_index),
+                batch.iter().map(|r| &r.cell_id),
                 ctx.wkb_buf,
             );
             if let Some(col) = out_idx_state {
