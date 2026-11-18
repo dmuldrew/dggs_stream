@@ -893,7 +893,7 @@ fn test_cross_engine_categorical_e2e_parity() {
     for row_res in pg_srf {
         let row = row_res.unwrap();
         pg_map.insert(
-            row.h3_index as u64,
+            row.cell_id as u64,
             CategoricalCellSummary {
                 majority_class: row.majority_class,
                 majority_fraction: row.majority_fraction,

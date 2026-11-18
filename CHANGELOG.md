@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rust PostgreSQL consumers of `PgContinuousRow` and `PgCategoricalRow` now use `cell_id` and `cell_hex` in place of `h3_index` and `h3_hex`.
+
 - Rust scan consumers now read the unsigned cell identifier from `cell_id` on `MultiContinuousRecord`, `MultiCategoricalRecord` and `PartialCell`. This replaces the `h3_index` field. SQL, Arrow and Parquet retain their grid-specific column names.
 
 - Rust: `H3ParquetWriter` is now `ParquetWriter`. The writer uses the grid in the scan configuration or streamer.

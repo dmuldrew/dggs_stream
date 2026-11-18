@@ -133,8 +133,8 @@ fn aggregate_srfs_match_the_rust_srfs() {
             .map(|r| {
                 let r = r.unwrap();
                 vec![
-                    Some(r.h3_index.to_string()),
-                    Some(r.h3_hex),
+                    Some(r.cell_id.to_string()),
+                    Some(r.cell_hex),
                     Some(r.mean.to_string()),
                     r.stddev.map(|s| s.to_string()),
                     Some(r.count.to_string()),
