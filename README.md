@@ -8,6 +8,10 @@
 
 A pure-Rust engine that streams multi-gigabyte geospatial raster files (GeoTIFF, Cloud-Optimized GeoTIFFs) in a single pass and aggregates them into the cells of a **Discrete Global Grid System (DGGS)**: [Uber H3](https://h3geo.org/) hexagons, [A5](https://a5geo.org/) pentagons, [Google S2](https://s2geometry.io/) cells or [HEALPix](https://healpix.sourceforge.io/) cells. It also generates cloud-native **PMTiles v3** vector pyramids for instant web visualization. Aggregation runs in a [bounded memory budget](docs/engineering.md#1-southernmost-scan-line-horizon-eviction) and spills to disk when needed. The same engine ships as a native DuckDB extension, DataFusion-style table providers, a Python/Polars package, a PostgreSQL extension and a command-line tool (see [Engines](#engines)).
 
+![Global cell boundaries on four Equal Earth maps: H3 hexagons and pentagons, A5 pentagons, S2 quadrilaterals, and HEALPix curved-edge quadrilaterals.](assets/global-grid-comparison.svg)
+
+Each panel shows every cell at the indicated level. Cell counts give a common reference because each grid defines its own resolution scale. [Compare grid properties](docs/grids.md).
+
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
 Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
