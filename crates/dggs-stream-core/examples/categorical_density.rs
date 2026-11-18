@@ -173,7 +173,7 @@ fn run(args: &[String]) {
                 let (maj, cnt, frac) = acc.majority();
                 lines.push(format!(
                     "{:016x} {} {} {:x} {:x} {} {:x} {:x} {:?} {}",
-                    rec.h3_index,
+                    rec.cell_id,
                     rec.resolution,
                     maj,
                     cnt.to_bits(),
