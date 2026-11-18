@@ -384,8 +384,8 @@ fn continuous_aggregate_srf_matches_rust_srf() {
         .iter()
         .map(|r| {
             vec![
-                Some(r.h3_index.to_string()),
-                Some(r.h3_hex.clone()),
+                Some(r.cell_id.to_string()),
+                Some(r.cell_hex.clone()),
                 Some(r.mean.to_string()),
                 r.stddev.map(|s| s.to_string()),
                 Some(r.count.to_string()),

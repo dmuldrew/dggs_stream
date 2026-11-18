@@ -906,8 +906,8 @@ fn bytea_text(bytes: &[u8]) -> String {
 
 fn continuous_values(r: PgContinuousRow) -> RowText {
     vec![
-        Some(r.h3_index.to_string()),
-        Some(r.h3_hex),
+        Some(r.cell_id.to_string()),
+        Some(r.cell_hex),
         // NaN marks a cell without samples and without a NoData value: SQL NULL.
         (!r.mean.is_nan()).then(|| float_text(r.mean)),
         r.stddev.map(float_text),
@@ -922,8 +922,8 @@ fn continuous_values(r: PgContinuousRow) -> RowText {
 
 fn categorical_values(r: PgCategoricalRow) -> RowText {
     vec![
-        Some(r.h3_index.to_string()),
-        Some(r.h3_hex),
+        Some(r.cell_id.to_string()),
+        Some(r.cell_hex),
         (!r.majority_is_null).then(|| r.majority_class.to_string()),
         Some(float_text(r.majority_fraction)),
         Some(float_text(r.majority_count)),

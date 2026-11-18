@@ -129,11 +129,11 @@ fn srfs_aggregate_onto_every_grid() {
             for row in PgContinuousSrf::open_for(grid, path, vec![res], None, None, None).unwrap() {
                 let row = row.unwrap();
                 // The bigint is the id's bit pattern; the hex text is the unsigned id.
-                let cell = row.h3_index as u64;
-                assert_eq!(row.h3_hex, format!("{cell:x}"));
+                let cell = row.cell_id as u64;
+                assert_eq!(row.cell_hex, format!("{cell:x}"));
                 assert_eq!(
-                    u64::from_str_radix(&row.h3_hex, 16).unwrap() as i64,
-                    row.h3_index
+                    u64::from_str_radix(&row.cell_hex, 16).unwrap() as i64,
+                    row.cell_id
                 );
                 assert_eq!(row.resolution, i16::from(res));
                 assert_eq!(row.wkb, grid_to_wkb_u64(grid, cell).unwrap());
@@ -146,8 +146,8 @@ fn srfs_aggregate_onto_every_grid() {
                     .unwrap()
                     .map(|row| {
                         let row = row.unwrap();
-                        assert_eq!(row.h3_hex, format!("{:x}", row.h3_index as u64));
-                        (row.h3_index as u64, row.total_count)
+                        assert_eq!(row.cell_hex, format!("{:x}", row.cell_id as u64));
+                        (row.cell_id as u64, row.total_count)
                     })
                     .collect();
             let want_totals: BTreeMap<u64, f64> = want.iter().map(|(k, v)| (*k, v.0)).collect();
@@ -322,7 +322,7 @@ fn nodata_policy_and_decimals_on_every_grid() {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-            rows.sort_by_key(|r| r.h3_index);
+            rows.sort_by_key(|r| r.cell_id);
             rows
         };
         let omit = open(OutputPolicy::default());
@@ -345,8 +345,8 @@ fn nodata_policy_and_decimals_on_every_grid() {
         assert_eq!(kept.len(), omit.len(), "{grid}");
         for (a, b) in kept.iter().zip(&omit) {
             assert_eq!(
-                (a.h3_index, a.count, a.min, a.max),
-                (b.h3_index, b.count, b.min, b.max)
+                (a.cell_id, a.count, a.min, a.max),
+                (b.cell_id, b.count, b.min, b.max)
             );
             assert!((a.mean - b.mean).abs() <= 1e-12 * b.mean.abs(), "{grid}");
             assert_eq!(a.stddev.is_some(), b.stddev.is_some());
