@@ -55,8 +55,8 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`. |
 | `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics instead of NULL. |
 | `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
-| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'sample'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
-| `sample_method` | `VARCHAR` | `'bilinear'` | With `transfer := 'sample'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'interpolate'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `interpolation` | `VARCHAR` | `'bilinear'` | With `transfer := 'interpolate'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
 | `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
 | `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
 | `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
@@ -180,8 +180,8 @@ On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can a
 | `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`; the long format does not return the empty cells. |
 | `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics (and class) instead of NULL. |
 | `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
-| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'sample'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
-| `sample_method` | `VARCHAR` | `'bilinear'` | With `transfer := 'sample'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'interpolate'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `interpolation` | `VARCHAR` | `'bilinear'` | With `transfer := 'interpolate'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
 | `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
 | `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
 | `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |

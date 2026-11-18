@@ -1,4 +1,4 @@
-//! The `sample` and `overlay` transfer modes against analytic rasters, on every grid.
+//! The `interpolate` and `overlay` transfer modes against analytic rasters, on every grid.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -9,7 +9,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
 use dggs_stream_core::aggregator::H3Accumulator;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::resolution::area_matched_resolution;
-use dggs_stream_core::transfer::{SampleMethod, TransferMode};
+use dggs_stream_core::transfer::{Interpolation, TransferMode};
 use dggs_stream_core::GridKind;
 
 use crate::helpers::TestGeoTiffBuilder;
@@ -77,12 +77,12 @@ fn sampling_fills_cells_finer_than_pixels_with_interpolated_values() {
         let res = matched(grid, 2);
         let centres = scan(&path, &config(grid, res, TransferMode::AssignCenters));
         for method in [
-            SampleMethod::Nearest,
-            SampleMethod::Bilinear,
-            SampleMethod::Bicubic,
-            SampleMethod::Lanczos,
+            Interpolation::Nearest,
+            Interpolation::Bilinear,
+            Interpolation::Bicubic,
+            Interpolation::Lanczos,
         ] {
-            let sampled = scan(&path, &config(grid, res, TransferMode::Sample(method)));
+            let sampled = scan(&path, &config(grid, res, TransferMode::Interpolate(method)));
             // Centre assignment leaves most fine cells empty; sampling fills them.
             assert!(
                 sampled.len() > 3 * centres.len(),
@@ -106,19 +106,23 @@ fn sampling_fills_cells_finer_than_pixels_with_interpolated_values() {
             }
             // f32 pixels hold the plane to about 1e-4; one pixel spans 4 units.
             let tolerance = match method {
-                SampleMethod::Nearest => 4.0,
-                SampleMethod::Bilinear | SampleMethod::Bicubic => 2e-3,
-                SampleMethod::Lanczos => 0.2,
+                Interpolation::Nearest => 4.0,
+                Interpolation::Bilinear | Interpolation::Bicubic => 2e-3,
+                Interpolation::Lanczos => 0.2,
             };
             assert!(worst < tolerance, "{grid} {method:?}: off by {worst}");
-            if method == SampleMethod::Nearest {
+            if method == Interpolation::Nearest {
                 assert!(worst > 0.1, "nearest should show the pixel steps");
             }
         }
         // Every cell with a pixel centre is also sampled.
         let sampled = scan(
             &path,
-            &config(grid, res, TransferMode::Sample(SampleMethod::Bilinear)),
+            &config(
+                grid,
+                res,
+                TransferMode::Interpolate(Interpolation::Bilinear),
+            ),
         );
         assert!(
             centres.keys().all(|cell| sampled.contains_key(cell)),
@@ -147,7 +151,11 @@ fn sampling_a_projected_raster_follows_its_crs() {
         let res = area_matched_resolution(grid, 900.0) + 1;
         let cells = scan(
             &path,
-            &config(grid, res, TransferMode::Sample(SampleMethod::Bilinear)),
+            &config(
+                grid,
+                res,
+                TransferMode::Interpolate(Interpolation::Bilinear),
+            ),
         );
         assert!(cells.len() > 64 * 64, "{grid}: {}", cells.len());
         let mut checked = 0;
@@ -272,7 +280,7 @@ fn overlay_of_a_constant_is_that_constant_and_skips_nodata() {
         let mut sample = config(
             grid,
             matched(grid, 1),
-            TransferMode::Sample(SampleMethod::Nearest),
+            TransferMode::Interpolate(Interpolation::Nearest),
         );
         sample.custom_nodata = Some(-9999.0);
         let valid = scan(&path, &sample);
@@ -308,7 +316,7 @@ fn categorical_transfers_keep_class_codes() {
         let sample = config(
             grid,
             matched(grid, 2),
-            TransferMode::Sample(SampleMethod::Nearest),
+            TransferMode::Interpolate(Interpolation::Nearest),
         );
         let cells = drain(&sample).unwrap();
         assert!(cells.len() > 3 * (W * H) as usize, "{grid}");
@@ -323,7 +331,7 @@ fn categorical_transfers_keep_class_codes() {
         let bilinear = config(
             grid,
             matched(grid, 2),
-            TransferMode::Sample(SampleMethod::Bilinear),
+            TransferMode::Interpolate(Interpolation::Bilinear),
         );
         let err = drain(&bilinear).unwrap_err().to_string();
         assert!(err.contains("nearest"), "{err}");
@@ -369,7 +377,11 @@ fn transfer_modes_refuse_options_of_the_centre_kernel() {
         .to_string()
         .contains("spectral"));
     // Filters apply to transferred cells too.
-    let mut filtered = config(GridKind::H3, 9, TransferMode::Sample(SampleMethod::Nearest));
+    let mut filtered = config(
+        GridKind::H3,
+        9,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
     filtered.min_mean = Some(2.0);
     assert!(scan(&path, &filtered).is_empty());
     filtered.min_mean = Some(0.5);
@@ -451,7 +463,7 @@ fn transfer_streamers_advance_explicitly() {
         });
     let res = matched(GridKind::H3, 0);
     for mode in [
-        TransferMode::Sample(SampleMethod::Nearest),
+        TransferMode::Interpolate(Interpolation::Nearest),
         TransferMode::OVERLAY,
     ] {
         let config = config(GridKind::H3, res, mode);
@@ -560,8 +572,8 @@ fn transfer_modes_skip_transparent_pixels() {
     for grid in GridKind::ALL {
         for (mode, offset) in [
             (TransferMode::AssignCenters, 0),
-            (TransferMode::Sample(SampleMethod::Nearest), 1),
-            (TransferMode::Sample(SampleMethod::Bilinear), 1),
+            (TransferMode::Interpolate(Interpolation::Nearest), 1),
+            (TransferMode::Interpolate(Interpolation::Bilinear), 1),
             (TransferMode::OVERLAY, -1),
         ] {
             let cells = scan(file.path(), &config(grid, matched(grid, offset), mode));

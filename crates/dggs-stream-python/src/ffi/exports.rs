@@ -96,9 +96,9 @@ struct PyExportOptions {
     nodata_policy: Option<String>,
     emit_nodata_value: Option<f64>,
     decimals: Option<i64>,
-    /// `assign_centers` (default), `sample` or `overlay`.
+    /// `assign_centers` (default), `interpolate` or `overlay`.
     transfer: Option<String>,
-    sample_method: Option<String>,
+    interpolation: Option<String>,
     overlay_weighted: Option<bool>,
     mass_preserve: Option<bool>,
 }
@@ -128,7 +128,7 @@ impl PyExportOptions {
         config.decimals = policy.decimals;
         config.transfer = dggs_stream_core::transfer::TransferMode::from_options(
             self.transfer.as_deref(),
-            self.sample_method.as_deref(),
+            self.interpolation.as_deref(),
             self.overlay_weighted,
             self.mass_preserve,
         )?;

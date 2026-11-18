@@ -42,8 +42,8 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--nodata-policy <omit\|emit>` | all | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
-| `--transfer <assign_centers\|sample\|overlay>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)) |
-| `--sample-method <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer sample` | Interpolation (default `bilinear`) |
+| `--transfer <assign_centers\|interpolate\|overlay>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)) |
+| `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer interpolate` | Interpolation (default `bilinear`) |
 | `--overlay-weighted <true\|false>` | `--transfer overlay` | `false` counts every touched pixel once |
 | `--mass-preserve` | `--transfer overlay` | Normalise each pixel's weights so `sum` adds up to the raster's total |
 | `--histogram <values\|N:min:max\|e0,e1,...>` | `ipc`, `jsonl` | Structured per-cell histogram (implies `-c`) |
@@ -158,7 +158,7 @@ dggs-stream-cli parquet elevation.tif --grid a5 -r auto-1 -o a5.parquet
 
 ```bash
 # Cells finer than the pixels: interpolate a value at each cell centre
-dggs-stream-cli jsonl elevation.tif -r auto+2 --transfer sample --sample-method bicubic
+dggs-stream-cli jsonl elevation.tif -r auto+2 --transfer interpolate --interpolation bicubic
 # Population counts: split each pixel across the cells it overlaps, keeping the total
 dggs-stream-cli parquet population.tif -r 7 --transfer overlay --mass-preserve -o pop.parquet
 # Per-cell histogram of a continuous raster in four bins, as fractions
