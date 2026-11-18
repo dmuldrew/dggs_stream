@@ -265,7 +265,7 @@ impl Accumulator for MergeAccumulator {
             State::Continuous(accumulator) => RecordBatch::from_continuous_records(
                 &[MultiContinuousRecord {
                     resolution: 0,
-                    h3_index: 0,
+                    cell_id: 0,
                     accumulator,
                 }],
                 &[],
@@ -274,7 +274,7 @@ impl Accumulator for MergeAccumulator {
             State::Categorical(accumulator) => RecordBatch::from_categorical_wide_records(
                 &[MultiCategoricalRecord {
                     resolution: 0,
-                    h3_index: 0,
+                    cell_id: 0,
                     accumulator: *accumulator,
                 }],
                 Some(&projection),
