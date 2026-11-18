@@ -4,7 +4,7 @@ use std::fs::{self};
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream_core::pmtiles::tiler::PmtilesTiler;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 
@@ -80,7 +80,7 @@ fn corrupt_chunk_exports_fail_and_preserve_existing_outputs() {
             row_group_size: 1,
             ..Default::default()
         };
-        assert!(H3ParquetWriter::process_raster_source_to_parquet(
+        assert!(ParquetWriter::process_raster_source_to_parquet(
             file.path(),
             &parquet,
             config.clone(),

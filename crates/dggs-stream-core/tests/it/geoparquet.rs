@@ -11,7 +11,7 @@ use tempfile::NamedTempFile;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
@@ -98,7 +98,7 @@ fn test_geoparquet_continuous_metadata_and_wkb() {
         ..Default::default()
     };
 
-    let total_written = H3ParquetWriter::write_continuous_streamer_to_parquet(
+    let total_written = ParquetWriter::write_continuous_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -186,7 +186,7 @@ fn test_geoparquet_compact_continuous() {
         ..Default::default()
     };
 
-    let total_written = H3ParquetWriter::write_continuous_streamer_to_parquet(
+    let total_written = ParquetWriter::write_continuous_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -238,7 +238,7 @@ fn test_geoparquet_categorical() {
         ..Default::default()
     };
 
-    let total_written = H3ParquetWriter::write_categorical_streamer_to_parquet(
+    let total_written = ParquetWriter::write_categorical_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -301,7 +301,7 @@ fn test_geoparquet_disabled_by_default() {
     };
     assert!(!parquet_config.geoparquet);
 
-    H3ParquetWriter::write_continuous_streamer_to_parquet(streamer, &parquet_path, parquet_config)
+    ParquetWriter::write_continuous_streamer_to_parquet(streamer, &parquet_path, parquet_config)
         .unwrap();
 
     let file = File::open(&parquet_path).unwrap();
@@ -344,7 +344,7 @@ fn test_geoparquet_raster_source_end_to_end() {
         ..Default::default()
     };
 
-    let written = H3ParquetWriter::process_raster_source_to_parquet(
+    let written = ParquetWriter::process_raster_source_to_parquet(
         tiff_path,
         parquet_path,
         config,
@@ -386,7 +386,7 @@ fn test_geoparquet_ogc_1_1_specification_deep_validation() {
         ..Default::default()
     };
 
-    let total = H3ParquetWriter::write_continuous_streamer_to_parquet(
+    let total = ParquetWriter::write_continuous_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -487,7 +487,7 @@ fn test_geoparquet_non_compact_categorical_metadata_and_columns() {
         ..Default::default()
     };
 
-    let total = H3ParquetWriter::write_categorical_streamer_to_parquet(
+    let total = ParquetWriter::write_categorical_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -549,7 +549,7 @@ fn test_geoparquet_column_projection_and_filtering() {
         ..Default::default()
     };
 
-    let total_written = H3ParquetWriter::write_continuous_streamer_to_parquet(
+    let total_written = ParquetWriter::write_continuous_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -642,7 +642,7 @@ fn export(tiff: &std::path::Path, out: &std::path::Path, res: u8) {
         row_group_size: 7,
         ..Default::default()
     };
-    H3ParquetWriter::write_continuous_streamer_to_parquet(streamer, out, pq).unwrap();
+    ParquetWriter::write_continuous_streamer_to_parquet(streamer, out, pq).unwrap();
 }
 
 #[test]
@@ -705,7 +705,7 @@ fn test_parquet_column_orders_readable_by_polars() {
             geoparquet,
             ..Default::default()
         };
-        H3ParquetWriter::write_continuous_streamer_to_parquet(
+        ParquetWriter::write_continuous_streamer_to_parquet(
             streamer,
             &parquet_file,
             parquet_config,
@@ -761,14 +761,14 @@ fn a5_unsigned_ids_round_trip_all_parquet_layouts() {
                 };
                 let raster = GeoTiffStreamReader::open(tif.path().to_str().unwrap()).unwrap();
                 if categorical {
-                    H3ParquetWriter::write_categorical_streamer_to_parquet(
+                    ParquetWriter::write_categorical_streamer_to_parquet(
                         MultiCategoricalHorizonStreamer::new(raster, &config).unwrap(),
                         &output,
                         options,
                     )
                     .unwrap();
                 } else {
-                    H3ParquetWriter::write_continuous_streamer_to_parquet(
+                    ParquetWriter::write_continuous_streamer_to_parquet(
                         MultiScanHorizonStreamer::new(raster, &config).unwrap(),
                         &output,
                         options,
@@ -788,6 +788,49 @@ fn a5_unsigned_ids_round_trip_all_parquet_layouts() {
                     "categorical={categorical}, compact={compact}, geo={geoparquet}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn parquet_writer_preserves_each_grids_index_schema_and_cell_id() {
+    use dggs_stream_core::grid::GridKind;
+    use parquet::basic::{ConvertedType, Type};
+
+    let dir = tempfile::tempdir().unwrap();
+    let tif = dir.path().join("one_pixel.tif");
+    // The centre lies on S2's south face, where IDs have their high bit set.
+    helpers::TestGeoTiffBuilder::new(1, 1)
+        .origin(140.0, -40.0)
+        .pixel_size(0.001)
+        .write_fn::<f32, _, _>(&tif, |_, _| 7.0)
+        .unwrap();
+    for grid in GridKind::ALL {
+        let expected = grid.cell_at(-40.0005, 140.0005, 10).unwrap();
+        if grid == GridKind::S2 {
+            assert!(expected > i64::MAX as u64);
+        }
+        let output = dir.path().join(format!("{grid}.parquet"));
+        let rows = ParquetWriter::process_raster_source_to_parquet(
+            &tif,
+            &output,
+            MultiResolutionConfig::single(10).with_grid(grid),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(rows, 1, "{grid}");
+        let reader = SerializedFileReader::new(File::open(output).unwrap()).unwrap();
+        let column = reader.metadata().file_metadata().schema_descr().column(0);
+        assert_eq!(column.name(), format!("{grid}_index"));
+        assert_eq!(column.physical_type(), Type::INT64);
+        let row = reader.get_row_iter(None).unwrap().next().unwrap().unwrap();
+        if grid == GridKind::H3 {
+            assert_eq!(column.converted_type(), ConvertedType::NONE);
+            assert!(column.logical_type_ref().is_none());
+            assert_eq!(row.get_long(0).unwrap(), i64::try_from(expected).unwrap());
+        } else {
+            assert_eq!(column.converted_type(), ConvertedType::UINT_64);
+            assert_eq!(row.get_ulong(0).unwrap(), expected, "{grid}");
         }
     }
 }

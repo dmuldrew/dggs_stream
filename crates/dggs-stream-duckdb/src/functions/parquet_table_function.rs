@@ -27,7 +27,7 @@ use crate::functions::bind_utils::{
     register_common_raster_named_parameters, BindHelper, ChunkWriter, ExecutionParams,
 };
 use crate::grid::GridKind;
-use crate::parquet::{H3ParquetWriter, ParquetExportConfig};
+use crate::parquet::{ParquetExportConfig, ParquetWriter};
 use crate::raster::mosaic::OverlapRule;
 
 /// Bind data parsed during SQL query planning
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn parquet_scan(info: duckdb_function_info, output: duckdb
             };
 
             let start = Instant::now();
-            let result = H3ParquetWriter::process_raster_source_to_parquet(
+            let result = ParquetWriter::process_raster_source_to_parquet(
                 &bind_data.file_path,
                 &bind_data.output_parquet,
                 config,
