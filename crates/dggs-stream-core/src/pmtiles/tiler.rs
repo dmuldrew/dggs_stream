@@ -765,6 +765,7 @@ impl H3PmtilesTiler {
             desc.fields_json,
             Some({
                 let mut extras = desc.extras;
+                extras.insert("grid".into(), json!(grid.as_str()));
                 let skipped = capped_cells.load(Ordering::Relaxed);
                 if skipped > 0 {
                     extras.insert(

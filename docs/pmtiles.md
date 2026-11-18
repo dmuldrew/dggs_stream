@@ -199,6 +199,8 @@ For massive multi-resolution archives containing tens of thousands or millions o
 
 ## Embedded Multi-Resolution Statistical Metadata (`resolution_stats`)
 
+The archive metadata includes a `grid` field (`h3`, `a5`, `s2`, or `healpix`). For an exact cell ID in a JavaScript client, read the grid’s hex-string property, such as `s2_hex`.
+
 dggs_stream automatically embeds rich statistical envelopes across all pyramid levels directly inside the PMTiles JSON metadata:
 ```json
 {
@@ -306,7 +308,7 @@ That's it — GeoTIFF to interactive, zoomable web map in three steps.
 
 ---
 
-## PMTiles Hexagon Studio Web Viewer
+## PMTiles Grid Studio Web Viewer
 
 dggs_stream includes a browser-based visual exploration studio for inspecting continuous and categorical H3 vector pyramids. It runs entirely client-side via MapLibre GL JS with HTTP byte-range streaming or offline drag-and-drop.
 

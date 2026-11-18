@@ -1398,6 +1398,51 @@ fn test_parquet_to_pmtiles_nullable_h3_column() {
     assert!(summary.total_tiles > 0);
 }
 
+#[test]
+fn s2_parquet_archive_preserves_grid_and_exact_hex_id() {
+    use parquet::{
+        data_type::Int64Type, file::writer::SerializedFileWriter,
+        schema::parser::parse_message_type,
+    };
+
+    // A level-30 S2 cell whose low bit is lost by conversion to a JavaScript Number.
+    let cell = 0x1000_0000_0000_0001_i64;
+    let dir = tempfile::tempdir().unwrap();
+    for empty in [true, false] {
+        let input = dir.path().join("cells.parquet");
+        let output = dir.path().join("cells.pmtiles");
+        let schema = parse_message_type("message cells { REQUIRED INT64 s2_index; }").unwrap();
+        let mut writer = SerializedFileWriter::new(
+            File::create(&input).unwrap(),
+            schema.into(),
+            Default::default(),
+        )
+        .unwrap();
+        if !empty {
+            let mut group = writer.next_row_group().unwrap();
+            let mut col = group.next_column().unwrap().unwrap();
+            col.typed::<Int64Type>()
+                .write_batch(&[cell], None, None)
+                .unwrap();
+            col.close().unwrap();
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        let summary = H3PmtilesTiler::process_parquet_to_pmtiles(&input, &output, None).unwrap();
+        assert_eq!(summary.valid_features, usize::from(!empty));
+        let metadata = read_pmtiles_metadata(output.to_str().unwrap());
+        assert_eq!(metadata["grid"], "s2");
+        assert_eq!(metadata["name"], "dggs_stream_pmtiles_export");
+        assert!(metadata["description"].as_str().unwrap().contains("s2"));
+        if !empty {
+            let features = archive_features(&std::fs::read(&output).unwrap());
+            assert!(features.iter().any(
+                |f| f.properties.get("s2_hex") == Some(&MvtValue::String(format!("{cell:x}")))
+            ));
+        }
+    }
+}
+
 /// Every feature in every tile of an archive. PMTiles tile data is a run of gzip
 /// members, and concatenated MVT tiles decode as one tile holding all their layers.
 fn archive_features(archive: &[u8]) -> Vec<mvt_decode::Feature> {
@@ -1541,6 +1586,7 @@ fn s2_detail_and_overview_layers_match_archive_metadata() {
     )
     .unwrap();
     let metadata = read_pmtiles_metadata(output.to_str().unwrap());
+    assert_eq!(metadata["grid"], "s2");
     let layer = metadata["vector_layers"][0]["id"].as_str().unwrap();
     assert_eq!(layer, "dggs_cells");
 

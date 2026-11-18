@@ -1,18 +1,18 @@
-# PMTiles Hexagon Studio
+# PMTiles Grid Studio
 
 [← Back to README](../README.md) · [PMTiles v3 Technical Details](../docs/pmtiles.md)
 
-A lightweight, GPU-accelerated web studio built on [MapLibre GL JS](https://maplibre.org/) and the [PMTiles v3 specification](https://github.com/protomaps/PMTiles) for visual inspection of multi-resolution H3 hexagonal vector tile pyramids.
+A lightweight, GPU-accelerated web studio built on [MapLibre GL JS](https://maplibre.org/) and the [PMTiles v3 specification](https://github.com/protomaps/PMTiles) for visual inspection of multi-resolution H3, A5, S2, and HEALPix vector tile pyramids.
 
 ## Highlights
 
 - **Zero Backend Services** — Runs entirely client-side via HTTP byte-range queries (`pmtiles.FetchSource`) or 100% offline via drag-and-drop (`pmtiles.FileSource`).
 - **Auto-Detects Continuous vs. Categorical** — Dynamically switches between continuous surfaces (elevation, temperature, NDVI) and discrete classifications (land cover, zoning, LANDFIRE fuel models).
-- **3D Hexagon Extrusion** — Extrude hexagons in WebGL with variable pitch, bearing, and property-based height scaling.
+- **3D Cell Extrusion** — Extrude cells in WebGL with variable pitch, bearing, and property-based height scaling.
 - **Resolution-Adaptive Color Calibration** — Automatically adapts color ramp min/max across pyramid zoom transitions.
 - **Built-in Cartographic Colormaps** — Turbo, Viridis, Magma, Plasma, Inferno, Cividis, Spectral, Coolwarm, Thermal, and categorical color tables.
 - **LANDFIRE FBFM40 Built-in** — Complete 40-class fire behavior palette with editable labels and live color pickers.
-- **Real-Time HUD & Tooltips** — Live viewport coordinates, zoom level, active H3 resolution, and cell attribute readouts on hover.
+- **Real-Time HUD & Tooltips** — Live viewport coordinates, zoom level, active grid resolution, and cell attribute readouts on hover.
 
 ---
 

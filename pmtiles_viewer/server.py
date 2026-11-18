@@ -151,7 +151,7 @@ def run(port=8080):
 
     server = ThreadingHTTPServer(('0.0.0.0', port), PMTilesHTTPRequestHandler)
     print("================================================================")
-    print(f"🚀 PMTiles Hexagon Studio running at: http://localhost:{port}/pmtiles_viewer/")
+    print(f"🚀 PMTiles Grid Studio running at: http://localhost:{port}/pmtiles_viewer/")
     print(f"   Serving directory: {os.getcwd()}")
     print("   (HTTP Byte-Range & CORS enabled)")
     print("================================================================")

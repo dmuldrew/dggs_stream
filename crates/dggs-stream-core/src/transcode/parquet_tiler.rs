@@ -13,9 +13,7 @@ use std::path::Path;
 
 use crate::encoding::parse_hex_u64;
 use crate::grid::GridKind;
-use crate::pmtiles::features::{
-    build_pmtiles_metadata, PmtilesExportSummary, TilePyramidAccumulator,
-};
+use crate::pmtiles::features::{indexed_metadata, PmtilesExportSummary, TilePyramidAccumulator};
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
 use crate::pmtiles::pyramid::{
     cell_boundary_mercator_for, max_cell_radius_deg, zoom_band_extent,
@@ -253,16 +251,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     // If no extents found or empty file, fallback to empty summary
     if rg_extents.is_empty() {
-        let metadata = build_pmtiles_metadata(
-            "h3_pmtiles_export",
-            "H3 vector hexagon tile pyramid exported by dggs_stream",
-            0,
-            0,
-            crate::pmtiles::CELL_LAYER_ID,
-            "H3 hexagonal vector polygons with attributes",
-            json!({}),
-            None,
-        );
+        let metadata = indexed_metadata(grid, 0, 0, json!({}), 0);
         let writer = PmtilesWriter::new(0, 0, [-180.0, -85.0, 180.0, 85.0], metadata.to_string())?;
         writer.finish(pmtiles_path)?;
         return Ok(PmtilesExportSummary {
@@ -459,20 +448,12 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     let capped_cells = accumulator.capped_cells;
     accumulator.flush_all(&mut writer)?;
-    let metadata = build_pmtiles_metadata(
-        "h3_pmtiles_export",
-        "H3 vector hexagon tile pyramid exported by dggs_stream",
+    let metadata = indexed_metadata(
+        grid,
         min_zoom,
         max_zoom,
-        crate::pmtiles::CELL_LAYER_ID,
-        "H3 hexagonal vector polygons with attributes",
         serde_json::Value::Object(fields_map),
-        (capped_cells > 0).then(|| {
-            serde_json::Map::from_iter([(
-                crate::pmtiles::CELLS_OVER_TILE_CAP.to_string(),
-                json!(capped_cells),
-            )])
-        }),
+        capped_cells,
     );
 
     writer.set_metadata(global_bbox, metadata.to_string());
