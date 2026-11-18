@@ -2,13 +2,13 @@
 
 [← Back to README](../README.md) · [Core Engineering](engineering.md) · [Architecture Comparison](architecture-comparison.md) · [Optimal Raster Format](optimal-raster-format.md)
 
-This document traces the chronological evolution of dggs_stream from an initial single-threaded DuckDB prototype (`v0.1.0`) to a multi-engine geospatial workspace (`v0.4.0`) capable of aggregating 18+ billion pixels across the Continental United States (CONUS) into 74.4 million H3 hexagons in under 9 minutes on a single workstation. It then follows the hardening of that workspace for production (`v0.5.0`), its expansion to DuckDB 2.0 and SedonaDB (`v0.6.0`), and its move to scans partitioned across independent workers (`v0.7.0`).
+This document traces the chronological evolution of `dggs_stream` from an initial single-threaded DuckDB prototype (`v0.1.0`) to a multi-engine geospatial workspace (`v0.4.0`) capable of aggregating 18+ billion pixels across the Continental United States (CONUS) into 74.4 million H3 hexagons in under 9 minutes on a single workstation. It then follows the hardening of that workspace for production (`v0.5.0`), its expansion to DuckDB 2.0 and SedonaDB (`v0.6.0`), and its move to scans partitioned across independent workers (`v0.7.0`). The unreleased work since `v0.7.0` makes the engine grid-neutral (H3, A5, S2 and HEALPix in every engine) and adds explicit choices for how pixels map onto cells. The document closes with the input sources beyond rasters that the same streaming design could take on.
 
 More importantly, it documents the **engineering hypotheses that failed**, the **subtle geodetic and concurrency bugs uncovered under continental-scale stress testing**, and the **systems lessons learned** along the way.
 
 ---
 
-## Executive Timeline: The Eight Architectural Eras
+## Executive Timeline: The Nine Architectural Eras
 
 ```mermaid
 flowchart LR
@@ -19,6 +19,7 @@ flowchart LR
     P5 --> P6["Phase 6 (v0.5.0)<br/>Correctness Contracts &<br/>Release Gates"]
     P6 --> P7["Phase 7 (v0.6.0)<br/>DuckDB 2.0 &<br/>SedonaDB Adapter"]
     P7 --> P8["Phase 8 (v0.7.0)<br/>Partitioned Scans &<br/>Merge Scaling"]
+    P8 --> P9["Phase 9 (Unreleased)<br/>Grid-Neutral Engine &<br/>Transfer Modes"]
 ```
 
 | Era | Key Architectural Milestone | Primary Bottleneck Solved | Key Pivot / Lesson Learned |
@@ -31,6 +32,7 @@ flowchart LR
 | **Phase 6 (`v0.5.0`)** | Snyder/Chebyshev Albers series, strict transform mode, GDAL scale/offset, release quality gates | Silent sample loss on failed transforms, uncalibrated values, and unverified releases | A dropped sample must be counted or fail the scan; a speedup that changes cell assignment is a bug, not an optimization. |
 | **Phase 7 (`v0.6.0`)** | v1.5.6-API DuckDB build with signing, DataFusion 54 / SedonaDB adapter, cached multi-resolution H3 indexing | One DuckDB ABI for every release, no SedonaDB path, and per-resolution H3 projection cost | Pushdown is only allowed when it is a true superset: a pushed bbox must never change a straddling cell's statistics. |
 | **Phase 8 (`v0.7.0`)** | Partitioned scans across every engine, parallel eviction keys, pixel-sized horizon batches, version-pinned remote reads | Single-process scan limits and a serial merge that dominated fine-resolution runs | Measure before parallelising: the serial merge was slow because of one ~584 ns key per cell, not because it was serial. |
+| **Phase 9 (Unreleased)** | Every grid (H3, A5, S2, HEALPix) in every engine via `GridSpec`, transfer modes, row-keyed Albers eviction, pipelined kernel windows, runtime FMA kernels | Grid-specific code paths, one fixed pixel-to-cell rule, CONUS spills under Albers, and idle workers between waves | Key eviction by the scan's own order, not by geography; and check what a portable build costs before tuning the math. |
 
 ---
 
@@ -279,6 +281,49 @@ A compacted scan filters input cells, but a user's `WHERE resolution = 7` or `co
 
 ---
 
+## Phase 9: A Grid-Neutral Engine & Explicit Transfer Modes (Unreleased, after `v0.7.0`)
+
+This work is on `main` and listed under `[Unreleased]` in the [changelog](../CHANGELOG.md); it has not been tagged. It changes what the engine is: the "H3" in `dggs_stream` now names the default grid, not the only one.
+
+| PR | Change |
+| :--- | :--- |
+| #99 | Worker windows sized from the accumulator's bytes per sample |
+| #100 | Row-keyed eviction for single-projection Albers rasters |
+| #101 | Kernel windows pipelined with in-order merging instead of waves |
+| #108, #134 | Credentials scoped per host; redirects followed with per-hop credentials |
+| #117, #120 | Decoded partial states validated; remote block cache bounded |
+| #143 | Hardware FMA kernels chosen at run time on x86-64 |
+| #144 | `dggs-stream-datafusion` folded into `dggs-stream-sedona` |
+| #148, #151 | A5, S2 and HEALPix grids |
+| #153 | Every grid in every engine (`GridSpec`), auto resolution, NoData policy, transfer modes, histograms, runtime profile |
+
+### Lesson 27: Describe Each Grid Once, and Let Every Stage Read the Description
+H3, A5, S2 and HEALPix are now available in every engine: the CLI, DuckDB, Python/Polars, DataFusion/SedonaDB and PostgreSQL. The output columns are `{grid}_index` and `{grid}_hex` everywhere. Pipeline stages no longer match on grid variants. Each grid's properties and invariants live in one table, `GridSpec` (`GridKind::spec()`): resolution range, base cells, aperture, whether cells are equal-area, the edge model for latitude bounds, the pole model, row-space eviction support, PMTiles zoom model, cell-radius bound, polygon-fill engine and Parquet annotation. Adding a grid now means filling in a row, not finding every `match`. Two smaller lessons came with it:
+* **A cell id's 64 bits do not always fit a signed column.** S2 ids on faces 4 and 5, and half of A5's, have the top bit set. PostgreSQL keeps them as `bigint`, the signed reading of the same bits, which is lossless; the hex text is always the unsigned id.
+* **Grid libraries carry their own shortcuts.** The `a5` crate's last-cell shortcut returned whichever polar cell had been looked up previously for any point within about 1e-5° of a pole, sometimes a cell at the opposite pole. Within 0.001° of a pole, A5 cells are now indexed without it.
+
+### Lesson 28: How Pixels Map onto Cells Is a Choice, Not a Constant
+Every earlier phase assumed many pixels per cell, each pixel assigned to the cell containing its centre (or its sub-pixel samples). That assumption is wrong when cells are finer than pixels, and biased when a statistic must conserve a total. `transfer` now makes the rule explicit, independently of the grid:
+* `assign_centers` (the default) is the existing single-pass kernel, unchanged.
+* `sample` gives each cell whose centre lies on the raster the value interpolated there (`nearest`, `bilinear`, `bicubic`, `lanczos`), for cells finer than the pixels.
+* `overlay` weights each pixel by the exact fraction of it that the cell overlaps; `mass_preserve` normalises those weights so `sum` adds up to the raster's total.
+
+`overlay` and `sample` walk the raster in bands of rows and hold one band plus the cells open across band edges, so they keep a bounded-memory profile, though not the single-pass kernel's. `auto` resolution picks the resolution whose mean cell area is closest to the raster's ground pixel area, measured at the raster's centre. Per-cell histograms (`HistogramSpec`) stream through the categorical kernel with bin indices as classes, and `nodata_policy := 'emit'` returns cells that have no valid sample, which the default omits.
+
+### Lesson 29: Key Eviction by the Scan's Own Order, Not by Geography
+Latitude is the natural eviction key for north-up rasters, but Albers rows curve across parallels: on a CONUS raster in `EPSG:5070`, cells near the east and west edges waited thousands of rows under a latitude rule, overflowed the map budget and spilled. Spilling also stopped eviction for the rest of the scan. When every tile uses the same Albers projection, cells are now keyed by **raster row** (`multi_horizon::eviction_space`): a cell leaves once the scan passes a certified upper bound of the rows its points project to (derivation in [`engineering.md`](engineering.md#1-southernmost-scan-line-horizon-eviction)). On `BP_CONUS.tif` with 5-point sampling at resolution 9 and the default budget, nothing spills any more, and wall time drops from 39.0 to 36.6 minutes. A latitude bound is still tracked for each held cell, because the tilers and compaction need one. The general lesson, which the future inputs below rely on, is that the eviction rule only needs a monotone key in which chunk bounds can be certified. Latitude is one such key; raster rows, scanlines and event time are others.
+
+### Lesson 30: Measure What the Portable Build Costs Before Tuning the Math
+Two scheduling changes and one build change account for most of this phase's speed:
+* **Pipelined windows instead of waves.** Each wave of kernel windows used to wait for its slowest window, and workers idled during the serial merge. Windows now go to long-lived workers that take the next job as soon as they finish. The calling thread merges finished map sets strictly in window order, so output does not depend on timing (a run matches the serial run of the same windows bit for bit). Eviction keys for new cells are extra worker jobs.
+* **Worker windows sized from the accumulator.** Continuous streams without quantiles size windows by `inline_worker_bytes_per_sample::<H3Accumulator>()` (260 B per sample and resolution) instead of a flat 1 KiB. With 5-point sampling at resolution 9 on `BP_CONUS.tif`, system CPU (Rayon workers sleeping and waking between tiny waves) drops by about 62%, and wall time from 39.0 to 36.0 minutes.
+* **Hardware FMA chosen at run time.** h3o's indexing math calls `f64::mul_add`, which a portable x86-64 build compiles to a software routine. That routine cost 11–16% of all instructions in the streaming benchmarks. On CPUs with FMA, the continuous and categorical kernels now run a second copy compiled with hardware fused multiply-add. The output is unchanged bit for bit, because both forms are correctly rounded. On a 4-core Xeon, the criterion `streaming` benchmarks run 13–28% faster, and `worker_scaling` streams 16–28% faster at resolutions 7 and 9.
+
+### Lesson 31: A URL from SQL Is Untrusted Input
+Any URL passed to a scan, including one typed into SQL, used to receive `DGGS_STREAM_AUTH_TOKEN` and `AWS_SESSION_TOKEN` from the environment. And because the HTTP client stripped only `Authorization` and `Cookie` on redirects, an S3 session token could follow a redirect to another host, even over plain `http://`. Credentials are now scoped to each URL: `DGGS_STREAM_AUTH_TOKEN` goes only to hosts in `DGGS_STREAM_AUTH_HOSTS`, `AWS_SESSION_TOKEN` only to S3 endpoints, and neither over plain HTTP except to loopback. Redirects are followed by `dggs_stream` itself, so each hop gets only the credentials its own URL is entitled to. The remote block cache is now bounded (64 MiB, LRU), and decoding a partial state or spill run rejects states no accumulator could have produced.
+
+---
+
 ## Summary of Golden Engineering Rules
 
 1. **Favor Branchless Sequential Loops Over Heuristic Skipping:** On modern superscalar CPUs, exact coordinate evaluation with register-level span accumulation beats branch-heavy binary search lookahead in both speed and geodetic correctness.
@@ -290,6 +335,8 @@ A compacted scan filters input cells, but a user's `WHERE resolution = 7` or `co
 7. **Count or Fail, Never Drop Silently:** Failed transforms, out-of-range bands and unsupported datum shifts must surface as a count, a warning or an error. A plausible-looking wrong answer is worse than a failed scan.
 8. **Pushdown and Partitioning Must Not Change Answers:** Every pushed filter is a superset of the rows it replaces, and every partitioned scan merges to exactly the single-scan result. Test both against an unpruned, unpartitioned reference.
 9. **Profile the Serial Section Before Parallelising It:** A serial stage that dominates wall time often has one expensive call inside it. Moving that call to the workers can be simpler, and just as effective, as parallelising the stage.
+10. **Key Eviction by the Scan's Own Order:** A cell may leave memory once nothing still to be read can reach it. Express that bound in whatever order the scan actually advances (latitude, raster row, and later scanline or event time), and certify it there.
+11. **Scope Credentials to the URL, Not the Process:** A library that accepts URLs from queries must decide per URL, and per redirect hop, which credentials it may send.
 
 ---
 
@@ -310,6 +357,9 @@ The original post-`v0.4.0` roadmap was ranked from the CONUS Resolution 9 teleme
 | — | Eviction keys computed in the parallel workers | **Shipped** in `v0.7.0` (PR #82) | Resolution 11 merge 12.1 s → 2.0 s; **1.7×** wall at 4 workers |
 | — | Horizon batches sized by pixels | **Shipped** in `v0.7.0` (PR #85) | **1.5×** (multi-resolution, 2 GiB) and **2.1×** (quantiles, 64 MiB) at 4 workers |
 | — | Partitioned scans | **Shipped** in `v0.7.0` (PRs #78, #80, #84) | No measurable CPU overhead (0.97×–1.02× total CPU) |
+| — | Row-keyed eviction for single-projection Albers rasters | **On `main`** (unreleased) | No spill on `BP_CONUS.tif` (5-point, r9, 64 MiB); 39.0 → 36.6 min |
+| — | Pipelined kernel windows + accumulator-sized worker windows | **On `main`** (unreleased) | −62% system CPU; 39.0 → 36.0 min on the same workload |
+| — | Runtime-selected hardware FMA kernels (x86-64) | **On `main`** (unreleased) | 13–28% faster `streaming` benchmarks; output bit-identical |
 
 ### Open Work, Ranked
 
@@ -323,7 +373,8 @@ The original post-`v0.4.0` roadmap was ranked from the CONUS Resolution 9 teleme
 | **P4** | **Row-shared trigonometry in H3 indexing** | North-up `EPSG:4326` / `EPSG:3857` | **+8–12%** on indexing math, but the projection now runs inside `h3o::LatLngIndexer` | Medium + upstream |
 
 #### R1. Refresh the Continental Baseline
-* **Why first:** Every decision below depends on where time goes at full scale, on a machine with more cores than the 4-vCPU runs. The CONUS tables above were measured at `v0.4.0` (and the P0 + P2 branch); since then indexing, eviction, batching and spill behaviour have all changed.
+* **Why first:** Every decision below depends on where time goes at full scale, on a machine with more cores than the 4-vCPU runs. The CONUS tables above were measured at `v0.4.0` (and the P0 + P2 branch); since then indexing, eviction, batching and spill behaviour have all changed. The only newer continental figures are the 5-point resolution 9 runs in Phase 9 (36.0–36.6 min), which use a different sampling mode from the tables above and are not comparable to them.
+* **Use the runtime profile:** the unreleased `run_profile` telemetry (CLI `--profile`, Python `profile_raster`, DuckDB `profile := true`) splits wall and CPU time into `fetch`, `tiff_decode`, `kernel` (`crs_transform`, `grid_index`, `accumulate`), `horizon`, `spill`, `stall` and `serialize`. Record it for every run, and include one non-H3 grid so that the A5, S2 and HEALPix indexing costs are on record too.
 * **What to record:** wall, user/sys CPU and peak RSS for CLI, Polars and DuckDB on both `BP_CONUS` rasters at resolution 9; plus `StreamProfile` merge, spill and `eviction_key_fallbacks`, and `worker_scaling` at 1/2/4/8/16 workers on the same machine. Add a partitioned run (`dggs-stream-cli plan` / `ipc --partition` / `merge`) to confirm partitioning stays free at continental scale.
 
 #### R2. Weight Budget Shares by Expected Cell Count
@@ -331,6 +382,7 @@ The original post-`v0.4.0` roadmap was ranked from the CONUS Resolution 9 teleme
 * **The bottleneck:** Each resolution's horizon map gets a quarter of the aggregation budget divided by the number of resolutions ([`engineering.md`](engineering.md)). A batch of resolution-11 cells on a 4096-pixel-wide, 64-row-strip raster needs ~53 MiB, but gets 16 MiB alone or ~5 MiB in a three-resolution run, while resolution 7 in the same run holds a few thousand cells. The fine resolution spills on every batch.
 * **The fix:** Size each resolution's share from its expected cells per batch (batch pixels divided by pixels per cell, capped at batch pixels), so coarse resolutions give up memory they cannot use. Keep the total budget unchanged, and keep spilling as the fallback so the result is always correct.
 * **Validate with:** the `worker_scaling` `res 11` and `res 7, 9, 11` workloads at 64 MiB, and the memory benchmark suite, which must show peak memory still within the budget.
+* **Still open after Phase 9:** row-keyed Albers eviction removed the CONUS spill at resolution 9, but it shortens how long cells are held, not how many cells a fine-resolution batch creates. With four grids, the expected cell count per batch should come from `GridSpec` (aperture and mean cell area), not from H3 constants.
 
 #### R3. Parallelise the Merge Only If It Still Dominates
 * **Where:** the serial horizon merge in [`crates/dggs-stream-core/src/aggregator/multi_horizon/controller/pipeline.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/controller/pipeline.rs).
@@ -339,7 +391,7 @@ The original post-`v0.4.0` roadmap was ranked from the CONUS Resolution 9 teleme
 
 #### Notes on P3–P5
 * **P3** is unchanged in substance: the CLI writer still permutes and compresses columns on one writer thread, and only `h3_index` sets a non-default encoding (`DELTA_BINARY_PACKED`). Much of the 6.2 GB vs 960 MB gap is the geometry and extra columns of the full GeoParquet schema, so compare against the compact schema when measuring.
-* **P4:** since `v0.6.0` the lat/lng → face projection happens inside `h3o::LatLngIndexer` (PR #48), which also shares it across resolutions. Reusing a row's `sin(lat)`/`cos(lat)` therefore needs `h3o` to accept precomputed values, which is an upstream change like the one that added `LatLngIndexer`.
+* **P4:** since `v0.6.0` the lat/lng → face projection happens inside `h3o::LatLngIndexer` (PR #48), which also shares it across resolutions. Reusing a row's `sin(lat)`/`cos(lat)` therefore needs `h3o` to accept precomputed values, which is an upstream change like the one that added `LatLngIndexer`. Re-measure before starting: the runtime FMA kernels (Phase 9) removed the software `mul_add` cost from the same h3o code path, so what P4 can still save is smaller than the estimate in its row, which was made before that change.
 * **P5** is unchanged. Partitioned scans add a second record type (`PartialCell`) to `OutputBuffer`, so a columnar eviction path must cover partial rows too.
 
 ---
@@ -459,3 +511,91 @@ These reported measurements used the original endpoint-probing implementation (`
 | **CFL WGS84 (`EPSG:4326`), Res 9 [Parquet]** | 2.642 s | **1.925 s** | **1.37×** | **-27.1%** | 212,042 (matching row count only) |
 | **FBFM40 Categorical Albers, Res 8 [Parquet]** | 22.484 s | **8.848 s** | **2.54×** | **-60.6%** | 273,840 (matching row count only) |
 | **FBFM40 Categorical WGS84, Res 8 [Parquet]** | 18.214 s | **10.053 s** | **1.81×** | **-44.8%** | 273,840 (matching row count only) |
+
+---
+
+## Beyond Rasters: Input Sources the Same Design Could Stream
+
+Every phase above is about rasters, but the engine's central rule never mentions pixels: *a cell is sealed once its certified bound passes the bound of every chunk still unread* (Lesson 29). Any input that can say, before it is read, roughly where each of its pieces lies can stream the same way, with finished cells leaving memory early. This section records the input sources that fit that rule, what each would reuse, and what each would need. None of it is scheduled. It is here so that later design decisions keep these paths open.
+
+### Prerequisite: One Source Trait, Several Eviction Keys
+
+Most of what a new input needs is already independent of the input. After the sample stage, spans, run accumulation, spilling, compaction, partitioning and the three outputs (Arrow, GeoParquet, PMTiles) are shared. Phase 9 made the grid a table (`GridSpec`) and the pixel-to-cell rule a parameter (`transfer`). The next step in that direction is to put the raster reader behind a trait that supplies three things:
+
+* **An ordered list of chunks**, each with a certified bound in some eviction space.
+* **A bound for the chunks still unread**, the suffix bound the horizon already uses.
+* **The samples in each chunk:** a location *or* a footprint polygon, one or more values, and optionally a timestamp.
+
+`multi_horizon::eviction_space` already distinguishes latitude from raster row. It would gain **scanline index** (for swaths) and **event time** (for live feeds). With that refactor in place, each source below is mostly a reader plus its test suite, not a change to the engine.
+
+| Source | Chunk | Certified bound from | Eviction key | Sample → cell | Fit |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Climate/weather cubes (Zarr, NetCDF, GRIB) | Array chunk | Array metadata | Latitude (per time step) | `assign_centers`, `overlay` or `sample` | Strong |
+| Point clouds (COPC) | Octree node | Node cube in the hierarchy | Latitude | Point | Strong |
+| Spatially sorted GeoParquet | Row group | bbox covering-column statistics | Latitude | Point, line length, polygon `overlay` | Strong for lines and polygons |
+| Satellite swaths (Sentinel-5P, MODIS, VIIRS) | Block of scanlines | Per-pixel geolocation arrays | Scanline index | Pixel-footprint `overlay` | Good, with new work |
+| Real-time feeds (AIS, GPS, IoT) | Batch of records | Event-time watermark | Event time | Point, or track segment | Different eviction rule |
+
+### 1. Climate and Weather Cubes (Zarr, NetCDF, GRIB)
+
+**Why it fits:** Zarr and NetCDF metadata give every chunk's extent before any data is read, which is what pruning and eviction need. Regular latitude/longitude grids take the identity fast path. Rotated-pole grids (common in regional climate models such as CORDEX) are not covered yet: they use a rotated-pole CRS (PROJ's `ob_tran`), whereas the existing rotated-grid correctness tests exercise affine rotation and shear of an EPSG:4326 geotransform. Supporting them would mean confirming the CRS path (`proj4rs`) handles `ob_tran` and adding correctness and eviction tests of their own.
+
+**Already in place:** the main obstacle was that climate pixels (0.25° ERA5 is about 28 km) are coarser than most useful cells. The `sample` and `overlay` / `mass_preserve` transfer modes (Lesson 28) now cover that case, and `auto` resolution picks a sensible starting resolution.
+
+**The design question is time.** Two chunk layouts are common, and they need opposite traversal orders:
+* **One time step over a large area**, such as `(time=1, y=720, x=1440)`. Traverse time-major: each step is one raster pass, cells close per step, and memory is one step's horizon.
+* **Many time steps over a small area**, such as `(time=365, y=32, x=32)`, a layout chosen for time-series reads. Traverse space-major with one accumulator per (cell, step). Memory grows with the number of steps. Offer `time_agg := 'mean' | 'max' | ...` to fold time away, or a long `({grid}_index, time, ...)` output emitted as each cell closes.
+
+**Open issues:**
+* **Ground-area weighting.** On global latitude/longitude grids, pixel area shrinks with cos(latitude). `overlay` weights by the overlapped fraction of each pixel, not by the pixel's ground area, so a global mean is still biased toward high latitudes. A `weighting := 'area'` option should arrive with this source.
+* **Dependencies.** Zarr can be read in pure Rust. NetCDF4 and HDF5 normally link the C libraries, which would break the pure-Rust claim, so they belong behind a feature flag. Reading NetCDF through kerchunk / VirtualiZarr reference files, which present its chunks as a Zarr store, avoids the C dependency. GRIB2 reduced Gaussian grids (native ERA5) are not regular, so they belong with swaths (section 4).
+
+### 2. Point Clouds (COPC / LAZ)
+
+**Why it fits:** every node of a COPC file has a known cube, and the hierarchy is in the header, so the whole read order can be planned from metadata, as partition plans are today.
+
+**Ordering is the subtle part.** COPC stores a subsample at every depth, so the points for any location are spread across the root and every node beneath it. A cell is complete only when every node covering it, at every depth, has been read. Sorting all nodes by north bound, in descending order, with coarse nodes first among ties, reads the root and the northern coarse nodes first, and the suffix-bound rule then holds unchanged. The cost is that coarse nodes scatter points into cells that stay open longer. Coarse levels hold a small share of the points, but the memory budget documentation should state this.
+
+**Statistics people want:** point density and return-number statistics; ground elevation (min or mean z of class 2 points); top of canopy (max z, or a high quantile from the existing sketch); class fractions (buildings, vegetation, water) through the categorical kernel; and canopy height (top of canopy minus ground), either as two accumulators in one pass or as a join against a DEM aggregated to the same cells.
+
+**Open issues:** every point is transformed, not only pixel centres. Point clouds usually come in UTM or state plane with a vertical datum, so the datum caveats in [`crs-and-projection.md`](crs-and-projection.md) extend to three dimensions. Run accumulation saves less, because points within a node are not in span order; sorting each node's points by cell first recovers most of it.
+
+### 3. Spatially Sorted GeoParquet (Points, Lines, Polygons)
+
+**Why it fits:** GeoParquet 1.1 bbox covering columns give each row group min/max statistics. All of them sit in the footer, so the reader can choose its own row-group order (descending north bound) before reading a row. Polygon fill and exact-overlap weighting already exist (`{grid}_polygon_to_cells`, `overlay`).
+
+**Effectiveness depends on how the file is sorted.** In Hilbert- or geohash-sorted files, row groups are compact and cells evict early. In an unsorted file every row group spans the whole extent, so nothing closes before the end and the scan falls back to spilling. The reader should detect this from the footer and warn, and a helper that sorts a file spatially would make the fast path easy to reach.
+
+**Where the value is:**
+* **Points alone add little.** `GROUP BY` on a cell id in DuckDB already does this, and it spills.
+* **Lines and polygons with exact coverage are the edge.** Examples: road length per cell, or area-weighted sums such as splitting each census tract's population across cells by the fraction of the tract each covers.
+* **Dasymetric mapping combines this source with the raster engine.** Each polygon's total is split using raster weights, for example putting population only on built-up land cover pixels. Few tools do this in bounded memory, and it extends the land cover and census tracts example in the README directly.
+
+### 4. Satellite Swaths (Sentinel-5P, MODIS, VIIRS)
+
+**Why it fits:** the data still arrives in scanlines, and per-pixel latitude/longitude arrays give exact geolocation, so chunk bounds are computed from the coordinates themselves rather than certified from a projection.
+
+**New work:**
+* **Eviction by scanline, not latitude.** An orbit file runs north, crosses near a pole and comes back south, so latitude is not monotone across a granule. Either split each granule into monotone segments at the turning latitude, or key cells by scanline block, the way Lesson 29 keys Albers cells by row.
+* **Footprints.** Sentinel-5P pixels are several kilometres across and come with corner coordinates. Each pixel should be assigned by its footprint polygon, which is what `overlay` already does for regular pixels, not by its centre.
+* **Overlap.** The bow-tie overlap between adjacent MODIS and VIIRS scans, and the overlap between successive orbits, go through the existing `OverlapRule`.
+* **Quality masks.** A quality filter, such as Sentinel-5P's `qa_value` threshold, must be a first-class parameter. Without it, the output is misleading.
+* **Composites.** Users mostly want a daily or monthly mean per cell across many orbits, so this source depends on the time-binned accumulators from section 1.
+* **Dependencies.** The same HDF5 question as NetCDF.
+
+### 5. Real-Time Feeds (AIS, GPS, IoT)
+
+**Why it fits the word "stream":** this is what most readers picture first. The eviction rule is the same idea with a different key: cells close when the **event-time watermark** passes the end of their window, instead of when the latitude horizon passes them. The key becomes (cell, window), and memory is bounded by active windows × active cells.
+
+**New work:** tumbling, sliding and session windows; an allowed-lateness setting, and a rule for records that arrive after their window has closed; flushing each window to Arrow, Parquet or NDJSON; and interpolating tracks. A ship that reports every few minutes crosses cells between fixes, so walking the grid path between consecutive positions is what makes "time in cell" or "vessel transits per cell" correct. The cheapest input is NDJSON or Arrow IPC on stdin, which mirrors the CLI's output side. Kafka clients are C-backed, so Kafka support belongs behind a feature flag.
+
+**Positioning:** Flink, Arroyo and RisingWave can already window and group by a cell id. The distinctive feature would be **enrichment**: tagging each live position with precomputed raster statistics for its cell (bathymetry, land cover, protected-area fraction). That is a lookup against tables this engine already produces, and it is hard to get elsewhere.
+
+### Suggested Order
+
+1. **The source trait and eviction-space refactor.** It is small, and it makes everything below cheaper, in the same way `GridSpec` did for grids.
+2. **Zarr with a time axis.** It is the closest source to the raster path, can stay pure Rust, reuses the Phase 9 transfer modes, and serves a large climate audience.
+3. **GeoParquet lines and polygons, plus dasymetric weighting.** This reuses polygon fill and `overlay`, and it is the most distinctive capability on this list.
+4. **COPC.** It fits the eviction rule cleanly and makes a strong demonstration (canopy height per cell), but it brings 3D datum work.
+5. **Swaths.** They depend on the footprint and time-binning work from steps 2 and 3.
+6. **Real-time feeds.** Last, and only if the project wants "stream" to mean live data. Until then, the README's first line should say that the engine streams files in one pass, so that readers do not expect a real-time system.
