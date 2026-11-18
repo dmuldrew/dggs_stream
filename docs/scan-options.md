@@ -9,15 +9,18 @@ in its own way; the [table at the end](#option-names-by-engine) lists every spel
 
 `transfer` chooses how pixels become cell values.
 
+[Transfer Modes](transfer-modes.md) covers each mode in depth: the interpolation kernels,
+overlay weighting and mass preservation, and how `transfer` differs from sub-pixel `sampling`.
+
 | Mode | What a cell gets | When to use it |
 | :--- | :--- | :--- |
 | `assign_centers` (default) | Every pixel goes to the cell that holds its centre (or its sub-pixel sample points, see [Super-Sampling](super-sampling.md)); the cell aggregates them | Cells about the size of pixels or larger. This is the single-pass streaming kernel, unchanged. |
-| `sample` | The value interpolated at the cell's centre, for each cell whose centre lies on the raster | Cells finer than the pixels, which `assign_centers` would leave empty or sparse |
+| `interpolate` | The value interpolated at the cell's centre, for each cell whose centre lies on the raster | Cells finer than the pixels, which `assign_centers` would leave empty or sparse |
 | `overlay` | The pixels the cell overlaps, each weighted by the exact fraction of it the cell covers | Cells comparable to or larger than pixels, when edge pixels should count partially |
 
 Modifiers:
 
-- `sample_method` (with `sample`): `nearest`, `bilinear` (the default), `bicubic` or `lanczos`.
+- `interpolation` (with `interpolate`): `nearest`, `bilinear` (the default), `bicubic` or `lanczos`.
   Bilinear leaves out NoData taps and renormalises the rest. Bicubic and Lanczos fall back
   to bilinear when any of their taps is NoData. A cell is missing only when all four bilinear
   taps are NoData. Taps past the raster's edge repeat the edge pixel.
@@ -27,14 +30,14 @@ Modifiers:
   over all cells equals the raster's total. Use it for counts or other extensive quantities.
 
 How they run:
-- **Bands of rows.** `sample` and `overlay` walk the raster in bands of rows. Each holds one
+- **Bands of rows.** `interpolate` and `overlay` walk the raster in bands of rows. Each holds one
   band in memory, plus the cells still open across the band's edges.
 - **Pixels that are skipped.** Zero-alpha pixels are missing, as in the default mode. A
   `bbox` selects pixels by their centres, so cells larger than the box are kept.
 - **Very large cells.** In `overlay`, cells whose diameter bound is above 500 km take whole
   pixels by centre, because their edges are far from straight in pixel space. These are the
   coarsest two or three resolutions of each grid.
-- **Categorical scans.** They accept `overlay`, and `sample` only with `nearest`; classes
+- **Categorical scans.** They accept `overlay`, and `interpolate` only with `nearest`; classes
   can't be interpolated.
 - **Combinations refused.** Transfer modes can't be combined with partitioned scans,
   compaction, spectral formulas or sub-pixel sampling.
@@ -139,7 +142,7 @@ The code is in [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs)
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | grid | `--grid` | per-grid functions, or `grid :=` | `grid=` | per-grid functions, a grid-name argument, `with_grid` | per-grid functions |
 | automatic resolution | `-r auto[±N]` | `resolutions := 'auto'` | `resolutions="auto"`, `auto_resolution()` | `'auto'` | `{grid}_auto_resolution()` |
-| transfer mode | `--transfer`, `--sample-method`, `--overlay-weighted`, `--mass-preserve` | `transfer :=`, `sample_method :=`, `overlay_weighted :=`, `mass_preserve :=` | `transfer=`, `sample_method=`, `overlay_weighted=`, `mass_preserve=` | `'transfer=overlay'`-style arguments, `with_transfer` | — |
+| transfer mode | `--transfer`, `--interpolation`, `--overlay-weighted`, `--mass-preserve` | `transfer :=`, `interpolation :=`, `overlay_weighted :=`, `mass_preserve :=` | `transfer=`, `interpolation=`, `overlay_weighted=`, `mass_preserve=` | `'transfer=overlay'`-style arguments, `with_transfer` | — |
 | histogram | `--histogram`, `--histogram-weight`, `--histogram-normalize` (`ipc`, `jsonl`; implies `-c`) | `histogram :=`, `histogram_weight :=`, `histogram_normalize :=` | `histogram=`, `histogram_weight=`, `histogram_normalize=` | `'histogram=...'` arguments, `with_histogram` | — |
 | NoData policy and rounding | `--nodata-policy`, `--emit-nodata-value`, `--decimals` | `nodata_policy :=`, `emit_nodata_value :=`, `decimals :=` | `nodata_policy=`, `emit_nodata_value=`, `decimals=` | `'nodata_policy=emit'`-style arguments, `with_output_policy` | `nodata_policy`, `emit_nodata_value`, `decimals` arguments |
 | runtime profile | `--profile` | `profile := true` | `profile_raster()` | `with_profile` | — |

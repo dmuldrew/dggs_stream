@@ -1,7 +1,7 @@
 //! Streaming GeoTIFF reader with on-demand chunk decoding and buffer recycling.
 //!
 //! This module provides a streaming GeoTIFF reader that decodes chunks (strips/tiles) on-demand
-//! with buffer recycling, supporting DEFLATE, LZW, and uncompressed formats.
+//! with buffer recycling, supporting DEFLATE, LZW, ZSTD, and uncompressed formats.
 //! It supports both local files (via memory mapping) and remote cloud storage (via HTTP range requests).
 
 use memmap2::Mmap;
@@ -242,7 +242,7 @@ impl RasterSource {
 /// TIFF chunk layout and compression metadata for SIMD-accelerated direct decoding
 #[derive(Debug, Clone)]
 pub struct TiffChunkInfo {
-    /// Compression scheme used for chunk payloads (e.g., None, LZW, Deflate).
+    /// Compression scheme used for chunk payloads (e.g., None, LZW, Deflate, ZSTD).
     pub compression: CompressionMethod,
     /// Differencing predictor applied prior to compression (e.g., None, Horizontal, FloatingPoint).
     pub predictor: Predictor,
@@ -363,6 +363,7 @@ pub struct ChunkDecoder<'a> {
     source: DecoderSource<'a>,
     libdeflater: Option<libdeflater::Decompressor>,
     lzw_decoder: Option<weezl::decode::Decoder>,
+    zstd_decoder: Option<zstd::bulk::Decompressor<'static>>,
     decomp_scratch: Vec<u8>,
     /// Remote sources only: chunk bytes already in memory, served to the generic decoder
     /// so it does not download a chunk the accelerated path already holds.
@@ -411,10 +412,10 @@ impl<'a> ChunkDecoder<'a> {
     /// - If `provided_bytes` is Some (e.g. from async prefetch queue), decodes from it directly.
     /// - If `provided_bytes` is None, retrieves chunk payload via `self.source.get_chunk_payload`
     ///   (zero-copy slice for local memory maps, range request for remote COGs).
-    /// - Uses SIMD Deflate or accelerated LZW first, populating `target_buffer` in-place if available.
+    /// - Uses accelerated Deflate, LZW, or ZSTD first, populating `target_buffer` in-place if available.
     /// - Falls back to the standard TIFF decoder when the accelerated kernels do not cover the
     ///   chunk's layout, or when `provided_bytes` fails to decode (the chunk is then re-read
-    ///   from the source).
+    ///   from the source). ZSTD decoding errors are returned directly.
     /// - A failed read of the source, or source bytes that do not decode to the chunk's declared
     ///   layout, is returned as an error.
     pub fn read_chunk_with_payload(
@@ -591,7 +592,8 @@ impl<'a> ChunkDecoder<'a> {
             Ok(Some(new_buf)) => return Ok((chunk_bounds, new_buf)),
             // No accelerated kernel for this layout: the generic decoder handles it.
             Err(FastDecodeError::Unsupported(_)) => {}
-            Err(FastDecodeError::Failed(_)) if reread_on_failure => {}
+            Err(FastDecodeError::Failed(_)) if reread_on_failure && self.zstd_decoder.is_none() => {
+            }
             // The source's own bytes do not decode to the declared layout. Report
             // that instead of masking it behind a second decode attempt.
             Err(FastDecodeError::Failed(err)) => return Err(err),
@@ -657,6 +659,7 @@ impl<'a> ChunkDecoder<'a> {
     fn decode_chunk_bytes_into(
         libdeflater: Option<&mut libdeflater::Decompressor>,
         lzw_decoder: Option<&mut weezl::decode::Decoder>,
+        zstd_decoder: Option<&mut zstd::bulk::Decompressor<'static>>,
         compression: CompressionMethod,
         compressed: &[u8],
         out: &mut [u8],
@@ -728,12 +731,24 @@ impl<'a> ChunkDecoder<'a> {
                     return Err(failed("lzw chunk did not fill buffer".into()));
                 }
             }
+            CompressionMethod::ZSTD => {
+                let decoder = zstd_decoder.ok_or_else(|| unsupported("no ZSTD decompressor"))?;
+                let written = decoder
+                    .decompress_to_buffer(compressed, out)
+                    .map_err(|err| failed(format!("ZSTD chunk decompression failed: {err}")))?;
+                if written != out.len() {
+                    return Err(failed(format!(
+                        "ZSTD chunk did not fill its declared layout (expected {} bytes, got {written})",
+                        out.len()
+                    )));
+                }
+            }
             _ => return Err(unsupported("unsupported fast compression")),
         }
         Ok(())
     }
 
-    /// Attempt accelerated chunk decompression with libdeflater (Deflate) or weezl (LZW).
+    /// Attempt accelerated chunk decompression for Deflate, LZW, or ZSTD.
     /// If target_buffer is provided and of matching type, it will be populated in-place.
     /// Returns Ok(None) if target_buffer was populated in-place.
     /// Returns Ok(Some(new_result)) if a new DecodingResult was created.
@@ -752,7 +767,7 @@ impl<'a> ChunkDecoder<'a> {
         self.decompress_chunk_fast_bytes(chunk_index, payload.as_ref(), target_buffer)
     }
 
-    /// Attempt accelerated chunk decompression with libdeflater (Deflate) or weezl (LZW)
+    /// Attempt accelerated chunk decompression for Deflate, LZW, or ZSTD
     /// directly from a compressed byte slice (works for both local mmap slices and remote prefetched payloads).
     pub fn decompress_chunk_fast_bytes(
         &mut self,
@@ -832,6 +847,7 @@ impl<'a> ChunkDecoder<'a> {
                             Self::decode_chunk_bytes_into(
                                 self.libdeflater.as_mut(),
                                 self.lzw_decoder.as_mut(),
+                                self.zstd_decoder.as_mut(),
                                 info.compression,
                                 compressed_slice,
                                 b,
@@ -850,6 +866,7 @@ impl<'a> ChunkDecoder<'a> {
                             Self::decode_chunk_bytes_into(
                                 self.libdeflater.as_mut(),
                                 self.lzw_decoder.as_mut(),
+                                self.zstd_decoder.as_mut(),
                                 info.compression,
                                 compressed_slice,
                                 b,
@@ -879,6 +896,7 @@ impl<'a> ChunkDecoder<'a> {
         Self::decode_chunk_bytes_into(
             self.libdeflater.as_mut(),
             self.lzw_decoder.as_mut(),
+            self.zstd_decoder.as_mut(),
             info.compression,
             compressed_slice,
             decomp_slice,
@@ -893,10 +911,12 @@ impl<'a> ChunkDecoder<'a> {
             predictor: info.predictor,
             photometric: info.photometric,
         };
-        // The float kernels reverse only the floating-point predictor; any other
-        // unpack error means the decoded bytes do not match the declared layout.
-        let float_predictor_supported =
-            matches!(info.predictor, Predictor::None | Predictor::FloatingPoint);
+        // Unpack errors for supported float predictors indicate that the
+        // decoded bytes do not match the declared layout.
+        let float_predictor_supported = matches!(
+            info.predictor,
+            Predictor::None | Predictor::Horizontal | Predictor::FloatingPoint
+        );
         let float_err = |e: DggsStreamError| {
             if float_predictor_supported {
                 FastDecodeError::Failed(e)
@@ -1309,6 +1329,18 @@ impl GeoTiffStreamReader {
             None
         };
 
+        let zstd_decoder = self
+            .chunk_info
+            .as_ref()
+            .is_some_and(|info| info.compression == CompressionMethod::ZSTD)
+            .then(zstd::bulk::Decompressor::new)
+            .transpose()
+            .map_err(|err| {
+                DggsStreamError::InvalidMetadata(format!(
+                    "could not initialize ZSTD decoder: {err}"
+                ))
+            })?;
+
         let source = match &self.source {
             RasterSource::Local(mmap) => DecoderSource::Local(&mmap[..]),
             RasterSource::Remote(remote) => DecoderSource::Remote(Arc::clone(remote)),
@@ -1325,6 +1357,7 @@ impl GeoTiffStreamReader {
             source,
             libdeflater,
             lzw_decoder,
+            zstd_decoder,
             decomp_scratch: Vec::new(),
             remote_overlay,
         })
@@ -1360,6 +1393,7 @@ mod tests {
         assert!(ChunkDecoder::decode_chunk_bytes_into(
             Some(&mut decompressor),
             None,
+            None,
             CompressionMethod::Deflate,
             &compressed,
             &mut out,
@@ -1375,6 +1409,7 @@ mod tests {
         let mut out = [0u8; 16];
         ChunkDecoder::decode_chunk_bytes_into(
             Some(&mut decompressor),
+            None,
             None,
             CompressionMethod::Deflate,
             &compressed,

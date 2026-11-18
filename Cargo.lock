@@ -434,6 +434,7 @@ dependencies = [
  "ureq",
  "url",
  "weezl 0.2.1",
+ "zstd",
 ]
 
 [[package]]

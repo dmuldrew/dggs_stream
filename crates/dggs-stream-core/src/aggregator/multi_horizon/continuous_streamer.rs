@@ -147,7 +147,7 @@ impl HorizonStreamKernel for ContinuousKernel {
 pub struct MultiScanHorizonStreamer {
     inner: MultiHorizonStreamer<ContinuousKernel>,
     track_quantiles: bool,
-    /// The `sample` / `overlay` stream, when `config.transfer` is not the default; the
+    /// The `interpolate` / `overlay` stream, when `config.transfer` is not the default; the
     /// horizon kernel in `inner` is then idle.
     transfer: Option<Box<crate::transfer::TransferStream<H3Accumulator>>>,
     transfer_mode: crate::transfer::TransferMode,

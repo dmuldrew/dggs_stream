@@ -1,4 +1,4 @@
-//! The streaming driver of the `sample` and `overlay` transfer modes.
+//! The streaming driver of the `interpolate` and `overlay` transfer modes.
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -18,7 +18,7 @@ use crate::raster::mosaic::{MosaicReader, TileDescriptor};
 use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError};
 
 use super::clip::pixel_overlaps;
-use super::interp::{interpolate, SampleMethod};
+use super::interp::{interpolate, Interpolation};
 use super::window::{BandSelection, ChunkCache, RowWindow};
 use super::TransferMode;
 
@@ -141,7 +141,7 @@ struct Pending<A> {
     last_tile: usize,
 }
 
-/// Streams `(resolution, cell, accumulator)` for the `sample` and `overlay` modes.
+/// Streams `(resolution, cell, accumulator)` for the `interpolate` and `overlay` modes.
 pub struct TransferStream<A: TransferAccumulator> {
     mosaic: Arc<MosaicReader>,
     grid: GridKind,
@@ -188,9 +188,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
             TransferMode::AssignCenters => {
                 return invalid("is the default scan, not a transfer stream")
             }
-            TransferMode::Sample(method) if A::CATEGORICAL && method != SampleMethod::Nearest => {
+            TransferMode::Interpolate(method)
+                if A::CATEGORICAL && method != Interpolation::Nearest =>
+            {
                 return invalid(
-                    "of class codes needs sample_method 'nearest': classes cannot be \
+                    "of class codes needs interpolation 'nearest': classes cannot be \
                      interpolated",
                 )
             }
@@ -367,7 +369,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         match block.bbox {
             None => self.record_failures(1)?,
             Some(bbox) => match self.mode {
-                TransferMode::Sample(method) => self.sample_block(block, bbox, method)?,
+                TransferMode::Interpolate(method) => self.interpolate_block(block, bbox, method)?,
                 TransferMode::Overlay {
                     weighted,
                     mass_preserve,
@@ -392,7 +394,12 @@ impl<A: TransferAccumulator> TransferStream<A> {
         }
     }
 
-    fn sample_block(&mut self, block: &Block, bbox: [f64; 4], method: SampleMethod) -> Result<()> {
+    fn interpolate_block(
+        &mut self,
+        block: &Block,
+        bbox: [f64; 4],
+        method: Interpolation,
+    ) -> Result<()> {
         let mosaic = Arc::clone(&self.mosaic);
         let tile = &mosaic.tiles[block.tile];
         let margin = method.margin();
@@ -647,7 +654,7 @@ fn plan_tile(
         .max(1e-9);
     let block_pixels = (TARGET_BLOCK_CELLS / cells_per_pixel).max(1.0);
     let margin = match mode {
-        TransferMode::Sample(method) => 2 * method.margin(),
+        TransferMode::Interpolate(method) => 2 * method.margin(),
         _ => 0,
     };
     let window_rows = ((MAX_WINDOW_VALUES / width as usize) as u32)
@@ -660,7 +667,7 @@ fn plan_tile(
         rows -= rows % chunk_height;
     }
     let overlay = matches!(mode, TransferMode::Overlay { .. });
-    // A sample block may also be narrower than the raster; an overlay band is not, as
+    // An interpolation block may also be narrower than the raster; an overlay band is not, as
     // every pixel's weights are totalled within its band.
     let cols = if overlay || rows > 1 {
         width
