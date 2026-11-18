@@ -50,6 +50,16 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `geom` | `BOOLEAN` | `false` | Emit a `geometry` column of the cell geometries (enables DuckDB Spatial interop); see [cell geometry](#cell-geometry). |
 | `quantiles` | `VARCHAR` | `None` | Streaming quantile targets: percentiles such as `'p50,p90,p99.5'` or `'0.05'`, aliases `median`/`q1`/`q2`/`q3`/`iqr`, or presets `'default'`, `'box'` (p25, p50, p75, iqr), `'tails'`, `'deciles'`. Percentiles must be finite and strictly between 0 and 100 (decimals between 0 and 1). Adds one nullable column per target; per-cell sketches are only built when the query selects or filters on one of these columns. |
 | `percentiles` | `VARCHAR` | `None` | Alias for `quantiles`. |
+| `grid` | `VARCHAR` | `'h3'` | Grid to index onto: `'h3'`, `'a5'`, `'s2'` or `'healpix'`. The `a5_`, `s2_` and `healpix_` table functions default to their own grid. The cell columns are then `{grid}_index` / `{grid}_hex`, and `resolution(s)` follow that grid's range (A5 and S2 0–30, HEALPix 0–29). See [Grids](grids.md). |
+| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area, moved N steps finer or coarser. |
+| `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`. |
+| `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics instead of NULL. |
+| `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'sample'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `sample_method` | `VARCHAR` | `'bilinear'` | With `transfer := 'sample'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
+| `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
+| `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
 
 On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can also come from [session options](#session-options-duckdb-20-build); an argument passed here takes precedence.
 
@@ -165,6 +175,19 @@ Every engine reads these from the GeoTIFF and applies them the same way:
 
 On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can also come from [session options](#session-options-duckdb-20-build); an argument passed here takes precedence.
 | `geom` | `BOOLEAN` | `false` | Emit a `geometry` column with OGC WKB 2D Polygon hexagons. |
+| `grid` | `VARCHAR` | `'h3'` | Grid to index onto: `'h3'`, `'a5'`, `'s2'` or `'healpix'`. The `a5_`, `s2_` and `healpix_` table functions default to their own grid. The cell columns are then `{grid}_index` / `{grid}_hex`, and `resolution(s)` follow that grid's range (A5 and S2 0–30, HEALPix 0–29). See [Grids](grids.md). |
+| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area, moved N steps finer or coarser. |
+| `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`; the long format does not return the empty cells. |
+| `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics (and class) instead of NULL. |
+| `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'sample'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `sample_method` | `VARCHAR` | `'bilinear'` | With `transfer := 'sample'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
+| `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
+| `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
+| `histogram` | `VARCHAR` | `None` | Per-cell histogram: `'values'`, `'N:min:max'` (N equal bins) or `'e0,e1,...'` (bin edges). The `histogram` column then holds it as JSON: `{"class": weight}` or `[[lower, upper, weight], ...]`. |
+| `histogram_weight` | `VARCHAR` | `'count'` | `'count'` or `'area'` (overlapped area in pixels; runs the weighted `overlay` transfer). |
+| `histogram_normalize` | `VARCHAR` | `'none'` | `'none'`, `'fraction'` or `'density'` (bins only). |
 
 ### Wide Format Output Schema (`format := 'wide'`, Default)
 | Column Name | Logical Type | Description |
