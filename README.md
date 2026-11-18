@@ -281,6 +281,17 @@ SELECT * FROM h3_raster_to_pmtiles(
 );
 ```
 
+```rust
+// Rust: tile your own cell features. The grid is explicit (H3, A5, S2 or HEALPix).
+use dggs_stream_core::pmtiles::{CellFeature, MvtValue, PmtilesTiler};
+use dggs_stream_core::GridKind;
+
+let features = cells.iter().map(|&(cell_id, canopy)| {
+    CellFeature::new(cell_id, vec![("canopy", MvtValue::Double(canopy))])
+});
+let summary = PmtilesTiler::export_features(GridKind::H3, features, "canopy.pmtiles")?;
+```
+
 Upload `landcover_canopy.pmtiles` to S3, R2, or GitHub Pages, open it in MapLibre GL JS, and zoom from state level to city block.
 
 A web map needs tiles at every zoom level — from hemispheric overview down to street-level detail. dggs_stream builds this entire multi-resolution pyramid in a single pass over the raster, aggregating pixels simultaneously across all requested H3 resolutions. See [PMTiles & Multi-Resolution](docs/pmtiles.md) for the full deep dive.
