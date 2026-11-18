@@ -50,7 +50,7 @@ pub use dggs_stream_core::aggregator::{NodataPolicy, OutputPolicy};
 pub use dggs_stream_core::grid::GridKind;
 pub use dggs_stream_core::resolution::ResolutionSpec;
 pub use dggs_stream_core::run_profile::{ProfileReport, RunProfile};
-pub use dggs_stream_core::transfer::{SampleMethod, TransferMode};
+pub use dggs_stream_core::transfer::{Interpolation, TransferMode};
 pub use merge::{merge_udafs, MergePartials};
 pub use pmtiles::{
     register_pmtiles_format, write_pmtiles, write_record_batches, PmtilesFormatFactory,

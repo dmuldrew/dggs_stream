@@ -189,7 +189,7 @@ On the pixel-centre path the kernel's time is split into `crs_transform`, `grid_
 and `accumulate`. Without `stream-profile` the split is an upper estimate from a few
 probed pixels per window, scaled by the share of pixels indexed; when the estimate
 exceeds the kernel's measured time only the `crs_transform` : `grid_index` ratio is
-reported. `sample` and `overlay` report the kernel whole.
+reported. `interpolate` and `overlay` report the kernel whole.
 
 The same report is available as `dggs-stream ... --profile` (stderr), Python
 `dggs_stream.profile_raster(...)`, DuckDB `profile := true` (stderr, and

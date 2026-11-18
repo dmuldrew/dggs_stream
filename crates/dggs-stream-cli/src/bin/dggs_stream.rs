@@ -52,11 +52,11 @@ fn print_help() {
           --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
           --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
                                      each pixel into the cell holding its centre),\n                                     \
-                                     sample (each cell takes the value interpolated at\n                                     \
-                                     its centre; for cells finer than pixels) or overlay\n                                     \
-                                     (each cell aggregates the pixels it overlaps,\n                                     \
-                                     weighted by overlap area)\n  \
-          --sample-method <M>        nearest, bilinear (default), bicubic or lanczos\n  \
+                                     interpolate (each cell takes the value interpolated\n                                     \
+                                     at its centre; for cells finer than pixels) or\n                                     \
+                                     overlay (each cell aggregates the pixels it\n                                     \
+                                     overlaps, weighted by overlap area)\n  \
+          --interpolation <M>        nearest, bilinear (default), bicubic or lanczos\n  \
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
           --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \
                                      conserved exactly\n  \

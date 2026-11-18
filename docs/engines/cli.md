@@ -43,8 +43,8 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl` | Column projection, in the given order |
 | `--limit <N>` | `ipc`, `jsonl` | Maximum rows |
-| `--transfer <assign_centers\|sample\|overlay>` | scans | How pixels map onto cells (default `assign_centers`); see [Transfer Modes](../transfer-modes.md) |
-| `--sample-method <nearest\|bilinear\|bicubic\|lanczos>` | scans | Interpolation of `--transfer sample` (default `bilinear`) |
+| `--transfer <assign_centers\|interpolate\|overlay>` | scans | How pixels map onto cells (default `assign_centers`); see [Transfer Modes](../transfer-modes.md) |
+| `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | scans | Interpolation of `--transfer interpolate` (default `bilinear`) |
 | `--overlay-weighted <true\|false>` | scans | `--transfer overlay`: `false` counts every touched pixel once (default `true`) |
 | `--mass-preserve` | scans | `--transfer overlay`: normalise each pixel's weights so the `sum` column adds up to the raster's total |
 | `--partition <SPEC\|@FILE>` | `ipc` | Scan one partition (see [Partitioned scans](#partitioned-scans)) |

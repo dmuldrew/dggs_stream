@@ -13,7 +13,7 @@
 //! `'emit_nodata_value=-9999'` and `'decimals=2'` set the output options: `emit` returns
 //! every cell a pixel falls in (zero count and NULL statistics, or the NoData value,
 //! where all its samples are NoData), and `decimals` rounds the statistics.
-//! `'transfer=sample'` (with `'sample_method=nearest|bilinear|bicubic|lanczos'`) gives
+//! `'transfer=interpolate'` (with `'interpolation=nearest|bilinear|bicubic|lanczos'`) gives
 //! each cell the value interpolated at its centre, and `'transfer=overlay'` (with
 //! `'overlay_weighted=false'` or `'mass_preserve=true'`) aggregates the pixels each cell
 //! overlaps by overlap area, instead of assigning each pixel to the cell at its centre.
@@ -240,13 +240,13 @@ fn output_option(text: &str) -> Option<(&str, &str)> {
 }
 
 /// `Some((key, value))` if `text` is `key=value` for one of the transfer options
-/// (`transfer`, `sample_method`, `overlay_weighted`, `mass_preserve`).
+/// (`transfer`, `interpolation`, `overlay_weighted`, `mass_preserve`).
 fn transfer_option(text: &str) -> Option<(&str, &str)> {
     let (key, value) = text.split_once('=')?;
     let key = key.trim();
     [
         "transfer",
-        "sample_method",
+        "interpolation",
         "overlay_weighted",
         "mass_preserve",
     ]
@@ -312,7 +312,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         histogram: None,
     };
     let mut histogram = [None::<String>, None, None];
-    let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
+    let (mut transfer, mut interpolation) = (None::<String>, None::<String>);
     let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
     let mut grid = None;
     let mut auto = None;
@@ -330,7 +330,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                 Some(spec) if spec.trim_start().starts_with('{') && args.partition.is_none() => {
                     args.partition = Some(ScanPartition::from_json(spec).map_err(to_df_error)?)
                 }
-                // `'transfer=overlay'`, `'sample_method=bicubic'`, `'mass_preserve=true'`.
+                // `'transfer=overlay'`, `'interpolation=bicubic'`, `'mass_preserve=true'`.
                 Some(option) if transfer_option(option).is_some() => {
                     let (key, value) = transfer_option(option).unwrap_or_default();
                     let flag = || match value.to_ascii_lowercase().as_str() {
@@ -340,7 +340,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                     };
                     match key {
                         "transfer" => transfer = Some(value.to_string()),
-                        "sample_method" => sample_method = Some(value.to_string()),
+                        "interpolation" => interpolation = Some(value.to_string()),
                         "overlay_weighted" => overlay_weighted = Some(flag()?),
                         _ => mass_preserve = Some(flag()?),
                     }
@@ -373,7 +373,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
     }
     args.transfer = TransferMode::from_options(
         transfer.as_deref(),
-        sample_method.as_deref(),
+        interpolation.as_deref(),
         overlay_weighted,
         mass_preserve,
     )

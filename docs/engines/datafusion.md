@@ -62,7 +62,7 @@ Schema: `ColumnSchema::continuous(&quantiles)` (see the [overview](README.md#out
 | `with_scale_offset(b)` | `apply_scale_offset` (default `true`) |
 | `with_bbox([min_lon, min_lat, max_lon, max_lat])` | `bbox` |
 | `with_sampling(SamplingPattern)` | `sampling` (see [Super-Sampling](../super-sampling.md)) |
-| `with_transfer(TransferMode)` | `transfer` (see [Transfer Modes](../transfer-modes.md)); SQL: `'transfer=sample'`, `'sample_method=bicubic'`, `'overlay_weighted=false'`, `'mass_preserve=true'` |
+| `with_transfer(TransferMode)` | `transfer` (see [Transfer Modes](../transfer-modes.md)); SQL: `'transfer=interpolate'`, `'interpolation=bicubic'`, `'overlay_weighted=false'`, `'mass_preserve=true'` |
 | `with_band(n)` | `band` |
 | `with_spectral_formula(SpectralFormula)` | `spectral_formula` (NDVI, NDWI, NBR, EVI) |
 | `with_quantiles(Vec<QuantileTarget>)` | `quantiles`; adds one nullable `Float64` column per target |

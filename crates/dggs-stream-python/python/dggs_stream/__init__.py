@@ -548,7 +548,7 @@ _SCAN_OPTIONS = (
     "emit_nodata_value",
     "decimals",
     "transfer",
-    "sample_method",
+    "interpolation",
     "overlay_weighted",
     "mass_preserve",
     "histogram",
@@ -571,7 +571,7 @@ _STR_OPTIONS = (
     "spectral_formula",
     "nodata_policy",
     "transfer",
-    "sample_method",
+    "interpolation",
     "histogram_weight",
     "histogram_normalize",
 )
@@ -801,7 +801,7 @@ class RasterH3ArrowStream:
         emit_nodata_value: Optional[float] = None,
         decimals: Optional[int] = None,
         transfer: Optional[str] = None,
-        sample_method: Optional[str] = None,
+        interpolation: Optional[str] = None,
         overlay_weighted: Optional[bool] = None,
         mass_preserve: Optional[bool] = None,
         histogram: Optional[Union[str, Sequence[float]]] = None,
@@ -1109,7 +1109,7 @@ def scan_raster_h3(
     emit_nodata_value: Optional[float] = None,
     decimals: Optional[int] = None,
     transfer: Optional[str] = None,
-    sample_method: Optional[str] = None,
+    interpolation: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
     histogram: Optional[Union[str, Sequence[float]]] = None,
@@ -1169,8 +1169,8 @@ def scan_raster_h3(
     - `decimals`: round the floating-point statistics (not counts or class codes) to
       this many decimals, 0 to 15.
     - `transfer`: how pixels map onto cells. `"assign_centers"` (default) aggregates
-      each pixel into the cell holding its centre. `"sample"` gives each cell whose
-      centre lies on the raster the value interpolated there with `sample_method`
+      each pixel into the cell holding its centre. `"interpolate"` gives each cell whose
+      centre lies on the raster the value interpolated there with `interpolation`
       (`"nearest"`, `"bilinear"` (default), `"bicubic"`, `"lanczos"`); use it when the
       cells are finer than the pixels, where centre assignment leaves most cells empty.
       `"overlay"` aggregates, for each cell, the pixels it overlaps, weighted by the
@@ -1178,7 +1178,7 @@ def scan_raster_h3(
       pixel once); `count` is then the overlapped area in pixels. With
       `mass_preserve=True` each pixel's weights are normalised to sum to one, so the
       `sum` column adds up to the raster's total. Categorical scans take `"overlay"`
-      and `"sample"` with `sample_method="nearest"`. Not combinable with `sampling`,
+      and `"interpolate"` with `interpolation="nearest"`. Not combinable with `sampling`,
       `spectral_formula` or partitions.
 
     `histogram` asks for a structured per-cell histogram and makes the scan categorical:
@@ -2010,7 +2010,7 @@ def raster_to_parquet(
     emit_nodata_value: Optional[float] = None,
     decimals: Optional[int] = None,
     transfer: Optional[str] = None,
-    sample_method: Optional[str] = None,
+    interpolation: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
 ) -> int:
@@ -2026,7 +2026,7 @@ def raster_to_parquet(
         emit_nodata_value=emit_nodata_value,
         decimals=decimals,
         transfer=transfer,
-        sample_method=sample_method,
+        interpolation=interpolation,
         overlay_weighted=overlay_weighted,
         mass_preserve=mass_preserve,
     )
@@ -2053,7 +2053,7 @@ def raster_to_pmtiles(
     emit_nodata_value: Optional[float] = None,
     decimals: Optional[int] = None,
     transfer: Optional[str] = None,
-    sample_method: Optional[str] = None,
+    interpolation: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
 ) -> int:
@@ -2065,7 +2065,7 @@ def raster_to_pmtiles(
         emit_nodata_value=emit_nodata_value,
         decimals=decimals,
         transfer=transfer,
-        sample_method=sample_method,
+        interpolation=interpolation,
         overlay_weighted=overlay_weighted,
         mass_preserve=mass_preserve,
     )

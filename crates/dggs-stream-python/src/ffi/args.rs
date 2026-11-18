@@ -206,9 +206,9 @@ pub(crate) struct PyScanOptions {
     pub(crate) nodata_policy: Option<String>,
     pub(crate) emit_nodata_value: Option<f64>,
     pub(crate) decimals: Option<i64>,
-    /// `assign_centers` (default), `sample` or `overlay`.
+    /// `assign_centers` (default), `interpolate` or `overlay`.
     pub(crate) transfer: Option<String>,
-    pub(crate) sample_method: Option<String>,
+    pub(crate) interpolation: Option<String>,
     pub(crate) overlay_weighted: Option<bool>,
     pub(crate) mass_preserve: Option<bool>,
     /// `values`, `N:min:max` or comma-separated bin edges.
@@ -337,7 +337,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     cfg.min_count = opts.min_count;
     cfg.transfer = TransferMode::from_options(
         opts.transfer.as_deref(),
-        opts.sample_method.as_deref(),
+        opts.interpolation.as_deref(),
         opts.overlay_weighted,
         opts.mass_preserve,
     )?;
