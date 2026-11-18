@@ -340,10 +340,10 @@ fn reader_quantile_columns_match_per_record_quantiles() {
                 acc.quantile(0.9),
                 acc.quantile(0.5),
             ];
-            let row = &got[&rec.h3_index];
+            let row = &got[&rec.cell_id];
             for (g, w) in row.iter().zip(want) {
                 match g {
-                    Some(v) => assert!(close(*v, w), "cell {}: {v} vs {w}", rec.h3_index),
+                    Some(v) => assert!(close(*v, w), "cell {}: {v} vs {w}", rec.cell_id),
                     None => assert!(!w.is_finite(), "null for finite {w}"),
                 }
             }

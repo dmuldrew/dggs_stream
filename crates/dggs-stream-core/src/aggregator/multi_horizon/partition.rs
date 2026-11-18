@@ -340,13 +340,13 @@ pub(crate) fn restrict_mosaic(
 
 /// A sample-bearing cell that a partitioned stream could not finalize because other
 /// partitions may hold samples inside it. Merge all partitions' partials for the same
-/// `(resolution, h3_index)` to obtain the cell's final state.
+/// `(resolution, cell_id)` to obtain the cell's final state.
 #[derive(Debug, Clone)]
 pub struct PartialCell<A> {
-    /// H3 resolution of the cell.
+    /// Resolution of the cell in the selected grid.
     pub resolution: u8,
-    /// H3 cell index.
-    pub h3_index: u64,
+    /// Unsigned cell identifier in the selected grid.
+    pub cell_id: u64,
     /// This partition's share of the cell's state (not filtered).
     pub accumulator: A,
 }

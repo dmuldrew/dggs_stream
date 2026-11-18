@@ -61,7 +61,7 @@ fn web_mercator_samples_match_exact_projection() {
                     }
                     for record in batch {
                         assert!(actual
-                            .insert(record.h3_index, record.accumulator.count)
+                            .insert(record.cell_id, record.accumulator.count)
                             .is_none());
                         assert!(
                             (record.accumulator.sum - 3.0 * record.accumulator.count).abs() < 1e-8
@@ -81,7 +81,7 @@ fn web_mercator_samples_match_exact_projection() {
                     }
                     for record in batch {
                         assert!(categories
-                            .insert(record.h3_index, record.accumulator.total_count)
+                            .insert(record.cell_id, record.accumulator.total_count)
                             .is_none());
                     }
                 }
@@ -436,7 +436,7 @@ fn test_projected_utm_gradient_exact_cell_assignment() {
             break;
         }
         for rec in batch {
-            streamed_cells.insert(rec.h3_index, (rec.accumulator.count, rec.accumulator.sum));
+            streamed_cells.insert(rec.cell_id, (rec.accumulator.count, rec.accumulator.sum));
         }
     }
 
@@ -502,7 +502,7 @@ fn custom_single_samples_preserve_offsets_and_weights() {
             while !stream.is_finished() {
                 for record in stream.fetch_next_batch(17).unwrap() {
                     assert!(actual
-                        .insert(record.h3_index, record.accumulator.count)
+                        .insert(record.cell_id, record.accumulator.count)
                         .is_none());
                     assert_eq!(record.accumulator.sum, record.accumulator.count * 3.0);
                 }
@@ -513,7 +513,7 @@ fn custom_single_samples_preserve_offsets_and_weights() {
             while !stream.is_finished() {
                 for record in stream.fetch_next_batch(17).unwrap() {
                     assert!(actual
-                        .insert(record.h3_index, record.accumulator.total_count)
+                        .insert(record.cell_id, record.accumulator.total_count)
                         .is_none());
                 }
             }

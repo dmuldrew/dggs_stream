@@ -202,7 +202,7 @@ fn raster_cell_assignment_uses_independent_proj_datum_references() {
             }
             for record in batch {
                 assert!(actual
-                    .insert((record.resolution, record.h3_index), record.accumulator)
+                    .insert((record.resolution, record.cell_id), record.accumulator)
                     .is_none());
             }
         }

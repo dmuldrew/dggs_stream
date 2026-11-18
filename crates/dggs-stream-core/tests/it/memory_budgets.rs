@@ -72,10 +72,10 @@ fn run(path: &std::path::Path, config: &MultiResolutionConfig) -> Run {
         }
         for rec in batch {
             let previous = cells.insert(
-                (rec.resolution, rec.h3_index),
+                (rec.resolution, rec.cell_id),
                 (rec.accumulator.count, rec.accumulator.sum),
             );
-            assert!(previous.is_none(), "duplicate record {:x}", rec.h3_index);
+            assert!(previous.is_none(), "duplicate record {:x}", rec.cell_id);
         }
     }
     let metrics = streamer.metrics();

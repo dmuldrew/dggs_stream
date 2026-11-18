@@ -30,7 +30,7 @@ fn test_scan_horizon_streamer_with_prefetch_and_coherence() {
             break;
         }
         for rec in batch {
-            all_yielded.push((rec.h3_index, rec.accumulator));
+            all_yielded.push((rec.cell_id, rec.accumulator));
         }
     }
 
@@ -94,7 +94,7 @@ fn test_categorical_horizon_streaming() {
             break;
         }
         for rec in batch {
-            all_yielded.push((rec.h3_index, rec.accumulator));
+            all_yielded.push((rec.cell_id, rec.accumulator));
         }
     }
 
@@ -277,7 +277,7 @@ fn test_categorical_homogeneous_raster() {
             break;
         }
         for rec in batch {
-            all_yielded.push((rec.h3_index, rec.accumulator));
+            all_yielded.push((rec.cell_id, rec.accumulator));
         }
     }
 
@@ -581,7 +581,7 @@ fn test_parallel_chunk_aggregation_hawaii_dataset() {
     while !stream.is_finished() {
         for record in stream.fetch_next_batch(2048).unwrap() {
             let (count, sum, min, max) = expected
-                .remove(&record.h3_index)
+                .remove(&record.cell_id)
                 .expect("Unexpected or duplicate cell");
             let acc = record.accumulator;
             assert_eq!(acc.count, count);
@@ -636,7 +636,7 @@ fn test_parallel_categorical_aggregation_hawaii_dataset() {
         while !stream.is_finished() {
             for record in stream.fetch_next_batch(2048).unwrap() {
                 let histogram = reference
-                    .remove(&record.h3_index)
+                    .remove(&record.cell_id)
                     .expect("Unexpected or duplicate cell");
                 let mut actual = HashMap::new();
                 record.accumulator.for_each_class(|class, count| {

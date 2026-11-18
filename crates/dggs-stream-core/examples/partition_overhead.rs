@@ -131,7 +131,7 @@ fn partitioned_scan(
                 |p| {
                     partials.push((
                         p.resolution,
-                        p.h3_index,
+                        p.cell_id,
                         encode_partial_state(&p.accumulator),
                     ))
                 },

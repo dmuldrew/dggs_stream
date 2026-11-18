@@ -105,7 +105,7 @@ pub fn drain_continuous(
         let state = encode_partial_state(&p.accumulator).into_boxed_slice();
         let record = MultiContinuousRecord {
             resolution: p.resolution,
-            h3_index: p.h3_index,
+            cell_id: p.cell_id,
             accumulator: p.accumulator,
         };
         f(
@@ -155,7 +155,7 @@ pub fn drain_categorical(
         let state = encode_partial_state(&p.accumulator).into_boxed_slice();
         let record = MultiCategoricalRecord {
             resolution: p.resolution,
-            h3_index: p.h3_index,
+            cell_id: p.cell_id,
             accumulator: p.accumulator,
         };
         f(

@@ -109,7 +109,7 @@ fn cell_bbox_pushdown_preserves_raster_samples() {
                     break;
                 }
                 for rec in batch {
-                    if rec.h3_index == u64::from(cell) {
+                    if rec.cell_id == u64::from(cell) {
                         matched.push(rec.accumulator);
                     }
                 }

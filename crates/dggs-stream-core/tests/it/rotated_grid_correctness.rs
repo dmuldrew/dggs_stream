@@ -109,13 +109,13 @@ fn test_rotated_and_south_to_north_grids_match_exhaustive_reference() {
                     // A prematurely evicted cell would be recreated, producing duplicate emissions.
                     assert!(
                         streamed_continuous
-                            .insert(rec.h3_index, rec.accumulator)
+                            .insert(rec.cell_id, rec.accumulator)
                             .is_none(),
                         "Duplicate cell emitted in {name} with pattern {:?}: {:x}",
                         pattern,
-                        rec.h3_index
+                        rec.cell_id
                     );
-                    emitted_order.push(rec.h3_index);
+                    emitted_order.push(rec.cell_id);
                 }
             }
 
@@ -167,7 +167,7 @@ fn test_rotated_and_south_to_north_grids_match_exhaustive_reference() {
                         classes.insert(cls, cnt);
                     });
                     assert!(
-                        streamed_categorical.insert(rec.h3_index, classes).is_none(),
+                        streamed_categorical.insert(rec.cell_id, classes).is_none(),
                         "Duplicate categorical cell emitted in {name}"
                     );
                 }

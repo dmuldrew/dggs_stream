@@ -39,7 +39,7 @@ fn scan(path: &Path, config: &MultiResolutionConfig) -> BTreeMap<u64, H3Accumula
     while streamer
         .drain_completed_into(777, |_, rec| {
             assert!(
-                cells.insert(rec.h3_index, rec.accumulator).is_none(),
+                cells.insert(rec.cell_id, rec.accumulator).is_none(),
                 "cell twice"
             );
         })
@@ -306,7 +306,7 @@ fn categorical_transfers_keep_class_codes() {
         let mut streamer = MultiCategoricalHorizonStreamer::new(reader, config)?;
         let mut cells = BTreeMap::new();
         while streamer.drain_completed_into(500, |_, rec| {
-            cells.insert(rec.h3_index, rec.accumulator);
+            cells.insert(rec.cell_id, rec.accumulator);
         })? > 0
         {}
         Ok::<_, dggs_stream_core::error::DggsStreamError>(cells)
@@ -475,7 +475,7 @@ fn transfer_streamers_advance_explicitly() {
             streamer.advance_until_completed(1).unwrap();
             let drained = streamer
                 .drain_completed_into(1, |_, rec| {
-                    got.insert(rec.h3_index, rec.accumulator.count);
+                    got.insert(rec.cell_id, rec.accumulator.count);
                 })
                 .unwrap();
             if drained == 0 {

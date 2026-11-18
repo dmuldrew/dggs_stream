@@ -27,7 +27,7 @@ fn drain_with_peak(mut streamer: MultiScanHorizonStreamer) -> (HashMap<u64, H3Ac
     let mut map = HashMap::new();
     while !streamer.is_finished() {
         for record in streamer.fetch_next_batch(128).unwrap() {
-            let cell = record.h3_index;
+            let cell = record.cell_id;
             assert!(
                 map.insert(cell, record.accumulator).is_none(),
                 "cell {cell:x} emitted twice"
@@ -420,7 +420,7 @@ fn test_workers_precompute_every_eviction_key() -> Result<()> {
     let mut reference = HashMap::new();
     while !streamer.is_finished() {
         for record in streamer.fetch_next_batch(128)? {
-            reference.insert(record.h3_index, record.accumulator);
+            reference.insert(record.cell_id, record.accumulator);
         }
     }
     assert_eq!(streamer.metrics().eviction_key_fallbacks, 0);
@@ -430,7 +430,7 @@ fn test_workers_precompute_every_eviction_key() -> Result<()> {
     let mut map = HashMap::new();
     while !streamer.is_finished() {
         for record in streamer.fetch_next_batch(128)? {
-            assert!(map.insert(record.h3_index, record.accumulator).is_none());
+            assert!(map.insert(record.cell_id, record.accumulator).is_none());
         }
     }
     assert_eq!(streamer.metrics().eviction_key_fallbacks, 0);
@@ -452,7 +452,7 @@ fn drain_stats(
     let mut map = HashMap::new();
     while !streamer.is_finished() {
         for record in streamer.fetch_next_batch(512).unwrap() {
-            assert!(map.insert(record.h3_index, record.accumulator).is_none());
+            assert!(map.insert(record.cell_id, record.accumulator).is_none());
         }
     }
     (
@@ -664,7 +664,7 @@ fn test_inline_continuous_kernel_uses_larger_windows() {
         let mut map = HashMap::new();
         while !streamer.is_finished() {
             for record in streamer.fetch_next_batch(4096).unwrap() {
-                map.insert(record.h3_index, record.accumulator);
+                map.insert(record.cell_id, record.accumulator);
             }
         }
         (map, streamer.metrics().jobs)
@@ -730,7 +730,7 @@ fn assert_pipelined_matches_serial(size: (u32, u32), layout: helpers::Layout) {
                 let a = &r.accumulator;
                 records.push((
                     r.resolution,
-                    r.h3_index,
+                    r.cell_id,
                     a.count.to_bits(),
                     a.sum.to_bits(),
                     a.min.to_bits(),

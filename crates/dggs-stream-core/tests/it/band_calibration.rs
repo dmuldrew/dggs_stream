@@ -93,7 +93,7 @@ fn drain(mut streamer: MultiScanHorizonStreamer) -> HashMap<(u8, u64), H3Accumul
         for r in batch {
             assert!(
                 cells
-                    .insert((r.resolution, r.h3_index), r.accumulator)
+                    .insert((r.resolution, r.cell_id), r.accumulator)
                     .is_none(),
                 "duplicate cell emitted"
             );

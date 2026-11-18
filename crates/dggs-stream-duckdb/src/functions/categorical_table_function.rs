@@ -298,9 +298,9 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
         // 13: geom GEOMETRY (if emit_geom)
         for (out_idx, &orig_col) in proj_cols.iter().enumerate() {
             match orig_col {
-                0 => writer.fill_column(out_idx, batch_len, batch.iter().map(|r| r.h3_index)),
+                0 => writer.fill_column(out_idx, batch_len, batch.iter().map(|r| r.cell_id)),
                 1 => {
-                    writer.write_hex_column(out_idx, batch.iter().map(|r| &r.h3_index), ctx.hex_buf)
+                    writer.write_hex_column(out_idx, batch.iter().map(|r| &r.cell_id), ctx.hex_buf)
                 }
                 2 => out_maj_cls = Some(out_idx),
                 3 => out_maj_frac = Some(out_idx),
@@ -385,7 +385,7 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
             global.grid,
             out_idx_wkb,
             out_idx_geom,
-            batch.iter().map(|r| &r.h3_index),
+            batch.iter().map(|r| &r.cell_id),
             ctx.wkb_buf,
         );
         if let Some(col) = out_idx_state {

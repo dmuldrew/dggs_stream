@@ -569,7 +569,7 @@ fn polar_pruning_preserves_full_and_bbox_mosaic_aggregation() {
                                 break;
                             }
                             for record in batch {
-                                let stats = cells.entry(record.h3_index).or_insert((0., 0.));
+                                let stats = cells.entry(record.cell_id).or_insert((0., 0.));
                                 stats.0 += record.accumulator.count;
                                 stats.1 += record.accumulator.sum;
                             }
