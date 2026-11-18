@@ -44,8 +44,21 @@ the suffix your server expects). Then:
 CREATE EXTENSION dggs_stream;
 ```
 
-A database with 0.4.0 or later installed upgrades in place with `ALTER EXTENSION dggs_stream UPDATE;`
-through the `dggs_stream--<old>--<new>.sql` scripts; the SQL definitions are unchanged since 0.4.0.
+**Databases with the extension under its former name, `raster_h3`.** The `raster_h3.control`
+file and its `raster_h3--*.sql` install and upgrade scripts still ship, so `CREATE EXTENSION
+raster_h3` and `ALTER EXTENSION raster_h3 UPDATE` keep working (from 0.4.0 or later; the SQL
+definitions are unchanged since then). Functions created by those versions record the library
+as `$libdir/raster_h3_pg`, and an upgrade does not rewrite them, so also install the library
+under that name:
+
+```bash
+cp target/release/libdggs_stream_pg.so  "$(pg_config --pkglibdir)/raster_h3_pg.so"
+cp crates/dggs-stream-pg/raster_h3.control       "$(pg_config --sharedir)/extension/"
+cp crates/dggs-stream-pg/sql/raster_h3--*.sql   "$(pg_config --sharedir)/extension/"
+```
+
+Install either `raster_h3` or `dggs_stream` in a given database, not both: they define the same
+functions.
 
 [`dggs_stream.control`](../../crates/dggs-stream-pg/dggs_stream.control) declares version `0.7.0`,
 `module_pathname = '$libdir/dggs_stream_pg'`, `relocatable = true` and `superuser = true`.

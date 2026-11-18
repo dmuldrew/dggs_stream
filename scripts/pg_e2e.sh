@@ -51,7 +51,9 @@ sharedir="$(docker exec "$container" pg_config --sharedir)"
 docker cp "$out_dir/dggs_stream_pg.so" "$container:$libdir/dggs_stream_pg.so"
 docker cp "$repo/crates/dggs-stream-pg/dggs_stream.control" "$container:$sharedir/extension/"
 docker cp "$repo/crates/dggs-stream-pg/sql/dggs_stream--0.7.0.sql" "$container:$sharedir/extension/"
-# The same extension under its former name, raster_h3.
+# The same extension under its former name, raster_h3, whose functions load the library
+# as raster_h3_pg.
+docker cp "$out_dir/dggs_stream_pg.so" "$container:$libdir/raster_h3_pg.so"
 docker cp "$repo/crates/dggs-stream-pg/raster_h3.control" "$container:$sharedir/extension/"
 docker cp "$repo/crates/dggs-stream-pg/sql/raster_h3--0.7.0.sql" "$container:$sharedir/extension/"
 

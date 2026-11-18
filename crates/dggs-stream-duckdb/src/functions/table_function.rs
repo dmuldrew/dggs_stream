@@ -94,7 +94,8 @@ impl RasterTable for ContinuousTable {
     const NAMES: &'static [&'static str] = &[
         "h3_raster_continuous_aggregate",
         "h3_raster_continuous",
-        "dggs_stream",
+        // `raster_{grid}` for H3, like `raster_a5`; not the project name.
+        "raster_h3",
     ];
     const FUNCTION: &'static str = "h3_raster_continuous_aggregate";
     const MISSING_BIND_DATA: &'static str = "Missing bind data in init";

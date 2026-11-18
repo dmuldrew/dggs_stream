@@ -8,4 +8,4 @@ extend-exclude = ["extension-ci-tools"]
 select = ["E4", "E7", "E9", "F", "W", "B", "I"]
 
 [lint.isort]
-known-first-party = ["dggs_stream", "dggs_stream_sedona", "conftest"]
+known-first-party = ["dggs_stream", "dggs_stream_sedona", "raster_h3", "conftest"]

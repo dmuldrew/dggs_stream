@@ -12,7 +12,7 @@
 //!
 //! # Submodules
 //!
-//! - [`table_function`](crate::functions::table_function): Continuous raster aggregation table function (`dggs_stream`).
+//! - [`table_function`](crate::functions::table_function): Continuous raster aggregation table function (`h3_raster_continuous_aggregate`, alias `raster_h3`).
 //! - [`categorical_table_function`](crate::functions::categorical_table_function): Categorical raster aggregation table function (`raster_h3_categorical`).
 //! - [`pmtiles_table_function`](crate::functions::pmtiles_table_function): Direct streaming export of H3 aggregations to PMTiles archives (`raster_h3_pmtiles`).
 //! - [`parquet_table_function`](crate::functions::parquet_table_function): Direct streaming export of H3 aggregations to Parquet files (`raster_h3_parquet`).
@@ -47,7 +47,7 @@ pub mod pmtiles_table_function;
 pub(crate) mod raster_table;
 /// Helper scalar functions such as `h3_to_string` and coordinate extractors.
 pub mod scalar;
-/// Continuous raster aggregation table function (`dggs_stream`).
+/// Continuous raster aggregation table function (`h3_raster_continuous_aggregate`, alias `raster_h3`).
 pub mod table_function;
 /// Well-Known Binary (WKB) geometry serialization for H3 cells (re-exported from crate::encoding).
 pub use crate::encoding::wkb;

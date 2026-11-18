@@ -369,6 +369,23 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
         );
     }
 
+    // The extension under its former name, in a database of its own: its functions record
+    // `$libdir/raster_h3_pg` in pg_proc.probin, which is also what databases upgraded from
+    // earlier raster_h3 versions keep, and must load the library installed under that name.
+    let legacy = server.query(&format!(
+        "CREATE DATABASE legacy_name;
+         \\c legacy_name
+         CREATE EXTENSION raster_h3;
+         SELECT extversion FROM pg_extension WHERE extname = 'raster_h3';
+         SELECT DISTINCT probin FROM pg_proc WHERE proname = 'h3_to_string';
+         SELECT h3_to_string({cell});"
+    ));
+    assert_eq!(
+        legacy,
+        ["0.7.0", "$libdir/raster_h3_pg", cell_hex.as_str()],
+        "raster_h3 under its former name"
+    );
+
     // No backend crashed along the way.
     let logs = server.logs();
     assert!(
