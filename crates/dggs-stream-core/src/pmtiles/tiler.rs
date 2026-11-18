@@ -80,11 +80,11 @@ trait TileKind: Sync {
     /// properties and the run statistics.
     type Summary: Send;
     type Stats: Default;
-    fn parts(record: Self::Record) -> (u8, u64, Self::Acc); // (resolution, h3_index, accumulator)
+    fn parts(record: Self::Record) -> (u8, u64, Self::Acc); // (resolution, cell_id, accumulator)
     fn summarize(&self, acc: &Self::Acc) -> Self::Summary;
     fn properties(
         &self,
-        h3_index: u64,
+        cell_id: u64,
         resolution: u8,
         acc: &Self::Acc,
         summary: &Self::Summary,
@@ -120,7 +120,7 @@ impl TileKind for ContinuousTiles {
 
     fn properties(
         &self,
-        h3_index: u64,
+        cell_id: u64,
         resolution: u8,
         acc: &Self::Acc,
         summary: &Self::Summary,
@@ -128,7 +128,7 @@ impl TileKind for ContinuousTiles {
         // MVT properties have no NULL: a statistic without a value is NaN.
         let stats = self.policy.continuous(acc);
         FeatureProperties::Continuous {
-            h3_index,
+            cell_id,
             resolution,
             mean: stats.mean.unwrap_or(f64::NAN),
             sum: stats.sum,
@@ -271,13 +271,13 @@ impl TileKind for CategoricalTiles {
 
     fn properties(
         &self,
-        h3_index: u64,
+        cell_id: u64,
         resolution: u8,
         _acc: &Self::Acc,
         summary: &Self::Summary,
     ) -> FeatureProperties {
         FeatureProperties::Categorical {
-            h3_index,
+            cell_id,
             resolution,
             majority: summary.majority,
             majority_fraction: summary.majority_fraction,
@@ -653,15 +653,15 @@ impl PmtilesTiler {
                 .records
                 .into_par_iter()
                 .filter_map(|record| {
-                    let (resolution, h3_index, accumulator) = K::parts(record);
+                    let (resolution, cell_id, accumulator) = K::parts(record);
                     let summary = kind.summarize(&accumulator);
 
-                    let (c_lat, c_lon) = grid.center_lat_lng(h3_index)?;
+                    let (c_lat, c_lon) = grid.center_lat_lng(cell_id)?;
                     let center_merc = MercatorPoint::from_lat_lng(c_lat, c_lon);
-                    let (v_merc, v_count) = cell_boundary_mercator_for(grid, h3_index)?;
+                    let (v_merc, v_count) = cell_boundary_mercator_for(grid, cell_id)?;
                     let vertices_merc = &v_merc[..v_count];
 
-                    let properties = kind.properties(h3_index, resolution, &accumulator, &summary);
+                    let properties = kind.properties(cell_id, resolution, &accumulator, &summary);
 
                     let zooms = zooms_for_grid_res(grid, resolution, min_res);
                     let num_zooms = zooms.len();
@@ -681,7 +681,7 @@ impl PmtilesTiler {
                             zoom,
                             |tx, ty| {
                                 let feature = MvtFeature::from_mercator(
-                                    h3_index,
+                                    cell_id,
                                     vertices_merc,
                                     zoom,
                                     tx,
@@ -702,7 +702,7 @@ impl PmtilesTiler {
                     }
 
                     Some(PreparedHex {
-                        cell_u64: h3_index,
+                        cell_u64: cell_id,
                         resolution,
                         summary,
                         accumulator,
