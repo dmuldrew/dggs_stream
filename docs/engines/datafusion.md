@@ -271,7 +271,7 @@ for batch in plan.execute()? {
 ### Exports
 
 The `scan` layer has no file writers. For Parquet/GeoParquet or PMTiles, use
-the core exporters (`H3ParquetWriter`, `H3PmtilesTiler`, see [Core](core.md#file-exporters))
+the core exporters (`H3ParquetWriter`, `PmtilesTiler`, see [Core](core.md#file-exporters))
 with the same `MultiResolutionConfig`, or write the Arrow stream with any Arrow-based writer.
 In real DataFusion and SedonaDB, `dggs-stream-sedona` adds `COPY ... TO '*.pmtiles'`; see
 [PMTiles output](#pmtiles-output-copy--to-pmtiles).

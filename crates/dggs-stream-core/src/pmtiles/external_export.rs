@@ -1,4 +1,4 @@
-//! Bounded-memory export of unordered H3 features to a PMTiles archive.
+//! Bounded-memory export of unordered cell features to a PMTiles archive.
 //!
 //! [`TilePyramidAccumulator`] can only write a tile once no later feature can
 //! touch it, which it learns from features arriving north to south. Callers
@@ -14,7 +14,7 @@
 //!    [`PmtilesWriter`]'s disk spill as the merge moves south.
 //!
 //! Peak memory is therefore the buffer budget plus one band of open tiles,
-//! not the whole input. The sort order (latitude descending, then H3 index)
+//! not the whole input. The sort order (latitude descending, then cell ID)
 //! is total, so the archive bytes do not depend on the budget.
 
 use std::borrow::Cow;
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grid::GridKind;
 use crate::pmtiles::features::{
-    build_default_pmtiles_fields_for, indexed_metadata, H3Feature, PmtilesExportSummary,
+    build_default_pmtiles_fields_for, indexed_metadata, CellFeature, PmtilesExportSummary,
     TilePyramidAccumulator,
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
@@ -48,18 +48,18 @@ const EVICT_EVERY: usize = 4096;
 /// sort key), its index, and its properties with keys interned as ids.
 struct SortRecord {
     lat: f64,
-    h3_index: u64,
+    cell_id: u64,
     properties: Vec<(u16, MvtValue)>,
 }
 
 impl SortRecord {
-    /// Latitude descending (north first), then H3 index ascending. Total, so
+    /// Latitude descending (north first), then cell ID ascending. Total, so
     /// in-memory and merged orders agree exactly.
     fn order(&self, other: &Self) -> Ordering {
         other
             .lat
             .total_cmp(&self.lat)
-            .then(self.h3_index.cmp(&other.h3_index))
+            .then(self.cell_id.cmp(&other.cell_id))
     }
 
     /// Rough heap footprint, used only to decide when to spill.
@@ -80,7 +80,7 @@ impl SortRecord {
 
     fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
         w.write_all(&self.lat.to_le_bytes())?;
-        w.write_all(&self.h3_index.to_le_bytes())?;
+        w.write_all(&self.cell_id.to_le_bytes())?;
         let count = u16::try_from(self.properties.len())
             .map_err(|_| io::Error::other("more than 65535 properties on one feature"))?;
         w.write_all(&count.to_le_bytes())?;
@@ -128,7 +128,7 @@ impl SortRecord {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e),
         }
-        let h3_index = u64::from_le_bytes(read_array(r)?);
+        let cell_id = u64::from_le_bytes(read_array(r)?);
         let count = u16::from_le_bytes(read_array(r)?);
         let mut properties = Vec::with_capacity(usize::from(count));
         for _ in 0..count {
@@ -167,7 +167,7 @@ impl SortRecord {
         }
         Ok(Some(Self {
             lat: f64::from_le_bytes(lat),
-            h3_index,
+            cell_id,
             properties,
         }))
     }
@@ -211,7 +211,7 @@ impl Ord for MergeHead {
     }
 }
 
-/// External-sort PMTiles exporter for H3 features in arbitrary order. See
+/// External-sort PMTiles exporter for cell features in arbitrary order. See
 /// the module documentation.
 pub struct ExternalFeatureExport {
     grid: GridKind,
@@ -223,7 +223,7 @@ pub struct ExternalFeatureExport {
     keys: Vec<Cow<'static, str>>,
     key_ids: HashMap<Cow<'static, str>, u16>,
     bounds: Wgs84BoundsAccumulator,
-    /// Bit `r` set once a cell at H3 resolution `r` has been pushed.
+    /// Bit `r` set once a cell at resolution `r` has been pushed.
     resolutions: u32,
     /// Optional `(min, max)` zoom clamp applied to every resolution's band.
     zoom_limits: (Option<u8>, Option<u8>),
@@ -232,7 +232,7 @@ pub struct ExternalFeatureExport {
     valid_features: usize,
     evict_every: usize,
     /// Extra `vector_layers` fields (name -> `"Number"` / `"String"` / `"Boolean"`) listed
-    /// in the archive metadata next to the default `h3_index`, `h3_hex` and `resolution`.
+    /// in the archive metadata next to the grid’s index and hex fields and `resolution`.
     layer_fields: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -267,7 +267,7 @@ impl ExternalFeatureExport {
 
     /// List the features' property names and types in the archive's `vector_layers`
     /// metadata (TileJSON field types: `"Number"`, `"String"` or `"Boolean"`), in addition
-    /// to the default `h3_index`, `h3_hex` and `resolution`. Map clients use the list to
+    /// to the grid’s index and hex fields and `resolution`. Map clients use the list to
     /// offer styling by property; it does not change the tiles.
     pub fn with_layer_fields<I, K>(mut self, fields: I) -> Self
     where
@@ -317,17 +317,17 @@ impl ExternalFeatureExport {
     }
 
     /// Add one feature. Features whose index is not a valid cell are
-    /// counted and dropped, as in [`crate::pmtiles::H3PmtilesTiler::export_h3_features`].
-    pub fn push(&mut self, feature: H3Feature) -> io::Result<()> {
+    /// counted and dropped, as in [`crate::pmtiles::PmtilesTiler::export_features`].
+    pub fn push(&mut self, feature: CellFeature) -> io::Result<()> {
         self.total_features += 1;
-        let Some((c_lat, _c_lng)) = self.grid.center_lat_lng(feature.h3_index) else {
+        let Some((c_lat, _c_lng)) = self.grid.center_lat_lng(feature.cell_id) else {
             return Ok(());
         };
-        let Some(res) = self.grid.resolution(feature.h3_index) else {
+        let Some(res) = self.grid.resolution(feature.cell_id) else {
             return Ok(());
         };
         self.valid_features += 1;
-        self.bounds.record_cell_for(self.grid, feature.h3_index);
+        self.bounds.record_cell_for(self.grid, feature.cell_id);
         self.resolutions |= 1u32 << res;
         self.coarsest_res = self.coarsest_res.min(res);
 
@@ -337,7 +337,7 @@ impl ExternalFeatureExport {
         }
         let record = SortRecord {
             lat: c_lat,
-            h3_index: feature.h3_index,
+            cell_id: feature.cell_id,
             properties,
         };
         self.buffer_bytes += record.estimated_bytes();
@@ -512,16 +512,16 @@ fn add_record(
     record: SortRecord,
 ) {
     // Only valid cells are buffered (checked in `push`).
-    let Some(res) = grid.resolution(record.h3_index) else {
+    let Some(res) = grid.resolution(record.cell_id) else {
         return;
     };
     let Some(zooms) = zoom_bands[usize::from(res)] else {
         return;
     };
-    let Some((c_lat, c_lng)) = grid.center_lat_lng(record.h3_index) else {
+    let Some((c_lat, c_lng)) = grid.center_lat_lng(record.cell_id) else {
         return;
     };
-    let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, record.h3_index) else {
+    let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, record.cell_id) else {
         return;
     };
     let center_merc = MercatorPoint::from_lat_lng(c_lat, c_lng);
@@ -534,19 +534,19 @@ fn add_record(
         .map(|(id, v)| (keys[usize::from(id)].clone(), v))
         .collect();
     if !properties.iter().any(|(k, _)| k == idx_col) {
-        properties.push((Cow::Borrowed(idx_col), MvtValue::UInt(record.h3_index)));
+        properties.push((Cow::Borrowed(idx_col), MvtValue::UInt(record.cell_id)));
     }
     if !properties.iter().any(|(k, _)| k == hex_col) {
         properties.push((
             Cow::Borrowed(hex_col),
-            MvtValue::from_hex_u64(record.h3_index),
+            MvtValue::from_hex_u64(record.cell_id),
         ));
     }
     if !properties.iter().any(|(k, _)| k == "resolution") {
         properties.push((Cow::Borrowed("resolution"), MvtValue::UInt(u64::from(res))));
     }
     acc.add_hexagon_mercator_zooms(
-        record.h3_index,
+        record.cell_id,
         center_merc,
         &v_merc[..v_count],
         zooms,
@@ -559,7 +559,7 @@ mod tests {
     use super::*;
     use h3o::{CellIndex, LatLng};
 
-    fn sample_features() -> Vec<H3Feature> {
+    fn sample_features() -> Vec<CellFeature> {
         // All 343 res-8 descendants of a res-5 cell, plus the res-5 cell and
         // an invalid index, shuffled deterministically so input order is
         // unrelated to latitude.
@@ -570,11 +570,11 @@ mod tests {
             .collect();
         cells.push(u64::from(parent));
         cells.sort_unstable_by_key(|c| c.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let mut features: Vec<H3Feature> = cells
+        let mut features: Vec<CellFeature> = cells
             .into_iter()
             .enumerate()
             .map(|(i, c)| {
-                H3Feature::new(
+                CellFeature::new(
                     c,
                     vec![
                         ("name", MvtValue::String(format!("cell-{i}"))),
@@ -585,7 +585,7 @@ mod tests {
                 )
             })
             .collect();
-        features.push(H3Feature::new::<&str>(1, Vec::new()));
+        features.push(CellFeature::new::<&str>(1, Vec::new()));
         features
     }
 
@@ -670,7 +670,7 @@ mod tests {
         // The sample holds res-5 and res-8 cells.
         let zoom_bands = crate::pmtiles::pyramid::zoom_bands_for_resolutions((1 << 5) | (1 << 8));
         for f in sample_features() {
-            let Ok(cell) = CellIndex::try_from(f.h3_index) else {
+            let Ok(cell) = CellIndex::try_from(f.cell_id) else {
                 continue;
             };
             let properties = f
@@ -686,7 +686,7 @@ mod tests {
                 .collect();
             let record = SortRecord {
                 lat: LatLng::from(cell).lat(),
-                h3_index: f.h3_index,
+                cell_id: f.cell_id,
                 properties,
             };
             add_record(&mut acc, GridKind::H3, &keys, &zoom_bands, record);
@@ -697,13 +697,13 @@ mod tests {
     }
 
     /// One cell at each of `resolutions`, all ancestors of one res-8 cell.
-    fn chain(resolutions: &[u8]) -> Vec<H3Feature> {
+    fn chain(resolutions: &[u8]) -> Vec<CellFeature> {
         let leaf = CellIndex::try_from(0x8828308281fffff_u64).unwrap();
         resolutions
             .iter()
             .map(|&r| {
                 let res = h3o::Resolution::try_from(r).unwrap();
-                H3Feature::new(
+                CellFeature::new(
                     u64::from(leaf.parent(res).unwrap()),
                     vec![("r", MvtValue::UInt(u64::from(r)))],
                 )
@@ -756,7 +756,7 @@ mod tests {
     fn records_round_trip_through_a_run() {
         let record = SortRecord {
             lat: -12.5,
-            h3_index: 0x85283473fffffff,
+            cell_id: 0x85283473fffffff,
             properties: vec![
                 (0, MvtValue::String("héllo".into())),
                 (1, MvtValue::from_hex_u64(0x85283473fffffff)),
@@ -772,7 +772,7 @@ mod tests {
         let mut reader = &buf[..];
         let back = SortRecord::read_from(&mut reader).unwrap().unwrap();
         assert_eq!(back.lat, record.lat);
-        assert_eq!(back.h3_index, record.h3_index);
+        assert_eq!(back.cell_id, record.cell_id);
         assert_eq!(back.properties.len(), record.properties.len());
         for ((ka, va), (kb, vb)) in back.properties.iter().zip(&record.properties) {
             assert_eq!(ka, kb);

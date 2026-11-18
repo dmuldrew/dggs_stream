@@ -18,7 +18,7 @@ pub mod writer;
 pub use crate::transcode::{process_parquet_to_pmtiles, RowGroupExtent};
 pub use external_export::{ExternalFeatureExport, DEFAULT_EXPORT_MEMORY_BUDGET};
 pub use features::{
-    build_default_pmtiles_fields, build_pmtiles_metadata, H3Feature, PmtilesExportSummary,
+    build_default_pmtiles_fields, build_pmtiles_metadata, CellFeature, PmtilesExportSummary,
     ResolutionAccumulatorStats, TileEvictionEntry, TilePyramidAccumulator,
 };
 pub use mvt::{FeatureProperties, MercatorPoint, MvtFeature, MvtLayer, MvtValue};
@@ -28,5 +28,5 @@ pub use pyramid::{
     max_cell_radius_deg, max_hex_radius_deg, mercator_to_tile_xy, tile_xy_to_bbox, zoom_to_h3_res,
     zooms_for_grid_res, zooms_for_h3_res,
 };
-pub use tiler::H3PmtilesTiler;
+pub use tiler::PmtilesTiler;
 pub use writer::{zxy_to_tile_id, PmtilesWriter, TilePayload};

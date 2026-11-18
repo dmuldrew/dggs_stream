@@ -1,7 +1,7 @@
-//! Multi-Resolution H3 to PMTiles v3 Tiling Engine
+//! Multi-Resolution DGGS to PMTiles v3 Tiling Engine
 //!
-//! Orchestrates the streaming aggregation of GeoTIFF rasters across multiple H3 resolutions
-//! and packages the resulting vector hexagons directly into a single PMTiles v3 archive.
+//! Orchestrates the streaming aggregation of GeoTIFF rasters across multiple grid resolutions
+//! and packages the resulting cell polygons directly into a single PMTiles v3 archive.
 
 use crate::aggregator::output_policy::OutputPolicy;
 use rayon::prelude::*;
@@ -38,7 +38,7 @@ pub use crate::pmtiles::pyramid::{
 
 // Re-export feature definitions, metadata, accumulator, and export summaries from features module
 pub use crate::pmtiles::features::{
-    build_default_pmtiles_fields, build_pmtiles_metadata, H3Feature, PmtilesExportSummary,
+    build_default_pmtiles_fields, build_pmtiles_metadata, CellFeature, PmtilesExportSummary,
     ResolutionAccumulatorStats, TilePyramidAccumulator,
 };
 
@@ -468,25 +468,27 @@ fn reject_compaction<S: RecordStreamer>(
     Ok(())
 }
 
-/// High-level builder to convert H3 data and GeoTIFF raster aggregations directly to PMTiles v3
-pub struct H3PmtilesTiler;
+/// High-level builder to convert indexed cells and GeoTIFF raster aggregations directly to PMTiles v3
+pub struct PmtilesTiler;
 
-impl H3PmtilesTiler {
-    /// Export any collection of generic H3 features (with strict H3 validation) to a PMTiles v3 archive.
+impl PmtilesTiler {
+    /// Export cells of the selected grid to a PMTiles v3 archive. Invalid IDs are counted and dropped.
     ///
     /// Features may arrive in any order. Memory stays near
     /// [`DEFAULT_EXPORT_MEMORY_BUDGET`](crate::pmtiles::DEFAULT_EXPORT_MEMORY_BUDGET):
     /// larger inputs are sorted externally through temporary files (see
     /// [`ExternalFeatureExport`](crate::pmtiles::ExternalFeatureExport), which
     /// also allows a custom budget, spill directory or output writer).
-    pub fn export_h3_features<P: AsRef<Path>, I: IntoIterator<Item = H3Feature>>(
+    pub fn export_features<P: AsRef<Path>, I: IntoIterator<Item = CellFeature>>(
+        grid: crate::grid::GridKind,
         features: I,
         output_path: P,
     ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
         let mut exporter = crate::pmtiles::ExternalFeatureExport::new(
             crate::pmtiles::DEFAULT_EXPORT_MEMORY_BUDGET,
             None,
-        );
+        )
+        .with_grid(grid);
         for feature in features {
             exporter.push(feature)?;
         }

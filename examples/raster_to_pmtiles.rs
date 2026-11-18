@@ -5,7 +5,7 @@
 
 use dggs_stream::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream::aggregator::sampling::SamplingPattern;
-use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::pmtiles::tiler::PmtilesTiler;
 use std::env;
 use std::fs::File;
 use std::time::Instant;
@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let start = Instant::now();
     let total_hexagons =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(&input_path, &output_path, config)?;
+        PmtilesTiler::process_geotiff_to_pmtiles(&input_path, &output_path, config)?;
     let elapsed = start.elapsed();
 
     let pmtiles_file = File::open(&output_path)?;

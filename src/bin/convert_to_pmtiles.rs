@@ -1,6 +1,6 @@
 use dggs_stream::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream::aggregator::SamplingPattern;
-use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::pmtiles::tiler::PmtilesTiler;
 use std::path::Path;
 
 fn print_help() {
@@ -173,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
 
         let start = std::time::Instant::now();
-        let summary = H3PmtilesTiler::process_parquet_to_pmtiles(
+        let summary = PmtilesTiler::process_parquet_to_pmtiles(
             &input_path,
             &output_path,
             h3_column.as_deref(),
@@ -227,13 +227,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         let start = std::time::Instant::now();
         let total_hexagons = if is_categorical {
-            H3PmtilesTiler::process_categorical_source_to_pmtiles(
-                &input_path,
-                &output_path,
-                config,
-            )?
+            PmtilesTiler::process_categorical_source_to_pmtiles(&input_path, &output_path, config)?
         } else {
-            H3PmtilesTiler::process_raster_source_to_pmtiles(&input_path, &output_path, config)?
+            PmtilesTiler::process_raster_source_to_pmtiles(&input_path, &output_path, config)?
         };
         let elapsed = start.elapsed();
 

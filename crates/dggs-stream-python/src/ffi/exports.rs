@@ -11,7 +11,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
 };
 use dggs_stream_core::error::{safe_panic_payload_to_string, DggsStreamError, Result};
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
-use dggs_stream_core::pmtiles::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::PmtilesTiler;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
 use dggs_stream_core::grid::GridKind;
@@ -359,14 +359,10 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
             config.transform_failure_counter = Some(Arc::clone(&failures));
 
             if categorical == 0 {
-                H3PmtilesTiler::process_raster_source_to_pmtiles(
-                    &in_str,
-                    Path::new(&out_str),
-                    config,
-                )
-                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
+                PmtilesTiler::process_raster_source_to_pmtiles(&in_str, Path::new(&out_str), config)
+                    .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
             } else {
-                H3PmtilesTiler::process_categorical_source_to_pmtiles(
+                PmtilesTiler::process_categorical_source_to_pmtiles(
                     &in_str,
                     Path::new(&out_str),
                     config,
@@ -442,7 +438,7 @@ pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles_v2(
                 None => None,
                 Some(_) => Some(parse_c_grid(grid)?),
             };
-            let summary = H3PmtilesTiler::process_parquet_to_pmtiles_for(
+            let summary = PmtilesTiler::process_parquet_to_pmtiles_for(
                 Path::new(&in_str),
                 Path::new(&out_str),
                 column.as_deref(),

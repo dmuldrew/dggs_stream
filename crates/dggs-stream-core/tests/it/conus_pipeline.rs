@@ -13,7 +13,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
-use dggs_stream_core::pmtiles::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::PmtilesTiler;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use tempfile::TempDir;
@@ -115,7 +115,7 @@ fn test_conus_batch_and_evict_pipeline_simulation() {
     let streamer_pmtiles =
         MultiScanHorizonStreamer::new_mosaic(Arc::clone(&mosaic), &config).unwrap();
     let total_pmtiles_hex =
-        H3PmtilesTiler::generate_from_continuous_streamer(streamer_pmtiles, &out_pmtiles)
+        PmtilesTiler::generate_from_continuous_streamer(streamer_pmtiles, &out_pmtiles)
             .expect("generate pmtiles");
 
     assert_eq!(total_pmtiles_hex, total_written);

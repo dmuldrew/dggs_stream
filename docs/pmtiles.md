@@ -142,7 +142,7 @@ its southern edge. Arbitrary H3 tables have no such order. Two routes write them
   any query, with `min_zoom`/`max_zoom` filters and an optional `memory_budget_mb`. See the
   [reference](sql-api-reference.md#copy-to-pmtiles-copy-query-to-path-format-pmtiles--duckdb-20-build).
   For a Parquet file on any DuckDB version, `h3_parquet_to_pmtiles` also works.
-* **Rust**: `H3PmtilesTiler::export_h3_features(features, path)` takes `H3Feature`s in any order.
+* **Rust**: `PmtilesTiler::export_features(grid, features, path)` takes `CellFeature`s in any order and interprets their `cell_id` values using the supplied `GridKind`.
   `pmtiles::ExternalFeatureExport` is the same exporter with a custom memory budget, spill
   directory, and output (`finish_into` streams to any `std::io::Write`).
 

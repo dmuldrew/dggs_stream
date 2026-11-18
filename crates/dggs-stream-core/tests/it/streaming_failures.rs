@@ -5,7 +5,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
-use dggs_stream_core::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::tiler::PmtilesTiler;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 
 use crate::helpers::{corrupt_strip_geotiff as corrupt_payload, TestGeoTiffBuilder};
@@ -89,12 +89,12 @@ fn corrupt_chunk_exports_fail_and_preserve_existing_outputs() {
         .is_err());
         let reader = GeoTiffStreamReader::open(file.path()).unwrap();
         let result = if categorical {
-            H3PmtilesTiler::generate_from_categorical_streamer(
+            PmtilesTiler::generate_from_categorical_streamer(
                 MultiCategoricalHorizonStreamer::new(reader, &config).unwrap(),
                 &pmtiles,
             )
         } else {
-            H3PmtilesTiler::generate_from_continuous_streamer(
+            PmtilesTiler::generate_from_continuous_streamer(
                 MultiScanHorizonStreamer::new(reader, &config).unwrap(),
                 &pmtiles,
             )

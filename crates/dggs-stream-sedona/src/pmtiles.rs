@@ -70,7 +70,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use dggs_stream_core::encoding::parse_hex_u64;
 use dggs_stream_core::grid::GridKind;
-use dggs_stream_core::pmtiles::features::H3Feature;
+use dggs_stream_core::pmtiles::features::CellFeature;
 use dggs_stream_core::pmtiles::mvt::MvtValue;
 use dggs_stream_core::pmtiles::pyramid::grid_res_to_zoom;
 #[cfg(test)]
@@ -393,7 +393,7 @@ impl FeatureEncoder {
     pub fn encode_batch(
         &self,
         batch: &RecordBatch,
-        mut sink: impl FnMut(H3Feature) -> Result<()>,
+        mut sink: impl FnMut(CellFeature) -> Result<()>,
     ) -> Result<u64> {
         let h3_col = batch.column(self.h3_index);
         let h3_strings = match self.h3_kind {
@@ -439,8 +439,8 @@ impl FeatureEncoder {
                     prop_value(col.as_ref(), *kind, row).map(|v| (name.clone(), v))
                 })
                 .collect();
-            sink(H3Feature {
-                h3_index: cell,
+            sink(CellFeature {
+                cell_id: cell,
                 properties,
             })?;
             added += 1;
@@ -832,7 +832,7 @@ mod tests {
     const RES8_B: u64 = 0x8828308283fffff;
     const RES5: u64 = 0x85283473fffffff;
 
-    fn encode(batch: &RecordBatch, options: PmtilesWriteOptions) -> Result<Vec<H3Feature>> {
+    fn encode(batch: &RecordBatch, options: PmtilesWriteOptions) -> Result<Vec<CellFeature>> {
         let encoder = FeatureEncoder::try_new(&batch.schema(), options)?;
         let mut out = Vec::new();
         let n = encoder.encode_batch(batch, |f| {
@@ -847,7 +847,7 @@ mod tests {
         RecordBatch::try_from_iter(columns).unwrap()
     }
 
-    fn props(f: &H3Feature) -> Vec<(&str, &MvtValue)> {
+    fn props(f: &CellFeature) -> Vec<(&str, &MvtValue)> {
         f.properties.iter().map(|(k, v)| (k.as_ref(), v)).collect()
     }
 
@@ -875,7 +875,7 @@ mod tests {
         ]);
         let features = encode(&b, PmtilesWriteOptions::default()).unwrap();
         assert_eq!(features.len(), 2);
-        assert_eq!(features[0].h3_index, RES8_A);
+        assert_eq!(features[0].cell_id, RES8_A);
         assert_eq!(
             props(&features[0]),
             vec![
@@ -920,7 +920,7 @@ mod tests {
         let cells: Vec<u64> = encode(&b, PmtilesWriteOptions::default())
             .unwrap()
             .iter()
-            .map(|f| f.h3_index)
+            .map(|f| f.cell_id)
             .collect();
         assert_eq!(cells, vec![RES8_A, RES5]);
 
@@ -932,7 +932,7 @@ mod tests {
         let cells: Vec<u64> = encode(&b, PmtilesWriteOptions::default())
             .unwrap()
             .iter()
-            .map(|f| f.h3_index)
+            .map(|f| f.cell_id)
             .collect();
         assert_eq!(cells, vec![RES8_A, RES8_B]);
 
@@ -952,7 +952,7 @@ mod tests {
             ..Default::default()
         };
         let features = encode(&b, options).unwrap();
-        assert_eq!(features[1].h3_index, RES8_B);
+        assert_eq!(features[1].cell_id, RES8_B);
         assert_eq!(
             props(&features[1]),
             vec![("h3_index", &MvtValue::UInt(RES5))]
@@ -964,7 +964,7 @@ mod tests {
             Arc::new(UInt64Array::from(vec![RES5])) as ArrayRef,
         )]);
         assert_eq!(
-            encode(&b, PmtilesWriteOptions::default()).unwrap()[0].h3_index,
+            encode(&b, PmtilesWriteOptions::default()).unwrap()[0].cell_id,
             RES5
         );
     }

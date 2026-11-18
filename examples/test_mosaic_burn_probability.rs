@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
-use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::pmtiles::tiler::PmtilesTiler;
 use dggs_stream::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -171,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let t_pmtiles = Instant::now();
     let total_pmtiles_hexes =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(source_pattern, pmtiles_output, pmtiles_config)?;
+        PmtilesTiler::process_geotiff_to_pmtiles(source_pattern, pmtiles_output, pmtiles_config)?;
     let dur_pmtiles = t_pmtiles.elapsed();
 
     let pmtiles_file = File::open(pmtiles_output)?;
