@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking A5 index change:** upgraded `a5` from 0.10.1 to 1.0.0. A5 uses a new cell-ID ordering. Rebuild existing A5 raster aggregates and polygon indexes together before joining them, or explicitly migrate stored 0.x IDs with upstream Rust `a5::migrate`. Validity checks cannot identify which ID version a value came from. Polygon fills expand the new compacted covering to the requested resolution and exclude its compaction marker from the allocation budget.
 - **Renamed: raster_h3 is now dggs_stream.** The names you install, import or load changed; the old ones keep working for now, with the exceptions noted:
   - Rust crates `raster-h3-{core,cli,duckdb,python,pg,sedona}` → `dggs-stream-*` (directories `crates/dggs-stream-*`), the root crate `raster_h3` → `dggs_stream`. No alias (the crates are not published).
   - Python distribution `raster-h3` → `dggs-stream`, module `raster_h3` → `dggs_stream`. `import raster_h3` still works: it returns the `dggs_stream` module and emits a `DeprecationWarning`. The Spark data source is `spark.read.format("dggs_stream")`, and `register` also registers it as `raster_h3`. The SedonaDB binding `raster_h3_sedona` → `dggs_stream_sedona` (built from source; no alias).

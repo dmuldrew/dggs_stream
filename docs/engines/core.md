@@ -47,6 +47,8 @@ Every adapter follows the same steps:
 1. Build a `MultiResolutionConfig` from its own parameters (`resolutions`, `custom_crs`,
    `custom_nodata`, `apply_scale_offset`, `bbox`, `overlap_rule`, `sampling`, `quantiles`,
    filters, …). See [band calibration and validity](../sql-api-reference.md#band-calibration-and-validity).
+   A5 uses 1.0 cell IDs. See [A5 index version](../grids.md#a5-index-version) before importing A5 0.x data.
+
    Grid-independent options set more fields: `with_grid(GridKind)` ([Grids](../grids.md));
    `ResolutionSpec::parse` and `ResolutionSpec::resolve` for `auto`; `transfer`;
    `set_histogram`; `nodata_policy`, `emit_nodata_value` and `decimals` (or

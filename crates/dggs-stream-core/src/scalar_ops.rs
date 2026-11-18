@@ -590,7 +590,7 @@ fn a5_fill_polygons(
         let compacted = a5::polygon_to_cells(&rings, res as i32, Some(opts))
             .map_err(|_| PolygonToCellsError::InvalidGeometry("invalid polygon"))?;
         check_a5_expansion_budget(&compacted, res as i32, out.len())?;
-        let mut cells = a5::uncompact(&compacted, res as i32)
+        let mut cells = a5::uncompact(&compacted)
             .map_err(|_| PolygonToCellsError::InvalidGeometry("uncompact failed"))?;
         if matches!(mode, ContainmentMode::ContainsBoundary) {
             cells.retain(|&cell| a5_boundary_contained(cell, &prepared));
@@ -648,6 +648,9 @@ fn check_a5_expansion_budget(
 ) -> Result<(), PolygonToCellsError> {
     let mut count = existing;
     for &cell in cells {
+        if a5::core::compaction_marker::is_compaction_marker(cell) {
+            continue;
+        }
         let source = a5::get_resolution(cell);
         let descendants = a5::core::cell_info::get_num_cells(res)
             / a5::core::cell_info::get_num_cells(source).max(1);
@@ -1044,12 +1047,35 @@ mod tests {
     #[test]
     fn a5_expansion_budget_checks_descendants_without_allocating() {
         let root = GridKind::A5.cell_at(0., 0., 0).unwrap();
+        let covering = [root, a5::core::compaction_marker::compaction_marker(1)];
+        assert!(check_a5_expansion_budget(&covering, 1, H3_POLYGON_TO_CELLS_MAX_CELLS - 5).is_ok());
         assert!(check_a5_expansion_budget(&[root], 1, H3_POLYGON_TO_CELLS_MAX_CELLS - 5).is_ok());
         assert!(check_a5_expansion_budget(&[root], 1, H3_POLYGON_TO_CELLS_MAX_CELLS - 4).is_err());
         assert!(matches!(
             check_a5_expansion_budget(&[root], 30, 0),
             Err(PolygonToCellsError::TooManyCells { .. })
         ));
+    }
+
+    #[test]
+    fn a5_compaction_marker_preserves_the_expansion_resolution() {
+        let root = GridKind::A5.cell_at(0., 0., 3).unwrap();
+        let children = a5::cell_to_children(root, Some(5)).unwrap();
+        let compacted = a5::compact(&children).unwrap();
+        assert!(compacted
+            .iter()
+            .any(|&cell| a5::core::compaction_marker::is_compaction_marker(cell)));
+        check_a5_expansion_budget(
+            &compacted,
+            5,
+            H3_POLYGON_TO_CELLS_MAX_CELLS - children.len(),
+        )
+        .unwrap();
+        let mut expanded = a5::uncompact(&compacted).unwrap();
+        let mut expected = children;
+        expanded.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(expanded, expected);
     }
 
     #[test]
