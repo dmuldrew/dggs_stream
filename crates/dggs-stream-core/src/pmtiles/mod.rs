@@ -3,6 +3,9 @@
 //! Provides zero-intermediate-file streaming aggregation of GeoTIFF rasters
 //! into Mapbox Vector Tile (MVT) format and single-file PMTiles v3 archives.
 
+pub(crate) const CELL_LAYER_ID: &str = "dggs_cells";
+pub(crate) const CELLS_OVER_TILE_CAP: &str = "cells_over_tile_cap";
+
 pub mod external_export;
 pub mod features;
 pub mod mvt;

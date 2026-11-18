@@ -232,7 +232,7 @@ pub struct TilePyramidAccumulator {
 impl TilePyramidAccumulator {
     /// Create a new tile pyramid accumulator with a safety margin (in degrees)
     pub fn new(safety_margin: f64) -> Self {
-        Self::with_layer("h3_hexagons", safety_margin)
+        Self::with_layer(crate::pmtiles::CELL_LAYER_ID, safety_margin)
     }
 
     /// Create a new tile pyramid accumulator with a custom layer name and safety margin

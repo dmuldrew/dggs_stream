@@ -760,14 +760,17 @@ impl H3PmtilesTiler {
             &desc.description,
             min_zoom,
             max_zoom,
-            "h3_hexagons",
+            crate::pmtiles::CELL_LAYER_ID,
             &format!("Aggregated {grid} grid cells"),
             desc.fields_json,
             Some({
                 let mut extras = desc.extras;
                 let skipped = capped_cells.load(Ordering::Relaxed);
                 if skipped > 0 {
-                    extras.insert("h3_cells_over_tile_cap".to_string(), json!(skipped));
+                    extras.insert(
+                        crate::pmtiles::CELLS_OVER_TILE_CAP.to_string(),
+                        json!(skipped),
+                    );
                 }
                 extras
             }),

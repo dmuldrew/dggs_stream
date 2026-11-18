@@ -258,7 +258,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
             "H3 vector hexagon tile pyramid exported by dggs_stream",
             0,
             0,
-            "h3_hexagons",
+            crate::pmtiles::CELL_LAYER_ID,
             "H3 hexagonal vector polygons with attributes",
             json!({}),
             None,
@@ -464,12 +464,12 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
         "H3 vector hexagon tile pyramid exported by dggs_stream",
         min_zoom,
         max_zoom,
-        "h3_hexagons",
+        crate::pmtiles::CELL_LAYER_ID,
         "H3 hexagonal vector polygons with attributes",
         serde_json::Value::Object(fields_map),
         (capped_cells > 0).then(|| {
             serde_json::Map::from_iter([(
-                "h3_cells_over_tile_cap".to_string(),
+                crate::pmtiles::CELLS_OVER_TILE_CAP.to_string(),
                 json!(capped_cells),
             )])
         }),

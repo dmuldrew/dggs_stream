@@ -186,7 +186,7 @@ width of the map (millions of tiles per cell). Tiling skips a cell at any zoom w
 cover more than 65,536 tiles (`pyramid::MAX_TILE_OPS_PER_CELL_ZOOM`); it stays present at
 coarser zooms. `pyramid::for_each_cell_tile_mercator` returns the number of tiles it emitted,
 `0` for a skipped cell. Raster and table exporters record skipped `(cell, zoom)` pairs as
-`h3_cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
+`cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
 gap between resolutions can also trigger the cap for nonpolar cells and leave a zoom empty.
 
 ## PMTiles v3 Leaf Directory Architecture
@@ -283,10 +283,10 @@ map.on('load', () => {
         url: 'pmtiles://https://my-maps-bucket.s3.amazonaws.com/landcover.pmtiles'
     });
     map.addLayer({
-        id: 'h3_hexagons_layer',
+        id: 'dggs_cells_layer',
         type: 'fill',
         source: 'h3_raster',
-        'source-layer': 'h3_hexagons',
+        'source-layer': 'dggs_cells',
         paint: {
             'fill-color': [
                 'interpolate', ['linear'], ['get', 'mean'],
