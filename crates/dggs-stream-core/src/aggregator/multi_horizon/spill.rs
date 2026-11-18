@@ -146,11 +146,7 @@ impl SpillAccumulator for H3Accumulator {
 impl SpillAccumulator for CategoricalAccumulator {
     fn write_state(&self, out: &mut impl Write) -> io::Result<()> {
         write_f64(out, self.total_count)?;
-        let n = self
-            .heap_counts
-            .as_ref()
-            .map_or(self.inline_len as usize, |h| h.len());
-        write_u64(out, n as u64)?;
+        write_u64(out, self.unique_classes() as u64)?;
         // Do not round-trip through JSON: it cannot preserve arbitrary f64 states.
         let mut result = Ok(());
         self.for_each_class(|k, v| {
@@ -552,10 +548,11 @@ mod tests {
 
     #[test]
     fn oversized_merged_state_fails_without_discarding_categories() {
+        // 40 classes fit the limit; the 80 of the merged state do not.
         let mut runs = SpillRuns::<CategoricalAccumulator>::new(2048, None);
         for offset in [0, 100] {
             let mut acc = CategoricalAccumulator::new();
-            for k in offset..offset + 16 {
+            for k in offset..offset + 40 {
                 acc.update(k);
             }
             let result = runs.push_sorted([(1, acc)]);

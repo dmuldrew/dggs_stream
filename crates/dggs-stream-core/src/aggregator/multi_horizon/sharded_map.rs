@@ -51,9 +51,7 @@ impl AccumulatorMerge for H3Accumulator {
 
 impl AccumulatorMerge for CategoricalAccumulator {
     fn heap_bytes(&self) -> usize {
-        self.heap_counts.as_ref().map_or(0, |h| {
-            size_of_val(&**h) + table_bytes::<i64, f64>(h.capacity())
-        })
+        CategoricalAccumulator::heap_bytes(self)
     }
 
     #[inline(always)]

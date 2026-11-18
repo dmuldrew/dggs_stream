@@ -12,7 +12,7 @@ use tiff::decoder::DecodingResult;
 use tiff::encoder::{colortype, TiffEncoder};
 use tiff::tags::Tag;
 
-use dggs_stream_core::aggregator::categorical::INLINE_CAPACITY;
+use dggs_stream_core::aggregator::categorical::{INLINE_CAPACITY, LIST_CAPACITY};
 use dggs_stream_core::aggregator::multi_horizon::{
     continuous_streamer::ContinuousKernel, MultiCategoricalHorizonStreamer, MultiHorizonStreamer,
     MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget,
@@ -403,10 +403,10 @@ fn stream_categorical(
 
 #[test]
 fn mixed_resolution_categorical_spill_with_compaction_matches_in_memory_reference() {
-    // 40 classes in small blocks: coarse cells overflow the inline class
-    // array into heap maps, which must round-trip through spill runs.
+    // Many classes in small blocks: coarse cells overflow inline storage into
+    // heap lists and maps, which must round-trip through spill runs.
     let (_file, path) =
-        mixed_spill_builder().create_tempfile(|c, r| (1 + (c / 3 * 7 + r / 3 * 13) % 40) as u8);
+        mixed_spill_builder().create_tempfile(|c, r| (1 + (c / 3 * 7 + r / 3 * 13) % 100) as u8);
 
     let reference = stream_categorical(&path, &mixed_spill_config(UNBOUNDED));
     assert_eq!(reference.spills, [0, 0]);
@@ -414,7 +414,13 @@ fn mixed_resolution_categorical_spill_with_compaction_matches_in_memory_referenc
     assert!(
         reference
             .values()
-            .any(|classes| classes.len() > INLINE_CAPACITY),
+            .any(|classes| (INLINE_CAPACITY + 1..=LIST_CAPACITY).contains(&classes.len())),
+        "some cells must use heap class lists"
+    );
+    assert!(
+        reference
+            .values()
+            .any(|classes| classes.len() > LIST_CAPACITY),
         "some cells must use heap class maps"
     );
     assert!(
