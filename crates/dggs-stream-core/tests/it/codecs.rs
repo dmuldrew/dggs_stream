@@ -898,7 +898,7 @@ fn cropped_edge_tiles_match_reference_in_both_streaming_paths() {
         while !stream.is_finished() {
             for rec in stream.fetch_next_batch(3).unwrap() {
                 assert!(actual
-                    .insert(rec.h3_index, (rec.accumulator.count, rec.accumulator.sum))
+                    .insert(rec.cell_id, (rec.accumulator.count, rec.accumulator.sum))
                     .is_none());
             }
         }

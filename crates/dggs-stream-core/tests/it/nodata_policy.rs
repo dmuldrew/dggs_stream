@@ -69,7 +69,7 @@ fn continuous(path: &Path, config: &MultiResolutionConfig) -> BTreeMap<u64, (f64
     while streamer
         .drain_completed_into(1024, |_, rec| {
             let acc = &rec.accumulator;
-            assert!(cells.insert(rec.h3_index, (acc.count, acc.sum)).is_none());
+            assert!(cells.insert(rec.cell_id, (acc.count, acc.sum)).is_none());
         })
         .unwrap()
         > 0
@@ -139,7 +139,7 @@ fn emit_keeps_all_nodata_cells_in_categorical_scans() {
             let mut totals = BTreeMap::new();
             while streamer
                 .drain_completed_into(1024, |_, rec| {
-                    totals.insert(rec.h3_index, rec.accumulator.total_count);
+                    totals.insert(rec.cell_id, rec.accumulator.total_count);
                 })
                 .unwrap()
                 > 0

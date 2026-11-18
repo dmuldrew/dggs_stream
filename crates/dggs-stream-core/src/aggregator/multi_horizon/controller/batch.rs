@@ -27,7 +27,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                 partition.partials.push_sized(
                     PartialCell {
                         resolution: self.resolution_u8s[res_idx],
-                        h3_index: key,
+                        cell_id: key,
                         accumulator: acc,
                     },
                     bytes,

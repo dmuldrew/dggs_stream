@@ -87,7 +87,7 @@ fn single_continuous(
         .drain_completed_into(1024, |_, r| {
             insert_unique(
                 &mut cells,
-                (r.resolution, r.h3_index),
+                (r.resolution, r.cell_id),
                 r.accumulator,
                 "single scan",
             )
@@ -124,7 +124,7 @@ fn partitioned_continuous(
                 |_, r| {
                     insert_unique(
                         &mut cells,
-                        (r.resolution, r.h3_index),
+                        (r.resolution, r.cell_id),
                         r.accumulator,
                         "interior",
                     )
@@ -132,7 +132,7 @@ fn partitioned_continuous(
                 |p| {
                     partials.push((
                         p.resolution,
-                        p.h3_index,
+                        p.cell_id,
                         encode_partial_state(&p.accumulator),
                     ))
                 },
@@ -150,7 +150,7 @@ fn partitioned_continuous(
     for r in merger.finish() {
         insert_unique(
             &mut cells,
-            (r.resolution, r.h3_index),
+            (r.resolution, r.cell_id),
             r.accumulator,
             "interior and merged",
         );
@@ -174,7 +174,7 @@ fn single_categorical(
         .drain_completed_into(1024, |_, r| {
             insert_unique(
                 &mut cells,
-                (r.resolution, r.h3_index),
+                (r.resolution, r.cell_id),
                 r.accumulator,
                 "single scan",
             )
@@ -206,7 +206,7 @@ fn partitioned_categorical(
                 |_, r| {
                     insert_unique(
                         &mut cells,
-                        (r.resolution, r.h3_index),
+                        (r.resolution, r.cell_id),
                         r.accumulator,
                         "interior",
                     )
@@ -214,7 +214,7 @@ fn partitioned_categorical(
                 |p| {
                     partials.push((
                         p.resolution,
-                        p.h3_index,
+                        p.cell_id,
                         encode_partial_state(&p.accumulator),
                     ))
                 },
@@ -231,7 +231,7 @@ fn partitioned_categorical(
     for r in merger.finish() {
         insert_unique(
             &mut cells,
-            (r.resolution, r.h3_index),
+            (r.resolution, r.cell_id),
             r.accumulator,
             "interior and merged",
         );

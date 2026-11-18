@@ -81,7 +81,7 @@ fn reference_rows(path: &Path) -> Vec<Row> {
             classes.sort_unstable_by_key(|&(k, _)| k);
             for (category, count) in classes {
                 rows.push(Row {
-                    cell: rec.h3_index,
+                    cell: rec.cell_id,
                     resolution: rec.resolution,
                     category,
                     count,

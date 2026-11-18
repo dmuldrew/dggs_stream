@@ -99,7 +99,7 @@ where
 
     /// Merge one partition's share of a cell.
     pub fn push(&mut self, cell: PartialCell<K::Accumulator>) {
-        match self.cells.entry((cell.resolution, cell.h3_index)) {
+        match self.cells.entry((cell.resolution, cell.cell_id)) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 e.get_mut().merge(&cell.accumulator)
             }
@@ -113,14 +113,14 @@ where
     pub fn push_encoded(
         &mut self,
         resolution: u8,
-        h3_index: u64,
+        cell_id: u64,
         state: &[u8],
         limit: usize,
     ) -> Result<()> {
         let accumulator = decode_partial_state(state, limit)?;
         self.push(PartialCell {
             resolution,
-            h3_index,
+            cell_id,
             accumulator,
         });
         Ok(())
@@ -137,7 +137,7 @@ where
     }
 
     /// Final records for every merged cell passing the filters, sorted by
-    /// `(resolution, h3_index)`.
+    /// `(resolution, cell_id)`.
     pub fn finish(self) -> Vec<K::Record> {
         let mut cells: Vec<_> = self.cells.into_iter().collect();
         cells.sort_unstable_by_key(|&(key, _)| key);

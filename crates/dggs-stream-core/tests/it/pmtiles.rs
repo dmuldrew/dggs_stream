@@ -1088,7 +1088,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
             accumulator.update(val);
             MultiContinuousRecord {
                 resolution: 6,
-                h3_index: c.into(),
+                cell_id: c.into(),
                 accumulator,
             }
         })
@@ -1171,7 +1171,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
             }
             MultiCategoricalRecord {
                 resolution: 6,
-                h3_index: c.into(),
+                cell_id: c.into(),
                 accumulator: acc,
             }
         })

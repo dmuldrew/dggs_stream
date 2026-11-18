@@ -141,11 +141,11 @@ fn main() {
         let n = streamer_cfl_cell
             .drain_completed_into(2048, |_i, rec| {
                 point_hexes += 1;
-                if rec.h3_index == u64::from(target_cell) {
+                if rec.cell_id == u64::from(target_cell) {
                     point_cell_found = true;
                     println!(
                         "      - Cell {:x}: Mean={:.2}, Count={:.0}, Min={:.2}, Max={:.2}",
-                        rec.h3_index,
+                        rec.cell_id,
                         rec.accumulator.mean(),
                         rec.accumulator.count,
                         rec.accumulator.min,

@@ -188,7 +188,7 @@ fn test_albers_multi_horizon_streaming_no_duplicate_cells() {
             break;
         }
         for record in batch {
-            emitted_cells.push(record.h3_index);
+            emitted_cells.push(record.cell_id);
             total_pixel_count += record.accumulator.count;
         }
     }
@@ -366,9 +366,9 @@ fn test_albers_interior_apex_and_southern_hemisphere_bounds() {
         }
         for rec in batch {
             assert!(
-                seen.insert(rec.h3_index),
+                seen.insert(rec.cell_id),
                 "Duplicate cell in southern Albers stream: {:x}",
-                rec.h3_index
+                rec.cell_id
             );
             total_count += rec.accumulator.count;
         }

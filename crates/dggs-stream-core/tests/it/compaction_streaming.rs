@@ -106,14 +106,14 @@ fn stream(
             emitted_before_eof = true;
         }
         for rec in batch {
-            let south = compute_cell_south_lat(rec.h3_index);
+            let south = compute_cell_south_lat(rec.cell_id);
             assert!(
                 south <= strictest_horizon,
                 "record {:x} (south {south}) emitted north of published horizon {strictest_horizon}",
-                rec.h3_index
+                rec.cell_id
             );
-            let previous = out.insert((rec.resolution, rec.h3_index), rec.accumulator.count);
-            assert!(previous.is_none(), "duplicate record {:x}", rec.h3_index);
+            let previous = out.insert((rec.resolution, rec.cell_id), rec.accumulator.count);
+            assert!(previous.is_none(), "duplicate record {:x}", rec.cell_id);
         }
         strictest_horizon = strictest_horizon.min(streamer.current_lat_horizon());
     }

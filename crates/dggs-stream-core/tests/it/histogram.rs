@@ -55,7 +55,7 @@ fn scan(path: &std::path::Path, config: &MultiResolutionConfig) -> BTreeMap<u64,
                 .iter()
                 .map(|e| e.weight)
                 .collect();
-            assert!(cells.insert(rec.h3_index, weights).is_none());
+            assert!(cells.insert(rec.cell_id, weights).is_none());
         })
         .unwrap()
         > 0

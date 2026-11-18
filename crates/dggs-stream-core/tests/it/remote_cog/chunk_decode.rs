@@ -169,7 +169,7 @@ fn remote_chunks_for_the_generic_decoder_are_downloaded_once() {
             }
             records.extend(batch);
         }
-        records.sort_by_key(|r| (r.resolution, r.h3_index));
+        records.sort_by_key(|r| (r.resolution, r.cell_id));
         records
     };
 

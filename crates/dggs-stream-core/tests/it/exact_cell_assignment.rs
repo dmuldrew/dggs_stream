@@ -104,7 +104,7 @@ fn short_scanline_reentry_and_boundary_match_every_pixel() {
                 for rec in batch {
                     assert!(actual
                         .insert(
-                            (rec.resolution, rec.h3_index),
+                            (rec.resolution, rec.cell_id),
                             (rec.accumulator.count, rec.accumulator.sum),
                         )
                         .is_none());
@@ -127,7 +127,7 @@ fn short_scanline_reentry_and_boundary_match_every_pixel() {
                 for rec in batch {
                     rec.accumulator.for_each_class(|class, count| {
                         assert!(actual_classes
-                            .insert((rec.resolution, rec.h3_index, class), count)
+                            .insert((rec.resolution, rec.cell_id, class), count)
                             .is_none());
                     });
                 }
@@ -225,7 +225,7 @@ fn supersampling_matches_direct_h3_per_cell_and_per_class() {
                         for rec in batch {
                             assert!(
                                 actual
-                                    .insert((rec.resolution, rec.h3_index), rec.accumulator)
+                                    .insert((rec.resolution, rec.cell_id), rec.accumulator)
                                     .is_none(),
                                 "duplicate cell emitted"
                             );
@@ -262,11 +262,11 @@ fn supersampling_matches_direct_h3_per_cell_and_per_class() {
                         }
                         for rec in batch {
                             assert!(actual_cells
-                                .insert((rec.resolution, rec.h3_index), rec.accumulator.total_count)
+                                .insert((rec.resolution, rec.cell_id), rec.accumulator.total_count)
                                 .is_none());
                             rec.accumulator.for_each_class(|class, count| {
                                 assert!(actual_classes
-                                    .insert((rec.resolution, rec.h3_index, class), count)
+                                    .insert((rec.resolution, rec.cell_id, class), count)
                                     .is_none());
                             });
                         }
@@ -430,7 +430,7 @@ fn boundary_assignments_do_not_depend_on_worker_partitioning() {
             while !stream.is_finished() {
                 for rec in stream.fetch_next_batch(37).unwrap() {
                     assert!(actual
-                        .insert(rec.h3_index, (rec.accumulator.count, rec.accumulator.sum))
+                        .insert(rec.cell_id, (rec.accumulator.count, rec.accumulator.sum))
                         .is_none());
                 }
             }

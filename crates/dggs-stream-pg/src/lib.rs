@@ -732,18 +732,18 @@ impl PgContinuousSrf {
             return Ok(None);
         };
 
-        let hex_bytes = fast_hex_u64(rec.h3_index, &mut self.hex_buf);
+        let hex_bytes = fast_hex_u64(rec.cell_id, &mut self.hex_buf);
         let h3_hex = std::str::from_utf8(hex_bytes)
             .unwrap_or_default()
             .to_owned();
-        let wkb = match cell_index_to_wkb(self.grid, rec.h3_index, &mut self.wkb_buf) {
+        let wkb = match cell_index_to_wkb(self.grid, rec.cell_id, &mut self.wkb_buf) {
             Some(len) => self.wkb_buf[..len].to_vec(),
             None => Vec::new(),
         };
         let stats = self.policy.continuous(&rec.accumulator);
 
         Ok(Some(PgContinuousRow {
-            h3_index: rec.h3_index as i64,
+            h3_index: rec.cell_id as i64,
             h3_hex,
             mean: stats.mean.unwrap_or(f64::NAN),
             stddev: stats.stddev,
@@ -893,18 +893,18 @@ impl PgCategoricalSrf {
             return Ok(None);
         };
 
-        let hex_bytes = fast_hex_u64(rec.h3_index, &mut self.hex_buf);
+        let hex_bytes = fast_hex_u64(rec.cell_id, &mut self.hex_buf);
         let h3_hex = std::str::from_utf8(hex_bytes)
             .unwrap_or_default()
             .to_owned();
         let stats = self.policy.categorical(&rec.accumulator);
-        let wkb = match cell_index_to_wkb(self.grid, rec.h3_index, &mut self.wkb_buf) {
+        let wkb = match cell_index_to_wkb(self.grid, rec.cell_id, &mut self.wkb_buf) {
             Some(len) => self.wkb_buf[..len].to_vec(),
             None => Vec::new(),
         };
 
         Ok(Some(PgCategoricalRow {
-            h3_index: rec.h3_index as i64,
+            h3_index: rec.cell_id as i64,
             h3_hex,
             majority_class: stats.majority_class.unwrap_or(0),
             majority_is_null: stats.majority_class.is_none(),

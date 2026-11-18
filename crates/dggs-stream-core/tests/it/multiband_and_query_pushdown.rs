@@ -614,7 +614,7 @@ fn borrowed_interleaved_windows_match_across_job_sizes() {
             }
             for r in batch {
                 assert!(result
-                    .insert(r.h3_index, (r.accumulator.count, r.accumulator.sum))
+                    .insert(r.cell_id, (r.accumulator.count, r.accumulator.sum))
                     .is_none());
             }
         }

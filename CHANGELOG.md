@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rust scan consumers now read the unsigned cell identifier from `cell_id` on `MultiContinuousRecord`, `MultiCategoricalRecord` and `PartialCell`. This replaces the `h3_index` field. SQL, Arrow and Parquet retain their grid-specific column names.
+
 - Rust: `H3ParquetWriter` is now `ParquetWriter`. The writer uses the grid in the scan configuration or streamer.
 
 - Rust PMTiles exports now take an explicit grid: use `PmtilesTiler::export_features(grid, features, path)` and `CellFeature { cell_id, properties }` in place of `H3PmtilesTiler::export_h3_features` and `H3Feature`. Pass `GridKind::H3` for existing H3 inputs.

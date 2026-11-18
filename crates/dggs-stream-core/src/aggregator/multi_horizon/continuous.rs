@@ -16,7 +16,8 @@ use crate::raster::metadata::BandScaling;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiContinuousRecord {
     pub resolution: u8,
-    pub h3_index: u64,
+    /// Unsigned cell identifier in the selected grid.
+    pub cell_id: u64,
     pub accumulator: H3Accumulator,
 }
 

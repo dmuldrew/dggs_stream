@@ -107,7 +107,7 @@ impl TileKind for ContinuousTiles {
     type Stats = HashMap<u8, ResolutionAccumulatorStats, FxBuildHasher>;
 
     fn parts(record: Self::Record) -> (u8, u64, Self::Acc) {
-        (record.resolution, record.h3_index, record.accumulator)
+        (record.resolution, record.cell_id, record.accumulator)
     }
 
     fn summarize(&self, acc: &Self::Acc) -> Self::Summary {
@@ -246,7 +246,7 @@ impl TileKind for CategoricalTiles {
     type Stats = CategoricalTileStats;
 
     fn parts(record: Self::Record) -> (u8, u64, Self::Acc) {
-        (record.resolution, record.h3_index, record.accumulator)
+        (record.resolution, record.cell_id, record.accumulator)
     }
 
     fn summarize(&self, acc: &Self::Acc) -> Self::Summary {

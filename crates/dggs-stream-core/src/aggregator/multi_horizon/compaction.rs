@@ -468,7 +468,7 @@ mod tests {
     ) -> Vec<(u8, u64, f64)> {
         let mut records = Vec::new();
         output.drain_into(usize::MAX, |_, r| {
-            records.push((r.resolution, r.h3_index, r.accumulator.count))
+            records.push((r.resolution, r.cell_id, r.accumulator.count))
         });
         records
     }

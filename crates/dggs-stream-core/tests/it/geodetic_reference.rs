@@ -653,12 +653,12 @@ fn assert_coverage_and_no_duplicates_with_sampling(
         }
         batches += 1;
         for rec in batch {
-            let key = (rec.resolution, rec.h3_index);
+            let key = (rec.resolution, rec.cell_id);
             assert!(
                 emitted.insert(key, rec.accumulator.count).is_none(),
                 "{crs}: duplicate emission of res {} cell {:x}",
                 rec.resolution,
-                rec.h3_index
+                rec.cell_id
             );
         }
     }
@@ -1122,11 +1122,9 @@ fn coverage_mosaic_overlap_wgs84() {
             }
             for rec in batch {
                 assert!(
-                    emitted
-                        .insert(rec.h3_index, rec.accumulator.count)
-                        .is_none(),
+                    emitted.insert(rec.cell_id, rec.accumulator.count).is_none(),
                     "Cutline: duplicate cell emission {:x}",
-                    rec.h3_index
+                    rec.cell_id
                 );
             }
         }
@@ -1153,13 +1151,10 @@ fn coverage_mosaic_overlap_wgs84() {
             for rec in batch {
                 assert!(
                     emitted
-                        .insert(
-                            rec.h3_index,
-                            (rec.accumulator.count, rec.accumulator.mean())
-                        )
+                        .insert(rec.cell_id, (rec.accumulator.count, rec.accumulator.mean()))
                         .is_none(),
                     "First: duplicate cell emission {:x}",
-                    rec.h3_index
+                    rec.cell_id
                 );
             }
         }
@@ -1201,13 +1196,10 @@ fn coverage_mosaic_overlap_wgs84() {
             for rec in batch {
                 assert!(
                     emitted
-                        .insert(
-                            rec.h3_index,
-                            (rec.accumulator.count, rec.accumulator.mean())
-                        )
+                        .insert(rec.cell_id, (rec.accumulator.count, rec.accumulator.mean()))
                         .is_none(),
                     "Average: duplicate cell emission {:x}",
-                    rec.h3_index
+                    rec.cell_id
                 );
             }
         }

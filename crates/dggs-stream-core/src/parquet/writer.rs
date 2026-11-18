@@ -227,7 +227,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
 
     #[inline(always)]
     fn push_record(&mut self, record: Self::Record) {
-        let cell_u64 = record.h3_index;
+        let cell_u64 = record.cell_id;
         let acc = record.accumulator;
         self.h3_indices.push(cell_u64 as i64);
 
@@ -445,7 +445,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
 
     #[inline(always)]
     fn push_record(&mut self, record: Self::Record) {
-        let cell_u64 = record.h3_index;
+        let cell_u64 = record.cell_id;
         let acc = record.accumulator;
         let stats = self.policy.categorical(&acc);
         self.h3_indices.push(cell_u64 as i64);

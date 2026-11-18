@@ -198,12 +198,14 @@ def test_partitions_merge_to_the_single_scan(dggs_stream, tmp_path, grid, catego
     else:
         write_geotiff(tif, 48, 48, gradient_value, rows_per_strip=4)
     index = f"{grid}_index"
+    resolutions = [RES[grid] - 1, RES[grid]]
+    order = ["resolution", index]
     kwargs = dict(grid=grid, categorical=categorical)
-    single = frame(pa.table(dggs_stream.RasterArrowStream(tif, RES[grid], **kwargs))).sort(index)
+    single = frame(pa.table(dggs_stream.RasterArrowStream(tif, resolutions, **kwargs))).sort(order)
     specs = dggs_stream.plan_partitions(tif, target_chunks=3)
     assert len(specs) > 1
     parts = [
-        frame(pa.table(dggs_stream.RasterArrowStream(tif, RES[grid], partition=s, **kwargs)))
+        frame(pa.table(dggs_stream.RasterArrowStream(tif, resolutions, partition=s, **kwargs)))
         for s in specs
     ]
     rows = pl.concat(parts)
@@ -211,9 +213,13 @@ def test_partitions_merge_to_the_single_scan(dggs_stream, tmp_path, grid, catego
     final = rows.filter(pl.col(state).is_null()).drop(state)
     partial = rows.filter(pl.col(state).is_not_null())
     assert partial.height > 0
+    if grid == "s2":
+        assert partial[index].max() >= 1 << 63
     merged = frame(dggs_stream.merge_partials(partial, grid=grid, categorical=categorical))
-    combined = pl.concat([final, merged.select(final.columns)]).sort(index)
-    keys = [index, "total_count" if categorical else "count"]
+    combined = pl.concat([final, merged.select(final.columns)]).sort(order)
+    assert set(single["resolution"]) == set(resolutions)
+    stats = ["total_count", "majority_class"] if categorical else ["count", "sum"]
+    keys = order + stats
     assert combined.select(keys).equals(single.select(keys))
 
 
