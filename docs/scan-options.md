@@ -71,13 +71,13 @@ a spec it stays JSON text of class fractions.
 | :--- | :--- |
 | Python / Polars | `List(Struct)` |
 | DataFusion / SedonaDB | `List<Struct>` |
-| CLI (`ipc`, `jsonl`) | list of structs (Arrow IPC), arrays of objects (JSON Lines) |
+| CLI (`ipc`, `jsonl`) | list of structs in `RH3IPC01`, the workspace's own binary stream (not Arrow IPC; see the [CLI output formats](engines/cli.md#ipc)); arrays of objects in JSON Lines |
 | DuckDB | `VARCHAR` holding the histogram as JSON: `{"class": weight}` or `[[lower, upper, weight], ...]` |
 
 Histograms are not available in the Parquet and PMTiles exports, in partitioned scans, or in
 PostgreSQL. The spec lives in [`histogram.rs`](../crates/raster-h3-core/src/histogram.rs). The
 nested column type is `ArrowDataType::ValueHistogram` / `BinHistogram` with
-`ColumnArray::Histogram`, carried through the Arrow C Data Interface, the IPC stream and
+`ColumnArray::Histogram`, carried through the Arrow C Data Interface, the `RH3IPC01` stream and
 JSON Lines.
 
 ## NoData policy and rounding
@@ -90,7 +90,9 @@ JSON Lines.
 
 Details:
 - **Formats without NULLs.** Formats that can't hold a NULL statistic (the direct Parquet
-  exporter, PMTiles properties) write NaN.
+  exporter, PMTiles properties) write NaN. A categorical Parquet export is the exception: its
+  majority-class column is an integer and can hold neither NULL nor NaN, so under `emit` it
+  requires an integer `emit_nodata_value` and refuses the export without one.
 - **Limits of `emit`.**
   - It refuses `min_count` and compaction.
   - Chunks a sparse TIFF does not store are not output.
