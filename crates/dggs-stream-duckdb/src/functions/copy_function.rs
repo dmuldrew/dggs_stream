@@ -25,7 +25,7 @@
 use std::ffi::c_void;
 use std::sync::Mutex;
 
-use dggs_stream_core::pmtiles::features::H3Feature;
+use dggs_stream_core::pmtiles::features::CellFeature;
 use dggs_stream_core::pmtiles::mvt::MvtValue;
 use dggs_stream_core::pmtiles::{ExternalFeatureExport, DEFAULT_EXPORT_MEMORY_BUDGET};
 
@@ -505,8 +505,8 @@ unsafe extern "C" fn pmtiles_copy_sink(
                         properties.push((key, value));
                     }
                 }
-                features.push(H3Feature {
-                    h3_index: u64::from(cell),
+                features.push(CellFeature {
+                    cell_id: u64::from(cell),
                     properties,
                 });
             }

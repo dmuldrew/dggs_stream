@@ -7,7 +7,7 @@ use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::pmtiles::mvt::{
     FeatureProperties, MercatorPoint, MvtLayer, MvtValue, PropertyFilter,
 };
-use dggs_stream_core::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::tiler::PmtilesTiler;
 use dggs_stream_core::pmtiles::writer::{zxy_to_tile_id, PmtilesWriter};
 use flate2::read::GzDecoder;
 use std::fs::File;
@@ -137,7 +137,7 @@ fn test_geotiff_to_pmtiles_end_to_end() {
 
     let config = MultiResolutionConfig::new(vec![7, 8]);
     let total_hexagons =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_path, config).unwrap();
+        PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_path, config).unwrap();
 
     assert!(
         total_hexagons > 0,
@@ -185,7 +185,7 @@ fn test_hilbert_zxy_tile_id_ordering() {
 #[test]
 fn test_export_generic_h3_features_with_validation() {
     use dggs_stream_core::pmtiles::mvt::MvtValue;
-    use dggs_stream_core::pmtiles::tiler::H3Feature;
+    use dggs_stream_core::pmtiles::tiler::CellFeature;
 
     let pmtiles_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let pmtiles_path = pmtiles_tmp.to_str().unwrap().to_string();
@@ -196,7 +196,7 @@ fn test_export_generic_h3_features_with_validation() {
     let invalid_cell_2 = 0xFFFFFFFFFFFFFFFFu64;
 
     let features = vec![
-        H3Feature::new(
+        CellFeature::new(
             valid_cell_1,
             vec![
                 ("population".to_string(), MvtValue::Double(1420.0)),
@@ -206,11 +206,11 @@ fn test_export_generic_h3_features_with_validation() {
                 ),
             ],
         ),
-        H3Feature::new(
+        CellFeature::new(
             invalid_cell_1,
             vec![("population".to_string(), MvtValue::Double(0.0))],
         ),
-        H3Feature::new(
+        CellFeature::new(
             valid_cell_2,
             vec![
                 ("population".to_string(), MvtValue::Double(980.0)),
@@ -220,13 +220,18 @@ fn test_export_generic_h3_features_with_validation() {
                 ),
             ],
         ),
-        H3Feature::new(
+        CellFeature::new(
             invalid_cell_2,
             vec![("population".to_string(), MvtValue::Double(12.0))],
         ),
     ];
 
-    let summary = H3PmtilesTiler::export_h3_features(features, &pmtiles_path).unwrap();
+    let summary = PmtilesTiler::export_features(
+        dggs_stream_core::grid::GridKind::H3,
+        features,
+        &pmtiles_path,
+    )
+    .unwrap();
 
     assert_eq!(summary.total_features, 4);
     assert_eq!(summary.valid_features, 2);
@@ -318,7 +323,7 @@ fn test_parquet_to_pmtiles_end_to_end() {
     // Test process_parquet_to_pmtiles
     let invalid_output_dir = tempfile::tempdir().unwrap();
     let invalid_pmtiles_path = invalid_output_dir.path().join("missing-column.pmtiles");
-    let error = H3PmtilesTiler::process_parquet_to_pmtiles(
+    let error = PmtilesTiler::process_parquet_to_pmtiles(
         &parquet_path,
         &invalid_pmtiles_path,
         Some("missing_h3_column"),
@@ -337,7 +342,7 @@ fn test_parquet_to_pmtiles_end_to_end() {
     let pmtiles_path = pmtiles_tmp.to_str().unwrap().to_string();
 
     let summary =
-        H3PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
+        PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
     assert_eq!(summary.total_features, 2);
     assert_eq!(summary.valid_features, 2);
     assert_eq!(summary.invalid_features_dropped, 0);
@@ -354,7 +359,7 @@ fn test_parquet_to_pmtiles_end_to_end() {
     let case_insensitive_pmtiles_path = case_insensitive_output_dir
         .path()
         .join("case-insensitive.pmtiles");
-    let case_insensitive_summary = H3PmtilesTiler::process_parquet_to_pmtiles(
+    let case_insensitive_summary = PmtilesTiler::process_parquet_to_pmtiles(
         &parquet_path,
         &case_insensitive_pmtiles_path,
         Some("H3_INDEX"),
@@ -410,7 +415,7 @@ fn test_parquet_to_pmtiles_custom_col_and_hex_string() {
     let pmtiles_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let pmtiles_path = pmtiles_tmp.to_str().unwrap().to_string();
 
-    let summary = H3PmtilesTiler::process_parquet_to_pmtiles(
+    let summary = PmtilesTiler::process_parquet_to_pmtiles(
         &parquet_path,
         &pmtiles_path,
         Some("custom_hex_id"),
@@ -501,7 +506,7 @@ fn test_parquet_to_pmtiles_multi_row_group_eviction() {
     let pmtiles_path = pmtiles_tmp.to_str().unwrap().to_string();
 
     let summary =
-        H3PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
+        PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
     assert_eq!(summary.total_features, 3);
     assert_eq!(summary.valid_features, 3);
     assert_eq!(summary.invalid_features_dropped, 0);
@@ -549,7 +554,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregation_content() {
     // Export fine resolutions 7 and 8
     let config = MultiResolutionConfig::new(vec![7, 8]);
     let total_hexagons =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_path, config).unwrap();
+        PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_path, config).unwrap();
 
     assert!(total_hexagons > 0);
 
@@ -632,7 +637,7 @@ fn test_all_nodata_geotiff_to_pmtiles_export() {
 
     let config = MultiResolutionConfig::new(vec![7, 8]);
     let total_hexagons =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_path, config).unwrap();
+        PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_path, config).unwrap();
 
     // Should complete cleanly with 0 hexagons emitted
     assert_eq!(total_hexagons, 0);
@@ -753,7 +758,7 @@ fn test_geotiff_to_pmtiles_selective_properties() {
     let pmtiles_all_path = pmtiles_all_tmp.to_str().unwrap().to_string();
     let config_all = MultiResolutionConfig::new(vec![7, 8]);
     let hex_all =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_all_path, config_all)
+        PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_all_path, config_all)
             .unwrap();
     let size_all = File::open(&pmtiles_all_path)
         .unwrap()
@@ -767,7 +772,7 @@ fn test_geotiff_to_pmtiles_selective_properties() {
     let mut config_sel = MultiResolutionConfig::new(vec![7, 8]);
     config_sel.properties = Some("mean,count".to_string());
     let hex_sel =
-        H3PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_sel_path, config_sel)
+        PmtilesTiler::process_geotiff_to_pmtiles(&tiff_path, &pmtiles_sel_path, config_sel)
             .unwrap();
     let size_sel = File::open(&pmtiles_sel_path)
         .unwrap()
@@ -1091,7 +1096,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
 
     let cont_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let cont_path = cont_tmp.to_str().unwrap().to_string();
-    let count = H3PmtilesTiler::generate_from_continuous_streamer(
+    let count = PmtilesTiler::generate_from_continuous_streamer(
         VecStreamer {
             records: cont_records.into_iter(),
             resolutions: vec![6],
@@ -1174,7 +1179,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
 
     let cat_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let cat_path = cat_tmp.to_str().unwrap().to_string();
-    H3PmtilesTiler::generate_from_categorical_streamer(
+    PmtilesTiler::generate_from_categorical_streamer(
         VecStreamer {
             records: cat_records.into_iter(),
             resolutions: vec![6],
@@ -1233,14 +1238,18 @@ fn world_tile_encodes_both_antimeridian_pieces_in_one_feature() {
 
 #[test]
 fn test_pmtiles_header_bounds_include_cell_vertices_and_antimeridian_center() {
-    use dggs_stream_core::pmtiles::tiler::H3Feature;
+    use dggs_stream_core::pmtiles::tiler::CellFeature;
 
     // 1. Single cell in SF: header bbox must reflect cell vertex extent (not a zero-area point)
     let sf_cell = 0x85283083fffffffu64; // Res 5 SF
     let sf_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let sf_path = sf_tmp.to_str().unwrap().to_string();
-    H3PmtilesTiler::export_h3_features([H3Feature::new::<&str>(sf_cell, Vec::new())], &sf_path)
-        .unwrap();
+    PmtilesTiler::export_features(
+        dggs_stream_core::grid::GridKind::H3,
+        [CellFeature::new::<&str>(sf_cell, Vec::new())],
+        &sf_path,
+    )
+    .unwrap();
 
     let mut header = [0u8; 127];
     File::open(&sf_path)
@@ -1262,8 +1271,9 @@ fn test_pmtiles_header_bounds_include_cell_vertices_and_antimeridian_center() {
         .to_cell(h3o::Resolution::Five);
     let fiji_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let fiji_path = fiji_tmp.to_str().unwrap().to_string();
-    H3PmtilesTiler::export_h3_features(
-        [H3Feature::new::<&str>(fiji_cell.into(), Vec::new())],
+    PmtilesTiler::export_features(
+        dggs_stream_core::grid::GridKind::H3,
+        [CellFeature::new::<&str>(fiji_cell.into(), Vec::new())],
         &fiji_path,
     )
     .unwrap();
@@ -1391,7 +1401,7 @@ fn test_parquet_to_pmtiles_nullable_h3_column() {
 
     let pmtiles_path = dir.path().join("nullable.pmtiles");
     let summary =
-        H3PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
+        PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
     assert_eq!(summary.total_features, 3);
     assert_eq!(summary.valid_features, 2);
     assert_eq!(summary.invalid_features_dropped, 1);
@@ -1428,7 +1438,7 @@ fn s2_parquet_archive_preserves_grid_and_exact_hex_id() {
             group.close().unwrap();
         }
         writer.close().unwrap();
-        let summary = H3PmtilesTiler::process_parquet_to_pmtiles(&input, &output, None).unwrap();
+        let summary = PmtilesTiler::process_parquet_to_pmtiles(&input, &output, None).unwrap();
         assert_eq!(summary.valid_features, usize::from(!empty));
         let metadata = read_pmtiles_metadata(output.to_str().unwrap());
         assert_eq!(metadata["grid"], "s2");
@@ -1460,7 +1470,7 @@ fn archive_features(archive: &[u8]) -> Vec<mvt_decode::Feature> {
 // buffer that is read from the front.
 #[test]
 fn test_export_writes_full_h3_hex_property() {
-    use dggs_stream_core::pmtiles::{ExternalFeatureExport, H3Feature};
+    use dggs_stream_core::pmtiles::{CellFeature, ExternalFeatureExport};
 
     let cells: Vec<u64> = [(37.7749, -122.4194), (-33.86, 151.21)]
         .into_iter()
@@ -1473,7 +1483,10 @@ fn test_export_writes_full_h3_hex_property() {
     let mut exporter = ExternalFeatureExport::new(1 << 20, None);
     for &cell in &cells {
         exporter
-            .push(H3Feature::new(cell, vec![("mean", MvtValue::Double(1.0))]))
+            .push(CellFeature::new(
+                cell,
+                vec![("mean", MvtValue::Double(1.0))],
+            ))
             .unwrap();
     }
     let mut archive = Vec::new();
@@ -1503,6 +1516,34 @@ fn test_export_writes_full_h3_hex_property() {
 
 /// Root directory limit of PMTiles v3: the 16 KiB initial fetch minus the header.
 const MAX_ROOT_DIR_BYTES: usize = 16_384 - 127;
+
+#[test]
+fn public_feature_export_uses_the_selected_grid() {
+    use dggs_stream_core::{grid::GridKind, pmtiles::CellFeature};
+
+    for grid in GridKind::ALL {
+        let cell = grid.cell_at(37.7749, -122.4194, 6).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cells.pmtiles");
+        let summary =
+            PmtilesTiler::export_features(grid, [CellFeature::new::<&str>(cell, vec![])], &path)
+                .unwrap();
+        assert_eq!(summary.valid_features, 1, "{grid}");
+        assert_eq!(
+            read_pmtiles_metadata(path.to_str().unwrap())["grid"],
+            grid.as_str()
+        );
+        let features = archive_features(&std::fs::read(path).unwrap());
+        assert!(!features.is_empty(), "{grid}");
+        for feature in features {
+            assert_eq!(
+                feature.properties[grid.hex_column_name()],
+                MvtValue::String(format!("{cell:x}")),
+                "{grid}"
+            );
+        }
+    }
+}
 
 /// Directory entries with irregular tile-ID gaps and lengths, so varint
 /// compression cannot shrink the directories to a trivial size.
@@ -1579,7 +1620,7 @@ fn s2_detail_and_overview_layers_match_archive_metadata() {
     create_temp_geotiff(tif.path(), 8, 8, tiff::tags::CompressionMethod::None).unwrap();
     let output = NamedTempFile::new().unwrap().into_temp_path();
     let resolution = 12;
-    H3PmtilesTiler::process_geotiff_to_pmtiles(
+    PmtilesTiler::process_geotiff_to_pmtiles(
         tif.path(),
         &output,
         MultiResolutionConfig::new(vec![resolution]).with_grid(GridKind::S2),
@@ -1622,7 +1663,7 @@ fn test_polar_cells_over_tile_cap_reported_in_metadata() {
     let pmtiles_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let pmtiles_path = pmtiles_tmp.to_str().unwrap();
 
-    let total = H3PmtilesTiler::process_geotiff_to_pmtiles(
+    let total = PmtilesTiler::process_geotiff_to_pmtiles(
         tiff_tmp.path(),
         pmtiles_path,
         MultiResolutionConfig::new(vec![12]),
@@ -1645,7 +1686,7 @@ fn test_tile_cap_metadata_absent_without_polar_cells() {
     create_temp_geotiff(tiff_tmp.path(), 32, 32, tiff::tags::CompressionMethod::None).unwrap();
     let pmtiles_tmp = NamedTempFile::new().unwrap().into_temp_path();
     let pmtiles_path = pmtiles_tmp.to_str().unwrap();
-    H3PmtilesTiler::process_geotiff_to_pmtiles(
+    PmtilesTiler::process_geotiff_to_pmtiles(
         tiff_tmp.path(),
         pmtiles_path,
         MultiResolutionConfig::new(vec![9]),
@@ -1701,7 +1742,7 @@ fn tiles_per_zoom(archive: &[u8]) -> std::collections::BTreeMap<u8, usize> {
 #[test]
 fn preindexed_export_fills_every_zoom_between_resolutions() {
     use dggs_stream_core::pmtiles::mvt::MvtValue;
-    use dggs_stream_core::pmtiles::tiler::H3Feature;
+    use dggs_stream_core::pmtiles::tiler::CellFeature;
     use dggs_stream_core::pmtiles::ExternalFeatureExport;
 
     // One cell at each of resolutions 0..=5, all ancestors of one res-8 cell.
@@ -1710,7 +1751,7 @@ fn preindexed_export_fills_every_zoom_between_resolutions() {
         resolutions
             .map(|r| {
                 let res = h3o::Resolution::try_from(r).unwrap();
-                H3Feature::new(
+                CellFeature::new(
                     u64::from(leaf.parent(res).unwrap()),
                     vec![("r", MvtValue::UInt(u64::from(r)))],
                 )
@@ -1787,7 +1828,7 @@ fn parquet_zoom_bands_span_row_groups_with_32_bit_indexes() {
         writer.close().unwrap();
 
         let summary =
-            H3PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
+            PmtilesTiler::process_parquet_to_pmtiles(&parquet_path, &pmtiles_path, None).unwrap();
         assert_eq!(summary.total_features, 2);
         assert_eq!(summary.valid_features, 2);
         assert_eq!((summary.min_zoom, summary.max_zoom), (coarse, fine));
@@ -1801,14 +1842,14 @@ fn parquet_zoom_bands_span_row_groups_with_32_bit_indexes() {
 
 #[test]
 fn preindexed_export_reports_capped_cells_in_sparse_bands() {
-    use dggs_stream_core::pmtiles::{ExternalFeatureExport, H3Feature};
+    use dggs_stream_core::pmtiles::{CellFeature, ExternalFeatureExport};
 
     let point = h3o::LatLng::new(0.0, 0.0).unwrap();
     let mut exporter =
         ExternalFeatureExport::new(1 << 20, None).with_zoom_limits(Some(22), Some(23));
     for res in [h3o::Resolution::Zero, h3o::Resolution::Fifteen] {
         exporter
-            .push(H3Feature::new(
+            .push(CellFeature::new(
                 point.to_cell(res).into(),
                 Vec::<(&str, MvtValue)>::new(),
             ))

@@ -470,7 +470,7 @@ fn test_prefetched_mosaic_reader_early_drop() {
 #[test]
 fn test_vrt_mixed_paths_error_handling_and_export_pipelines() {
     use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
-    use dggs_stream_core::pmtiles::tiler::H3PmtilesTiler;
+    use dggs_stream_core::pmtiles::tiler::PmtilesTiler;
 
     let temp_dir = tempfile::tempdir().unwrap();
     let sub_dir = temp_dir.path().join("sub");
@@ -512,7 +512,7 @@ fn test_vrt_mixed_paths_error_handling_and_export_pipelines() {
         .unwrap();
     assert!(resolve_raster_sources(&empty_vrt.to_string_lossy()).is_err());
 
-    // 3. Stream VRT directly through H3ParquetWriter and H3PmtilesTiler
+    // 3. Stream VRT directly through H3ParquetWriter and PmtilesTiler
     let out_pq = temp_dir.path().join("vrt_out.parquet");
     let out_pm = temp_dir.path().join("vrt_out.pmtiles");
     let pq_count = H3ParquetWriter::process_raster_source_to_parquet(
@@ -522,7 +522,7 @@ fn test_vrt_mixed_paths_error_handling_and_export_pipelines() {
         ParquetExportConfig::default(),
     )
     .unwrap();
-    let pm_count = H3PmtilesTiler::process_raster_source_to_pmtiles(
+    let pm_count = PmtilesTiler::process_raster_source_to_pmtiles(
         &vrt_path,
         &out_pm,
         MultiResolutionConfig::new(vec![8]),

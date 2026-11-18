@@ -6,7 +6,7 @@ use std::path::Path;
 use std::ptr;
 
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
-use dggs_stream_core::pmtiles::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::PmtilesTiler;
 use dggs_stream_python::{
     raster_h3_py_export_parquet, raster_h3_py_export_parquet_with_stats,
     raster_h3_py_export_pmtiles, raster_h3_py_export_pmtiles_with_stats,
@@ -238,9 +238,9 @@ fn successful_exports_report_core_row_counts() {
         let n = pmtiles(s(path), s(&out), Some("7,8"), categorical).unwrap();
         let cfg = MultiResolutionConfig::new(vec![7, 8]);
         let core_n = if categorical {
-            H3PmtilesTiler::process_categorical_source_to_pmtiles(path, &reference, cfg)
+            PmtilesTiler::process_categorical_source_to_pmtiles(path, &reference, cfg)
         } else {
-            H3PmtilesTiler::process_raster_source_to_pmtiles(path, &reference, cfg)
+            PmtilesTiler::process_raster_source_to_pmtiles(path, &reference, cfg)
         }
         .unwrap();
         assert_eq!(n as usize, core_n);

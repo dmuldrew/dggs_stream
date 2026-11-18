@@ -167,17 +167,17 @@ impl ResolutionAccumulatorStats {
     }
 }
 
-/// A generic H3 feature record with arbitrary properties for PMTiles export
+/// A grid cell feature record with arbitrary properties for PMTiles export
 #[derive(Debug, Clone)]
-pub struct H3Feature {
-    pub h3_index: u64,
+pub struct CellFeature {
+    pub cell_id: u64,
     pub properties: Vec<(Cow<'static, str>, MvtValue)>,
 }
 
-impl H3Feature {
-    pub fn new<K: Into<Cow<'static, str>>>(h3_index: u64, properties: Vec<(K, MvtValue)>) -> Self {
+impl CellFeature {
+    pub fn new<K: Into<Cow<'static, str>>>(cell_id: u64, properties: Vec<(K, MvtValue)>) -> Self {
         Self {
-            h3_index,
+            cell_id,
             properties: properties.into_iter().map(|(k, v)| (k.into(), v)).collect(),
         }
     }

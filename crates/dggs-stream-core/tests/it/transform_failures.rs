@@ -123,7 +123,7 @@ fn batch_readers_report_transform_failures() {
 #[test]
 fn exporters_report_through_the_shared_counter() {
     use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
-    use dggs_stream_core::pmtiles::H3PmtilesTiler;
+    use dggs_stream_core::pmtiles::PmtilesTiler;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -143,7 +143,7 @@ fn exporters_report_through_the_shared_counter() {
     .unwrap();
     assert_eq!(counter.swap(0, Ordering::Relaxed), 50);
 
-    H3PmtilesTiler::process_raster_source_to_pmtiles(&path, dir.path().join("out.pmtiles"), cfg)
+    PmtilesTiler::process_raster_source_to_pmtiles(&path, dir.path().join("out.pmtiles"), cfg)
         .unwrap();
     assert_eq!(counter.load(Ordering::Relaxed), 50);
 }

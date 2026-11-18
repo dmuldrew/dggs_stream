@@ -10,7 +10,7 @@ use dggs_stream_core::aggregator::horizon_streamer::compute_cell_south_lat;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use dggs_stream_core::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::tiler::PmtilesTiler;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use h3o::CellIndex;
 
@@ -166,13 +166,13 @@ fn pmtiles_rejects_compacting_streamers_before_writing() {
     let open = || GeoTiffStreamReader::open(file.path()).unwrap();
 
     let continuous = MultiScanHorizonStreamer::new(open(), &compacting).unwrap();
-    let err = H3PmtilesTiler::generate_from_continuous_streamer(continuous, &out).unwrap_err();
+    let err = PmtilesTiler::generate_from_continuous_streamer(continuous, &out).unwrap_err();
     assert!(err.to_string().contains("compaction"), "{err}");
     let categorical = MultiCategoricalHorizonStreamer::new(open(), &compacting).unwrap();
-    assert!(H3PmtilesTiler::generate_from_categorical_streamer(categorical, &out).is_err());
+    assert!(PmtilesTiler::generate_from_categorical_streamer(categorical, &out).is_err());
     assert!(!out.exists(), "a rejected stream must not create output");
 
     // Without compaction the same input tiles normally.
     let plain = MultiScanHorizonStreamer::new(open(), &config(&[8], false)).unwrap();
-    assert!(H3PmtilesTiler::generate_from_continuous_streamer(plain, &out).unwrap() > 0);
+    assert!(PmtilesTiler::generate_from_continuous_streamer(plain, &out).unwrap() > 0);
 }

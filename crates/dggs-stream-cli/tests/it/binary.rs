@@ -12,7 +12,7 @@ use dggs_stream_core::columnar::ipc::read_ipc_stream;
 use dggs_stream_core::columnar::{
     CategoricalBatchReader, CategoricalFormat, ColumnArray, ContinuousBatchReader, RecordBatch,
 };
-use dggs_stream_core::pmtiles::H3PmtilesTiler;
+use dggs_stream_core::pmtiles::PmtilesTiler;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::Field;
 use tempfile::NamedTempFile;
@@ -326,7 +326,7 @@ fn categorical_pmtiles_equals_core_export() {
     let core_out = dir.path().join("core.pmtiles");
     run_ok(&["pmtiles", s(&path), "-c", "-r", "7,8", "-o", s(&cli_out)]);
 
-    H3PmtilesTiler::process_categorical_source_to_pmtiles(
+    PmtilesTiler::process_categorical_source_to_pmtiles(
         &path,
         &core_out,
         MultiResolutionConfig::new(vec![7, 8]),
@@ -413,7 +413,7 @@ fn parquet_to_pmtiles_round_trips_the_cli_parquet_export() {
     );
 
     let core_out = dir.path().join("core.pmtiles");
-    let summary = H3PmtilesTiler::process_parquet_to_pmtiles(&parquet, &core_out, None).unwrap();
+    let summary = PmtilesTiler::process_parquet_to_pmtiles(&parquet, &core_out, None).unwrap();
     let rows = SerializedFileReader::new(File::open(&parquet).unwrap())
         .unwrap()
         .metadata()

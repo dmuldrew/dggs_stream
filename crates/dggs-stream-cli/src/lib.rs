@@ -33,7 +33,7 @@ use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::histogram::HistogramSpec;
 use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
-use dggs_stream_core::pmtiles::{H3PmtilesTiler, PmtilesExportSummary};
+use dggs_stream_core::pmtiles::{PmtilesExportSummary, PmtilesTiler};
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::ResolutionSpec;
 use dggs_stream_core::run_profile::RunProfile;
@@ -1067,9 +1067,9 @@ pub fn export_raster_to_pmtiles_with_transfer(
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
     let tiles = if !categorical {
-        H3PmtilesTiler::process_raster_source_to_pmtiles(input_path, output_path, config)
+        PmtilesTiler::process_raster_source_to_pmtiles(input_path, output_path, config)
     } else {
-        H3PmtilesTiler::process_categorical_source_to_pmtiles(input_path, output_path, config)
+        PmtilesTiler::process_categorical_source_to_pmtiles(input_path, output_path, config)
     }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));
@@ -1094,7 +1094,7 @@ pub fn transcode_parquet_to_pmtiles(
             input_path.display()
         )));
     }
-    H3PmtilesTiler::process_parquet_to_pmtiles(input_path, output_path, h3_column)
+    PmtilesTiler::process_parquet_to_pmtiles(input_path, output_path, h3_column)
         .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
 }
 

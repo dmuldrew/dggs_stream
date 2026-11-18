@@ -3,7 +3,7 @@
 //! Downloads CONUS GeoTIFF tiles in latitudinal bands from the USFS GeoPlatform ImageServer,
 //! aggregates them into multi-resolution H3 hexagonal indices (e.g. Res 8 and 9),
 //! streams them into Parquet partitions and/or PMTiles v3 archives using the unified
-//! `H3ParquetWriter` and `H3PmtilesTiler` engines, and immediately evicts raw GeoTIFF tiles
+//! `H3ParquetWriter` and `PmtilesTiler` engines, and immediately evicts raw GeoTIFF tiles
 //! to keep total disk usage strictly bounded under 2.5 GB.
 //!
 //! Usage:
@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
 use dggs_stream::aggregator::sampling::SamplingPattern;
 use dggs_stream::parquet::{H3ParquetWriter, ParquetExportConfig};
-use dggs_stream::pmtiles::H3PmtilesTiler;
+use dggs_stream::pmtiles::PmtilesTiler;
 use dggs_stream::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
 const BASE_URL: &str = "https://imagery.geoplatform.gov/iipp/rest/services/Fire_Aviation/USFS_EDW_RMRS_WRC_BurnProbability/ImageServer/exportImage";
@@ -419,7 +419,7 @@ fn process_band_streaming(
             let streamer = MultiScanHorizonStreamer::new_mosaic(Arc::clone(&mosaic), &config)?;
 
             let total_pmtiles_hex =
-                H3PmtilesTiler::generate_from_continuous_streamer(streamer, &out_pmtiles)?;
+                PmtilesTiler::generate_from_continuous_streamer(streamer, &out_pmtiles)?;
 
             let p_size_mb = fs::metadata(&out_pmtiles)
                 .map(|m| m.len() as f64 / (1024.0 * 1024.0))

@@ -18,7 +18,7 @@ use crate::functions::bind_utils::{
     register_common_raster_named_parameters, BindHelper, ChunkWriter, ExecutionParams,
 };
 use crate::grid::GridKind;
-use crate::pmtiles::tiler::{grid_res_to_zoom, H3PmtilesTiler};
+use crate::pmtiles::tiler::{grid_res_to_zoom, PmtilesTiler};
 use crate::raster::mosaic::OverlapRule;
 
 /// Bind data parsed during SQL query planning
@@ -245,13 +245,13 @@ pub unsafe extern "C" fn pmtiles_scan(info: duckdb_function_info, output: duckdb
 
             let start = Instant::now();
             let result = if bind_data.is_categorical {
-                H3PmtilesTiler::process_categorical_geotiff_to_pmtiles(
+                PmtilesTiler::process_categorical_geotiff_to_pmtiles(
                     &bind_data.file_path,
                     &bind_data.output_pmtiles,
                     config,
                 )
             } else {
-                H3PmtilesTiler::process_geotiff_to_pmtiles(
+                PmtilesTiler::process_geotiff_to_pmtiles(
                     &bind_data.file_path,
                     &bind_data.output_pmtiles,
                     config,
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn parquet_pmtiles_scan(
             }
 
             let start = Instant::now();
-            let result = H3PmtilesTiler::process_parquet_to_pmtiles(
+            let result = PmtilesTiler::process_parquet_to_pmtiles(
                 &bind_data.parquet_path,
                 &bind_data.output_pmtiles,
                 bind_data.h3_column.as_deref(),

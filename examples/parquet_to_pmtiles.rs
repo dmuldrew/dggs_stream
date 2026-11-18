@@ -6,7 +6,7 @@
 //!     --output data/census.pmtiles \
 //!     --h3-col h3_index
 
-use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::pmtiles::tiler::PmtilesTiler;
 use std::env;
 use std::time::Instant;
 
@@ -78,7 +78,7 @@ fn main() {
     println!("-----------------------------------------------------------------");
 
     let start = Instant::now();
-    match H3PmtilesTiler::process_parquet_to_pmtiles(&input, &output, h3_col.as_deref()) {
+    match PmtilesTiler::process_parquet_to_pmtiles(&input, &output, h3_col.as_deref()) {
         Ok(summary) => {
             let elapsed = start.elapsed();
             println!("SUCCESS!");
