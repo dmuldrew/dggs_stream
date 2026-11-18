@@ -73,9 +73,9 @@ pub type CatRow = Vec<String>;
 
 pub fn pg_categorical(r: &PgCategoricalRow) -> (i64, CatRow) {
     (
-        r.h3_index,
+        r.cell_id,
         vec![
-            r.h3_hex.clone(),
+            r.cell_hex.clone(),
             r.majority_class.to_string(),
             f(r.majority_fraction),
             f(r.majority_count),

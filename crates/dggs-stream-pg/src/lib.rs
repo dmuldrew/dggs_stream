@@ -563,13 +563,13 @@ grid_scalar_v1!(
 // Set-Returning Functions (SRF) for PostgreSQL (`{grid}_raster_*_aggregate`)
 // =============================================================================
 
-/// A single output row of `h3_raster_continuous_aggregate` in PostgreSQL types.
+/// A continuous aggregate row for the selected grid in PostgreSQL types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgContinuousRow {
-    /// `bigint` (signed 64-bit representation of H3 index, matching `h3-pg` convention)
-    pub h3_index: i64,
-    /// `text`
-    pub h3_hex: String,
+    /// PostgreSQL `bigint` containing the cell ID's 64 bits.
+    pub cell_id: i64,
+    /// Lowercase hexadecimal encoding of the unsigned cell ID.
+    pub cell_hex: String,
     /// `double precision`. NaN (SQL NULL) for a cell without samples and without a
     /// NoData value, which only `NodataPolicy::Emit` returns; likewise `min` and `max`.
     pub mean: f64,
@@ -589,11 +589,13 @@ pub struct PgContinuousRow {
     pub wkb: Vec<u8>,
 }
 
-/// A single output row of `h3_raster_categorical_aggregate` in PostgreSQL types.
+/// A categorical aggregate row for the selected grid in PostgreSQL types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgCategoricalRow {
-    pub h3_index: i64,
-    pub h3_hex: String,
+    /// PostgreSQL `bigint` containing the cell ID's 64 bits.
+    pub cell_id: i64,
+    /// Lowercase hexadecimal encoding of the unsigned cell ID.
+    pub cell_hex: String,
     pub majority_class: i64,
     /// SQL NULL `majority_class`: a cell without samples under `NodataPolicy::Emit` and
     /// no integral NoData value (`majority_class` is then 0).
@@ -639,7 +641,7 @@ impl PgContinuousSrf {
         )
     }
 
-    /// Open a scan onto `grid`. The rows' `h3_index` / `h3_hex` fields then hold that
+    /// Open a scan onto `grid`. The rows' `cell_id` / `cell_hex` fields then hold that
     /// grid's cell id (as the signed reading of its 64 bits) and its hexadecimal form.
     pub fn open_for(
         grid: GridKind,
@@ -733,7 +735,7 @@ impl PgContinuousSrf {
         };
 
         let hex_bytes = fast_hex_u64(rec.cell_id, &mut self.hex_buf);
-        let h3_hex = std::str::from_utf8(hex_bytes)
+        let cell_hex = std::str::from_utf8(hex_bytes)
             .unwrap_or_default()
             .to_owned();
         let wkb = match cell_index_to_wkb(self.grid, rec.cell_id, &mut self.wkb_buf) {
@@ -743,8 +745,8 @@ impl PgContinuousSrf {
         let stats = self.policy.continuous(&rec.accumulator);
 
         Ok(Some(PgContinuousRow {
-            h3_index: rec.cell_id as i64,
-            h3_hex,
+            cell_id: rec.cell_id as i64,
+            cell_hex,
             mean: stats.mean.unwrap_or(f64::NAN),
             stddev: stats.stddev,
             count: stats.count,
@@ -800,7 +802,7 @@ impl PgCategoricalSrf {
         )
     }
 
-    /// Open a scan onto `grid`. The rows' `h3_index` / `h3_hex` fields then hold that
+    /// Open a scan onto `grid`. The rows' `cell_id` / `cell_hex` fields then hold that
     /// grid's cell id (as the signed reading of its 64 bits) and its hexadecimal form.
     pub fn open_for(
         grid: GridKind,
@@ -894,7 +896,7 @@ impl PgCategoricalSrf {
         };
 
         let hex_bytes = fast_hex_u64(rec.cell_id, &mut self.hex_buf);
-        let h3_hex = std::str::from_utf8(hex_bytes)
+        let cell_hex = std::str::from_utf8(hex_bytes)
             .unwrap_or_default()
             .to_owned();
         let stats = self.policy.categorical(&rec.accumulator);
@@ -904,8 +906,8 @@ impl PgCategoricalSrf {
         };
 
         Ok(Some(PgCategoricalRow {
-            h3_index: rec.cell_id as i64,
-            h3_hex,
+            cell_id: rec.cell_id as i64,
+            cell_hex,
             majority_class: stats.majority_class.unwrap_or(0),
             majority_is_null: stats.majority_class.is_none(),
             majority_fraction: stats.majority_fraction,
@@ -1075,9 +1077,9 @@ pub unsafe extern "C" fn pg_srf_continuous_next(
             // SAFETY: non-null `out_row` points to a writable, aligned `PgCContinuousRow`
             // (caller contract); every field is plain data, so any prior contents are fine.
             let out = unsafe { &mut *out_row };
-            out.h3_index = row.h3_index;
+            out.h3_index = row.cell_id;
             out.h3_hex = [0u8; 16];
-            let hb = row.h3_hex.as_bytes();
+            let hb = row.cell_hex.as_bytes();
             let hlen = hb.len().min(15);
             out.h3_hex[..hlen].copy_from_slice(&hb[..hlen]);
             out.mean = row.mean;
@@ -1272,7 +1274,7 @@ mod tests {
         for r in &rows {
             assert_eq!(r.resolution, 8);
             assert!((r.mean - 7.0).abs() < 1e-6);
-            assert_eq!(r.h3_hex.len(), 15);
+            assert_eq!(r.cell_hex.len(), 15);
             assert!(r.wkb.len() >= 109);
         }
 

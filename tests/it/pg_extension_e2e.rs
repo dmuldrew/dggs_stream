@@ -175,7 +175,7 @@ fn continuous_rows(
     let mut rows: Vec<_> = srf
         .collect::<dggs_stream::core::error::Result<_>>()
         .unwrap();
-    rows.sort_by_key(|r| r.h3_index);
+    rows.sort_by_key(|r| r.cell_id);
     rows
 }
 
@@ -191,7 +191,7 @@ fn categorical_rows(path: &Path) -> Vec<PgCategoricalRow> {
     let mut rows: Vec<_> = srf
         .collect::<dggs_stream::core::error::Result<_>>()
         .unwrap();
-    rows.sort_by_key(|r| r.h3_index);
+    rows.sort_by_key(|r| r.cell_id);
     rows
 }
 
@@ -201,8 +201,8 @@ fn check_continuous(lines: &[String], expected: &[PgContinuousRow], label: &str)
     for (line, e) in lines.iter().zip(expected) {
         let f: Vec<&str> = line.split('|').collect();
         assert_eq!(f.len(), 10, "{label}: {line}");
-        assert_eq!(f[0], e.h3_index.to_string(), "{label}: h3_index");
-        assert_eq!(f[1], e.h3_hex, "{label}: h3_hex");
+        assert_eq!(f[0], e.cell_id.to_string(), "{label}: h3_index");
+        assert_eq!(f[1], e.cell_hex, "{label}: h3_hex");
         assert_float(f[2], e.mean, "mean");
         assert_opt_float(f[3], e.stddev, "stddev");
         assert_float(f[4], e.count, "count");
@@ -303,8 +303,8 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
     for (line, e) in lines.iter().zip(&expected) {
         let f: Vec<&str> = line.split('|').collect();
         assert_eq!(f.len(), 11, "{line}");
-        assert_eq!(f[0], e.h3_index.to_string());
-        assert_eq!(f[1], e.h3_hex);
+        assert_eq!(f[0], e.cell_id.to_string());
+        assert_eq!(f[1], e.cell_hex);
         assert_eq!(f[2], e.majority_class.to_string());
         assert_float(f[3], e.majority_fraction, "majority_fraction");
         assert_float(f[4], e.majority_count, "majority_count");

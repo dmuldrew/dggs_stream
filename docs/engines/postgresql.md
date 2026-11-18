@@ -370,7 +370,11 @@ sequenceDiagram
 
 `PgContinuousSrf::open(path, resolutions, crs, nodata, bbox)` and
 `PgCategoricalSrf::open(...)` are ordinary iterators yielding `PgContinuousRow` /
-`PgCategoricalRow` in PostgreSQL types, usable from Rust tests or other hosts. The C
+`PgCategoricalRow` in PostgreSQL types, usable from Rust tests or other hosts. Both rows expose
+`cell_id: i64` and `cell_hex: String`. Cast `cell_id` to `u64` to recover the unsigned
+ID, including for cells with a negative PostgreSQL `bigint` value.
+
+The C
 functions `pg_srf_continuous_open`, `pg_srf_continuous_next` (`1` row, `0` EOF, `-1`
 error) and `pg_srf_continuous_close` wrap the continuous iterator, and the scalar entry
 points (`pg_h3_to_lat`, `pg_h3_get_resolution`, …) can be called with a
