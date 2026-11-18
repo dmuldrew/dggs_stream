@@ -8,7 +8,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono is unmaintained; no vulnerability is reported. It is not a direct dependency:
+    # it reaches the workspace and the fuzz crate only through parquet, and the SedonaDB
+    # adapter also through arrow and datafusion, all of which require it (every parquet
+    # release does). Remove this entry once arrow-rs drops chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained but only transitive via parquet/arrow/datafusion, which have no chrono-free release" },
+]
 
 [licenses]
 version = 2

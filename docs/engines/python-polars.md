@@ -54,12 +54,14 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 
 ### Scan parameters
 
-`RasterH3ArrowStream`, `scan_raster_h3` and `read_raster_h3` share these arguments:
+`RasterH3ArrowStream`, `scan_raster_h3` (alias `scan_raster`) and `read_raster_h3` (alias
+`read_raster`) share these arguments:
 
 | Argument | Type | Default | Meaning |
 | :--- | :--- | :--- | :--- |
 | `path` | `str \| Path` | — | Raster path, glob, comma-separated list or VRT |
-| `resolutions` | `int \| str \| Sequence[int]` | `8` | `8`, `"7,8"` or `[7, 8]`; each entry must be 0–15 |
+| `grid` | `str` | `"h3"` | `"h3"`, `"a5"`, `"s2"` or `"healpix"`; the cell columns are `{grid}_index` / `{grid}_hex` ([Grids](../grids.md)) |
+| `resolutions` | `int \| str \| Sequence[int]` | `8` | `8`, `"7,8"` or `[7, 8]`, within the grid's range (`dggs_stream.GRIDS[grid]` is the finest); or `"auto"`, `"auto+1"`, `"auto-2"` for pixel-sized cells |
 | `categorical` | `bool` | `False` | Categorical instead of continuous aggregation |
 | `format` | `str` | `"wide"` | Categorical layout: `"wide"` or `"long"` (case-insensitive) |
 | `crs` | `str` | `None` | Source CRS override, e.g. `"EPSG:32610"` |
@@ -76,6 +78,23 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `quantiles` | `str \| Sequence` | `None` | Continuous only: quantile columns, e.g. `"p50,p90"`, `[0.05, 0.95]`, `"box"` |
 | `remap` | `str \| Mapping` | `None` | Categorical only: class remapping, e.g. `{range(11, 20): 1, "else": None}` |
 | `min_count`, `min_mean`, `max_mean` | `float` | `None` | Inclusive cell filters applied in the engine (`min_mean` / `max_mean` continuous only) |
+| `nodata_policy` | `str` | `None` (`"omit"`) | `"emit"` keeps cells whose samples are all NoData (`count` 0, null statistics) |
+| `emit_nodata_value` | `float` | `None` | Under `"emit"`, the value of those statistics instead of null |
+| `decimals` | `int` | `None` | Round floating-point statistics to 0–15 decimals |
+| `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"` or `"overlay"` ([Scan Options](../scan-options.md#transfer-modes)) |
+| `interpolation` | `str` | `None` (`"bilinear"`) | With `"interpolate"`: `nearest`, `bilinear`, `bicubic`, `lanczos` |
+| `overlay_weighted`, `mass_preserve` | `bool` | `None` | With `"overlay"`: count touched pixels once / keep the raster's total in `sum` |
+| `histogram` | `str \| Sequence[float]` | `None` | Categorical only: `"values"`, `"4:0:100"` or bin edges `[0, 10, 50]`; the `histogram` column becomes `List(Struct)` |
+| `histogram_weight`, `histogram_normalize` | `str` | `None` | `"count"` / `"area"`; `"none"` / `"fraction"` / `"density"` |
+
+With `decimals`, Polars predicates on `mean` and `majority_fraction` are not pushed into the
+engine, since it compares unrounded values; Polars applies them to the rows.
+`resolution` predicates are pushed for any resolution of the grid.
+
+`profile_raster(path, resolutions, ...)` takes the same arguments, runs the scan with a
+runtime profile, and returns `{"rows": ..., "profile": {...}}`
+([Scan Options](../scan-options.md#runtime-profile)). `auto_resolution(path, grid, offset=0,
+crs=None)` returns the resolution `"auto"` would pick.
 
 An invalid `resolutions`, `format`, `bbox`, `sampling`, `overlap_rule` or `spectral_formula`,
 or a `band` the raster does not have, raises `RuntimeError` (as does an invalid
@@ -132,7 +151,10 @@ falling back to the stream object if Polars is missing.
 `h3_is_valid(int | str)`, `h3_to_wkb(int | str) -> bytes | None` and
 `h3_cell_to_parent(int | str, res)` and
 `h3_polygon_to_cells(wkb: bytes, resolution, containment="contains_centroid") -> list[int] | None`
-call the shared core helpers (behaviour on invalid input is listed in the
+call the shared core helpers. The grid-neutral forms take `grid="h3"` by default:
+`lonlat_to_cell(lon, lat, resolution, grid)`, `cell_to_string`, `string_to_cell`,
+`cell_is_valid`, `cell_to_lat`, `cell_to_lng`, `cell_resolution`, `cell_to_parent`,
+`cell_to_wkb` and `polygon_to_cells(wkb, resolution, containment, grid)` (behaviour on invalid input is listed in the
 [overview](README.md#scalar-helpers); containment modes are described in the
 [Polars API reference](../polars-api-reference.md#h3_polygon_to_cells)). `h3_to_wkb` returns a
 `MULTIPOLYGON` for cells crossing the antimeridian and a polar-cap polygon for the pole
@@ -146,9 +168,13 @@ values; for whole columns use the Arrow stream or a Polars expression such as
 
 | Function | Arguments | Returns |
 | :--- | :--- | :--- |
-| `raster_to_parquet(input, output, resolutions=8, *, categorical=False, crs=None, geoparquet=True)` | Parquet or GeoParquet 1.1 | Number of cells written |
-| `raster_to_pmtiles(input, output, resolutions=8, *, categorical=False, crs=None)` | PMTiles v3 archive | Count reported by the tiler |
-| `parquet_to_pmtiles(parquet, output, *, h3_column=None)` | PMTiles v3 archive from any H3-indexed Parquet file | Number of hexagon features written |
+| `raster_to_parquet(input, output, resolutions=8, *, categorical=False, crs=None, geoparquet=True, grid=None, ...)` | Parquet or GeoParquet 1.1 | Number of cells written |
+| `raster_to_pmtiles(input, output, resolutions=8, *, categorical=False, crs=None, grid=None, ...)` | PMTiles v3 archive | Count reported by the tiler |
+| `parquet_to_pmtiles(parquet, output, *, cell_column=None, grid=None, h3_column=None)` | PMTiles v3 archive from any cell-indexed Parquet file; the grid comes from `grid` or the column's name (`s2_index`, ...) | Number of cell features written |
+
+The raster exporters also take `nodata_policy`, `emit_nodata_value`, `decimals`, `transfer`,
+`interpolation`, `overlay_weighted` and `mass_preserve`. Histograms are not available in the
+exports.
 
 Errors raise `RuntimeError` with the engine's message.
 
@@ -190,6 +216,31 @@ top = (
 lf = dggs_stream.scan_raster_h3("elevation.tif", [6, 7, 8])
 per_res = lf.group_by("resolution").agg(pl.len().alias("cells"), pl.col("mean").mean()).collect()
 res8 = lf.filter(pl.col("resolution") == 8).collect()
+```
+
+### Other grids, pixel-sized cells and scan options
+
+```python
+import polars as pl
+import dggs_stream
+
+# S2 cells about one pixel in size
+s2 = dggs_stream.scan_raster("dem.tif", "auto", grid="s2").collect()      # s2_index, s2_hex, ...
+print(dggs_stream.auto_resolution("dem.tif", grid="healpix"))
+
+# Cells finer than the pixels, interpolated; or pixels split by overlap, keeping the total
+fine = dggs_stream.scan_raster_h3("dem.tif", "auto+2", transfer="interpolate", interpolation="bicubic")
+pop = dggs_stream.scan_raster_h3("population.tif", 7, transfer="overlay", mass_preserve=True)
+
+# Per-cell histograms as a List(Struct) column
+hist = dggs_stream.scan_raster_h3(
+    "dem.tif", 8, categorical=True, histogram="4:0:2000", histogram_normalize="fraction"
+).collect()
+hist.explode("histogram").unnest("histogram")                            # lower, upper, weight
+
+# Keep all-NoData cells and round; profile where the time went
+lf = dggs_stream.scan_raster_h3("dem.tif", 8, nodata_policy="emit", decimals=2)
+report = dggs_stream.profile_raster("dem.tif", 8)["profile"]
 ```
 
 ### Helper scalar functions

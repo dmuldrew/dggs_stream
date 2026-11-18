@@ -94,8 +94,7 @@ impl RasterTable for ContinuousTable {
     const NAMES: &'static [&'static str] = &[
         "h3_raster_continuous_aggregate",
         "h3_raster_continuous",
-        "dggs_stream",
-        // Former name of the `dggs_stream` alias, kept so existing queries bind.
+        // `raster_{grid}` for H3, like `raster_a5`; not the project name.
         "raster_h3",
     ];
     const FUNCTION: &'static str = "h3_raster_continuous_aggregate";

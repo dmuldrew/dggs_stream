@@ -12,7 +12,7 @@ under the root `src/`.
 ---
 
 ### [`dggs-stream-duckdb/src/lib.rs`](../crates/dggs-stream-duckdb/src/lib.rs) — Crate Root & Extension Entry Points
-Re-exports `dggs_stream_core::*` and declares the `ffi` and `functions` modules. Implements the DuckDB loadable extension entry points (`dggs_stream_init`, `dggs_stream_init_c_api`, `dggs_stream_version`, plus `raster_h3_*` aliases of all three) and coordinates registration of all table and scalar functions. The root crate's [`src/lib.rs`](../src/lib.rs) re-exports this crate, `dggs-stream-core` and `dggs-stream-cli` and builds the `libdggs_stream` shared library; the DataFusion, Python and PostgreSQL re-exports are behind its opt-in `datafusion`, `python` and `pg` features (`full` enables all three), so the shared library exports only the DuckDB entry points.
+Re-exports `dggs_stream_core::*` and declares the `ffi` and `functions` modules. Implements the DuckDB loadable extension entry points (`dggs_stream_init`, `dggs_stream_init_c_api`, `dggs_stream_version`, plus `raster_h3_*` aliases of all three) and coordinates registration of all table and scalar functions. The root crate's [`src/lib.rs`](../src/lib.rs) re-exports this crate, `dggs-stream-core` and `dggs-stream-cli` and builds the `libdggs_stream` shared library; the Python and PostgreSQL re-exports are behind its opt-in `python` and `pg` features (`full` enables both), so the shared library exports only the DuckDB entry points. The DataFusion adapter is the separate `dggs-stream-sedona` workspace.
 
 ### [`dggs-stream-core/src/lib.rs`](../crates/dggs-stream-core/src/lib.rs) — Engine Crate Root
 Declares the engine modules below and re-exports `h3o` (`CellIndex`, `LatLng`, `Resolution`).
@@ -49,8 +49,34 @@ Defines `RasterH3Error` via `thiserror`, unifying all recoverable error types ac
 | [`arrow_c.rs`](../crates/dggs-stream-core/src/columnar/arrow_c.rs) | Apache Arrow C Data (`ArrowSchema`, `ArrowArray`) and C Stream (`ArrowArrayStream`) interface: export from `RecordBatch` iterators with `release` callbacks, and import back via `collect_batches`. |
 | [`ipc.rs`](../crates/dggs-stream-core/src/columnar/ipc.rs) | `RH3IPC01` binary columnar stream writer/reader and NDJSON (`JSONEachRow`) writer used by the CLI. |
 
-### [`dggs-stream-core/src/scalar_ops.rs`](../crates/dggs-stream-core/src/scalar_ops.rs) — Engine-Neutral H3 Helpers
-H3 scalar helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat/lng`, `h3_get_resolution`, `h3_is_valid_*`, `h3_to_wkb_*`, `h3_cell_to_parent_*`), resolution/bbox parsers and `estimate_raster_cardinality`, shared by the DuckDB, DataFusion, Python, PostgreSQL and CLI adapters.
+### [`dggs-stream-core/src/scalar_ops.rs`](../crates/dggs-stream-core/src/scalar_ops.rs) — Engine-Neutral Cell Helpers
+H3 scalar helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat/lng`, `h3_get_resolution`, `h3_is_valid_*`, `h3_to_wkb_*`, `h3_cell_to_parent_*`), their grid-generic forms (`grid_lonlat_to_cell`, `grid_to_lat`, `grid_to_lng`, `grid_get_resolution`, `grid_is_valid_str`, `grid_to_wkb_u64`, `grid_cell_to_parent_u64`, `grid_polygon_to_cells_wkb_into`), resolution/bbox parsers and `estimate_raster_cardinality`, shared by the DuckDB, DataFusion, Python, PostgreSQL and CLI adapters.
+
+---
+
+### Grids — [`grid.rs`](../crates/dggs-stream-core/src/grid.rs), [`resolution.rs`](../crates/dggs-stream-core/src/resolution.rs), [`polygon_fill.rs`](../crates/dggs-stream-core/src/polygon_fill.rs)
+
+Every stage of the pipeline works on any of the four grids. See [Grids](grids.md) for what they are and how each engine picks one.
+
+| File | Responsibility |
+| :--- | :--- |
+| [`grid.rs`](../crates/dggs-stream-core/src/grid.rs) | `GridKind` (`H3`, `A5`, `S2`, `Healpix`) and its per-cell operations: `cell_at`, `center_lat_lng`, `boundary_lng_lat` (pole vertices spread along the pole), `parent`, `children_into`, `interior_pole`, `wgs84_bbox`, `base_cells_into`. `GridSpec` (`GridKind::spec()`) is one table of each grid's fixed properties: names and column names, resolution range, base cells, aperture, equal-area and sign-bit flags, edge model, pole model, row-space eviction support, PMTiles zoom model, cell-radius bound, polygon-fill engine and Parquet index annotation. Pipeline stages read the spec instead of matching on the grid. The per-sample indexing kernels are the `GridBackend` types (H3 through `h3o`'s `LatLngIndexer`, A5 with a guard near the poles, S2, and HEALPix indexed once at the deepest depth and shifted to coarser ones). |
+| [`resolution.rs`](../crates/dggs-stream-core/src/resolution.rs) | `ResolutionSpec`: explicit resolutions, or `auto` / `auto±N`. `area_matched_resolution` picks the resolution whose mean cell area best matches the raster's ground pixel area, measured at the raster's centre through its geotransform and CRS. |
+| [`polygon_fill.rs`](../crates/dggs-stream-core/src/polygon_fill.rs) | Polygon fill for S2 and HEALPix: descends the 4-ary hierarchy from the base cells, testing traced cell rings against the polygon in lon/lat for every containment mode, with a cell-count estimate that refuses oversized requests up front. H3 uses `h3o`'s tiler and A5 the `a5` crate. |
+
+### Scan options — [`transfer/`](../crates/dggs-stream-core/src/transfer), [`histogram.rs`](../crates/dggs-stream-core/src/histogram.rs), [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs)
+
+Grid-independent options a scan can add to the default pixel-centre kernel. See [Scan Options](scan-options.md).
+
+| File | Responsibility |
+| :--- | :--- |
+| [`transfer/mod.rs`](../crates/dggs-stream-core/src/transfer/mod.rs) | `TransferMode` (`AssignCenters`, `Interpolate(Interpolation)`, `Overlay { weighted, mass_preserve }`) and its validation against other options. |
+| [`transfer/stream.rs`](../crates/dggs-stream-core/src/transfer/stream.rs) | `TransferStream`: plans each tile into blocks of rows and cells, and runs `interpolate` and `overlay` over them. It holds the cells still open across a block edge, finishes them once no later pixel can reach them, honours bbox, mosaic ownership, alpha and `emit`, and normalises weights under `mass_preserve`. The continuous and categorical streamers hand off to it when `config.transfer` is not the default; the horizon kernel is then idle. |
+| [`transfer/window.rs`](../crates/dggs-stream-core/src/transfer/window.rs) | `RowWindow`: a band of rows of one band as `f64` (NoData and zero-alpha pixels as NaN), decoded through a chunk cache shared by consecutive windows. |
+| [`transfer/interp.rs`](../crates/dggs-stream-core/src/transfer/interp.rs) | Nearest, bilinear, bicubic and Lanczos interpolation at a pixel position, with NoData-aware fallbacks. |
+| [`transfer/clip.rs`](../crates/dggs-stream-core/src/transfer/clip.rs) | Exact overlap of a cell polygon (in pixel space) with each pixel it touches. |
+| [`histogram.rs`](../crates/dggs-stream-core/src/histogram.rs) | `HistogramSpec`: classes (`values`, `N:min:max`, explicit edges), weight (`count`, `area`), normalisation; turns a categorical accumulator into histogram entries and picks the transfer mode area weights need. |
+| [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs) | `RunProfile` / `ProfileReport`: opt-in per-phase wall and CPU time and counters, timed per chunk, window and batch. |
 
 ---
 
@@ -96,6 +122,7 @@ H3 scalar helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat/lng`, `h3_get_reso
 | [`transfer/`](../crates/dggs-stream-core/src/transfer/mod.rs) | Non-default transfer modes (`TransferMode`): `interpolate` (interpolation at cell centres: `Interpolation` nearest, bilinear, bicubic, Lanczos) and `overlay` (exact pixel–cell overlap weights, optional mass preservation), streamed in bands of rows. See [Transfer Modes](transfer-modes.md). |
 | [`simd.rs`](../crates/dggs-stream-core/src/aggregator/simd.rs) | Trait `SimdSpanAccumulate` and vectorized multi-lane scanline span accumulation for high-throughput pixel aggregation across native data types (`f32`, `f64`, `u8`–`u64`, `i8`–`i64`). |
 | [`h3_scanline.rs`](../crates/dggs-stream-core/src/aggregator/h3_scanline.rs) | Exact H3 indexing of a WGS84 point (`cell_at`), rejecting latitudes outside [-90, 90]. |
+| [`output_policy.rs`](../crates/dggs-stream-core/src/aggregator/output_policy.rs) | `OutputPolicy`: the NoData policy (`omit` / `emit`), the value of an all-NoData cell's statistics, and `decimals` rounding, applied wherever statistics are written (`continuous`, `categorical`, `derived`). |
 | [`horizon_streamer.rs`](../crates/dggs-stream-core/src/aggregator/horizon_streamer.rs) | Priority queue entry (`HexEvictionEntry`) for streaming scanline horizon eviction, ordered by southernmost latitude. Provides `compute_cell_south_lat` for cell boundary calculation and `chunk_intersects_bbox` for spatial pruning. |
 
 #### [`multi_horizon/`](../crates/dggs-stream-core/src/aggregator/multi_horizon) — Multi-Resolution Streaming Engine
@@ -111,6 +138,7 @@ H3 scalar helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat/lng`, `h3_get_reso
 | [`continuous_streamer.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/continuous_streamer.rs) | Continuous raster horizon streamer (`ContinuousKernel`, `MultiScanHorizonStreamer`). Implements single-pass streaming aggregation across multiple H3 resolutions for raw raster bands and spectral index formulas. |
 | [`categorical.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/categorical.rs) | Categorical chunk payload processing (`MultiCategoricalRecord`). Processes discrete integer chunk data into class histograms per H3 cell, enforcing mosaic tile ownership rules and class remappings. |
 | [`categorical_streamer.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/categorical_streamer.rs) | Categorical raster horizon streamer (`CategoricalKernel`, `MultiCategoricalHorizonStreamer`). Drives single-pass multi-resolution class aggregation, remapping, and majority fraction filtering. |
+| [`area_continuous.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/area_continuous.rs) | Window-level kernel that weights each pixel by its WGS84 ground area (continuous rasters in a geographic CRS). Not yet connected to the streaming API. |
 | [`spectral.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/spectral.rs) | On-the-fly spectral index formulas (`SpectralFormula`) and physical reflectance evaluation for NDVI, NDWI, NBR, and EVI with singularity/zero-division protections. |
 
 
@@ -124,7 +152,7 @@ H3 scalar helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat/lng`, `h3_get_reso
 
 | File | Responsibility |
 | :--- | :--- |
-| [`walker.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/walker.rs) | Single pixel walker for every kernel. Defines the `ScanlineEngine<T, Acc>` trait and `WalkContext`; `walk_direct` handles single-band windows and `walk_interleaved` handles band selection and spectral indices. Each valid pixel projects its samples once, filters them by bbox (antimeridian-aware) and mosaic tile ownership, and indexes them exactly at every resolution. Per-resolution runs merge into chunk maps on cell change; single-band center sampling batches contiguous pixels through the SIMD span kernels, and pixels wholly inside one cell combine their sample weights when the engine allows it. North-up WGS84/Web Mercator rows are pruned conservatively before projection. |
+| [`walker.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/walker.rs) | Single pixel walker for every kernel. Defines the `ScanlineEngine<T, Acc>` trait and `WalkContext`; `walk_direct` handles single-band windows and `walk_interleaved` handles band selection and spectral indices. Each valid pixel projects its samples once, filters them by bbox (antimeridian-aware) and mosaic tile ownership, and indexes them exactly at every resolution. Per-resolution runs merge into chunk maps on cell change; single-band center sampling batches contiguous pixels through the SIMD span kernels, and pixels wholly inside one cell combine their sample weights when the engine allows it. North-up WGS84/Web Mercator rows are pruned conservatively before projection. `WalkContext` carries the grid (indexing goes through its `GridBackend`), the alpha sample, the `emit` flag and the bins of a binned histogram; engines that ask for it (`needs_pixel_coordinates`) receive each sample's absolute pixel position. |
 | [`coordinates.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/coordinates.rs) | Reference pixel-to-WGS84 transforms (`CoordinateTransformer`), antimeridian-aware bbox tests (`is_point_in_bbox`), and conservative per-chunk northern latitude bounds for eviction (`eviction_north_bound`). |
 
 ---
@@ -135,7 +163,7 @@ H3 scalar helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat/lng`, `h3_get_reso
 
 | File | Responsibility |
 | :--- | :--- |
-| [`table_function.rs`](../crates/dggs-stream-duckdb/src/functions/table_function.rs) | Registers and executes `h3_raster_continuous_aggregate` (alias `dggs_stream`). Manages parameter binding (`RasterH3BindData`), parallel scan initialization (`RasterH3GlobalData`), thread-local scratch state (`TableFunctionLocalData`), and row output into DuckDB vector chunks. |
+| [`table_function.rs`](../crates/dggs-stream-duckdb/src/functions/table_function.rs) | Registers and executes `h3_raster_continuous_aggregate` (aliases `h3_raster_continuous`, `raster_h3`). Manages parameter binding (`RasterH3BindData`), parallel scan initialization (`RasterH3GlobalData`), thread-local scratch state (`TableFunctionLocalData`), and row output into DuckDB vector chunks. |
 | [`categorical_table_function.rs`](../crates/dggs-stream-duckdb/src/functions/categorical_table_function.rs) | Registers and executes `h3_raster_categorical_aggregate` (alias `raster_h3_categorical`). Supports Wide and Long output format schemas (`CategoricalOutputFormat`) with majority fraction filtering and unnested long-row pivoting. |
 | [`pmtiles_table_function.rs`](../crates/dggs-stream-duckdb/src/functions/pmtiles_table_function.rs) | Registers `h3_raster_to_pmtiles`. Invokes the PMTiles tiling engine and emits a 1-row summary result containing output path, tile count, and archive size. |
 | [`copy_function.rs`](../crates/dggs-stream-duckdb/src/functions/copy_function.rs) | DuckDB 2.0 build only: the `pmtiles` COPY format (`COPY ... TO ... (FORMAT pmtiles)`). Bind parses `MIN_ZOOM`/`MAX_ZOOM`/`MEMORY_BUDGET_MB`; global init opens the destination through DuckDB's file system; sink validates cells, applies the zoom filter and feeds `ExternalFeatureExport`; finalize streams the archive to the destination. |

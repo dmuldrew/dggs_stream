@@ -237,8 +237,6 @@ fn real_sql_raster_scans_and_parquet_parity() {
         SELECT count(*) > 0 AND bool_and(abs(mean - 42.0) < 1e-9)
         FROM h3_raster_continuous({tif}, resolution := 8, crs := 'EPSG:4326');
         SELECT count(*) > 0 AND bool_and(abs(mean - 42.0) < 1e-9)
-        FROM dggs_stream({tif}, resolution := 8, crs := 'EPSG:4326');
-        SELECT count(*) > 0 AND bool_and(abs(mean - 42.0) < 1e-9)
         FROM raster_h3({tif}, resolution := 8, crs := 'EPSG:4326');
         SELECT status = 'SUCCESS' AND total_hexagons > 0
         FROM h3_raster_to_parquet({tif}, {parquet}, crs := 'EPSG:4326',
@@ -262,7 +260,7 @@ fn real_sql_raster_scans_and_parquet_parity() {
     );
     assert_eq!(
         duckdb.query(&sql).lines().collect::<Vec<_>>(),
-        vec!["true"; 7]
+        vec!["true"; 6]
     );
 
     let (_categories_file, categories_tif) = helpers::TestGeoTiffBuilder::new(24, 24)

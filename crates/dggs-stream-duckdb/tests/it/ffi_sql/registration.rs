@@ -173,7 +173,6 @@ fn test_extension_init_and_registration_completeness() {
     for expected in [
         "h3_raster_continuous_aggregate",
         "h3_raster_continuous",
-        "dggs_stream",
         "raster_h3",
         "a5_raster_continuous_aggregate",
         "a5_raster_continuous",
@@ -213,14 +212,7 @@ fn test_extension_init_and_registration_completeness() {
             .unwrap_or_else(|| panic!("Missing table function {expected}"));
         assert!(!tf.positional_params.is_empty());
         if expected.contains("aggregate")
-            || [
-                "dggs_stream",
-                "raster_h3",
-                "raster_a5",
-                "raster_s2",
-                "raster_healpix",
-            ]
-            .contains(&expected)
+            || ["raster_h3", "raster_a5", "raster_s2", "raster_healpix"].contains(&expected)
         {
             assert!(tf.projection_pushdown);
         }

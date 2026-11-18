@@ -32,8 +32,12 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | [`RasterH3ArrowStream(path, resolutions=8, **opts)`](#rasterh3arrowstream) | stream object | Arrow PyCapsule producer, batch iterator, PyArrow / dict conversion |
 | [`raster_to_parquet(input_path, output_path, resolutions=8, ...)`](#raster_to_parquet) | `int` | Stream a raster straight to Parquet / GeoParquet 1.1 |
 | [`raster_to_pmtiles(input_path, output_path, resolutions=8, ...)`](#raster_to_pmtiles) | `int` | Stream a raster straight to a PMTiles v3 vector archive |
-| [`parquet_to_pmtiles(parquet_path, output_path, h3_column=None)`](#parquet_to_pmtiles) | `int` | Transcode any H3-indexed Parquet file to a PMTiles v3 vector archive |
+| [`parquet_to_pmtiles(parquet_path, output_path, *, cell_column=None, grid=None)`](#parquet_to_pmtiles) | `int` | Transcode any cell-indexed Parquet file to a PMTiles v3 vector archive |
+| `scan_raster`, `read_raster` | as above | Grid-neutral aliases of `scan_raster_h3` and `read_raster_h3` |
+| `profile_raster(path, resolutions=8, **opts)` | `dict` | Run a scan with a runtime profile: `{"rows": ..., "profile": {...}}` ([Scan Options](scan-options.md#runtime-profile)) |
+| `auto_resolution(path, grid="h3", *, offset=0, crs=None)` | `int` | The resolution `resolutions="auto"` picks ([Grids](grids.md#automatic-resolution)) |
 | [H3 helpers](#h3-helper-functions) | scalars | `h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`, `h3_get_resolution`, `h3_is_valid`, `h3_to_wkb`, `h3_cell_to_parent`, `h3_polygon_to_cells` |
+| Grid helpers | scalars | `lonlat_to_cell`, `cell_to_string`, `string_to_cell`, `cell_is_valid`, `cell_to_lat`, `cell_to_lng`, `cell_resolution`, `cell_to_parent`, `cell_to_wkb`, `polygon_to_cells`, each with `grid="h3"` |
 
 ---
 
@@ -62,10 +66,6 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `limit` | `int \| None` | `None` | Maximum rows to produce. |
 | `band` | `int \| None` | `None` (band 1) | 1-indexed band to aggregate. A band the raster does not have raises an error. |
 | `sampling` | `str \| None` | `None` (`"center"`) | Sub-pixel sampling pattern: `"center"`, `"5point"`, `"gaussian"`, `"rgss"`, `"hex"`, `"8rooks"`, `"9point"` or `"16point"` (the [SQL aliases](super-sampling.md) are accepted too). Each pixel's weight is split across its samples, so a pixel straddling a cell edge contributes to both cells. |
-| `transfer` | `str \| None` | `None` (`"assign_centers"`) | How pixels map onto cells: `"assign_centers"`, `"interpolate"` (value interpolated at each cell's centre; for cells finer than the pixels) or `"overlay"` (pixels each cell overlaps, weighted by overlap area). Not combinable with `sampling`, `spectral_formula`, compaction or partitions. See [Transfer Modes](transfer-modes.md). |
-| `interpolation` | `str \| None` | `None` (`"bilinear"`) | Interpolation of `transfer="interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"` or `"lanczos"`. Categorical scans take `"nearest"` only. |
-| `overlay_weighted` | `bool \| None` | `None` (`True`) | `transfer="overlay"`: `False` counts every touched pixel once instead of by overlapped fraction. |
-| `mass_preserve` | `bool \| None` | `None` (`False`) | `transfer="overlay"`: normalise each pixel's weights so the `sum` column adds up to the raster's total. |
 | `overlap_rule` | `str \| None` | `None` (`"cutline"`) | How overlapping mosaic tiles are resolved: `"cutline"` (each ground point from one tile), `"first"` (earlier files win) or `"average"` (every tile's samples are kept). Pass the same value to [`plan_partitions`](engines/python-polars.md#partitioned-scans-spark-and-other-distributed-engines) for partitioned scans. |
 | `spectral_formula` | `str \| None` | `None` | Continuous only: aggregate `"ndvi"`, `"ndwi"`, `"nbr"` or `"evi"`, computed per pixel from the bands named by `nir_band` (default 4), `red_band` (3), `green_band` (2), `blue_band` (1) and `swir_band` (6). |
 | `quantiles` | `str \| Sequence[str \| float] \| None` | `None` | Continuous only: streaming quantile columns, in DuckDB's [`quantiles`](sql-api-reference.md) syntax: `"p50,p90"`, `["median", "iqr"]`, `[0.05, 0.95]`, or a preset (`"default"`, `"box"`, `"tails"`, `"deciles"`). Each distinct target adds a nullable `Float64` column named after it (`0.05` becomes `p05`) after `wkb`. Sketches are built only when a quantile column is selected. |
@@ -73,6 +73,17 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `min_count` | `float \| None` | `None` | Drop cells with fewer samples than this (`count`, or `total_count` for categorical scans). Inclusive: a cell with exactly `min_count` samples is kept. |
 | `min_mean` / `max_mean` | `float \| None` | `None` | Continuous only: drop cells whose `mean` is below / above this value (inclusive). |
 | `min_majority_fraction` | `float \| None` | `None` | Categorical only: drop cells whose majority class covers less than this fraction (0 to 1) of their samples. |
+| `grid` | `str \| None` | `"h3"` | `"h3"`, `"a5"`, `"s2"` or `"healpix"`. Cell columns become `{grid}_index` / `{grid}_hex` and `resolutions` follow that grid's range (`GRIDS[grid]` is the finest). `resolutions` also accepts `"auto"`, `"auto+N"`, `"auto-N"`. See [Grids](grids.md). |
+| `nodata_policy` | `str \| None` | `"omit"` | `"emit"` keeps cells whose samples are all NoData: `count` 0, null statistics. Refused with `min_count`. |
+| `emit_nodata_value` | `float \| None` | `None` | Under `"emit"`, the value of those statistics instead of null. |
+| `decimals` | `int \| None` | `None` | Round floating-point statistics to 0–15 decimals. Polars filters on `mean` and `majority_fraction` are then not pushed into the engine. |
+| `transfer` | `str \| None` | `"assign_centers"` | `"interpolate"` (value interpolated at each cell centre) or `"overlay"` (pixels weighted by overlap). See [Scan Options](scan-options.md#transfer-modes). |
+| `interpolation` | `str \| None` | `"bilinear"` | With `"interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
+| `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
+| `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `histogram` | `str \| Sequence[float] \| None` | `None` | Categorical only: `"values"`, `"N:min:max"` or bin edges. The `histogram` column becomes `List(Struct({class, weight}))` or `List(Struct({lower, upper, weight}))`. |
+| `histogram_weight` | `str \| None` | `"count"` | `"count"` or `"area"` (runs the weighted overlay). |
+| `histogram_normalize` | `str \| None` | `"none"` | `"none"`, `"fraction"`, `"density"` (bins only). |
 
 The filters (`min_count`, `min_mean`, `max_mean`, `min_majority_fraction`) run inside the
 engine, so dropped cells never reach Python. A Polars `filter` on the same columns is pushed
@@ -401,7 +412,7 @@ all resolutions.
 ## `parquet_to_pmtiles`
 
 ```python
-parquet_to_pmtiles(parquet_path, output_path, *, h3_column=None) -> int
+parquet_to_pmtiles(parquet_path, output_path, *, cell_column=None, grid=None, h3_column=None) -> int
 ```
 
 Transcodes an H3-indexed Parquet file (for example the output of
@@ -415,7 +426,9 @@ valid cell are skipped.
 | :--- | :--- | :--- | :--- |
 | `parquet_path` | `str \| Path` | — | Input Parquet file. |
 | `output_path` | `str \| Path` | — | Destination `.pmtiles` file. |
-| `h3_column` | `str \| None` | `None` (auto) | H3 column, integer or hex string, matched case-insensitively. By default the first of `h3_index`, `h3_hex`, `h3`, `cell` or `hex`. A named column that does not exist raises `RuntimeError` listing the available columns. |
+| `cell_column` | `str \| None` | `None` (auto) | Cell column, integer or hex string, matched case-insensitively. By default the first `{grid}_index` / `{grid}_hex` column, else `h3`, `cell` or `hex`. A named column that does not exist raises `RuntimeError` listing the available columns. |
+| `grid` | `str \| None` | `None` (from the column name) | The grid of the cells; by default read from the column's name (`s2_index`, `healpix_hex`, ...), H3 otherwise. |
+| `h3_column` | `str \| None` | `None` | Older name of `cell_column`. |
 
 ```python
 (dggs_stream.scan_raster_h3("landcover.tif", 9, categorical=True)

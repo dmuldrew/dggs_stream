@@ -1,10 +1,22 @@
 name: Coverage
 
+# Documentation-only changes skip coverage: they can't change it. The patterns match the
+# "Detect code changes" filter in ci.yml.
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
 
 permissions:
   contents: read

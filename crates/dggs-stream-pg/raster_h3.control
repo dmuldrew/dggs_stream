@@ -1,11 +1,13 @@
 # raster_h3: the dggs_stream PostgreSQL extension under its former name, kept so
 # `CREATE EXTENSION raster_h3` and upgrades of existing installs keep working.
 # Install either raster_h3 or dggs_stream in a database, not both.
-# Functions created by earlier installs reference $libdir/raster_h3_pg, so install
-# the library under that name too (a symlink to dggs_stream_pg.so); see
-# docs/engines/postgresql.md.
+#
+# The library must also be installed under its former name, raster_h3_pg (a copy or
+# symlink of dggs_stream_pg): functions created by earlier versions record
+# '$libdir/raster_h3_pg' in pg_proc.probin, and ALTER EXTENSION UPDATE does not rewrite
+# them, so upgraded databases keep loading that file.
 comment = 'High-performance GeoTIFF/COG to H3 hexagonal aggregation and PMTiles/GeoParquet export'
 default_version = '0.7.0'
-module_pathname = '$libdir/dggs_stream_pg'
+module_pathname = '$libdir/raster_h3_pg'
 relocatable = true
 superuser = true

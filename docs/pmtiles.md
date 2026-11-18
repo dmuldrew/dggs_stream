@@ -123,6 +123,16 @@ To ensure optimal visual density on screen (150 to 2,500 hexagons per 512px tile
 | **Res 9** | 0.105 km² (10.5 ha) | 174 m | Parcel / Intersection | **Z14 – Z15** | ~700 – 2,200 |
 | **Res 10** | 0.015 km² (1.5 ha) | 65.9 m | Building Footprint / Lot | **Z16 – Z17** | ~800 – 2,500 |
 
+### Other grids
+
+A5, S2 and HEALPix are aperture-4 hierarchies like the tile pyramid itself, so each resolution
+maps to the zoom of the same number, capped at 24 (`GridSpec::zoom`; `grid_res_to_zoom`,
+`zooms_for_grid_res`). A tile then holds roughly 15 A5 cells or 6 S2 cells. The exports write
+the grid's own properties (`a5_index` / `a5_hex`, `s2_index` / `s2_hex`, ...) and its cell
+geometry. Every PMTiles exporter takes the grid: `--grid` in the CLI, `{grid}_raster_to_pmtiles`
+in DuckDB, `grid=` in Python, and the cell columns of a `COPY` in SedonaDB. See
+[Grids](grids.md).
+
 ## Exporting Any H3 Table
 
 Rasters stream into tiles north to south, so a tile can be written as soon as the scan passes
@@ -145,7 +155,9 @@ byte-for-byte the same whether or not it spilled.
 ### Zoom bands for H3 tables
 
 A table can hold any mix of resolutions, so its exports give each resolution present a band of
-zooms instead of one zoom (`pyramid::zoom_bands_for_resolutions`). A band starts where the
+zooms instead of one zoom (`pyramid::zoom_bands_for_resolutions`, or
+`zoom_bands_for_grid_resolutions` for any grid; the table's grid comes from its cell column's
+name, such as `s2_index`). A band starts where the
 resolution's band in the raster tilers starts (`zooms_for_h3_res`) and runs to the zoom before
 the next finer resolution present starts. The finest resolution fills its whole band. The bands
 cover every zoom between the coarsest and finest resolution:

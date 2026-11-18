@@ -207,6 +207,49 @@ FROM h3_raster_continuous_aggregate(
 );
 ```
 
+### Other grids and pixel-sized cells
+
+Each grid has its own functions, named like the H3 ones, and the H3 table functions also
+take `grid :=`. `resolutions := 'auto'` picks the resolution whose cells match the pixel
+size on whichever grid ([Grids](../grids.md)).
+
+```sql
+SELECT s2_index, s2_hex, mean
+FROM s2_raster_continuous_aggregate('elevation.tif', resolutions := 'auto');
+
+SELECT healpix_index, majority_class
+FROM h3_raster_categorical_aggregate('landcover.tif', resolution := 14, grid := 'healpix');
+
+SELECT a5_lonlat_to_cell(-122.4, 37.8, 10) AS cell,
+       a5_to_string(a5_lonlat_to_cell(-122.4, 37.8, 10)) AS hex;
+```
+
+### Transfer modes, histograms, empty cells and profiling
+
+See [Scan Options](../scan-options.md) for what each option does.
+
+```sql
+-- Cells finer than the pixels: a bicubic value at each cell centre
+SELECT h3_index, mean
+FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto+2',
+                                    transfer := 'interpolate', interpolation := 'bicubic');
+
+-- Population: each pixel split across the cells it overlaps; sum adds up to the raster total
+SELECT h3_index, sum AS population
+FROM h3_raster_continuous_aggregate('population.tif', resolution := 7,
+                                    transfer := 'overlay', mass_preserve := true);
+
+-- A binned histogram per cell (the histogram column holds it as JSON text)
+SELECT h3_index, histogram
+FROM h3_raster_categorical_aggregate('elevation.tif', resolution := 8,
+                                     histogram := '4:0:2000', histogram_normalize := 'fraction');
+
+-- Keep all-NoData cells (count 0, NULL statistics), round, and print a runtime profile
+SELECT h3_index, count, mean
+FROM h3_raster_continuous_aggregate('elevation.tif', resolution := 8,
+                                    nodata_policy := 'emit', decimals := 2, profile := true);
+```
+
 ### Helper scalar functions
 
 ```sql

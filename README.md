@@ -83,6 +83,11 @@ Every engine supports all four grids, so the choice depends on the question, not
 
 [Worked Examples](docs/worked-examples.md) shows each grid on a question that suits it. For the grids' own documentation, see [H3](https://h3geo.org/docs/), [A5](https://a5geo.org/), [S2](https://s2geometry.io/devguide/s2cell_hierarchy) and [HEALPix](https://healpix.sourceforge.io/).
 
+H3 is the default, not the only choice. The same scans index pixels onto A5 equal-area
+pentagons, Google S2 cells and HEALPix equal-area quadrilaterals, in every engine; `auto`
+picks the resolution whose cells match the pixel size on whichever grid you choose. See
+[Grids](docs/grids.md).
+
 ### Raster Meets Table: A Worked Example
 
 A city planning department has two datasets:
@@ -286,6 +291,8 @@ A web map needs tiles at every zoom level — from hemispheric overview down to 
 | **Native GeoParquet 1.1 Export** | Stack-allocated WKB polygons with PROJJSON metadata |
 | **Cloud-Native Streaming** | HTTP/S3 COG range prefetching — no local copies needed |
 | **Sub-Pixel Super-Sampling** | RGSS, Hex, Gaussian, 8-Rooks boundary anti-aliasing |
+| **Four Grids, One Pipeline** | H3, A5, S2 and HEALPix behind one `GridSpec` table, in every engine ([Grids](docs/grids.md)) |
+| **Choice of Pixel Transfer** | Pixel-centre assignment, interpolation at cell centres for fine cells, or exact area overlay; per-cell histograms, NoData emission, rounding and an opt-in runtime profile ([Scan Options](docs/scan-options.md)) |
 
 Built-in HTTP/S3 reads pin strong ETags per URL and use `If-Match`, failing if the
 object changes during a scan. Rust `HttpTransport` clones share each URL's pin:
@@ -318,6 +325,10 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
 - **One pass, every resolution.** Each pixel is located once and counted at every
   requested resolution, which is how a multi-zoom PMTiles pyramid comes from a
   single read.
+- **Fine cells and partial pixels.** For cells finer than the pixels, `transfer=interpolate`
+  interpolates a value at each cell's centre; for exact area weighting, `transfer=overlay`
+  splits each pixel across the cells it overlaps. Both stream the raster in bands of rows.
+  See [Scan Options](docs/scan-options.md).
 
 See [Core Engineering Architecture](#core-engineering-architecture) for how each step is
 implemented.
@@ -352,7 +363,10 @@ Feature coverage differs per engine: DuckDB exposes every parameter (sampling, b
 spectral formulas, quantiles, remapping, budgets), DataFusion exposes most of them through
 builders, Python exposes all but compaction, single-cell pushdown and resource budgets
 (and pushes Polars filters into the engine), and PostgreSQL and the CLI expose the common subset (resolutions, CRS, NoData, bbox,
-categorical layout). The [Engines Overview](docs/engines/README.md) has the
+categorical layout). Every engine takes the grid, `auto` resolution, the NoData policy and
+`decimals`; transfer modes and histograms are in every engine except PostgreSQL, and the
+runtime profile in all but PostgreSQL ([Scan Options](docs/scan-options.md#option-names-by-engine)).
+The [Engines Overview](docs/engines/README.md) has the
 full capability matrix, shared output schemas, a side-by-side cheat sheet and the
 cross-engine parity tests. Each engine deep dive covers install, recipes (basic and
 advanced scans, scalar helpers, joins, exports, remote COGs, mosaics, categorical queries),
@@ -515,7 +529,7 @@ flowchart TD
     subgraph ENGINES ["Engine Adapters"]
         DUCK["DuckDB table functions<br/>bind -> init_local -> scan"]
         PY["Python / Polars<br/>Arrow PyCapsule + IO source"]
-        DF["DataFusion-style<br/>TableProvider / ExecutionPlan"]
+        DF["DataFusion / SedonaDB<br/>TableProvider + table functions"]
         PG["PostgreSQL<br/>value-per-call SRFs"]
         CLI["CLI<br/>jsonl / ipc / parquet / pmtiles"]
     end
@@ -539,7 +553,7 @@ flowchart TD
             NODATA -- "Yes" --> SKIP["Instant O(1) Skip"]
             NODATA -- "No" --> HOIST["Absolute Pixel Coordinates"]
             HOIST --> STEP["CRS Transform at Sample Position"]
-            STEP --> LOOKAHEAD["Exact H3 Indexing and Sequential Spans"]
+            STEP --> LOOKAHEAD["Exact Cell Indexing (GridSpec: H3 / A5 / S2 / HEALPix) and Sequential Spans"]
             LOOKAHEAD --> RUN["In-Register Run Accumulator (Registers)"]
         end
 
@@ -553,11 +567,19 @@ flowchart TD
             EVICT -- "Yes" --> POP["Evict Finished Hexagons (Free RAM)"]
             EVICT -- "No" --> KEEP["Retain in Active Front"]
         end
+
+        subgraph TRANSFER ["transfer = interpolate / overlay"]
+            BANDS["TransferStream: bands of rows, interpolation or exact pixel overlap"]
+            OPEN["Cells open across band edges"]
+            CHUNK -.->|"instead of the horizon kernel"| BANDS
+            BANDS --> OPEN
+        end
     end
 
     subgraph OUTPUT ["Streaming Sinks"]
         BUFFER["Completed Hexagon Buffer"]
         POP --> BUFFER
+        OPEN -->|"finished cells"| BUFFER
         BATCH["Columnar batches: DuckDB DataChunk / Arrow RecordBatch / PG rows / NDJSON / RH3IPC01"]
         FILES["File exporters: GeoParquet 1.1 / PMTiles v3"]
         BUFFER -->|"drain on demand"| BATCH
@@ -732,6 +754,7 @@ cargo run --release --example benchmark_bottleneck path/to/raster.tif
 cargo run --release --example benchmark_scaling
 cargo run --release -p dggs-stream-core --example worker_scaling -- --quick  # kernel vs. serial-merge time per worker count
 cargo run --release --example raster_to_pmtiles -- --input data/sample_sf.tif --output data/sample_sf.pmtiles
+cargo run --release --example benchmark_grids -- --h3-res 8,10 --runs 3  # time and peak RSS per grid (Hawaii rasters in data/)
 ```
 
 ---
@@ -743,6 +766,8 @@ Topic guides that apply to every engine. Engine-specific documentation is listed
 
 | Document | What It Covers |
 | :--- | :--- |
+| [Grids](docs/grids.md) | H3, A5, S2 and HEALPix: resolutions, cell ids per engine, `GridSpec`, `auto` resolution, poles, polygon fill |
+| [Scan Options](docs/scan-options.md) | Transfer modes (`assign_centers`, `interpolate`, `overlay`), histograms, NoData policy, rounding, runtime profile, and each engine's names for them |
 | [Engineering Architecture](docs/engineering.md) | Streaming, memory budgets, disk spilling, and throughput |
 | [Module Architecture](docs/module-architecture.md) | File-by-file source code map with GitHub links |
 | [PMTiles & Multi-Resolution](docs/pmtiles.md) | Multi-resolution pyramids, zoom mapping, zero-server web maps |
