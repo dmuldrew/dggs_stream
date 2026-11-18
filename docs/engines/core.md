@@ -425,7 +425,7 @@ rejected by that client). An engine can supply its own byte source instead:
 
 When a factory is set it opens **every** path, local ones included, and the prefetcher,
 cache and coalescing work on top of it unchanged. The DuckDB 2.0 build uses this to read
-through DuckDB's file system (`SET raster_h3_use_duckdb_fs = true`).
+through DuckDB's file system (`SET dggs_stream_use_duckdb_fs = true`).
 
 ### Mosaic decoder cache
 

@@ -84,9 +84,9 @@ cells = dggs_stream.spark.read(spark, "dem.tif", resolutions=[8, 9], quantiles="
 CREATE TEMPORARY VIEW dem_parts USING dggs_stream
 OPTIONS (path 'dem.tif', resolutions '8,9', target_chunks '256');
 
--- Final cells in SQL alone: raster_h3_merge is registered by dggs_stream.spark.register
-SELECT * FROM raster_h3_merge(TABLE(dem_parts));
-SELECT * FROM raster_h3_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
+-- Final cells in SQL alone: dggs_stream_merge is registered by dggs_stream.spark.register
+SELECT * FROM dggs_stream_merge(TABLE(dem_parts));
+SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
 ```
 
 - **One Spark partition per raster partition.** The driver plans with `plan_partitions`
@@ -98,7 +98,7 @@ SELECT * FROM raster_h3_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
   through and merges the partial ones with `dggs_stream.merge_partials`; the raster is scanned
   once. Pass the scan's `categorical`, `columns`, `quantiles` and filters; `read` does this
   for you. Merge each raster's DataFrame on its own.
-- **`raster_h3_merge(TABLE(t) [, 'name=value, ...'])`** is the same merge as a SQL table
+- **`dggs_stream_merge(TABLE(t) [, 'name=value, ...'])`** is the same merge as a SQL table
   function (a Python UDTF). It hashes rows into `buckets` groups by `h3_index` (default 64)
   and merges each group in one call. Options: `quantiles`, `min_count`, `min_mean`,
   `max_mean`, `min_majority_fraction`, `categorical` (recognised from the columns when
@@ -310,7 +310,7 @@ can start.
 ## Testing
 
 [`examples/sedona_spark/tests/`](../../examples/sedona_spark/tests) runs the data source,
-the `raster_h3_merge` table function and the demo's `mapInArrow` pipeline on local Spark 4.0
+the `dggs_stream_merge` table function and the demo's `mapInArrow` pipeline on local Spark 4.0
 with Sedona, and [`crates/dggs-stream-python/tests/spark/`](../../crates/dggs-stream-python/tests/spark)
 checks filter pushdown on Spark 4.1. Every result is compared with an unpartitioned scan.
 The `sedona-spark` CI job builds the `sedona` image and runs both suites in it (the second

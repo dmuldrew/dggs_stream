@@ -12,9 +12,9 @@
     # or both steps at once:
     cells = dggs_stream.spark.read(spark, "dem.tif", resolutions=[8, 9])
 
-    -- or in SQL (register() also registers the raster_h3_merge table function):
+    -- or in SQL (register() also registers the dggs_stream_merge table function):
     CREATE TEMPORARY VIEW dem_parts USING dggs_stream OPTIONS (path 'dem.tif', resolutions '8,9');
-    SELECT * FROM raster_h3_merge(TABLE(dem_parts));
+    SELECT * FROM dggs_stream_merge(TABLE(dem_parts));
 
 Each Spark partition scans one partition planned by `dggs_stream.plan_partitions` (a disjoint
 set of TIFF tiles or strips), so executors read one raster in parallel and no pixel is read
@@ -60,9 +60,6 @@ import pyarrow as pa
 import dggs_stream
 
 SHORT_NAME = "dggs_stream"
-# The data source's name before the project was renamed; `register` adds it too, so
-# `spark.read.format("raster_h3")` keeps working.
-LEGACY_SHORT_NAME = "raster_h3"
 
 # Spark option name -> parser of its string value. Spark lower-cases option keys.
 _INT = int
@@ -358,25 +355,9 @@ def _require_pyspark() -> None:
 _PUSHDOWN_CONF = "spark.sql.python.filterPushdown.enabled"
 
 
-class LegacyRasterH3DataSource(RasterH3DataSource):  # type: ignore[misc,valid-type]
-    """`RasterH3DataSource` under its former name, `spark.read.format("raster_h3")`."""
-
-    @classmethod
-    def name(cls) -> str:
-        return LEGACY_SHORT_NAME
-
-
-class LegacyRasterH3PushdownDataSource(RasterH3PushdownDataSource):  # type: ignore[misc,valid-type]
-    """`RasterH3PushdownDataSource` under its former name, `raster_h3`."""
-
-    @classmethod
-    def name(cls) -> str:
-        return LEGACY_SHORT_NAME
-
-
 def register(spark, pushdown: Optional[bool] = None) -> None:
-    """Register the `dggs_stream` data source (also as `raster_h3`, its former name) and the
-    `raster_h3_merge` SQL table function.
+    """Register the `dggs_stream` data source and the
+    `dggs_stream_merge` SQL table function.
 
     `pushdown` selects filter pushdown (Spark 4.1+). `None` follows the session's
     `spark.sql.python.filterPushdown.enabled` (false by default); `True` sets it and uses
@@ -392,13 +373,8 @@ def register(spark, pushdown: Optional[bool] = None) -> None:
         if not _PUSHDOWN:
             raise RuntimeError("filter pushdown needs Spark 4.1 or later")
         spark.conf.set(_PUSHDOWN_CONF, "true")
-    if pushdown:
-        spark.dataSource.register(RasterH3PushdownDataSource)
-        spark.dataSource.register(LegacyRasterH3PushdownDataSource)
-    else:
-        spark.dataSource.register(RasterH3DataSource)
-        spark.dataSource.register(LegacyRasterH3DataSource)
-    spark.udtf.register("raster_h3_merge", udtf(RasterH3Merge))
+    spark.dataSource.register(RasterH3PushdownDataSource if pushdown else RasterH3DataSource)
+    spark.udtf.register("dggs_stream_merge", udtf(RasterH3Merge))
 
 
 def merge_partials(
@@ -465,7 +441,7 @@ _CATEGORICAL_COLUMNS = ("majority_class", "majority_fraction", "total_count", "h
 
 
 class RasterH3Merge:
-    """`raster_h3_merge(TABLE(t) [, 'name=value, ...'])`: the SQL form of `merge_partials`.
+    """`dggs_stream_merge(TABLE(t) [, 'name=value, ...'])`: the SQL form of `merge_partials`.
 
     `t` is a `dggs_stream` scan (with `partial_state`). Final rows pass through; partial rows
     are merged per cell. The options are those of `merge_partials` (`quantiles`,
@@ -481,11 +457,11 @@ class RasterH3Merge:
             if item.strip():
                 name, sep, value = item.partition("=")
                 if not sep:
-                    raise ValueError(f"raster_h3_merge option {item.strip()!r} is not name=value")
+                    raise ValueError(f"dggs_stream_merge option {item.strip()!r} is not name=value")
                 options[name.strip().lower()] = value.strip()
         unknown = sorted(set(options) - set(_MERGE_OPTIONS) - {"buckets"} - {"columns"})
         if unknown or "columns" in options:
-            raise ValueError(f"unknown raster_h3_merge option(s): {', '.join(unknown or ['columns'])}")
+            raise ValueError(f"unknown dggs_stream_merge option(s): {', '.join(unknown or ['columns'])}")
         return options
 
     @staticmethod
@@ -495,15 +471,15 @@ class RasterH3Merge:
 
         state = dggs_stream.PARTIAL_STATE_COLUMN
         if not getattr(table, "isTable", False):
-            raise ValueError("raster_h3_merge takes a table: raster_h3_merge(TABLE(t))")
+            raise ValueError("dggs_stream_merge takes a table: dggs_stream_merge(TABLE(t))")
         names = [f.name for f in table.dataType.fields]
         missing = [c for c in ("h3_index", "resolution", state) if c not in names]
         if missing:
-            raise ValueError(f"raster_h3_merge needs a dggs_stream scan; missing column(s): {', '.join(missing)}")
+            raise ValueError(f"dggs_stream_merge needs a dggs_stream scan; missing column(s): {', '.join(missing)}")
         parsed = RasterH3Merge._options(options.value if options is not None else None)
         buckets = int(parsed.get("buckets", 64))
         if buckets < 1:
-            raise ValueError("raster_h3_merge option buckets must be at least 1")
+            raise ValueError("dggs_stream_merge option buckets must be at least 1")
         return AnalyzeResult(
             schema=StructType([f for f in table.dataType.fields if f.name != state]),
             partitionBy=[PartitioningColumn(f"pmod(xxhash64(h3_index), {buckets})")],
@@ -578,7 +554,6 @@ def read(spark, path: str, **options: Any):
 
 __all__ = [
     "SHORT_NAME",
-    "LEGACY_SHORT_NAME",
     "RasterH3DataSource",
     "RasterH3Merge",
     "RasterH3Partition",

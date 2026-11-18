@@ -12,19 +12,19 @@ use dggs_stream_core::raster::http_range::RemoteSourceFactory;
 use crate::duckdb_connection;
 use crate::ffi::duckdb_bind_info;
 
-/// `SET raster_h3_use_duckdb_fs = true`: route raster byte-range reads through
+/// `SET dggs_stream_use_duckdb_fs = true`: route raster byte-range reads through
 /// DuckDB's file system (httpfs, S3/Azure/GCS, `CREATE SECRET` credentials).
 #[cfg(feature = "duckdb-api-v1_5_6")]
-pub(crate) const USE_DUCKDB_FS_OPTION: &str = "raster_h3_use_duckdb_fs";
-/// `SET raster_h3_fetch_workers = n`: remote prefetch worker count.
+pub(crate) const USE_DUCKDB_FS_OPTION: &str = "dggs_stream_use_duckdb_fs";
+/// `SET dggs_stream_fetch_workers = n`: remote prefetch worker count.
 #[cfg(feature = "duckdb-api-v1_5_6")]
-pub(crate) const FETCH_WORKERS_OPTION: &str = "raster_h3_fetch_workers";
-/// `SET raster_h3_decode_budget_mb = n`: decoded sample budget in MiB.
+pub(crate) const FETCH_WORKERS_OPTION: &str = "dggs_stream_fetch_workers";
+/// `SET dggs_stream_decode_budget_mb = n`: decoded sample budget in MiB.
 #[cfg(feature = "duckdb-api-v1_5_6")]
-pub(crate) const DECODE_BUDGET_MB_OPTION: &str = "raster_h3_decode_budget_mb";
-/// `SET raster_h3_workers = n`: dedicated aggregation pool size.
+pub(crate) const DECODE_BUDGET_MB_OPTION: &str = "dggs_stream_decode_budget_mb";
+/// `SET dggs_stream_workers = n`: dedicated aggregation pool size.
 #[cfg(feature = "duckdb-api-v1_5_6")]
-pub(crate) const WORKERS_OPTION: &str = "raster_h3_workers";
+pub(crate) const WORKERS_OPTION: &str = "dggs_stream_workers";
 
 #[cfg(feature = "duckdb-api-v1_5_6")]
 const USE_DUCKDB_FS_ENV: &str = "DGGS_STREAM_USE_DUCKDB_FS";
@@ -62,7 +62,7 @@ pub(crate) unsafe fn register_duckdb_config_options(
 }
 
 /// Build a raster source factory that opens every source through the DuckDB
-/// file system when `raster_h3_use_duckdb_fs` (or `DGGS_STREAM_USE_DUCKDB_FS`)
+/// file system when `dggs_stream_use_duckdb_fs` (or `DGGS_STREAM_USE_DUCKDB_FS`)
 /// is enabled. Always `None` on the v1.2.0 API build.
 ///
 /// # Safety
@@ -153,7 +153,7 @@ unsafe fn register_options_impl(con: duckdb_connection) -> Result<(), Vec<&'stat
     unsafe {
         if !register_one(
             con,
-            c"raster_h3_use_duckdb_fs",
+            c"dggs_stream_use_duckdb_fs",
             DuckDBType::Boolean,
             duckdb_create_bool(false),
             c"Route raster reads through the DuckDB file system (httpfs, S3/Azure/GCS, secrets)",
@@ -163,17 +163,17 @@ unsafe fn register_options_impl(con: duckdb_connection) -> Result<(), Vec<&'stat
         for (name, c_name, description) in [
             (
                 FETCH_WORKERS_OPTION,
-                c"raster_h3_fetch_workers",
+                c"dggs_stream_fetch_workers",
                 c"Remote prefetch worker count (0 = default)",
             ),
             (
                 DECODE_BUDGET_MB_OPTION,
-                c"raster_h3_decode_budget_mb",
+                c"dggs_stream_decode_budget_mb",
                 c"Decoded raster sample budget in MiB (0 = default)",
             ),
             (
                 WORKERS_OPTION,
-                c"raster_h3_workers",
+                c"dggs_stream_workers",
                 c"Dedicated aggregation worker pool size (0 = default)",
             ),
         ] {
