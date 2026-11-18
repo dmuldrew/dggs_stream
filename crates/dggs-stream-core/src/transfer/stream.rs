@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::aggregator::multi_horizon::coordinates::is_point_in_bbox;
 use crate::aggregator::multi_horizon::MultiResolutionConfig;
@@ -56,7 +56,7 @@ pub struct Filters {
     pub min_majority_fraction: Option<f64>,
 }
 
-impl TransferAccumulator for H3Accumulator {
+impl TransferAccumulator for ContinuousAccumulator {
     const CATEGORICAL: bool = false;
 
     fn empty(track_quantiles: bool) -> Self {

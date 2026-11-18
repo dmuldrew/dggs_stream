@@ -29,7 +29,7 @@ use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, Signature, TypeSignature, Volatility,
 };
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     decode_partial_state, encode_partial_state, AccumulatorMerge, MultiCategoricalRecord,
@@ -185,7 +185,7 @@ impl AggregateUDFImpl for MergePartials {
 #[derive(Debug)]
 enum State {
     Empty,
-    Continuous(H3Accumulator),
+    Continuous(ContinuousAccumulator),
     Categorical(Box<CategoricalAccumulator>),
 }
 
@@ -207,7 +207,7 @@ impl MergeAccumulator {
             let bytes = states.value(i);
             match (self.kind, &mut self.state) {
                 (Kind::Continuous, State::Continuous(acc)) => {
-                    let other: H3Accumulator =
+                    let other: ContinuousAccumulator =
                         decode_partial_state(bytes, STATE_LIMIT).map_err(to_df_error)?;
                     acc.merge(&other);
                 }

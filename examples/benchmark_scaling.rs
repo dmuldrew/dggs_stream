@@ -14,7 +14,8 @@ use tiff::encoder::TiffEncoder;
 use tiff::tags::Tag;
 
 use dggs_stream::aggregator::{
-    H3Accumulator, MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
+    ContinuousAccumulator, MultiCategoricalHorizonStreamer, MultiResolutionConfig,
+    MultiScanHorizonStreamer,
 };
 use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 
@@ -142,7 +143,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
     let chunks_res_4: Vec<
         std::collections::HashMap<
             u64,
-            H3Accumulator,
+            ContinuousAccumulator,
             dggs_stream::aggregator::cell_hash::H3BuildHasher,
         >,
     > = pool_4.install(|| {
@@ -171,8 +172,10 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
                                             h3o::Resolution::try_from(resolution).unwrap(),
                                         );
                                         map.entry(u64::from(cell))
-                                            .and_modify(|acc: &mut H3Accumulator| acc.update(val))
-                                            .or_insert_with(|| H3Accumulator::new(val));
+                                            .and_modify(|acc: &mut ContinuousAccumulator| {
+                                                acc.update(val)
+                                            })
+                                            .or_insert_with(|| ContinuousAccumulator::new(val));
                                     }
                                 }
                             }
@@ -197,7 +200,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
     let chunks_res_8: Vec<
         std::collections::HashMap<
             u64,
-            H3Accumulator,
+            ContinuousAccumulator,
             dggs_stream::aggregator::cell_hash::H3BuildHasher,
         >,
     > = pool_8.install(|| {
@@ -226,8 +229,10 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
                                             h3o::Resolution::try_from(resolution).unwrap(),
                                         );
                                         map.entry(u64::from(cell))
-                                            .and_modify(|acc: &mut H3Accumulator| acc.update(val))
-                                            .or_insert_with(|| H3Accumulator::new(val));
+                                            .and_modify(|acc: &mut ContinuousAccumulator| {
+                                                acc.update(val)
+                                            })
+                                            .or_insert_with(|| ContinuousAccumulator::new(val));
                                     }
                                 }
                             }

@@ -4,7 +4,7 @@
 //! prefetched chunk reader ordering, and resilience under high thread-contention stress.
 
 use crate::helpers;
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
@@ -17,13 +17,15 @@ use tiff::tags::CompressionMethod;
 fn drain_streamer_to_map(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,
-) -> HashMap<u64, H3Accumulator> {
+) -> HashMap<u64, ContinuousAccumulator> {
     drain_with_peak(MultiScanHorizonStreamer::new(reader, config).unwrap()).0
 }
 
 /// Drain every record, failing on any repeated cell (merging would hide
 /// duplicate emission), and report peak simultaneous kernel jobs.
-fn drain_with_peak(mut streamer: MultiScanHorizonStreamer) -> (HashMap<u64, H3Accumulator>, usize) {
+fn drain_with_peak(
+    mut streamer: MultiScanHorizonStreamer,
+) -> (HashMap<u64, ContinuousAccumulator>, usize) {
     let mut map = HashMap::new();
     while !streamer.is_finished() {
         for record in streamer.fetch_next_batch(128).unwrap() {
@@ -448,7 +450,7 @@ fn test_workers_precompute_every_eviction_key() -> Result<()> {
 /// Drain a stream, returning (cells, peak horizon-map bytes, spill runs, waves).
 fn drain_stats(
     mut streamer: MultiScanHorizonStreamer,
-) -> (HashMap<u64, H3Accumulator>, usize, u64, u64) {
+) -> (HashMap<u64, ContinuousAccumulator>, usize, u64, u64) {
     let mut map = HashMap::new();
     while !streamer.is_finished() {
         for record in streamer.fetch_next_batch(512).unwrap() {

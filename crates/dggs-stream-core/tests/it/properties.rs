@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
@@ -25,9 +25,9 @@ proptest! {
         split in 0usize..128,
     ) {
         let split = split % (values.len() + 1);
-        let mut whole = H3Accumulator::default();
-        let mut left = H3Accumulator::default();
-        let mut right = H3Accumulator::default();
+        let mut whole = ContinuousAccumulator::default();
+        let mut left = ContinuousAccumulator::default();
+        let mut right = ContinuousAccumulator::default();
         for (i, &(value, weight)) in values.iter().enumerate() {
             let (value, weight) = (f64::from(value), f64::from(weight) / 4.0);
             whole.update_weighted(value, weight);
@@ -125,7 +125,7 @@ proptest! {
         vc in prop::collection::vec((-10_000i32..10_000, 1u8..5), 0..64),
     ) {
         let build = |values: &[(i32, u8)]| {
-            let mut acc = H3Accumulator::default();
+            let mut acc = ContinuousAccumulator::default();
             for &(v, w) in values {
                 acc.update_weighted(f64::from(v), f64::from(w) / 4.0);
             }

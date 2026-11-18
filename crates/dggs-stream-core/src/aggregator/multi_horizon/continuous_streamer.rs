@@ -10,7 +10,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tiff::decoder::DecodingResult;
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::error::Result;
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::mosaic::MosaicReader;
@@ -58,24 +58,24 @@ impl ContinuousKernel {
 }
 
 impl HorizonStreamKernel for ContinuousKernel {
-    type Accumulator = H3Accumulator;
+    type Accumulator = ContinuousAccumulator;
     type Record = MultiContinuousRecord;
 
     #[inline(always)]
     fn new_parent_accumulator(&self) -> Self::Accumulator {
         if self.track_quantiles {
-            H3Accumulator::with_quantiles()
+            ContinuousAccumulator::with_quantiles()
         } else {
-            H3Accumulator::default()
+            ContinuousAccumulator::default()
         }
     }
 
     fn worker_bytes_per_sample(&self) -> usize {
-        // Without quantile sketches an `H3Accumulator` owns no heap state.
+        // Without quantile sketches an `ContinuousAccumulator` owns no heap state.
         if self.track_quantiles {
-            1024usize.max(size_of::<H3Accumulator>().saturating_mul(8))
+            1024usize.max(size_of::<ContinuousAccumulator>().saturating_mul(8))
         } else {
-            super::controller::inline_worker_bytes_per_sample::<H3Accumulator>()
+            super::controller::inline_worker_bytes_per_sample::<ContinuousAccumulator>()
         }
     }
 
@@ -149,7 +149,7 @@ pub struct MultiScanHorizonStreamer {
     track_quantiles: bool,
     /// The `interpolate` / `overlay` stream, when `config.transfer` is not the default; the
     /// horizon kernel in `inner` is then idle.
-    transfer: Option<Box<crate::transfer::TransferStream<H3Accumulator>>>,
+    transfer: Option<Box<crate::transfer::TransferStream<ContinuousAccumulator>>>,
     transfer_mode: crate::transfer::TransferMode,
 }
 
@@ -210,7 +210,7 @@ impl MultiScanHorizonStreamer {
     ) -> Result<usize>
     where
         F: FnMut(usize, MultiContinuousRecord),
-        G: FnMut(super::partition::PartialCell<H3Accumulator>),
+        G: FnMut(super::partition::PartialCell<ContinuousAccumulator>),
     {
         self.inner
             .drain_partitioned_into(max_rows, on_record, on_partial)
@@ -445,7 +445,7 @@ impl Drop for MultiScanHorizonStreamer {
 fn transfer_stream<K: HorizonStreamKernel>(
     inner: &mut MultiHorizonStreamer<K>,
     config: &MultiResolutionConfig,
-) -> Result<Option<Box<crate::transfer::TransferStream<H3Accumulator>>>> {
+) -> Result<Option<Box<crate::transfer::TransferStream<ContinuousAccumulator>>>> {
     if config.transfer.is_assign_centers() {
         return Ok(None);
     }

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 
 /// Whether cells whose samples are all NoData are output.
@@ -139,7 +139,7 @@ impl OutputPolicy {
     }
 
     /// The output values of a continuous cell.
-    pub fn continuous(&self, acc: &H3Accumulator) -> ContinuousStats {
+    pub fn continuous(&self, acc: &ContinuousAccumulator) -> ContinuousStats {
         if acc.count > 0.0 {
             let stddev = acc.stddev();
             ContinuousStats {
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn continuous_cells_with_and_without_samples() {
-        let mut acc = H3Accumulator::default();
+        let mut acc = ContinuousAccumulator::default();
         for v in [1.0, 2.0, 4.0] {
             acc.update(v);
         }
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(rounded.stddev, plain.stddev.map(|s| round_decimals(s, 2)));
         assert_eq!(rounded.count, 3.0);
 
-        let empty = H3Accumulator::default();
+        let empty = ContinuousAccumulator::default();
         let null = OutputPolicy::default().continuous(&empty);
         assert_eq!(
             (null.mean, null.min, null.max, null.stddev),

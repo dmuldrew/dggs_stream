@@ -46,7 +46,7 @@ pub mod sampling;
 pub mod simd;
 
 /// Online continuous accumulator maintaining Welford summary statistics for an H3 cell.
-pub use accumulator::H3Accumulator;
+pub use accumulator::ContinuousAccumulator;
 /// Categorical accumulator tracking class frequencies and uniformity metrics for an H3 cell.
 pub use categorical::{CategoricalAccumulator, CategoricalUniformity};
 /// Horizon eviction tracking structures and spatial bounding box helpers.

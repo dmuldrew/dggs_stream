@@ -1,10 +1,10 @@
-//! Tests streaming quantile sketches and DDSketch accuracy within H3 accumulators.
+//! Tests streaming quantile sketches and DDSketch accuracy within continuous accumulators.
 //!
 //! Validates quantile estimation precision, merge associativity and commutativity, preset and custom
 //! spec parsing, zero-overhead disabling, and edge cases including empty and single-value inputs.
 
 use crate::helpers;
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget,
 };
@@ -146,7 +146,7 @@ fn test_quantile_sketch_weighted_insert() {
 
 #[test]
 fn test_accumulator_with_and_without_quantiles() {
-    let mut acc_default = H3Accumulator::default();
+    let mut acc_default = ContinuousAccumulator::default();
     acc_default.update(10.0);
     acc_default.update(20.0);
     acc_default.update(30.0);
@@ -154,7 +154,7 @@ fn test_accumulator_with_and_without_quantiles() {
     assert!(acc_default.quantile(0.5).is_nan());
     assert!(acc_default.iqr().is_nan());
 
-    let mut acc_q = H3Accumulator::with_quantiles();
+    let mut acc_q = ContinuousAccumulator::with_quantiles();
     acc_q.update(10.0);
     acc_q.update(20.0);
     acc_q.update(30.0);

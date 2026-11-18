@@ -1,10 +1,10 @@
 //! Continuous (Welford/SIMD span) and categorical accumulator statistics and merges.
 
-use dggs_stream_core::aggregator::{CategoricalAccumulator, H3Accumulator};
+use dggs_stream_core::aggregator::{CategoricalAccumulator, ContinuousAccumulator};
 
 #[test]
 fn test_accumulator_operations() {
-    let mut acc1 = H3Accumulator::new(10.0);
+    let mut acc1 = ContinuousAccumulator::new(10.0);
     acc1.update(20.0);
     acc1.update(30.0);
     assert_eq!(acc1.count, 3.0);
@@ -13,7 +13,7 @@ fn test_accumulator_operations() {
     assert_eq!(acc1.min, 10.0);
     assert_eq!(acc1.max, 30.0);
 
-    let mut acc2 = H3Accumulator::new(40.0);
+    let mut acc2 = ContinuousAccumulator::new(40.0);
     acc2.update(50.0);
 
     acc1.merge(&acc2);
@@ -26,7 +26,7 @@ fn test_accumulator_operations() {
     assert!((acc1.stddev() - 250.0f64.sqrt()).abs() < 1e-9);
 
     // Test weighted updates
-    let mut acc_w = H3Accumulator::new_weighted(100.0, 0.4);
+    let mut acc_w = ContinuousAccumulator::new_weighted(100.0, 0.4);
     acc_w.update_weighted(200.0, 0.6);
     assert_eq!(acc_w.count, 1.0);
     assert_eq!(acc_w.sum, 160.0);
@@ -90,7 +90,7 @@ fn test_categorical_tied_majority() {
 #[test]
 fn test_accumulator_single_sample_variance_and_empty_default() {
     // Empty accumulator
-    let acc_empty = H3Accumulator::default();
+    let acc_empty = ContinuousAccumulator::default();
     assert_eq!(acc_empty.count, 0.0);
     assert!(acc_empty.mean().is_nan());
     assert!(acc_empty.variance().is_nan());
@@ -99,7 +99,7 @@ fn test_accumulator_single_sample_variance_and_empty_default() {
     assert_eq!(acc_empty.max, f64::NEG_INFINITY);
 
     // Single sample accumulator (variance must be exactly 0.0)
-    let acc_single = H3Accumulator::new(99.0);
+    let acc_single = ContinuousAccumulator::new(99.0);
     assert_eq!(acc_single.count, 1.0);
     assert_eq!(acc_single.mean(), 99.0);
     assert_eq!(acc_single.variance(), 0.0);
@@ -135,7 +135,7 @@ fn test_categorical_accumulator_merge_operations() {
 
 #[test]
 fn test_welford_accumulator_extreme_mixed_bathymetry_numerical_stability() {
-    let mut acc = H3Accumulator::default();
+    let mut acc = ContinuousAccumulator::default();
 
     // 1,000,000 samples spanning from Mariana Trench (-10,928m) to Mt Everest (+8,848.86m)
     let samples = [
@@ -227,7 +227,7 @@ fn test_simd_span_f32_accuracy_and_welford_equivalence() {
 
     // 1. Test arbitrary floating-point values
     let raw_vals: Vec<f32> = (0..127).map(|i| ((i * 7 + 13) % 97) as f32 * 1.5).collect();
-    let mut welford = H3Accumulator::default();
+    let mut welford = ContinuousAccumulator::default();
     for &v in &raw_vals {
         welford.update(v as f64);
     }
@@ -273,7 +273,7 @@ fn test_simd_span_f64_accuracy_and_welford_equivalence() {
     let raw_vals: Vec<f64> = (0..127)
         .map(|i| ((i * 11 + 7) % 89) as f64 * 2.25)
         .collect();
-    let mut welford = H3Accumulator::default();
+    let mut welford = ContinuousAccumulator::default();
     for &v in &raw_vals {
         welford.update(v);
     }
@@ -301,7 +301,7 @@ fn test_simd_span_variable_lengths() {
     // Test slice lengths from 0 to 33 to test all remainder combinations of 8-lane chunks
     for len in 0..=33 {
         let vals: Vec<f32> = (0..len).map(|i| (i as f32) + 1.0).collect();
-        let mut expected = H3Accumulator::default();
+        let mut expected = ContinuousAccumulator::default();
         for &v in &vals {
             expected.update(v as f64);
         }
@@ -499,8 +499,8 @@ fn test_categorical_simd_uniformity_types_and_spans() {
 fn apply_affine_matches_accumulating_transformed_values() {
     let values = [3.0, -1.5, 8.25, 0.0, 4.0, 4.0, 11.5];
     for (scale, offset) in [(0.01, 5.0), (-2.5, 100.0), (1.0, -7.0)] {
-        let mut raw = H3Accumulator::default();
-        let mut expected = H3Accumulator::default();
+        let mut raw = ContinuousAccumulator::default();
+        let mut expected = ContinuousAccumulator::default();
         for v in values {
             raw.update(v);
             expected.update(v * scale + offset);
@@ -513,9 +513,9 @@ fn apply_affine_matches_accumulating_transformed_values() {
         assert!(close(raw.variance(), expected.variance()));
         assert!(close(raw.min, expected.min) && close(raw.max, expected.max));
     }
-    let mut empty = H3Accumulator::default();
+    let mut empty = ContinuousAccumulator::default();
     empty.apply_affine(-3.0, 1.0);
-    assert_eq!(empty, H3Accumulator::default());
+    assert_eq!(empty, ContinuousAccumulator::default());
 }
 
 #[test]
@@ -524,13 +524,13 @@ fn weighted_sample_variance_handles_fractional_weights_and_merges() {
     // For 100 and 200 with weights 0.4 and 0.6, M2 is 2400 and
     // the denominator is 0.48, giving 5000.
     for factor in [0.5, 1.0, 2.0, 10.0] {
-        let mut direct = H3Accumulator::new_weighted(100.0, 0.4 * factor);
+        let mut direct = ContinuousAccumulator::new_weighted(100.0, 0.4 * factor);
         direct.update_weighted(200.0, 0.6 * factor);
         assert!((direct.variance() - 5000.0).abs() < 1e-8);
         assert!((direct.stddev() - 5000.0_f64.sqrt()).abs() < 1e-8);
 
-        let mut merged = H3Accumulator::new_weighted(100.0, 0.4 * factor);
-        merged.merge(&H3Accumulator::new_weighted(200.0, 0.6 * factor));
+        let mut merged = ContinuousAccumulator::new_weighted(100.0, 0.4 * factor);
+        merged.merge(&ContinuousAccumulator::new_weighted(200.0, 0.6 * factor));
         assert!((merged.variance() - direct.variance()).abs() < 1e-8);
     }
 }
@@ -539,13 +539,13 @@ fn weighted_sample_variance_handles_fractional_weights_and_merges() {
 fn weighted_sample_variance_edge_cases() {
     // Unit weights keep the unweighted sample variance, whichever path builds them.
     let values = [3.0, 7.0, 7.0, 19.0];
-    let mut unit = H3Accumulator::default();
-    let mut weighted = H3Accumulator::default();
+    let mut unit = ContinuousAccumulator::default();
+    let mut weighted = ContinuousAccumulator::default();
     for v in values {
         unit.update(v);
         weighted.update_weighted(v, 1.0);
     }
-    let mut sliced = H3Accumulator::default();
+    let mut sliced = ContinuousAccumulator::default();
     sliced.update_slice(&values);
     let mean = values.iter().sum::<f64>() / 4.0;
     let expected = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / 3.0;
@@ -556,21 +556,21 @@ fn weighted_sample_variance_edge_cases() {
 
     // A single observation has no spread, whatever its weight.
     for w in [0.25, 1.0, 3.0] {
-        let acc = H3Accumulator::new_weighted(42.0, w);
+        let acc = ContinuousAccumulator::new_weighted(42.0, w);
         assert_eq!(acc.variance(), 0.0);
         assert_eq!(acc.stddev(), 0.0);
     }
-    assert!(H3Accumulator::default().variance().is_nan());
-    assert!(H3Accumulator::default().stddev().is_nan());
+    assert!(ContinuousAccumulator::default().variance().is_nan());
+    assert!(ContinuousAccumulator::default().stddev().is_nan());
 
     // Merging with empty or self-equal states, and affine maps, keep sum(w^2).
-    let mut a = H3Accumulator::new_weighted(1.0, 0.3);
-    a.merge(&H3Accumulator::default());
+    let mut a = ContinuousAccumulator::new_weighted(1.0, 0.3);
+    a.merge(&ContinuousAccumulator::default());
     assert!((a.sum_w2 - 0.09).abs() < 1e-15);
-    let mut empty = H3Accumulator::default();
+    let mut empty = ContinuousAccumulator::default();
     empty.merge(&a);
     assert_eq!(empty.sum_w2, a.sum_w2);
-    let mut b = H3Accumulator::new_weighted(10.0, 0.5);
+    let mut b = ContinuousAccumulator::new_weighted(10.0, 0.5);
     b.update_weighted(20.0, 0.25);
     let var = b.variance();
     b.apply_affine(-2.0, 5.0);

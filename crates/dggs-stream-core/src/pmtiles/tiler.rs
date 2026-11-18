@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiCategoricalRecord, MultiContinuousRecord,
@@ -102,7 +102,7 @@ struct ContinuousTiles {
 
 impl TileKind for ContinuousTiles {
     type Record = MultiContinuousRecord;
-    type Acc = H3Accumulator;
+    type Acc = ContinuousAccumulator;
     type Summary = f64; // stddev
     type Stats = HashMap<u8, ResolutionAccumulatorStats, FxBuildHasher>;
 

@@ -6,7 +6,7 @@ use std::path::Path;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use dggs_stream_core::aggregator::H3Accumulator;
+use dggs_stream_core::aggregator::ContinuousAccumulator;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::resolution::area_matched_resolution;
 use dggs_stream_core::transfer::{Interpolation, TransferMode};
@@ -31,7 +31,7 @@ fn pixel_centre(c: u32, r: u32) -> (f64, f64) {
     )
 }
 
-fn scan(path: &Path, config: &MultiResolutionConfig) -> BTreeMap<u64, H3Accumulator> {
+fn scan(path: &Path, config: &MultiResolutionConfig) -> BTreeMap<u64, ContinuousAccumulator> {
     let reader = GeoTiffStreamReader::open(path).unwrap();
     let mut streamer = MultiScanHorizonStreamer::new(reader, config).unwrap();
     assert_eq!(streamer.transfer_mode(), config.transfer);
@@ -413,7 +413,7 @@ fn overlay_keeps_cells_larger_than_the_raster_or_the_bbox() {
         weighted: true,
         mass_preserve: false,
     };
-    let totals = |cells: &BTreeMap<u64, H3Accumulator>| {
+    let totals = |cells: &BTreeMap<u64, ContinuousAccumulator>| {
         cells
             .values()
             .fold((0.0, 0.0), |(n, s), a| (n + a.count, s + a.sum))

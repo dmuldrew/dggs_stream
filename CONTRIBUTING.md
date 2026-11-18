@@ -318,7 +318,7 @@ Open a GitHub Issue describing:
 
 The aggregation engines share the same I/O pipeline (`memmap2` → prefetch → chunk decode) and scan-line traversal logic (latitude hoisting, longitude stepping, scanline lookahead). They diverge at the accumulator level:
 
-- **Continuous** (`ScanHorizonStreamer`): Uses `H3Accumulator` with Welford online stats
+- **Continuous** (`ScanHorizonStreamer`): Uses `ContinuousAccumulator` with Welford online stats
 - **Categorical** (`CategoricalHorizonStreamer`): Uses `CategoricalAccumulator` with `HashMap<i64, f64>` frequency tracking
 - **Multi-Resolution Pyramids** (`MultiHorizonStreamer` / `pmtiles`): Single-pass concurrent aggregation across multiple H3 resolutions directly generating MVT protobuf tiles and PMTiles v3 archives.
 

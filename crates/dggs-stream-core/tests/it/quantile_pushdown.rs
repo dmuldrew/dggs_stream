@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer, QuantilePlan, QuantileTarget,
 };
@@ -40,8 +40,8 @@ fn close_opt(a: Option<f64>, b: Option<f64>) -> bool {
     }
 }
 
-fn accumulator(values: impl IntoIterator<Item = f64>) -> H3Accumulator {
-    let mut acc = H3Accumulator::with_quantiles();
+fn accumulator(values: impl IntoIterator<Item = f64>) -> ContinuousAccumulator {
+    let mut acc = ContinuousAccumulator::with_quantiles();
     for v in values {
         acc.update(v);
     }
@@ -49,9 +49,9 @@ fn accumulator(values: impl IntoIterator<Item = f64>) -> H3Accumulator {
 }
 
 /// Accumulators covering empty, single-value, negative, zero, duplicate and wide-range data.
-fn datasets() -> Vec<(&'static str, H3Accumulator)> {
+fn datasets() -> Vec<(&'static str, ContinuousAccumulator)> {
     vec![
-        ("empty", H3Accumulator::with_quantiles()),
+        ("empty", ContinuousAccumulator::with_quantiles()),
         ("single", accumulator([42.0])),
         ("positive", accumulator((1..=1000).map(f64::from))),
         ("negative", accumulator((1..=500).map(|i| -f64::from(i)))),
@@ -140,7 +140,7 @@ fn quantile_plan_matches_quantile_and_iqr() {
     let plan = QuantilePlan::new(&targets);
     assert_eq!(plan.len(), targets.len());
 
-    let mut no_sketch = H3Accumulator::default();
+    let mut no_sketch = ContinuousAccumulator::default();
     no_sketch.update(3.0);
     let mut cases = datasets();
     cases.push(("no_sketch", no_sketch));
@@ -171,7 +171,7 @@ fn quantile_plan_matches_quantile_and_iqr() {
 #[test]
 fn single_probability_plan_matches_quantile() {
     let mut cases = datasets();
-    let mut no_sketch = H3Accumulator::default();
+    let mut no_sketch = ContinuousAccumulator::default();
     no_sketch.update(3.0);
     cases.push(("no_sketch", no_sketch));
 

@@ -1,7 +1,7 @@
 //! Independent reference: index every sample directly, without scanline or cache helpers.
 use crate::helpers;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
@@ -171,7 +171,7 @@ fn supersampling_matches_direct_h3_per_cell_and_per_class() {
                     reader.metadata.geotransform.b = b;
                     reader.metadata.geotransform.d = d;
                     let gt = reader.metadata.geotransform;
-                    let mut expected: HashMap<(u8, u64), H3Accumulator> = HashMap::new();
+                    let mut expected: HashMap<(u8, u64), ContinuousAccumulator> = HashMap::new();
                     let mut classes: HashMap<(u8, u64, i64), f64> = HashMap::new();
                     for row in 0..32 {
                         for col in 0..32 {
