@@ -12,12 +12,12 @@ def main():
     input_tif, output_parquet = sys.argv[1:]
     print(f"Starting raster benchmark: {input_tif} -> {output_parquet}")
     t0 = time.perf_counter()
-    scan = dggs_stream.scan_raster_h3(
+    scan = dggs_stream.scan_raster(
         input_tif,
         resolutions=9,
         columns=["h3_index", "min", "max", "mean"],
     )
-    if isinstance(scan, dggs_stream.RasterH3ArrowStream):
+    if isinstance(scan, dggs_stream.RasterArrowStream):
         backend = "direct exporter (Polars IO plugin unavailable; full statistics schema)"
         dggs_stream.raster_to_parquet(input_tif, output_parquet, resolutions=9, geoparquet=False)
     else:

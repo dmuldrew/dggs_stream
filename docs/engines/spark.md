@@ -22,7 +22,7 @@ which has its own native adapter (`dggs-stream-sedona`, see
 
 ```mermaid
 flowchart LR
-    D["Driver<br/>plan_partitions()<br/>(metadata only)"] --> T1["Task 1<br/>RasterH3ArrowStream(partition=spec)"]
+    D["Driver<br/>plan_partitions()<br/>(metadata only)"] --> T1["Task 1<br/>RasterArrowStream(partition=spec)"]
     D --> T2["Task 2"]
     D --> TN["Task N"]
     T1 & T2 & TN --> F["Final cells<br/>(partial_state IS NULL)"]
@@ -34,7 +34,7 @@ flowchart LR
 1. **Plan on the driver.** `dggs_stream.plan_partitions(path, target_chunks=N)` reads only
    the raster's metadata and returns one JSON spec per partition: a rectangle of the TIFF
    chunk grid plus a fingerprint of the raster layout.
-2. **Scan one partition per task.** `RasterH3ArrowStream(path, resolutions, partition=spec)`
+2. **Scan one partition per task.** `RasterArrowStream(path, resolutions, partition=spec)`
    aggregates that partition's pixels and adds a nullable `partial_state` column.
 3. **Keep final cells, merge edge cells.** Rows with a null `partial_state` are complete.
    The others are cells that another partition also reaches: shuffle them by `h3_index` so
@@ -103,7 +103,7 @@ SELECT * FROM raster_h3_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20');
   and merges each group in one call. Options: `quantiles`, `min_count`, `min_mean`,
   `max_mean`, `min_majority_fraction`, `categorical` (recognised from the columns when
   omitted) and `buckets`; the output columns are the input's without `partial_state`.
-- **Options** have the names and meanings of `RasterH3ArrowStream`: `resolutions`,
+- **Options** have the names and meanings of `RasterArrowStream`: `resolutions`,
   `target_chunks` (default 256), `categorical`, `columns`, `crs`, `nodata`, `bbox`, `band`,
   `sampling`, `overlap_rule`, `spectral_formula` and its `*_band` options, `quantiles`,
   `remap`, `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`,
@@ -128,7 +128,7 @@ and merged as one raster).
 The data source and its merge are H3-only for now: they key partial cells on `h3_index`,
 so the `grid` option and the other grids ([Grids](../grids.md)) are not available through
 `dggs_stream.spark`. A partitioned scan of another grid can use the Python package directly
-(`plan_partitions`, `RasterH3ArrowStream(..., grid=..., partition=...)` and
+(`plan_partitions`, `RasterArrowStream(..., grid=..., partition=...)` and
 `merge_partials(..., grid=...)`), as in the `mapInArrow` pipeline below. Transfer modes and
 histograms are not available in partitioned scans on any engine.
 
@@ -156,7 +156,7 @@ def scan(batches):                           # mapInArrow: (path, spec) rows in,
     import dggs_stream
     for batch in batches:
         for path, spec in zip(batch["path"].to_pylist(), batch["spec"].to_pylist()):
-            stream = dggs_stream.RasterH3ArrowStream(path, [8, 9], columns=COLUMNS, partition=spec)
+            stream = dggs_stream.RasterArrowStream(path, [8, 9], columns=COLUMNS, partition=spec)
             for cells in pa.RecordBatchReader.from_stream(stream):
                 yield to_spark(cells, path)
 

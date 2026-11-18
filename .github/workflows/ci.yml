@@ -479,7 +479,7 @@ jobs:
   # a freshly built cdylib (not an installed wheel; the wheel jobs smoke-test that).
   # Dependency sets match the `python-polars` engine of manual-tests.yml: the declared
   # minimums (pyproject: polars>=1.0, pyarrow>=14.0; pyarrow 14 needs numpy 1.x), the first
-  # Polars with register_io_source (1.4, so scan_raster_h3 pushdown runs), and latest.
+  # Polars with register_io_source (1.4, so scan_raster pushdown runs), and latest.
   python-pytest:
     name: Pytest (Polars & PyArrow, ${{ matrix.deps }} deps)
     needs: [changes]

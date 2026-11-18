@@ -79,7 +79,7 @@ jobs:
           fi
           # python-polars runs pytest once per dependency set: the declared minimums
           # (pyproject: polars>=1.0, pyarrow>=14.0; pyarrow 14 needs numpy 1.x), the first
-          # Polars with register_io_source (1.4, so scan_raster_h3 pushdown runs), and latest.
+          # Polars with register_io_source (1.4, so scan_raster pushdown runs), and latest.
           if [ "$ENGINE" = python-polars ]; then
             deps='[
               {"deps":"min","python":"3.11","pip":"polars==1.0.* pyarrow==14.* numpy<2"},

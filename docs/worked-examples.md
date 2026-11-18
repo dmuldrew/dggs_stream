@@ -51,7 +51,7 @@ BBOX = (-93.9, 28.9, -88.8, 30.6)               # coastal Louisiana, lon/lat
 #    `fraction` is a share of the pixels observed, not of the whole cell).
 def wetland_area(path, year):
     return (
-        dggs_stream.scan_raster_h3(
+        dggs_stream.scan_raster(
             path, RES, grid="a5", categorical=True, format="long",
             remap={90: 1, 95: 1, "else": 0},  # woody + emergent wetland -> 1, everything else -> 0
             bbox=BBOX, columns=["a5_index", "category", "count"],

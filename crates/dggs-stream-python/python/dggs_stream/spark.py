@@ -24,7 +24,7 @@ several partitions reach. `merge_partials` shuffles those by `h3_index` and merg
 the result equals one unpartitioned scan (up to floating-point summation order).
 
 Options (all optional except the path), with the names and meanings of
-`dggs_stream.RasterH3ArrowStream`:
+`dggs_stream.RasterArrowStream`:
 
     resolutions          "8" or "7,8,9" (default 8)
     target_chunks        TIFF tiles or strips per partition (default 256)
@@ -154,7 +154,7 @@ def _to_schema(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
 
 
 def _parse_options(options: Mapping[str, Any]) -> Dict[str, Any]:
-    """Spark's string options as typed `RasterH3ArrowStream` arguments."""
+    """Spark's string options as typed `RasterArrowStream` arguments."""
     lowered = {str(k).lower(): v for k, v in options.items()}
     unknown = sorted(set(lowered) - set(_SCAN_OPTIONS) - set(_OTHER_OPTIONS))
     if unknown:
@@ -237,7 +237,7 @@ class RasterH3DataSource(DataSource):  # type: ignore[misc,valid-type]
     def arrow_schema(self) -> pa.Schema:
         """The partitioned scan's schema in Spark's signed types (with `partial_state`)."""
         if self._arrow_schema is None:
-            stream = dggs_stream.RasterH3ArrowStream(
+            stream = dggs_stream.RasterArrowStream(
                 self.config["path"], partition=self.specs()[0], **_scan_kwargs(self.config)
             )
             self._arrow_schema = _signed_schema(pa.schema(stream))
@@ -295,7 +295,7 @@ class RasterH3Reader(DataSourceReader):  # type: ignore[misc,valid-type]
 
         if not self.config["resolutions"] or self.rows == "none":
             return  # the pushed filters exclude every row
-        stream = rh3.RasterH3ArrowStream(
+        stream = rh3.RasterArrowStream(
             self.config["path"], partition=partition.spec, **_scan_kwargs(self.config)
         )
         for batch in pa.RecordBatchReader.from_stream(stream):

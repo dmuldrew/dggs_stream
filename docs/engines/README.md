@@ -76,8 +76,8 @@ Each deep dive has a recipes section covering the same tasks. The core calls, si
 
 | Task | DuckDB | Python / Polars | PostgreSQL | CLI | DataFusion |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Continuous scan | `h3_raster_continuous_aggregate('dem.tif', resolution := 8)` | `scan_raster_h3("dem.tif", 8)` | `h3_raster_continuous_aggregate('/data/dem.tif', 8)` | `dggs-stream-cli jsonl dem.tif -r 8` | `ContinuousRasterTableProvider::try_new("dem.tif", vec![8])?` |
-| Categorical scan | `h3_raster_categorical_aggregate(..., format := 'long')` | `scan_raster_h3(..., categorical=True, format="long")` | `h3_raster_categorical_aggregate(...)` (wide only) | `jsonl ... -c --format long` | `CategoricalRasterTableProvider::try_new(..)?.with_format(Long)` |
+| Continuous scan | `h3_raster_continuous_aggregate('dem.tif', resolution := 8)` | `scan_raster("dem.tif", 8)` | `h3_raster_continuous_aggregate('/data/dem.tif', 8)` | `dggs-stream-cli jsonl dem.tif -r 8` | `ContinuousRasterTableProvider::try_new("dem.tif", vec![8])?` |
+| Categorical scan | `h3_raster_categorical_aggregate(..., format := 'long')` | `scan_raster(..., categorical=True, format="long")` | `h3_raster_categorical_aggregate(...)` (wide only) | `jsonl ... -c --format long` | `CategoricalRasterTableProvider::try_new(..)?.with_format(Long)` |
 | Several resolutions | `resolutions := '7,8'` | `[7, 8]` | one call per resolution | `-r 7,8` | `vec![7, 8]` |
 | Another grid | `s2_raster_continuous_aggregate(...)` or `grid := 's2'` | `grid="s2"` | `s2_raster_continuous_aggregate(...)` | `--grid s2` | `.with_grid(GridKind::S2)` or `s2_raster_continuous_aggregate(...)` in SQL |
 | Pixel-sized cells | `resolutions := 'auto'` | `"auto"` | `s2_auto_resolution('/data/dem.tif')` | `-r auto` | `'auto'` argument in SQL |

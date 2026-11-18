@@ -92,7 +92,7 @@ def test_resolution_filter_on_a_view_merges_like_a_narrower_scan(spark, terrain)
     parts = spark.sql("SELECT * FROM push_parts WHERE resolution = 9")
     assert "Filter" not in plan(parts)
     got = spark_ds.merge_partials(parts).toArrow()
-    want = pa.table(dggs_stream.RasterH3ArrowStream(terrain, resolutions=[9]))
+    want = pa.table(dggs_stream.RasterArrowStream(terrain, resolutions=[9]))
     def as_rows(t):
         return {(r["resolution"], r["h3_index"], False): [r] for r in t.to_pylist()}
 

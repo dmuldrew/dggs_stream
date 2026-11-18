@@ -1,16 +1,16 @@
 """
-dggs_stream: High-performance Python, Polars, and Arrow PyCapsule bindings for GeoTIFF/COG to H3 aggregation.
+dggs_stream: High-performance Python, Polars, and Arrow PyCapsule bindings for GeoTIFF/COG aggregation on H3, A5, S2, and HEALPix grids.
 
 Provides:
-- `RasterH3ArrowStream`: Zero-copy Arrow PyCapsule producer (`__arrow_c_stream__`, `__arrow_c_schema__`)
+- `RasterArrowStream`: Zero-copy Arrow PyCapsule producer (`__arrow_c_stream__`, `__arrow_c_schema__`)
   compatible with `polars.from_arrow()`, `pyarrow.table()`, `duckdb`, `daft`, `lonboard`, and `pydeck`.
-- `scan_raster_h3()` / `read_raster_h3()`: Polars IO plugin (`register_io_source`) with column projection
+- `scan_raster()` / `read_raster()`: Polars IO plugin (`register_io_source`) with column projection
   and row-limit pushdown.
 - Scalar and vectorized H3 helpers (`h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`,
   `h3_get_resolution`, `h3_is_valid`, `h3_to_wkb`, `h3_cell_to_parent`, `h3_polygon_to_cells`).
 - Direct file exporters (`raster_to_parquet`, `raster_to_pmtiles`).
 - Partitioned scans for distributed engines such as Spark (`plan_partitions`,
-  `RasterH3ArrowStream(partition=...)`, `merge_partials`).
+  `RasterArrowStream(partition=...)`, `merge_partials`).
 """
 
 from __future__ import annotations
@@ -755,7 +755,7 @@ def _polars_from_stream(obj: Any) -> Any:
 # Arrow PyCapsule Stream Object
 # -----------------------------------------------------------------------------
 
-class RasterH3ArrowStream:
+class RasterArrowStream:
     """
     Lazy Arrow C Stream producer implementing the Arrow PyCapsule Protocol
     (`__arrow_c_schema__` and `__arrow_c_stream__`).
@@ -1074,10 +1074,10 @@ class RasterH3ArrowStream:
 
 
 # -----------------------------------------------------------------------------
-# Polars IO Plugin (`scan_raster_h3` and `read_raster_h3`)
+# Polars IO Plugin (`scan_raster` and `read_raster`)
 # -----------------------------------------------------------------------------
 
-def scan_raster_h3(
+def scan_raster(
     path: Union[str, Path],
     resolutions: Union[int, str, Sequence[int]] = 8,
     *,
@@ -1135,7 +1135,7 @@ def scan_raster_h3(
 
     If `polars` is installed with `register_io_source`, returns a Polars `LazyFrame`
     with column projection (`with_columns`) and row-slice (`n_rows`) pushdown.
-    Otherwise returns a `RasterH3ArrowStream` implementing `__arrow_c_stream__`.
+    Otherwise returns a `RasterArrowStream` implementing `__arrow_c_stream__`.
 
     Valid samples whose coordinate transform fails are skipped with a
     `RuntimeWarning` once the scan completes; `strict_transforms=True` raises instead.
@@ -1206,7 +1206,7 @@ def scan_raster_h3(
         categorical = True
     _locals = locals()
     extra = {k: _locals[k] for k in _SCAN_OPTIONS}
-    stream = RasterH3ArrowStream(
+    stream = RasterArrowStream(
         path=path,
         resolutions=resolutions,
         categorical=categorical,
@@ -1344,7 +1344,7 @@ def scan_raster_h3(
                         if not kept:
                             return  # the predicate rejects every scanned resolution
                         scan_resolutions = kept
-            s = RasterH3ArrowStream(
+            s = RasterArrowStream(
                 path=path,
                 resolutions=scan_resolutions,
                 categorical=categorical,
@@ -1578,13 +1578,13 @@ def _narrow_options(options: Dict[str, Any], pushed: Mapping[str, Any]) -> Dict[
     return out
 
 
-def read_raster_h3(
+def read_raster(
     path: Union[str, Path],
     resolutions: Union[int, str, Sequence[int]] = 8,
     **kwargs: Any,
 ) -> Any:
-    """Eagerly read a GeoTIFF / COG into a Polars DataFrame (or `RasterH3ArrowStream` if Polars is not installed)."""
-    stream = RasterH3ArrowStream(path=path, resolutions=resolutions, **kwargs)
+    """Eagerly read a GeoTIFF / COG into a Polars DataFrame (or `RasterArrowStream` if Polars is not installed)."""
+    stream = RasterArrowStream(path=path, resolutions=resolutions, **kwargs)
     try:
         return stream.to_polars()
     except ImportError:
@@ -1606,7 +1606,7 @@ def profile_raster(
 ) -> Dict[str, Any]:
     """Run a scan to completion, discarding its rows, and report where the time went.
 
-    Takes the arguments and options of `scan_raster_h3`. Returns `{"rows": n,
+    Takes the arguments and options of `scan_raster`. Returns `{"rows": n,
     "profile": {...}}`; the profile has `elapsed_ms`, a tree of `phases` (`fetch`,
     `tiff_decode`, `kernel` with its `crs_transform` / `grid_index` / `accumulate` split,
     `horizon` with `spill`, `stall`, `serialize`), each with `wall_ms` summed over worker
@@ -1648,11 +1648,6 @@ def profile_raster(
         lib.raster_h3_py_free_string(ptr)
 
 
-#: Grid-neutral names for `scan_raster_h3` and `read_raster_h3`; pass `grid=`.
-scan_raster = scan_raster_h3
-read_raster = read_raster_h3
-
-
 # -----------------------------------------------------------------------------
 # Partitioned scans (Spark and other distributed engines)
 # -----------------------------------------------------------------------------
@@ -1674,7 +1669,7 @@ def plan_partitions(
     `target_chunks` TIFF tiles or strips each, reading only metadata.
 
     Returns one JSON string per partition. Scan each with
-    `RasterH3ArrowStream(path, ..., partition=spec)` using the same `path`, `crs`, `bbox`
+    `RasterArrowStream(path, ..., partition=spec)` using the same `path`, `crs`, `bbox`
     and `overlap_rule` (a raster with another layout, or another bbox, refuses the spec); every TIFF
     chunk belongs to exactly one partition, so no pixel is read twice.
 
@@ -2018,7 +2013,7 @@ def raster_to_parquet(
     file (GeoParquet with a `wkb` geometry column by default). Returns the cells written.
 
     `nodata_policy`, `emit_nodata_value`, `decimals` and the `transfer` options are as
-    in `scan_raster_h3`. The file's statistics columns are not nullable, so under `nodata_policy="emit"` a
+    in `scan_raster`. The file's statistics columns are not nullable, so under `nodata_policy="emit"` a
     statistic without a value is NaN, and a categorical export needs an integer
     `emit_nodata_value`."""
     output = dict(
@@ -2059,7 +2054,7 @@ def raster_to_pmtiles(
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a PMTiles v3
     vector archive. Returns the cells written. `nodata_policy`, `emit_nodata_value` and
-    `decimals` are as in `scan_raster_h3`."""
+    `decimals` are as in `scan_raster`."""
     output = dict(
         nodata_policy=nodata_policy,
         emit_nodata_value=emit_nodata_value,
@@ -2273,12 +2268,10 @@ def polygon_to_cells(
 
 __all__ = [
     "PARTIAL_STATE_COLUMN",
-    "RasterH3ArrowStream",
+    "RasterArrowStream",
     "merge_partials",
     "parquet_to_pmtiles",
     "plan_partitions",
-    "scan_raster_h3",
-    "read_raster_h3",
     "scan_raster",
     "read_raster",
     "GRIDS",

@@ -161,7 +161,7 @@ To validate the culmination of Phases 1–5 at full continental scale, we benchm
 
 #### 1. Native Projected Raster: `BP_CONUS.tif` (Albers EPSG:5070, 24.4 GB, 15.87B pixels)
 
-| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
+| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
 | :--- | :--- | :--- | :--- |
 | **Output Columns** | `h3_index`, `min_value`, `max_value`, `avg_value`, `sum_value`, `pixel_count`, `geometry` (WKB) | `h3_index`, `min`, `max`, `mean` | `h3_index`, `min`, `max`, `mean` |
 | **H3 Row Count** | **74,440,878** | **74,440,878** | **74,440,878** |
@@ -174,7 +174,7 @@ To validate the culmination of Phases 1–5 at full continental scale, we benchm
 
 #### 2. Tiled WGS84 Raster: `BP_CONUS_wgs84_tiled.tif` (WGS84 EPSG:4326, 21.0 GB, 18.22B pixels)
 
-| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
+| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
 | :--- | :--- | :--- | :--- |
 | **Output Columns** | `h3_index`, `min_value`, `max_value`, `avg_value`, `sum_value`, `pixel_count`, `geometry` (WKB) | `h3_index`, `min`, `max`, `mean` | `h3_index`, `min`, `max`, `mean` |
 | **H3 Row Count** | **74,441,152** | **74,441,152** | **74,441,152** |

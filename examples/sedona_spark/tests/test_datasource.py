@@ -1,6 +1,6 @@
 """`dggs_stream.spark`: the Spark 4 Python data source and its partial-cell merge.
 
-Every result is compared with one unpartitioned `RasterH3ArrowStream` scan of the same
+Every result is compared with one unpartitioned `RasterArrowStream` scan of the same
 raster and options: the same cells, each once, with equal values (statistics within 1e-9
 relative, for summation order).
 """
@@ -25,7 +25,7 @@ def registered(sedona):
 
 def assert_matches_single_scan(cells, path, **options):
     got = cells.toArrow()
-    want = pa.table(dggs_stream.RasterH3ArrowStream(path, **options))
+    want = pa.table(dggs_stream.RasterArrowStream(path, **options))
     assert sorted(got.column_names) == sorted(want.column_names)
 
     def rows(table):

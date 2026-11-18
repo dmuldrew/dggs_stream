@@ -102,7 +102,7 @@ The engines surface the count, and strict mode, as follows:
 | :--- | :--- | :--- |
 | DuckDB | `transform_failures` column of the `h3_raster_to_parquet` / `h3_raster_to_pmtiles` summary row. The streaming aggregate functions have no warnings channel and report nothing. | `strict_transforms := true` on every table function |
 | PostgreSQL | One `WARNING` at the end of `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate`. | — |
-| Python | `RuntimeWarning` from `raster_to_parquet` / `raster_to_pmtiles`, and from `scan_raster_h3` / `RasterH3ArrowStream.iter_batches()` / `.to_dict()` once the scan completes. `to_polars()` / `read_raster_h3()` / `__arrow_c_stream__` hand the stream to Arrow and report nothing. | `strict_transforms=True` on `scan_raster_h3`, `read_raster_h3` and `RasterH3ArrowStream` |
+| Python | `RuntimeWarning` from `raster_to_parquet` / `raster_to_pmtiles`, and from `scan_raster` / `RasterArrowStream.iter_batches()` / `.to_dict()` once the scan completes. `to_polars()` / `read_raster()` / `__arrow_c_stream__` hand the stream to Arrow and report nothing. | `strict_transforms=True` on `scan_raster`, `read_raster` and `RasterArrowStream` |
 | CLI | Warning on stderr from every subcommand. | — |
 | DataFusion | `with_transform_failure_counter(Arc<AtomicU64>)` on either provider. | `with_strict_transforms(true)` |
 

@@ -69,7 +69,7 @@ As a result:
 
 ### Multi-Resolution SQL Examples
 
-These examples use the [DuckDB](engines/duckdb.md) extension. Python (`scan_raster_h3(path, [7, 8, 9])`) and the CLI (`-r 7,8,9`) take the same resolution lists; see the [Engines Overview](engines/README.md#same-task-every-engine).
+These examples use the [DuckDB](engines/duckdb.md) extension. Python (`scan_raster(path, [7, 8, 9])`) and the CLI (`-r 7,8,9`) take the same resolution lists; see the [Engines Overview](engines/README.md#same-task-every-engine).
 
 **Continuous** — elevation across resolutions 7, 8, and 9:
 ```sql

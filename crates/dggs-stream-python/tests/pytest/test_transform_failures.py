@@ -23,7 +23,7 @@ def past_pole_tif(tmp_path_factory):
 
 
 def test_lenient_scans_warn_with_the_count(dggs_stream, past_pole_tif):
-    stream = dggs_stream.RasterH3ArrowStream(past_pole_tif, 3)
+    stream = dggs_stream.RasterArrowStream(past_pole_tif, 3)
     with pytest.warns(RuntimeWarning, match=r"50 valid sample\(s\) were dropped"):
         frames = list(stream.iter_batches())
     assert sum(df.height for df in frames) > 0
@@ -31,7 +31,7 @@ def test_lenient_scans_warn_with_the_count(dggs_stream, past_pole_tif):
     with pytest.warns(RuntimeWarning, match=r"50 valid sample\(s\)"):
         assert stream.to_dict()["h3_index"]
 
-    lazy = dggs_stream.scan_raster_h3(past_pole_tif, 3)
+    lazy = dggs_stream.scan_raster(past_pole_tif, 3)
     if isinstance(lazy, pl.LazyFrame):
         with pytest.warns(RuntimeWarning, match=r"50 valid sample\(s\)"):
             assert lazy.collect().height > 0
@@ -50,19 +50,19 @@ def test_warnings_as_errors_still_free_the_result(dggs_stream, past_pole_tif, mo
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         with pytest.raises(RuntimeWarning, match=r"50 valid sample\(s\)"):
-            dggs_stream.RasterH3ArrowStream(past_pole_tif, 3).to_dict()
+            dggs_stream.RasterArrowStream(past_pole_tif, 3).to_dict()
     assert len(freed) == 1
 
 
 def test_valid_rasters_do_not_warn(dggs_stream, gradient_tif):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        list(dggs_stream.RasterH3ArrowStream(gradient_tif, 9).iter_batches())
-        dggs_stream.RasterH3ArrowStream(gradient_tif, 9, strict_transforms=True).to_polars()
+        list(dggs_stream.RasterArrowStream(gradient_tif, 9).iter_batches())
+        dggs_stream.RasterArrowStream(gradient_tif, 9, strict_transforms=True).to_polars()
 
 
 def test_strict_scans_raise(dggs_stream, past_pole_tif):
-    stream = dggs_stream.RasterH3ArrowStream(past_pole_tif, 3, strict_transforms=True)
+    stream = dggs_stream.RasterArrowStream(past_pole_tif, 3, strict_transforms=True)
     with pytest.raises(Exception, match="strict_transforms"):
         list(stream.iter_batches())
     with pytest.raises(Exception, match="strict_transforms"):
@@ -70,9 +70,9 @@ def test_strict_scans_raise(dggs_stream, past_pole_tif):
     with pytest.raises(Exception, match="strict_transforms"):
         stream.to_polars()
     with pytest.raises(Exception, match="strict_transforms"):
-        dggs_stream.read_raster_h3(past_pole_tif, 3, strict_transforms=True)
+        dggs_stream.read_raster(past_pole_tif, 3, strict_transforms=True)
 
-    lazy = dggs_stream.scan_raster_h3(past_pole_tif, 3, strict_transforms=True)
+    lazy = dggs_stream.scan_raster(past_pole_tif, 3, strict_transforms=True)
     if isinstance(lazy, pl.LazyFrame):
         with pytest.raises(Exception, match="strict_transforms"):
             lazy.collect()
@@ -85,7 +85,7 @@ def test_strict_scans_raise(dggs_stream, past_pole_tif):
 def test_stream_errors_survive_pyarrow_dropping_the_capsule(dggs_stream, past_pole_tif):
     import pyarrow as pa
 
-    stream = dggs_stream.RasterH3ArrowStream(past_pole_tif, 3, strict_transforms=True)
+    stream = dggs_stream.RasterArrowStream(past_pole_tif, 3, strict_transforms=True)
     with pytest.raises(OSError, match="strict_transforms"):
         pa.table(stream)
     if hasattr(pa.RecordBatchReader, "from_stream"):
@@ -95,6 +95,6 @@ def test_stream_errors_survive_pyarrow_dropping_the_capsule(dggs_stream, past_po
     # Capsules nobody consumes are destroyed without complaint.
     del stream
     for _ in range(3):
-        fresh = dggs_stream.RasterH3ArrowStream(past_pole_tif, 3)
+        fresh = dggs_stream.RasterArrowStream(past_pole_tif, 3)
         fresh.__arrow_c_stream__()
         fresh.__arrow_c_schema__()
