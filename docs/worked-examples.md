@@ -27,10 +27,12 @@ strictly protected land lose less?*
 **Data**: two 30-meter NLCD land cover rasters (2001 and 2021) and the PAD-US protected areas
 database.
 
-**Why A5**: every A5 cell at a resolution has the same area, so a cell's wetland fraction times one
-constant is wetland area in km², and summing those gives a total with no grid bias (H3 cells vary
-in area by location). NLCD is in an equal-area projection (EPSG:5070), so each pixel's share of a
-cell is also its share of the ground: the whole chain conserves area.
+**Why A5**: every A5 cell at a resolution has the same area. A cell straddling a protected-area
+boundary goes wholly to one side, by its centre, and because every cell is the same size those
+whole-cell assignments don't favour either side the way small and large H3 cells would (H3 cell
+area varies by location). Per-cell results are comparable for the same reason: a map of wetland
+lost per cell is a density map. The areas themselves come from pixel counts: NLCD is in an
+equal-area projection (EPSG:5070), so every pixel covers exactly 900 m².
 
 ```python
 # pip install "./crates/raster-h3-python[polars]" geopandas
@@ -41,25 +43,28 @@ import shapely
 
 RES = 14                                        # A5 cells of about 0.127 km² (~140 NLCD pixels)
 CELL_KM2 = 510_065_622 / (60 * 4 ** (RES - 1))  # equal area: Earth's area / number of cells
+PIXEL_KM2 = 900 / 1e6                           # every NLCD pixel (30 m x 30 m, EPSG:5070)
 BBOX = (-93.9, 28.9, -88.8, 30.6)               # coastal Louisiana, lon/lat
 
-# 1. Wetland share of every A5 cell, one lazy scan per year
-def wetland_share(path, year):
+# 1. Wetland area in every A5 cell, one lazy scan per year. Area is the cell's wetland pixel
+#    count times 900 m², which stays exact for cells cut by the raster or bbox edge (there,
+#    `fraction` is a share of the pixels observed, not of the whole cell).
+def wetland_area(path, year):
     return (
         raster_h3.scan_raster_h3(
             path, RES, grid="a5", categorical=True, format="long",
             remap={90: 1, 95: 1, "else": 0},  # woody + emergent wetland -> 1, everything else -> 0
-            bbox=BBOX, columns=["a5_index", "category", "fraction"],
+            bbox=BBOX, columns=["a5_index", "category", "count"],
         )
         .filter(pl.col("category") == 1)
-        .select("a5_index", pl.col("fraction").alias(f"wet_{year}"))
+        .select("a5_index", (pl.col("count") * PIXEL_KM2).alias(f"wet_{year}_km2"))
     )
 
 wetland = (
-    wetland_share("nlcd_2001_land_cover.tif", 2001)
-    .join(wetland_share("nlcd_2021_land_cover.tif", 2021),
+    wetland_area("nlcd_2001_land_cover.tif", 2001)
+    .join(wetland_area("nlcd_2021_land_cover.tif", 2021),
           on="a5_index", how="full", coalesce=True)
-    .with_columns(pl.col("wet_2001", "wet_2021").fill_null(0.0))  # no wetland that year = no row
+    .with_columns(pl.col("wet_2001_km2", "wet_2021_km2").fill_null(0.0))  # no wetland = no row
 )
 
 # 2. Polyfill strictly protected areas (GAP status 1 and 2) into the same A5 cells.
@@ -82,8 +87,8 @@ result = (
     .with_columns(pl.col("protected").fill_null(False))
     .group_by("protected")
     .agg(
-        (pl.col("wet_2001").sum() * CELL_KM2).alias("wetland_2001_km2"),
-        (pl.col("wet_2021").sum() * CELL_KM2).alias("wetland_2021_km2"),
+        pl.col("wet_2001_km2").sum().alias("wetland_2001_km2"),
+        pl.col("wet_2021_km2").sum().alias("wetland_2021_km2"),
     )
     .with_columns(
         lost_km2=pl.col("wetland_2001_km2") - pl.col("wetland_2021_km2"),
@@ -96,10 +101,13 @@ result = (
 In Polars, both rasters are `LazyFrame`s, read only when `.collect()` runs, so the two-year
 comparison is just a join and a `group_by`. Drop the `remap` and `pivot` on `category` to get a
 full from→to change matrix in km². `columns=` is pushed into the scan, and `bbox` limits how much
-of the raster is read. One caveat: the engine weights statistics by pixel, not by ground area
-(see [ground-area weighting](local-grids-and-ground-area.md)). That's exact here only because
-every NLCD pixel covers the same 900 m², which also gives a cross-check: `count × 900 m²` from the
-same scan should match. See the [Python scan parameters](engines/python-polars.md#scan-parameters).
+of the raster is read. For a map, `(wet_2001_km2 - wet_2021_km2) / CELL_KM2` is the share of each
+cell's ground that stopped being wetland; it compares fairly across cells only because they all
+have the same area. Pixel counts are areas here only because every NLCD pixel covers the same
+900 m²: the engine weights by pixel, not by ground area (see
+[ground-area weighting](local-grids-and-ground-area.md)). A lon/lat raster, whose pixels shrink
+toward the poles, would need ground-area weights, which the engine doesn't compute yet. See the
+[Python scan parameters](engines/python-polars.md#scan-parameters).
 
 ## 2. Flood depth at parcels and roads — DuckDB on H3
 
@@ -135,16 +143,17 @@ SELECT parcel_id, land_use, assessed_value,
        unnest(h3_polygon_to_cells(ST_AsWKB(geometry), 11, 'covers')) AS h3_index
 FROM read_parquet('harris_county_parcels.parquet');
 
--- 3. Road segments straight from Overture's public S3 bucket; the bbox struct
---    lets DuckDB skip row groups outside the city
+-- 3. Road segments straight from Overture's public S3 bucket. The test keeps every road whose
+--    bbox overlaps the city's, including roads that cross its edge (step 4b counts only their
+--    pieces inside flooded hexagons), and lets DuckDB skip row groups outside the city.
 CREATE TABLE roads AS
 SELECT id, class, geometry
 FROM read_parquet(
     's3://overturemaps-us-west-2/release/<release>/theme=transportation/type=segment/*',
     hive_partitioning = true)
 WHERE subtype = 'road'
-  AND bbox.xmin > -95.80 AND bbox.xmax < -95.01
-  AND bbox.ymin >  29.52 AND bbox.ymax <  30.11;
+  AND bbox.xmax > -95.80 AND bbox.xmin < -95.01
+  AND bbox.ymax >  29.52 AND bbox.ymin <  30.11;
 
 -- 4a. Flooded parcels: an integer hash join on the shared H3 index, then one row per parcel
 --     (a parcel can span several hexagons)
@@ -219,36 +228,45 @@ sd.read_pyogrio(huc8_path).to_view("huc8")
 # 2. A filter against a fixed shape limits the scan to the tiles near the basin;
 #    the rest of the CONUS raster is never aggregated
 sd.sql(f"""
-    SELECT s2_index, mean AS swe_mm, count, wkb
+    SELECT s2_index, mean AS swe_mm, min AS min_swe_mm, max AS max_swe_mm, count, wkb
     FROM swe_s2
     WHERE ST_Intersects(wkb, ST_SetSRID(ST_GeomFromWKT('{basin_box}'), 4326))
 """).to_view("swe_cells")
 
-# 3. Each cell goes to the one sub-basin that holds its centre, and ROLLUP adds the
-#    basin total (HUC6 = the first six digits of HUC8) from the same rows
+# 3. Each cell goes to the one sub-basin that holds its centre. GROUPING SETS gives one row per
+#    sub-basin plus one per basin (HUC6 = the first six digits of HUC8), with no grand total.
+#    A cell's mean can't say how many of its pixels have snow, so snow cover is bracketed:
+#    pixels in cells whose minimum SWE is above 0 are all snow-covered (a lower bound), and
+#    pixels in cells whose maximum is above 0 include every snow-covered pixel (an upper bound).
 by_basin = sd.sql("""
     WITH cells AS (
-        SELECT h.huc8, c.swe_mm, c.count
+        SELECT h.huc8, c.swe_mm, c.min_swe_mm, c.max_swe_mm, c.count
         FROM swe_cells AS c
         JOIN huc8 AS h ON ST_Contains(h.wkb_geometry, ST_Centroid(c.wkb))
     )
     SELECT
         substr(huc8, 1, 6)                                   AS huc6,
-        huc8,                                                -- NULL on the basin total row
+        huc8,                                                -- NULL on the basin row
         round(sum(swe_mm * count) / sum(count), 1)           AS mean_swe_mm,
-        round(sum(CASE WHEN swe_mm > 0 THEN count ELSE 0 END) / sum(count), 2)
-                                                             AS snow_covered_share
+        round(sum(CASE WHEN min_swe_mm > 0 THEN count ELSE 0 END) / sum(count), 2)
+                                                             AS snow_share_at_least,
+        round(sum(CASE WHEN max_swe_mm > 0 THEN count ELSE 0 END) / sum(count), 2)
+                                                             AS snow_share_at_most
     FROM cells
-    GROUP BY ROLLUP (substr(huc8, 1, 6), huc8)
+    GROUP BY GROUPING SETS ((substr(huc8, 1, 6), huc8), (substr(huc8, 1, 6)))
     ORDER BY huc6, huc8 NULLS FIRST
 """).to_pandas()
 
-# 4. Level-9 parents (~320 km²) are exact unions of their level-13 children, so these
-#    pixel-weighted means equal a direct level-9 scan. Tile them for a web map.
-raster_h3_sedona.write_pmtiles(sd.sql("""
+# 4. Level-9 parents (~320 km²) are exact unions of their level-13 children. Step 2 kept every
+#    child that touches the box, so a parent lying wholly inside the box has all its children
+#    here, and its pixel-weighted mean equals a direct level-9 scan. Parents cut by the box's
+#    edge would be missing children, so they are left out. Tile the rest for a web map.
+raster_h3_sedona.write_pmtiles(sd.sql(f"""
     SELECT s2_cell_to_parent(s2_index, 9) AS s2_index,
            sum(swe_mm * count) / sum(count) AS mean_swe_mm
     FROM swe_cells
+    WHERE ST_Within(s2_to_wkb(s2_cell_to_parent(s2_index, 9)),
+                    ST_SetSRID(ST_GeomFromWKT('{basin_box}'), 4326))
     GROUP BY 1
 """), "swe_s2_level9.pmtiles")
 ```
