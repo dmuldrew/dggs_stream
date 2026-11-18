@@ -64,7 +64,7 @@ jobs:
           key: miri
       - run: cargo miri setup
       - run: |
-          cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-core --lib -- columnar:: aggregator::categorical:: raster::predictor::
+          cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-core --lib -- columnar:: aggregator::categorical:: raster::predictor::
       # The hand-written FFI layers: DuckDB C-API structs, chunk writer, boxed lifecycles and
       # panic containment; the Python C ABI, its PyCapsule destructors and string helpers;
       # PostgreSQL fmgr entry points against in-process server stand-ins. Tests that read a
@@ -74,18 +74,18 @@ jobs:
       - name: Miri (DuckDB, Python and PostgreSQL FFI)
         env:
           MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-deterministic-floats
-          RASTER_H3_PG_MAJOR: '16'
+          DGGS_STREAM_PG_MAJOR: '16'
         run: |
           # This test drops a panic payload whose own drop panics; that second payload is
           # leaked on purpose (forgotten, not unwound across FFI), so it runs apart, with
           # leaks allowed, keeping leak checks for every other test.
-          cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-duckdb --lib -- --skip ffi::tests::test_safe_panic_payload_to_string_secondary_panic_containment
-          MIRIFLAGS="$MIRIFLAGS -Zmiri-ignore-leaks" cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-duckdb --lib -- --exact ffi::tests::test_safe_panic_payload_to_string_secondary_panic_containment
-          cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-python --lib
-          cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-python --test it -- capsules:: scalars::
+          cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-duckdb --lib -- --skip ffi::tests::test_safe_panic_payload_to_string_secondary_panic_containment
+          MIRIFLAGS="$MIRIFLAGS -Zmiri-ignore-leaks" cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-duckdb --lib -- --exact ffi::tests::test_safe_panic_payload_to_string_secondary_panic_containment
+          cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-python --lib
+          cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-python --test it -- capsules:: scalars::
           # The PostgreSQL stand-in `palloc` never frees, as memory contexts free in bulk.
-          MIRIFLAGS="$MIRIFLAGS -Zmiri-ignore-leaks" cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-pg --features pg-extension --lib
-          MIRIFLAGS="$MIRIFLAGS -Zmiri-ignore-leaks" cargo miri test --locked --target x86_64-unknown-linux-gnu -p raster-h3-pg --features pg-extension --test it -- fmgr::
+          MIRIFLAGS="$MIRIFLAGS -Zmiri-ignore-leaks" cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-pg --features pg-extension --lib
+          MIRIFLAGS="$MIRIFLAGS -Zmiri-ignore-leaks" cargo miri test --locked --target x86_64-unknown-linux-gnu -p dggs-stream-pg --features pg-extension --test it -- fmgr::
 
   tsan:
     name: ThreadSanitizer (prefetch and aggregation)
@@ -104,6 +104,6 @@ jobs:
         with:
           key: tsan
       - run: |
-          cargo test -Zbuild-std --locked --target x86_64-unknown-linux-gnu -p raster-h3-core --lib -- raster::prefetch:: raster::remote_prefetch:: aggregator::multi_horizon::controller::
+          cargo test -Zbuild-std --locked --target x86_64-unknown-linux-gnu -p dggs-stream-core --lib -- raster::prefetch:: raster::remote_prefetch:: aggregator::multi_horizon::controller::
       - run: |
-          cargo test -Zbuild-std --locked --target x86_64-unknown-linux-gnu -p raster-h3-core --test it -- threading:: chunks_and_prefetch:: streaming_failures::
+          cargo test -Zbuild-std --locked --target x86_64-unknown-linux-gnu -p dggs-stream-core --test it -- threading:: chunks_and_prefetch:: streaming_failures::

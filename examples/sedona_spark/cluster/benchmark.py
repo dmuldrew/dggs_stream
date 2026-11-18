@@ -1,12 +1,12 @@
-"""Time a partitioned raster_h3 scan on a Spark cluster: the data source plus the merge.
+"""Time a partitioned dggs_stream scan on a Spark cluster: the data source plus the merge.
 
     python3 benchmark.py --workers 3 [--side 6144] [--tile 256] [--resolutions 9]
                          [--target-chunks 16] [--repeat 3] [--path raster.tif]
 
-Without `--path`, a tiled synthetic float32 raster is written to RASTER_H3_SHARED_DIR (or
+Without `--path`, a tiled synthetic float32 raster is written to DGGS_STREAM_SHARED_DIR (or
 /tmp), where every executor must be able to read it. Prints one JSON line: the cluster's
 workers and cores, the raster, the partition count and the median wall time of
-`raster_h3.spark.read(...).count()` over the repeats (after one warm-up run).
+`dggs_stream.spark.read(...).count()` over the repeats (after one warm-up run).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import raster_h3_spark_demo as demo  # noqa: E402
+import dggs_stream_spark_demo as demo  # noqa: E402
 
 
 def main() -> None:
@@ -34,17 +34,17 @@ def main() -> None:
     parser.add_argument("--repeat", type=int, default=3)
     args = parser.parse_args()
 
-    import raster_h3
-    import raster_h3.spark
+    import dggs_stream
+    import dggs_stream.spark
 
     path = args.path
     if path is None:
-        shared = Path(os.environ.get("RASTER_H3_SHARED_DIR", "/tmp"))
+        shared = Path(os.environ.get("DGGS_STREAM_SHARED_DIR", "/tmp"))
         path = str(shared / f"benchmark_{args.side}_{args.tile}.tif")
         if not os.path.exists(path):
             demo.write_sample(path, side=args.side, tile=args.tile)
     resolutions = [int(r) for r in args.resolutions.split(",")]
-    partitions = len(raster_h3.plan_partitions(path, target_chunks=args.target_chunks))
+    partitions = len(dggs_stream.plan_partitions(path, target_chunks=args.target_chunks))
 
     spark = demo.sedona_session(os.environ.get("SPARK_MASTER", "local[*]"), shuffle_partitions=partitions)
     spark.sparkContext.setLogLevel("ERROR")
@@ -54,7 +54,7 @@ def main() -> None:
 
     def run() -> tuple:
         start = time.perf_counter()
-        cells = raster_h3.spark.read(
+        cells = dggs_stream.spark.read(
             spark, path, resolutions=resolutions, target_chunks=args.target_chunks
         ).count()
         return time.perf_counter() - start, cells

@@ -23,8 +23,8 @@ time caps the speedup from adding workers.
   which now runs on every invocation and in CI.
 
 ```bash
-cargo run --release -p raster-h3-core --example worker_scaling -- --json scaling.json
-cargo run --release -p raster-h3-core --example worker_scaling -- --budget-mb 2048 \
+cargo run --release -p dggs-stream-core --example worker_scaling -- --json scaling.json
+cargo run --release -p dggs-stream-core --example worker_scaling -- --budget-mb 2048 \
   --only 'res 11 (fine);res 7,9,11;res 9 + quantiles;categorical res 9'
 ```
 

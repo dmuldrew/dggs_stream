@@ -1,10 +1,22 @@
 name: Coverage
 
+# Documentation-only changes skip coverage: they can't change it. The patterns match the
+# "Detect code changes" filter in ci.yml.
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'assets/**'
+      - 'LICENSE'
 
 permissions:
   contents: read
@@ -20,7 +32,7 @@ jobs:
     timeout-minutes: 45
     env:
       # The pg fmgr suites need a target major; they run against in-process stand-ins.
-      RASTER_H3_PG_MAJOR: '16'
+      DGGS_STREAM_PG_MAJOR: '16'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -40,8 +52,8 @@ jobs:
       # merge both runs into one report.
       - name: Collect coverage
         run: |
-          cargo llvm-cov --locked --no-report -p raster-h3-core -p raster-h3-cli -p raster-h3-python --lib --test it
-          cargo llvm-cov --locked --no-report -p raster-h3-pg --features pg-extension --lib --test it
+          cargo llvm-cov --locked --no-report -p dggs-stream-core -p dggs-stream-cli -p dggs-stream-python --lib --test it
+          cargo llvm-cov --locked --no-report -p dggs-stream-pg --features pg-extension --lib --test it
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload to Codecov

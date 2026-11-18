@@ -1,11 +1,11 @@
-# DuckDB Deep Dive: `raster-h3-duckdb`
+# DuckDB Deep Dive: `dggs-stream-duckdb`
 
 [← Engines Overview](README.md) · [← Back to README](../../README.md)
 
-`raster-h3-duckdb` ([`crates/raster-h3-duckdb`](../../crates/raster-h3-duckdb)) is the
+`dggs-stream-duckdb` ([`crates/dggs-stream-duckdb`](../../crates/dggs-stream-duckdb)) is the
 DuckDB loadable extension. It talks to DuckDB only through the stable C API (no
-`libduckdb` link, no C++). The crate itself is an `rlib`; the root `raster_h3` crate
-re-exports it and builds the `libraster_h3.{so,dylib,dll}` that `LOAD` opens.
+`libduckdb` link, no C++). The crate itself is an `rlib`; the root `dggs_stream` crate
+re-exports it and builds the `libdggs_stream.{so,dylib,dll}` that `LOAD` opens.
 
 DuckDB is the engine with the widest parameter coverage: every option of the core engine
 (sampling, bands, spectral formulas, quantiles, remapping, compaction, worker and memory
@@ -31,12 +31,12 @@ Pre-compiled extensions are published for all major platforms:
 
 | Platform | Compatible Environments | Asset Filename |
 | :--- | :--- | :--- |
-| **`osx_arm64`** | macOS Apple Silicon (M1/M2/M3/M4) | `raster_h3-osx_arm64.duckdb_extension.gz` |
-| **`osx_amd64`** | macOS Intel x86_64 | `raster_h3-osx_amd64.duckdb_extension.gz` |
-| **`linux_amd64`** | Ubuntu, Debian, CentOS, Fedora (glibc, DuckDB ≥ 1.3 & 2.0+) | `raster_h3-linux_amd64.duckdb_extension.gz` |
-| **`linux_amd64_gcc4`** | Ubuntu, Debian, CentOS, Fedora (glibc, DuckDB 1.2) | `raster_h3-linux_amd64_gcc4.duckdb_extension.gz` |
-| **`linux_arm64`** | AWS Graviton, Raspberry Pi 4/5, AArch64 | `raster_h3-linux_arm64.duckdb_extension.gz` |
-| **`windows_amd64`** | Windows 10/11, Windows Server (x64) | `raster_h3-windows_amd64.duckdb_extension.gz` |
+| **`osx_arm64`** | macOS Apple Silicon (M1/M2/M3/M4) | `dggs_stream-osx_arm64.duckdb_extension.gz` |
+| **`osx_amd64`** | macOS Intel x86_64 | `dggs_stream-osx_amd64.duckdb_extension.gz` |
+| **`linux_amd64`** | Ubuntu, Debian, CentOS, Fedora (glibc, DuckDB ≥ 1.3 & 2.0+) | `dggs_stream-linux_amd64.duckdb_extension.gz` |
+| **`linux_amd64_gcc4`** | Ubuntu, Debian, CentOS, Fedora (glibc, DuckDB 1.2) | `dggs_stream-linux_amd64_gcc4.duckdb_extension.gz` |
+| **`linux_arm64`** | AWS Graviton, Raspberry Pi 4/5, AArch64 | `dggs_stream-linux_arm64.duckdb_extension.gz` |
+| **`windows_amd64`** | Windows 10/11, Windows Server (x64) | `dggs_stream-windows_amd64.duckdb_extension.gz` |
 
 #### Option A: Install via release URL
 
@@ -44,8 +44,8 @@ Pre-compiled extensions are published for all major platforms:
 SET allow_unsigned_extensions = true;
 
 -- Replace <platform> with your platform identifier (e.g. osx_arm64, linux_amd64)
-INSTALL 'https://github.com/dmuldrew/raster_h3/releases/latest/download/raster_h3-<platform>.duckdb_extension.gz';
-LOAD 'raster_h3';
+INSTALL 'https://github.com/dmuldrew/dggs_stream/releases/latest/download/dggs_stream-<platform>.duckdb_extension.gz';
+LOAD 'dggs_stream';
 
 SELECT raster_h3_version();
 ```
@@ -54,34 +54,34 @@ SELECT raster_h3_version();
 
 **DuckDB 2.0+ (Trusted Custom Extension Repository with Key Pinning):**
 
-When hosting the signed `duckdb-extension-repository-v1.2.0.zip` bundle (which includes `.well-known/duckdb-extension-repo.json` and `v2.0.0/<platform>/raster_h3.duckdb_extension.gz`; DuckDB requests the directory named after its own version), DuckDB 2.0 pins the repository's RSA-2048 public key at `CREATE` time, prints its SHA-256 fingerprint, and verifies the extension signature on every `INSTALL` and `LOAD` without needing `allow_unsigned_extensions`. The prefix can be an `https://` URL or a local directory. The bundle only contains the manifest when the release was signed:
+When hosting the signed `duckdb-extension-repository-v1.2.0.zip` bundle (which includes `.well-known/duckdb-extension-repo.json` and `v2.0.0/<platform>/dggs_stream.duckdb_extension.gz`; DuckDB requests the directory named after its own version), DuckDB 2.0 pins the repository's RSA-2048 public key at `CREATE` time, prints its SHA-256 fingerprint, and verifies the extension signature on every `INSTALL` and `LOAD` without needing `allow_unsigned_extensions`. The prefix can be an `https://` URL or a local directory. The bundle only contains the manifest when the release was signed:
 
 ```sql
 SET allow_extension_repositories = 'allowed';
 CREATE EXTENSION REPOSITORY IF NOT EXISTS raster_h3_repo
     WITH PREFIX 'https://your-extension-host.example.org/duckdb-repository';
 
-INSTALL raster_h3 FROM raster_h3_repo;
-LOAD raster_h3 FROM raster_h3_repo;
+INSTALL dggs_stream FROM raster_h3_repo;
+LOAD dggs_stream FROM raster_h3_repo;
 ```
 
-Later sessions only need `LOAD raster_h3 FROM raster_h3_repo;` (no opt-in). A plain `LOAD raster_h3;` does not find extensions installed from a custom repository.
+Later sessions only need `LOAD dggs_stream FROM raster_h3_repo;` (no opt-in). A plain `LOAD dggs_stream;` does not find extensions installed from a custom repository.
 
 **DuckDB 1.2–1.5 (Legacy `custom_extension_repository`):**
 
 ```sql
 SET allow_unsigned_extensions = true;
-SET custom_extension_repository = 'https://github.com/dmuldrew/raster_h3/releases/latest/download';
-INSTALL raster_h3;
-LOAD raster_h3;
+SET custom_extension_repository = 'https://github.com/dmuldrew/dggs_stream/releases/latest/download';
+INSTALL dggs_stream;
+LOAD dggs_stream;
 ```
 
 #### Option C: Manual download & local load
 
-Download from [Releases](https://github.com/dmuldrew/raster_h3/releases), then:
+Download from [Releases](https://github.com/dmuldrew/dggs_stream/releases), then:
 
 ```sql
-LOAD '/path/to/raster_h3-<platform>.duckdb_extension';
+LOAD '/path/to/dggs_stream-<platform>.duckdb_extension';
 ```
 
 To build the extension from source instead, see [Build, Package, Load](#build-package-load).
@@ -95,35 +95,35 @@ installs the DuckDB CLI and a sample GeoTIFF (`/data/sample_sf.tif`), and uses
 ### Build the container
 
 ```bash
-docker build -t raster_h3:latest .
+docker build -t dggs_stream:latest .
 ```
 
 ### Run an interactive session
 
 ```bash
-docker run -it raster_h3:latest   # runs sql/demo.sql, then opens a DuckDB shell
+docker run -it dggs_stream:latest   # runs sql/demo.sql, then opens a DuckDB shell
 ```
 
 ### Run SQL one-liners
 
 ```bash
 # Continuous raster aggregation
-docker run --rm -v $(pwd):/data raster_h3:latest \
+docker run --rm -v $(pwd):/data dggs_stream:latest \
   "SELECT h3_hex, round(mean, 2) AS avg_elevation, count FROM h3_raster_continuous_aggregate('/data/sample_sf.tif', resolution := 8) LIMIT 5;"
 
 # Categorical aggregation
-docker run --rm -v $(pwd):/data raster_h3:latest \
+docker run --rm -v $(pwd):/data dggs_stream:latest \
   "SELECT h3_hex, majority_class, round(majority_fraction * 100, 1) AS dominance_pct, total_count FROM h3_raster_categorical_aggregate('/data/sample_sf.tif', resolution := 8) LIMIT 5;"
 
 # PMTiles v3 export
-docker run --rm -v $(pwd):/data raster_h3:latest \
+docker run --rm -v $(pwd):/data dggs_stream:latest \
   "SELECT * FROM h3_raster_to_pmtiles('/data/sample_sf.tif', '/data/sample_sf.pmtiles', min_resolution := 6, max_resolution := 8);"
 ```
 
 ### Pipe SQL scripts
 
 ```bash
-cat my_analysis.sql | docker run --rm -i -v $(pwd):/data raster_h3:latest
+cat my_analysis.sql | docker run --rm -i -v $(pwd):/data dggs_stream:latest
 ```
 
 ### Standalone converters
@@ -132,7 +132,7 @@ The image also contains the `raster_to_pmtiles` and `parquet_to_pmtiles` example
 
 ```bash
 # GeoTIFF → PMTiles
-docker run --rm -v $(pwd):/data raster_h3:latest \
+docker run --rm -v $(pwd):/data dggs_stream:latest \
   raster_to_pmtiles \
     --input /data/sample_sf.tif \
     --output /data/sample_sf.pmtiles \
@@ -140,7 +140,7 @@ docker run --rm -v $(pwd):/data raster_h3:latest \
     --sampling rgss
 
 # Parquet → PMTiles
-docker run --rm -v $(pwd):/data raster_h3:latest \
+docker run --rm -v $(pwd):/data dggs_stream:latest \
   parquet_to_pmtiles \
     --input /data/demographics_h3.parquet \
     --output /data/demographics.pmtiles \
@@ -169,7 +169,7 @@ Open **`http://localhost:8080/pmtiles_viewer/`** to visualize any `.pmtiles` fil
 ### Load the extension
 
 ```sql
-LOAD 'target/release/libraster_h3.dylib'; -- macOS (.so on Linux, .dll on Windows)
+LOAD 'target/release/libdggs_stream.dylib'; -- macOS (.so on Linux, .dll on Windows)
 ```
 
 ### Basic continuous aggregation
@@ -205,6 +205,49 @@ SELECT resolution, h3_hex, mean, p50, p95, iqr
 FROM h3_raster_continuous_aggregate(
     'elevation.tif', resolutions := '7,8,9', quantiles := 'p50,p95,iqr'
 );
+```
+
+### Other grids and pixel-sized cells
+
+Each grid has its own functions, named like the H3 ones, and the H3 table functions also
+take `grid :=`. `resolutions := 'auto'` picks the resolution whose cells match the pixel
+size on whichever grid ([Grids](../grids.md)).
+
+```sql
+SELECT s2_index, s2_hex, mean
+FROM s2_raster_continuous_aggregate('elevation.tif', resolutions := 'auto');
+
+SELECT healpix_index, majority_class
+FROM h3_raster_categorical_aggregate('landcover.tif', resolution := 14, grid := 'healpix');
+
+SELECT a5_lonlat_to_cell(-122.4, 37.8, 10) AS cell,
+       a5_to_string(a5_lonlat_to_cell(-122.4, 37.8, 10)) AS hex;
+```
+
+### Transfer modes, histograms, empty cells and profiling
+
+See [Scan Options](../scan-options.md) for what each option does.
+
+```sql
+-- Cells finer than the pixels: a bicubic value at each cell centre
+SELECT h3_index, mean
+FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto+2',
+                                    transfer := 'sample', sample_method := 'bicubic');
+
+-- Population: each pixel split across the cells it overlaps; sum adds up to the raster total
+SELECT h3_index, sum AS population
+FROM h3_raster_continuous_aggregate('population.tif', resolution := 7,
+                                    transfer := 'overlay', mass_preserve := true);
+
+-- A binned histogram per cell (the histogram column holds it as JSON text)
+SELECT h3_index, histogram
+FROM h3_raster_categorical_aggregate('elevation.tif', resolution := 8,
+                                     histogram := '4:0:2000', histogram_normalize := 'fraction');
+
+-- Keep all-NoData cells (count 0, NULL statistics), round, and print a runtime profile
+SELECT h3_index, count, mean
+FROM h3_raster_continuous_aggregate('elevation.tif', resolution := 8,
+                                    nodata_policy := 'emit', decimals := 2, profile := true);
 ```
 
 ### Helper scalar functions
@@ -274,7 +317,7 @@ SELECT * FROM h3_raster_continuous_aggregate(
 > 💡 **Tip**: For optimal remote streaming and maximum local throughput, source rasters should be formatted as tiled WGS84 COGs with $512 \times 512$ blocks. See [Optimal Raster Format & Ingestion Speed](../optimal-raster-format.md).
 
 These reads use the extension's built-in HTTP/S3 client, configured through `AWS_*`
-and `RASTER_H3_AUTH_*` environment variables (see
+and `DGGS_STREAM_AUTH_*` environment variables (see
 [Remote credentials](core.md#remote-credentials) for which hosts receive them), and
 accept `http(s)://` and `s3://` paths only. Other schemes
 such as `gs://` fail with an "Unsupported remote protocol" error unless the DuckDB file
@@ -297,7 +340,7 @@ SELECT * FROM h3_raster_continuous_aggregate('gs://my-bucket/dem.tif', resolutio
 Byte ranges are still coalesced and prefetched by the extension (`fetch_workers` reads in
 parallel, each on its own DuckDB file handle). With the option on, local files are read
 through DuckDB too, so they lose the memory-mapped fast path; leave it off for local-only
-work. The `RASTER_H3_USE_DUCKDB_FS` environment variable turns it on as well. See
+work. The `DGGS_STREAM_USE_DUCKDB_FS` environment variable turns it on as well. See
 [session options](../sql-api-reference.md#session-options-duckdb-20-build) for the related
 `raster_h3_fetch_workers`, `raster_h3_decode_budget_mb` and `raster_h3_workers` settings.
 
@@ -441,7 +484,7 @@ Python package that does not need DuckDB (Arrow streams, Polars `LazyFrame`s), s
 import duckdb
 
 con = duckdb.connect(config={'allow_unsigned_extensions': 'true'})
-con.load_extension('target/release/libraster_h3.dylib')
+con.load_extension('target/release/libdggs_stream.dylib')
 
 df = con.execute("""
     SELECT h3_hex, round(mean, 2) AS mean_elevation, count AS pixel_count
@@ -458,7 +501,7 @@ print(df)
 const duckdb = require('duckdb');
 const db = new duckdb.Database(':memory:', { allow_unsigned_extensions: 'true' });
 
-db.all("LOAD 'target/release/libraster_h3.dylib';", (err) => {
+db.all("LOAD 'target/release/libdggs_stream.dylib';", (err) => {
   if (err) throw err;
   db.all(`SELECT h3_hex, round(mean, 2) AS avg_elevation, count
     FROM h3_raster_continuous_aggregate('california_elevation.tif', resolution := 8) LIMIT 5;`,
@@ -471,7 +514,7 @@ db.all("LOAD 'target/release/libraster_h3.dylib';", (err) => {
 ```r
 library(DBI); library(duckdb)
 con <- dbConnect(duckdb::duckdb(), config = list("allow_unsigned_extensions" = "true"))
-dbExecute(con, "LOAD 'target/release/libraster_h3.dylib';")
+dbExecute(con, "LOAD 'target/release/libdggs_stream.dylib';")
 res <- dbGetQuery(con, "SELECT h3_hex, majority_class, majority_fraction, total_count
     FROM h3_raster_categorical_aggregate('worldcover_2021.tif', resolution := 8) LIMIT 10;")
 print(res)
@@ -480,23 +523,23 @@ print(res)
 ## Build, Package, Load
 
 ```bash
-# Loadable library (root crate links raster-h3-duckdb)
+# Loadable library (root crate links dggs-stream-duckdb)
 cargo build --release
-# -> target/release/libraster_h3.dylib (macOS) / .so (Linux) / .dll (Windows)
+# -> target/release/libdggs_stream.dylib (macOS) / .so (Linux) / .dll (Windows)
 
 # Optional: append the 534-byte DuckDB extension metadata footer (unsigned)
 cargo run --release --bin package_extension -- \
-    --input target/release/libraster_h3.so \
-    --output target/release/raster_h3.duckdb_extension
+    --input target/release/libdggs_stream.so \
+    --output target/release/dggs_stream.duckdb_extension
 
 # Optional: sign with a 2048-bit RSA private key (or DUCKDB_EXTENSION_SIGNING_KEY env),
 # emit DuckDB 2.0's `.well-known/duckdb-extension-repo.json`, and verify the signature
 cargo run --release --bin package_extension -- \
-    --input target/release/libraster_h3.so \
-    --output target/release/raster_h3.duckdb_extension \
+    --input target/release/libdggs_stream.so \
+    --output target/release/dggs_stream.duckdb_extension \
     --signing-key signing_key.pem \
     --repo-manifest dist/.well-known/duckdb-extension-repo.json \
-    --verify target/release/raster_h3.duckdb_extension
+    --verify target/release/dggs_stream.duckdb_extension
 ```
 
 When `--signing-key` (`-k`) or `DUCKDB_EXTENSION_SIGNING_KEY` is provided, `package_extension`
@@ -509,7 +552,7 @@ fingerprint to match DuckDB 2.0's `CREATE EXTENSION REPOSITORY` output.
 
 ```sql
 -- Unsigned local builds need allow_unsigned_extensions (or `duckdb -unsigned`)
-LOAD 'target/release/libraster_h3.dylib';
+LOAD 'target/release/libdggs_stream.dylib';
 SELECT * FROM h3_raster_continuous_aggregate('dem.tif', resolution := 8) LIMIT 5;
 ```
 
@@ -527,13 +570,13 @@ The community build above targets the v1.2.0 C API; see [extension builds](#exte
 ```bash
 git submodule update --init
 make configure      # Python venv (duckdb + sqllogictest runner), platform and version detection
-make release        # -> build/release/raster_h3.duckdb_extension
+make release        # -> build/release/dggs_stream.duckdb_extension
 make test_release   # runs test/sql/*.test (skipped on linux_amd64 by extension-ci-tools)
 ```
 
 The submission manifest is [`packaging/duckdb-community/description.yml`](../../packaging/duckdb-community/description.yml).
 It is a copy of the file submitted to `duckdb/community-extensions` as
-`extensions/raster_h3/description.yml`; `repo.ref` must name a commit on this repository that
+`extensions/dggs_stream/description.yml`; `repo.ref` must name a commit on this repository that
 contains the `Makefile` and submodule.
 
 ### Extension builds
@@ -552,8 +595,8 @@ built against; DuckDB rejects `v2.0.0` in the footer:
 ```bash
 cargo build --release --lib --features duckdb-api-v1_5_6
 cargo run --release --bin package_extension -- \
-  --input target/release/libraster_h3.so \
-  --output dist/v2.0.0/linux_amd64/raster_h3.duckdb_extension \
+  --input target/release/libdggs_stream.so \
+  --output dist/v2.0.0/linux_amd64/dggs_stream.duckdb_extension \
   --platform linux_amd64 --duckdb-version v1.5.6
 ```
 
@@ -563,27 +606,27 @@ CI builds it into a separate `target-v156/` directory so both builds come from o
 
 | Symbol | Called by | Behaviour |
 | :--- | :--- | :--- |
-| `raster_h3_init_c_api(info, access)` | DuckDB ≥ 1.2 (C-API extensions) | Fetches the database handle from the access table and calls `raster_h3_init`. A panic is reported through `access->set_error`. |
-| `raster_h3_init(db)` | Older loaders, and `raster_h3_init_c_api` | Opens a connection (closed by an RAII guard on every path) and registers all functions; the DuckDB 2.0 build also registers its session options and the `pmtiles` COPY format there. Returns `false` if any function registration fails. A session option that DuckDB refuses (because an option of that name already exists) is reported on stderr and does not stop loading. |
-| `raster_h3_version()` | DuckDB | Returns the C-API version string `v0.0.1`. |
+| `dggs_stream_init_c_api(info, access)` | DuckDB ≥ 1.2 (C-API extensions) | Fetches the database handle from the access table and calls `dggs_stream_init`. A panic is reported through `access->set_error`. |
+| `dggs_stream_init(db)` | Older loaders, and `dggs_stream_init_c_api` | Opens a connection (closed by an RAII guard on every path) and registers all functions; the DuckDB 2.0 build also registers its session options and the `pmtiles` COPY format there. Returns `false` if any function registration fails. A session option that DuckDB refuses (because an option of that name already exists) is reported on stderr and does not stop loading. |
+| `dggs_stream_version()` (alias `raster_h3_version()`) | DuckDB | Returns the C-API version string `v0.0.1`. |
 
 The root crate keeps these symbols in the shared library through
-`raster_h3::_keep_duckdb_c_api_symbols`.
+`dggs_stream::_keep_duckdb_c_api_symbols`.
 
 ## Registered Functions
 
 | SQL name | Kind | Source |
 | :--- | :--- | :--- |
-| `h3_raster_continuous_aggregate` | table | [`table_function.rs`](../../crates/raster-h3-duckdb/src/functions/table_function.rs) |
-| `h3_raster_categorical_aggregate` | table (`format := 'wide' \| 'long'`) | [`categorical_table_function.rs`](../../crates/raster-h3-duckdb/src/functions/categorical_table_function.rs) |
-| `h3_raster_to_parquet` | table (1 summary row) | [`parquet_table_function.rs`](../../crates/raster-h3-duckdb/src/functions/parquet_table_function.rs) |
-| `h3_raster_to_pmtiles`, `h3_parquet_to_pmtiles` | table (1 summary row) | [`pmtiles_table_function.rs`](../../crates/raster-h3-duckdb/src/functions/pmtiles_table_function.rs) |
-| `h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`, `h3_get_resolution`, `h3_is_valid` (UBIGINT/VARCHAR), `h3_to_wkb` (UBIGINT/VARCHAR), `h3_cell_to_parent` (UBIGINT/VARCHAR), `h3_to_geometry` / `h3_cell_to_geometry` (UBIGINT/VARCHAR), `h3_polygon_to_cells` (BLOB, plus GEOMETRY on DuckDB ≥ 1.5; returns `UBIGINT[]`; on the DuckDB 2.0 build a bind callback rejects invalid constant arguments at plan time) | scalar | [`scalar.rs`](../../crates/raster-h3-duckdb/src/functions/scalar.rs) |
-| `a5_*`, `s2_*`, `healpix_*` | the same table functions and scalars on the A5, Google S2 and HEALPix grids: `{grid}_raster_continuous_aggregate` (aliases `{grid}_raster_continuous`, `read_raster_{grid}`, `raster_to_{grid}`, `raster_{grid}`), `{grid}_raster_categorical_aggregate`, `{grid}_raster_to_parquet`, `{grid}_raster_to_pmtiles`; `{grid}_to_string`, `string_to_{grid}`, `{grid}_to_lat`, `{grid}_to_lng`, `{grid}_get_resolution`, `{grid}_is_valid` / `{grid}_is_valid_cell`, `{grid}_to_wkb`, `{grid}_to_geometry` / `{grid}_cell_to_geometry`, `{grid}_cell_to_parent`, `{grid}_lonlat_to_cell`, `{grid}_polygon_to_cells`. Resolutions: A5 and S2 0–30, HEALPix 0–29 (H3 0–15). Cell ids are `UBIGINT` (S2 ids can have the top bit set); HEALPix ids are NUNIQ, `4 * 4^depth + nested_pixel`. Output columns are `{grid}_index` / `{grid}_hex`; the `h3_` table functions also take `grid := 'a5' \| 's2' \| 'healpix'`. | table / scalar | [`table_function.rs`](../../crates/raster-h3-duckdb/src/functions/table_function.rs), [`scalar.rs`](../../crates/raster-h3-duckdb/src/functions/scalar.rs) |
-| `pmtiles` (DuckDB 2.0 build) | `COPY ... TO ... (FORMAT pmtiles)` format | [`copy_function.rs`](../../crates/raster-h3-duckdb/src/functions/copy_function.rs) |
-| `raster_h3_use_duckdb_fs`, `raster_h3_fetch_workers`, `raster_h3_decode_budget_mb`, `raster_h3_workers` (DuckDB 2.0 build) | session options (`SET`) | [`config.rs`](../../crates/raster-h3-duckdb/src/functions/config.rs) |
+| `h3_raster_continuous_aggregate` | table | [`table_function.rs`](../../crates/dggs-stream-duckdb/src/functions/table_function.rs) |
+| `h3_raster_categorical_aggregate` | table (`format := 'wide' \| 'long'`) | [`categorical_table_function.rs`](../../crates/dggs-stream-duckdb/src/functions/categorical_table_function.rs) |
+| `h3_raster_to_parquet` | table (1 summary row) | [`parquet_table_function.rs`](../../crates/dggs-stream-duckdb/src/functions/parquet_table_function.rs) |
+| `h3_raster_to_pmtiles`, `h3_parquet_to_pmtiles` | table (1 summary row) | [`pmtiles_table_function.rs`](../../crates/dggs-stream-duckdb/src/functions/pmtiles_table_function.rs) |
+| `h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`, `h3_get_resolution`, `h3_is_valid` (UBIGINT/VARCHAR), `h3_to_wkb` (UBIGINT/VARCHAR), `h3_cell_to_parent` (UBIGINT/VARCHAR), `h3_to_geometry` / `h3_cell_to_geometry` (UBIGINT/VARCHAR), `h3_polygon_to_cells` (BLOB, plus GEOMETRY on DuckDB ≥ 1.5; returns `UBIGINT[]`; on the DuckDB 2.0 build a bind callback rejects invalid constant arguments at plan time) | scalar | [`scalar.rs`](../../crates/dggs-stream-duckdb/src/functions/scalar.rs) |
+| `a5_*`, `s2_*`, `healpix_*` | the same table functions and scalars on the A5, Google S2 and HEALPix grids: `{grid}_raster_continuous_aggregate` (aliases `{grid}_raster_continuous`, `read_raster_{grid}`, `raster_to_{grid}`, `raster_{grid}`), `{grid}_raster_categorical_aggregate`, `{grid}_raster_to_parquet`, `{grid}_raster_to_pmtiles`; `{grid}_to_string`, `string_to_{grid}`, `{grid}_to_lat`, `{grid}_to_lng`, `{grid}_get_resolution`, `{grid}_is_valid` / `{grid}_is_valid_cell`, `{grid}_to_wkb`, `{grid}_to_geometry` / `{grid}_cell_to_geometry`, `{grid}_cell_to_parent`, `{grid}_lonlat_to_cell`, `{grid}_polygon_to_cells`. Resolutions: A5 and S2 0–30, HEALPix 0–29 (H3 0–15). Cell ids are `UBIGINT` (S2 ids can have the top bit set); HEALPix ids are NUNIQ, `4 * 4^depth + nested_pixel`. Output columns are `{grid}_index` / `{grid}_hex`; the `h3_` table functions also take `grid := 'a5' \| 's2' \| 'healpix'`. | table / scalar | [`table_function.rs`](../../crates/dggs-stream-duckdb/src/functions/table_function.rs), [`scalar.rs`](../../crates/dggs-stream-duckdb/src/functions/scalar.rs) |
+| `pmtiles` (DuckDB 2.0 build) | `COPY ... TO ... (FORMAT pmtiles)` format | [`copy_function.rs`](../../crates/dggs-stream-duckdb/src/functions/copy_function.rs) |
+| `raster_h3_use_duckdb_fs`, `raster_h3_fetch_workers`, `raster_h3_decode_budget_mb`, `raster_h3_workers` (DuckDB 2.0 build) | session options (`SET`) | [`config.rs`](../../crates/dggs-stream-duckdb/src/functions/config.rs) |
 
-The scalar kernels call `raster_h3_core::scalar_ops`, so their results match the other
+The scalar kernels call `dggs_stream_core::scalar_ops`, so their results match the other
 engines (with the `0` vs `NULL` differences listed in the
 [overview](README.md#scalar-helpers)).
 
@@ -609,10 +652,10 @@ sequenceDiagram
     end
 ```
 
-- **Bind** (`BindHelper`, [`bind_utils/`](../../crates/raster-h3-duckdb/src/functions/bind_utils))
+- **Bind** (`BindHelper`, [`bind_utils/`](../../crates/dggs-stream-duckdb/src/functions/bind_utils))
   reads arguments through RAII `OwnedValue` guards, resolves paths/globs/VRTs, declares
   output columns (including one column per requested quantile) and reports a cardinality
-  estimate from `raster_h3_core::scalar_ops::estimate_raster_cardinality`.
+  estimate from `dggs_stream_core::scalar_ops::estimate_raster_cardinality`.
 - **Init** builds `MultiResolutionConfig` from the bind data (resolutions, CRS, NoData,
   bbox, sampling, band, spectral formula, quantiles, value filters, compaction, execution
   budgets) and opens the shared streamer.
@@ -625,7 +668,7 @@ sequenceDiagram
 
 ## Geometry Output
 
-[`spatial_detect.rs`](../../crates/raster-h3-duckdb/src/ffi/spatial_detect.rs) looks up the
+[`spatial_detect.rs`](../../crates/dggs-stream-duckdb/src/ffi/spatial_detect.rs) looks up the
 host DuckDB version at runtime (`dlsym` / `GetProcAddress`) and can probe whether the
 `spatial` extension is loaded. `h3_to_geometry` / `h3_cell_to_geometry` return the native
 `GEOMETRY` type on DuckDB ≥ 1.5; on older versions they return a WKB `BLOB` aliased as
@@ -659,13 +702,13 @@ skipping those pixels. See
 
 ### Unsigned extension loading errors
 
-`Error: Extension ".../libraster_h3.dylib" is not signed by DuckDB`
+`Error: Extension ".../libdggs_stream.dylib" is not signed by DuckDB`
 
 **Resolution**: Launch DuckDB with `-unsigned`, or set the config flag before loading:
 
 ```python
 con = duckdb.connect(config={'allow_unsigned_extensions': 'true'})
-con.load_extension('target/release/libraster_h3.dylib')
+con.load_extension('target/release/libdggs_stream.dylib')
 ```
 
 ### Missing CRS
@@ -685,8 +728,8 @@ README's [Troubleshooting](../../README.md#troubleshooting--common-pitfalls) sec
 
 | Test | Scope |
 | :--- | :--- |
-| `crates/raster-h3-duckdb/tests/it/ffi_sql/` | Mock C-API harness emulating the v1.2.0 function table; compiled only for the default build |
+| `crates/dggs-stream-duckdb/tests/it/ffi_sql/` | Mock C-API harness emulating the v1.2.0 function table; compiled only for the default build |
 | `tests/it/duckdb_sql_smoke.rs` | SQL through a real DuckDB CLI when available; `real_sql_v156_features` covers the DuckDB 2.0 build (session options, DuckDB file-system reads, `COPY ... (FORMAT pmtiles)` including spilling and overwrite, plan-time validation, native `GEOMETRY`) and runs when `DUCKDB_VERSION=v1.5.6` |
 | `tests/it/package_extension.rs` | Extension footer packaging |
 | `tests/it/multi_engine_e2e.rs` | DuckDB results compared with the other engines when `duckdb` is on `PATH` |
-| `cargo test -p raster-h3-duckdb` | Crate unit tests and its `tests/it` binary (uses the core `test-hooks` feature) |
+| `cargo test -p dggs-stream-duckdb` | Crate unit tests and its `tests/it` binary (uses the core `test-hooks` feature) |

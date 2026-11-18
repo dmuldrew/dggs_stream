@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [Core Engineering](engineering.md) · [Architecture Comparison](architecture-comparison.md) · [Optimal Raster Format](optimal-raster-format.md)
 
-This document traces the chronological evolution of `raster_h3` from an initial single-threaded DuckDB prototype (`v0.1.0`) to a multi-engine geospatial workspace (`v0.4.0`) capable of aggregating 18+ billion pixels across the Continental United States (CONUS) into 74.4 million H3 hexagons in under 9 minutes on a single workstation. It then follows the hardening of that workspace for production (`v0.5.0`), its expansion to DuckDB 2.0 and SedonaDB (`v0.6.0`), and its move to scans partitioned across independent workers (`v0.7.0`). The unreleased work since `v0.7.0` makes the engine grid-neutral (H3, A5, S2 and HEALPix in every engine) and adds explicit choices for how pixels map onto cells. The document closes with the input sources beyond rasters that the same streaming design could take on.
+This document traces the chronological evolution of `dggs_stream` from an initial single-threaded DuckDB prototype (`v0.1.0`) to a multi-engine geospatial workspace (`v0.4.0`) capable of aggregating 18+ billion pixels across the Continental United States (CONUS) into 74.4 million H3 hexagons in under 9 minutes on a single workstation. It then follows the hardening of that workspace for production (`v0.5.0`), its expansion to DuckDB 2.0 and SedonaDB (`v0.6.0`), and its move to scans partitioned across independent workers (`v0.7.0`). The unreleased work since `v0.7.0` makes the engine grid-neutral (H3, A5, S2 and HEALPix in every engine) and adds explicit choices for how pixels map onto cells. The document closes with the input sources beyond rasters that the same streaming design could take on.
 
 More importantly, it documents the **engineering hypotheses that failed**, the **subtle geodetic and concurrency bugs uncovered under continental-scale stress testing**, and the **systems lessons learned** along the way.
 
@@ -41,7 +41,7 @@ flowchart LR
 ### What We Built
 Traditional geospatial pipelines (`rasterio` + `h3-py`, or `gdal_polygonize` + PostGIS) materialize entire 2D coordinate meshgrids in RAM or convert rasters into millions of vector polygons before intersecting them with H3 cells. On a 24 GB raster, this exhausts memory almost immediately.
 
-Phase 1 introduced two foundational primitives that remain at the heart of `raster_h3`:
+Phase 1 introduced two foundational primitives that remain at the heart of dggs_stream:
 1. **North-to-South Scanline Horizon Streaming:** Reading GeoTIFFs like a document scanner so completed hexagons north of the active scan front can be sealed and emitted immediately.
 2. **In-Register Run Accumulation (Option 5):** Maintaining `run_cell`, `run_sum`, `run_min`, `run_max`, and `run_count` in local scalar variables (CPU registers) across contiguous horizontal pixels sharing the same H3 cell, flushing to the hash map only when a cell boundary is crossed.
 
@@ -135,7 +135,7 @@ On CONUS (`BP_CONUS.tif`, Albers EPSG:5070), removing lookahead and pairing exac
 * **The Fix:** Replaced the shard selector and map hasher with a `SplitMix64` finalizer (`H3BuildHasher`) that mixes all 64 bits (including base cell and high-order face/IJK digits) down to the low bits, restoring uniform 32-way distribution and $O(1)$ shard byte accounting (`067d742`).
 
 ### Lesson 10: Rayon `pool.install()` Reentrancy Trap
-* **The Bug:** To avoid deadlocks when called inside an existing Rayon thread, the controller checked `if rayon::current_thread_index().is_some()` and fell back to serial iteration. Consequently, any user or benchmark invoking `raster_h3` inside `pool.install(|| ...)` silently ran **single-threaded on 1 core** regardless of pool size!
+* **The Bug:** To avoid deadlocks when called inside an existing Rayon thread, the controller checked `if rayon::current_thread_index().is_some()` and fell back to serial iteration. Consequently, any user or benchmark invoking dggs_stream inside `pool.install(|| ...)` silently ran **single-threaded on 1 core** regardless of pool size!
 * **The Fix (Commit `2caf9d0`):** Replaced global/caller pool reliance with `shared_aggregation_pool(threads)`—a dedicated, weak-referenced pool registry (`OnceLock<Mutex<HashMap<usize, Weak<ThreadPool>>>>`) that guarantees true multi-core execution without starving or deadlocking caller thread pools.
 
 ### Lesson 11: Geodetic Rigor — Units, Prime Meridians, Datums & Mosaic Footprints
@@ -147,12 +147,12 @@ On CONUS (`BP_CONUS.tif`, Albers EPSG:5070), removing lookahead and pairing exac
 ## Phase 5: Multi-Engine Workspace & Continental Benchmarks (`v0.4.0`)
 
 In commit `0fd67df`, the monolithic repository was split into a modular 6-crate workspace:
-* [`crates/raster-h3-core`](../crates/raster-h3-core): Pure-Rust streaming engine, CRS transformers, SIMD decoders, GeoParquet & PMTiles writers.
-* [`crates/raster-h3-duckdb`](../crates/raster-h3-duckdb): Loadable DuckDB extension via stable C-API (`C_STRUCT` ABI).
-* [`crates/raster-h3-python`](../crates/raster-h3-python): `ctypes` C-ABI library exposing zero-copy Arrow PyCapsule streams (`__arrow_c_stream__`) and Polars IO plugins (`register_io_source`).
-* [`crates/raster-h3-cli`](../crates/raster-h3-cli): Standalone CLI for GeoParquet, PMTiles, Arrow IPC, and ClickHouse `JSONEachRow` streaming.
-* [`crates/raster-h3-sedona`](../crates/raster-h3-sedona): Apache DataFusion / SedonaDB adapter (`TableProvider`s, table functions and scalar UDFs), with the engine-neutral `scan` layer that was the `raster-h3-datafusion` crate.
-* [`crates/raster-h3-pg`](../crates/raster-h3-pg): PostgreSQL C-ABI extension (`pg_tle` / native SRF).
+* [`crates/dggs-stream-core`](../crates/dggs-stream-core): Pure-Rust streaming engine, CRS transformers, SIMD decoders, GeoParquet & PMTiles writers.
+* [`crates/dggs-stream-duckdb`](../crates/dggs-stream-duckdb): Loadable DuckDB extension via stable C-API (`C_STRUCT` ABI).
+* [`crates/dggs-stream-python`](../crates/dggs-stream-python): `ctypes` C-ABI library exposing zero-copy Arrow PyCapsule streams (`__arrow_c_stream__`) and Polars IO plugins (`register_io_source`).
+* [`crates/dggs-stream-cli`](../crates/dggs-stream-cli): Standalone CLI for GeoParquet, PMTiles, Arrow IPC, and ClickHouse `JSONEachRow` streaming.
+* [`crates/dggs-stream-sedona`](../crates/dggs-stream-sedona): Apache DataFusion / SedonaDB adapter (`TableProvider`s, table functions and scalar UDFs), with the engine-neutral `scan` layer that was the `dggs-stream-datafusion` crate.
+* [`crates/dggs-stream-pg`](../crates/dggs-stream-pg): PostgreSQL C-ABI extension (`pg_tle` / native SRF).
 
 ### CONUS Level 9 Multi-Engine Benchmark (Measured October 2026)
 
@@ -163,7 +163,7 @@ To validate the culmination of Phases 1–5 at full continental scale, we benchm
 
 #### 1. Native Projected Raster: `BP_CONUS.tif` (Albers EPSG:5070, 24.4 GB, 15.87B pixels)
 
-| Metric | CLI Engine (`raster-h3 parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
+| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
 | :--- | :--- | :--- | :--- |
 | **Output Columns** | `h3_index`, `min_value`, `max_value`, `avg_value`, `sum_value`, `pixel_count`, `geometry` (WKB) | `h3_index`, `min`, `max`, `mean` | `h3_index`, `min`, `max`, `mean` |
 | **H3 Row Count** | **74,440,878** | **74,440,878** | **74,440,878** |
@@ -176,7 +176,7 @@ To validate the culmination of Phases 1–5 at full continental scale, we benchm
 
 #### 2. Tiled WGS84 Raster: `BP_CONUS_wgs84_tiled.tif` (WGS84 EPSG:4326, 21.0 GB, 18.22B pixels)
 
-| Metric | CLI Engine (`raster-h3 parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
+| Metric | CLI Engine (`dggs-stream parquet`) | Polars 2.0.0 (`scan_raster_h3().sink_parquet()`) | DuckDB v1.5.5 (`COPY ... TO PARQUET`) |
 | :--- | :--- | :--- | :--- |
 | **Output Columns** | `h3_index`, `min_value`, `max_value`, `avg_value`, `sum_value`, `pixel_count`, `geometry` (WKB) | `h3_index`, `min`, `max`, `mean` | `h3_index`, `min`, `max`, `mean` |
 | **H3 Row Count** | **74,441,152** | **74,441,152** | **74,441,152** |
@@ -223,7 +223,7 @@ PRs #42 and #70 added CI gates for lint (strict Clippy and rustdoc), MSRV `1.94`
 | #75 | DuckDB 2.0 extension signing and custom repository manifests |
 | #77 | Second DuckDB build on the stable v1.5.6 C extension API |
 | #48 | Multi-resolution indexing through `h3o::LatLngIndexer` |
-| #72 | `raster-h3-sedona`: DataFusion 54 / SedonaDB adapter |
+| #72 | `dggs-stream-sedona`: DataFusion 54 / SedonaDB adapter |
 
 ### Lesson 16: Ship Two ABIs Instead of Choosing One
 The v1.2.0 C extension API still covers DuckDB 1.2 through 1.5, but features like native `GEOMETRY`, `COPY ... TO (FORMAT pmtiles)`, session settings (`raster_h3_fetch_workers`, `raster_h3_decode_budget_mb`, `raster_h3_workers`) and reads through DuckDB's own file system (`raster_h3_use_duckdb_fs`, so `CREATE SECRET` credentials work for `s3://`, `gs://`, `azure://`) need the v1.5.6 API. Release bundles now carry both trees (`v1.2.0/<platform>` and `v2.0.0/<platform>`). Signing (`package_extension --signing-key`) and a generated `.well-known/duckdb-extension-repo.json` let users install a signed build through `CREATE EXTENSION REPOSITORY` with signature checks on, and CI verifies that unsigned and wrong-key builds are rejected.
@@ -232,10 +232,10 @@ The v1.2.0 C extension API still covers DuckDB 1.2 through 1.5, but features lik
 DataFusion `Bbox` pushdown originally clipped pixels to the box, so a cell straddling the edge lost the pixels outside it and its `mean` changed depending on the query's `WHERE` clause (PR #73). The pushed box is now widened by more than the largest cell diameter at the coarsest resolution, so the scan returns an `Inexact` superset with unchanged statistics, and a box that misses every tile scans empty instead of failing. The same rule governs the SedonaDB adapter's `ST_Intersects` / `ST_DWithin` pushdown.
 
 ### Lesson 18: Match the Host's Dependency Pins Exactly
-`raster-h3-sedona` pins DataFusion `=54.1.0` and arrow `58` to match SedonaDB, so its `TableProvider`, table functions and UDFs register into a plain `SessionContext` or SedonaDB's `SedonaContext::ctx`. It is a separate workspace, so these pins add nothing to the root `Cargo.lock`. Geometry columns are `geoarrow.wkb` in `OGC:CRS84`, so Sedona's `ST_*` functions accept them without conversion. Python bindings implement SedonaDB's `__sedonadb_table_provider__` protocol and export the scalar UDFs as `sedonadb_scalar_kernel` capsules.
+`dggs-stream-sedona` pins DataFusion `=54.1.0` and arrow `58` to match SedonaDB, so its `TableProvider`, table functions and UDFs register into a plain `SessionContext` or SedonaDB's `SedonaContext::ctx`. It is a separate workspace, so these pins add nothing to the root `Cargo.lock`. Geometry columns are `geoarrow.wkb` in `OGC:CRS84`, so Sedona's `ST_*` functions accept them without conversion. Python bindings implement SedonaDB's `__sedonadb_table_provider__` protocol and export the scalar UDFs as `sedonadb_scalar_kernel` capsules.
 
 ### Lesson 19: Share Work Across Resolutions Upstream
-Multi-resolution scans indexed each sample once per resolution, repeating H3's resolution-independent face projection. PR #48 added `LatLngIndexer` to `h3o` upstream (released in `h3o 0.11.1`) and reuses the last cell per resolution while consecutive samples stay in the same face `IJK` cell. Cells are identical. The project temporarily depended on a git fork, then on upstream `master`, and dropped the patch once the release shipped, so `cargo package -p raster-h3-core` verifies against crates.io again.
+Multi-resolution scans indexed each sample once per resolution, repeating H3's resolution-independent face projection. PR #48 added `LatLngIndexer` to `h3o` upstream (released in `h3o 0.11.1`) and reuses the last cell per resolution while consecutive samples stay in the same face `IJK` cell. Cells are identical. The project temporarily depended on a git fork, then on upstream `master`, and dropped the patch once the release shipped, so `cargo package -p dggs-stream-core` verifies against crates.io again.
 
 ---
 
@@ -283,7 +283,7 @@ A compacted scan filters input cells, but a user's `WHERE resolution = 7` or `co
 
 ## Phase 9: A Grid-Neutral Engine & Explicit Transfer Modes (Unreleased, after `v0.7.0`)
 
-This work is on `main` and listed under `[Unreleased]` in the [changelog](../CHANGELOG.md); it has not been tagged. It changes what the engine is: the "H3" in `raster_h3` now names the default grid, not the only one.
+This work is on `main` and listed under `[Unreleased]` in the [changelog](../CHANGELOG.md); it has not been tagged. It changes what the engine is: the "H3" in `dggs_stream` now names the default grid, not the only one.
 
 | PR | Change |
 | :--- | :--- |
@@ -293,7 +293,7 @@ This work is on `main` and listed under `[Unreleased]` in the [changelog](../CHA
 | #108, #134 | Credentials scoped per host; redirects followed with per-hop credentials |
 | #117, #120 | Decoded partial states validated; remote block cache bounded |
 | #143 | Hardware FMA kernels chosen at run time on x86-64 |
-| #144 | `raster-h3-datafusion` folded into `raster-h3-sedona` |
+| #144 | `dggs-stream-datafusion` folded into `dggs-stream-sedona` |
 | #148, #151 | A5, S2 and HEALPix grids |
 | #153 | Every grid in every engine (`GridSpec`), auto resolution, NoData policy, transfer modes, histograms, runtime profile |
 
@@ -320,7 +320,7 @@ Two scheduling changes and one build change account for most of this phase's spe
 * **Hardware FMA chosen at run time.** h3o's indexing math calls `f64::mul_add`, which a portable x86-64 build compiles to a software routine. That routine cost 11–16% of all instructions in the streaming benchmarks. On CPUs with FMA, the continuous and categorical kernels now run a second copy compiled with hardware fused multiply-add. The output is unchanged bit for bit, because both forms are correctly rounded. On a 4-core Xeon, the criterion `streaming` benchmarks run 13–28% faster, and `worker_scaling` streams 16–28% faster at resolutions 7 and 9.
 
 ### Lesson 31: A URL from SQL Is Untrusted Input
-Any URL passed to a scan, including one typed into SQL, used to receive `RASTER_H3_AUTH_TOKEN` and `AWS_SESSION_TOKEN` from the environment. And because the HTTP client stripped only `Authorization` and `Cookie` on redirects, an S3 session token could follow a redirect to another host, even over plain `http://`. Credentials are now scoped to each URL: `RASTER_H3_AUTH_TOKEN` goes only to hosts in `RASTER_H3_AUTH_HOSTS`, `AWS_SESSION_TOKEN` only to S3 endpoints, and neither over plain HTTP except to loopback. Redirects are followed by `raster_h3` itself, so each hop gets only the credentials its own URL is entitled to. The remote block cache is now bounded (64 MiB, LRU), and decoding a partial state or spill run rejects states no accumulator could have produced.
+Any URL passed to a scan, including one typed into SQL, used to receive `DGGS_STREAM_AUTH_TOKEN` and `AWS_SESSION_TOKEN` from the environment. And because the HTTP client stripped only `Authorization` and `Cookie` on redirects, an S3 session token could follow a redirect to another host, even over plain `http://`. Credentials are now scoped to each URL: `DGGS_STREAM_AUTH_TOKEN` goes only to hosts in `DGGS_STREAM_AUTH_HOSTS`, `AWS_SESSION_TOKEN` only to S3 endpoints, and neither over plain HTTP except to loopback. Redirects are followed by `dggs_stream` itself, so each hop gets only the credentials its own URL is entitled to. The remote block cache is now bounded (64 MiB, LRU), and decoding a partial state or spill run rejects states no accumulator could have produced.
 
 ---
 
@@ -375,17 +375,17 @@ The original post-`v0.4.0` roadmap was ranked from the CONUS Resolution 9 teleme
 #### R1. Refresh the Continental Baseline
 * **Why first:** Every decision below depends on where time goes at full scale, on a machine with more cores than the 4-vCPU runs. The CONUS tables above were measured at `v0.4.0` (and the P0 + P2 branch); since then indexing, eviction, batching and spill behaviour have all changed. The only newer continental figures are the 5-point resolution 9 runs in Phase 9 (36.0–36.6 min), which use a different sampling mode from the tables above and are not comparable to them.
 * **Use the runtime profile:** the unreleased `run_profile` telemetry (CLI `--profile`, Python `profile_raster`, DuckDB `profile := true`) splits wall and CPU time into `fetch`, `tiff_decode`, `kernel` (`crs_transform`, `grid_index`, `accumulate`), `horizon`, `spill`, `stall` and `serialize`. Record it for every run, and include one non-H3 grid so that the A5, S2 and HEALPix indexing costs are on record too.
-* **What to record:** wall, user/sys CPU and peak RSS for CLI, Polars and DuckDB on both `BP_CONUS` rasters at resolution 9; plus `StreamProfile` merge, spill and `eviction_key_fallbacks`, and `worker_scaling` at 1/2/4/8/16 workers on the same machine. Add a partitioned run (`raster-h3-cli plan` / `ipc --partition` / `merge`) to confirm partitioning stays free at continental scale.
+* **What to record:** wall, user/sys CPU and peak RSS for CLI, Polars and DuckDB on both `BP_CONUS` rasters at resolution 9; plus `StreamProfile` merge, spill and `eviction_key_fallbacks`, and `worker_scaling` at 1/2/4/8/16 workers on the same machine. Add a partitioned run (`dggs-stream-cli plan` / `ipc --partition` / `merge`) to confirm partitioning stays free at continental scale.
 
 #### R2. Weight Budget Shares by Expected Cell Count
-* **Where:** `map_budget = aggregation_budget_bytes / num_res / 4` in [`crates/raster-h3-core/src/aggregator/multi_horizon/controller/construct.rs`](../crates/raster-h3-core/src/aggregator/multi_horizon/controller/construct.rs) and the horizon maps that enforce it.
+* **Where:** `map_budget = aggregation_budget_bytes / num_res / 4` in [`crates/dggs-stream-core/src/aggregator/multi_horizon/controller/construct.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/controller/construct.rs) and the horizon maps that enforce it.
 * **The bottleneck:** Each resolution's horizon map gets a quarter of the aggregation budget divided by the number of resolutions ([`engineering.md`](engineering.md)). A batch of resolution-11 cells on a 4096-pixel-wide, 64-row-strip raster needs ~53 MiB, but gets 16 MiB alone or ~5 MiB in a three-resolution run, while resolution 7 in the same run holds a few thousand cells. The fine resolution spills on every batch.
 * **The fix:** Size each resolution's share from its expected cells per batch (batch pixels divided by pixels per cell, capped at batch pixels), so coarse resolutions give up memory they cannot use. Keep the total budget unchanged, and keep spilling as the fallback so the result is always correct.
 * **Validate with:** the `worker_scaling` `res 11` and `res 7, 9, 11` workloads at 64 MiB, and the memory benchmark suite, which must show peak memory still within the budget.
 * **Still open after Phase 9:** row-keyed Albers eviction removed the CONUS spill at resolution 9, but it shortens how long cells are held, not how many cells a fine-resolution batch creates. With four grids, the expected cell count per batch should come from `GridSpec` (aperture and mean cell area), not from H3 constants.
 
 #### R3. Parallelise the Merge Only If It Still Dominates
-* **Where:** the serial horizon merge in [`crates/raster-h3-core/src/aggregator/multi_horizon/controller/pipeline.rs`](../crates/raster-h3-core/src/aggregator/multi_horizon/controller/pipeline.rs).
+* **Where:** the serial horizon merge in [`crates/dggs-stream-core/src/aggregator/multi_horizon/controller/pipeline.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/controller/pipeline.rs).
 * **Status:** After PR #82 the merge is a hash insert and an eviction-heap push per new cell. The horizon map already has 32 shards, so a sharded merge is possible, but merge order also feeds the eviction heap and spill runs, both of which must stay deterministic.
 * **Gate:** the `worker_scaling` decision rule: proceed only if the merge exceeds 20% of wall time on a common workload in R1's 8+ core runs.
 
@@ -403,7 +403,7 @@ The sections below are the original analysis of `P0`–`P5`, kept for reference.
 ### Tier 1: High-Impact Inner-Loop Optimizations
 
 #### 1. Replace Newton-Raphson + `.ln()` in `AlbersConicFast` with Snyder's Authalic Series & Eliminate Redundant `sqrt()` (`P0`, shipped in `v0.5.0`)
-* **Where:** [`crates/raster-h3-core/src/crs/transformer/albers.rs`](../crates/raster-h3-core/src/crs/transformer/albers.rs) (`AlbersConicFast::transform_point`)
+* **Where:** [`crates/dggs-stream-core/src/crs/transformer/albers.rs`](../crates/dggs-stream-core/src/crs/transformer/albers.rs) (`AlbersConicFast::transform_point`)
 * **The Bottleneck:** On CONUS Albers (`EPSG:5070`), coordinate reprojection accounts for the entire ~400–550 second gap versus native WGS84. Currently, `AlbersConicFast::transform_point` executes:
   1. `let rho = (x_p * x_p + y_p * y_p).sqrt();` followed immediately by `rho * rho` (`rho` is never used unsquared).
   2. Two iterations of Newton-Raphson, invoking **6 transcendental functions per pixel** (`2× sin`, `2× cos`, `2× ln`) in addition to `atan2` and `asin`.
@@ -413,13 +413,13 @@ The sections below are the original analysis of `P0`–`P5`, kept for reference.
   - This removes the iterative `sin`, `cos`, and `ln` calls. Independent PROJ 9.5.1 forward-reference points verify inverse errors below **0.01 m**, including both signs of latitude through **89.9999°**, northern/southern parallels and false offsets. This is a tested range, not a uniform accuracy guarantee arbitrarily close to the poles, where inversion is ill-conditioned in floating point.
 
 #### 2. Endpoint-Only Stride Probing (`P1`, withdrawn)
-* **Where:** [`crates/raster-h3-core/src/aggregator/multi_horizon/walker.rs`](../crates/raster-h3-core/src/aggregator/multi_horizon/walker.rs)
+* **Where:** [`crates/dggs-stream-core/src/aggregator/multi_horizon/walker.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/walker.rs)
 * **Correctness finding:** Short probes have the same re-entry problem as the retired binary-search lookahead. A five-pixel scanline can index as `A, A, B, A, A`, including at resolution 9; equal endpoints do not certify intermediate assignments. Convexity in gnomonic face space does not make a projected raster row a straight line in that space.
 * **Boundary finding:** Bisecting a three-column probe also cannot infer an unchecked pixel's cell from the midpoint and endpoint. For `A, A, A, A, A, B, A, C, C`, the midpoint is `A` and the next probe agrees with the `C` endpoint, but skipping the unchecked `B` still misassigns it to `A`.
 * **Current implementation:** Index every valid sample at every requested resolution, then batch only verified same-cell spans. Keep the Albers authalic series, row-invariant projection hoisting, and single-point loop specialization. Any future skipping requires a conservative geometric certificate, not endpoint equality.
 
 #### 3. Extend Row-Invariant Latitude Hoisting to `Wgs84Identity` & Specialize the Single-Point `walk` Loop (`P2`, shipped in `v0.5.0`)
-* **Where:** [`crates/raster-h3-core/src/aggregator/multi_horizon/walker.rs`](../crates/raster-h3-core/src/aggregator/multi_horizon/walker.rs) (`SampleProjector` and `walk`)
+* **Where:** [`crates/dggs-stream-core/src/aggregator/multi_horizon/walker.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/walker.rs) (`SampleProjector` and `walk`)
 * **The Bottleneck:**
   1. Before these changes, `SampleProjector` hoisted row-constant latitudes **only** for `WebMercatorFast`, leaving `Wgs84Identity` (`EPSG:4326`) to recompute them per pixel.
   2. Inside `walk()`, even when `batch == true` (single-band center sampling, covering >95% of queries) and `resolutions.len() == 1`, every valid pixel clears and pushes to a heap-backed `positions: Vec<(LatLng, f64)>`, iterates over `ctx.sampling.points`, and loops over `cells: Vec<u64>`.
@@ -432,7 +432,7 @@ The sections below are the original analysis of `P0`–`P5`, kept for reference.
 ### Tier 2: Engine, Serialization & Trigonometric Optimizations
 
 #### 4. Parallel Column Encoding & `BYTE_STREAM_SPLIT` in the Native CLI Parquet Writer (`P3`)
-* **Where:** [`crates/raster-h3-core/src/parquet/pipeline.rs`](../crates/raster-h3-core/src/parquet/pipeline.rs) and [`crates/raster-h3-core/src/parquet/writer.rs`](../crates/raster-h3-core/src/parquet/writer.rs)
+* **Where:** [`crates/dggs-stream-core/src/parquet/pipeline.rs`](../crates/dggs-stream-core/src/parquet/pipeline.rs) and [`crates/dggs-stream-core/src/parquet/writer.rs`](../crates/dggs-stream-core/src/parquet/writer.rs)
 * **The Bottleneck:**
   - In the CONUS benchmarks, the CLI engine was ~65–100s slower than Polars and DuckDB and produced **6.2 GB** files vs. Polars' **960 MB** files.
   - Currently, `pipeline.rs` sorts a single `perm: Vec<usize>` on one background thread, clones each column `Vec` sequentially in `reorder_by_perm`, and ZSTD-compresses 11 columns serially on that single thread. When a row group holds 1,000,000 rows, serial column encoding stalls the `sync_channel(1)` pipeline.
@@ -440,7 +440,7 @@ The sections below are the original analysis of `P0`–`P5`, kept for reference.
   - Parallelize column permutation and Parquet column page compression across the shared Rayon pool (`par_iter_mut` over columns), and support column-projected / `--compact` schemas with `ZSTD(1)` + `BYTE_STREAM_SPLIT` encoding for floating-point statistics columns.
 
 #### 5. Row-Shared Trigonometric Precomputation Inside H3 Indexing (`P4`)
-* **Where:** [`crates/raster-h3-core/src/aggregator/h3_scanline.rs`](../crates/raster-h3-core/src/aggregator/h3_scanline.rs)
+* **Where:** [`crates/dggs-stream-core/src/aggregator/h3_scanline.rs`](../crates/dggs-stream-core/src/aggregator/h3_scanline.rs)
 * **The Bottleneck:**
   - Inside `h3o::LatLng::to_cell`, converting `(lat, lon)` to a 3D unit sphere vector $(x, y, z)$ computes `lat.sin_cos()` and `lon.sin_cos()` on every pixel.
   - On north-up `EPSG:4326` and `EPSG:3857` rasters, `lat` is **identical for every pixel in a row**, causing `sin(lat)` and `cos(lat)` to be recomputed thousands of times per row for the same angle.
@@ -448,7 +448,7 @@ The sections below are the original analysis of `P0`–`P5`, kept for reference.
   - Precompute `(sin_lat, cos_lat, z)` once per row on north-up geographic/Mercator grids, or evaluate `lon.sin_cos()` across 4-pixel vectors using portable SIMD (`f64x4` NEON/AVX2).
 
 #### 6. Direct Projected SoA Eviction Slabs (Eliminating AoS `OutputBuffer` Transpose) (`P5`)
-* **Where:** [`crates/raster-h3-core/src/aggregator/multi_horizon/lifecycle.rs`](../crates/raster-h3-core/src/aggregator/multi_horizon/lifecycle.rs) and [`crates/raster-h3-core/src/columnar/mod.rs`](../crates/raster-h3-core/src/columnar/mod.rs)
+* **Where:** [`crates/dggs-stream-core/src/aggregator/multi_horizon/lifecycle.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/lifecycle.rs) and [`crates/dggs-stream-core/src/columnar/mod.rs`](../crates/dggs-stream-core/src/columnar/mod.rs)
 * **The Bottleneck:**
   - Evicted cells from `ShardedEvictionMap` are first materialized into an Array-of-Structs (`Vec<MultiContinuousRecord>`) inside `OutputBuffer`, and then transposed into Struct-of-Arrays (`ColumnArray` vectors for Polars/Arrow or `duckdb_data_chunk` vectors for DuckDB). Across 74.4M rows on CONUS, that AoS → SoA transpose copies ~6 GB of records through L3 cache.
 * **The Fix:**
@@ -538,7 +538,7 @@ Most of what a new input needs is already independent of the input. After the sa
 
 ### 1. Climate and Weather Cubes (Zarr, NetCDF, GRIB)
 
-**Why it fits:** Zarr and NetCDF metadata give every chunk's extent before any data is read, which is what pruning and eviction need. Regular latitude/longitude grids take the identity fast path, and rotated-pole grids (common in regional climate models such as CORDEX) are covered by the existing rotated-grid correctness work.
+**Why it fits:** Zarr and NetCDF metadata give every chunk's extent before any data is read, which is what pruning and eviction need. Regular latitude/longitude grids take the identity fast path. Rotated-pole grids (common in regional climate models such as CORDEX) are not covered yet: they use a rotated-pole CRS (PROJ's `ob_tran`), whereas the existing rotated-grid correctness tests exercise affine rotation and shear of an EPSG:4326 geotransform. Supporting them would mean confirming the CRS path (`proj4rs`) handles `ob_tran` and adding correctness and eviction tests of their own.
 
 **Already in place:** the main obstacle was that climate pixels (0.25° ERA5 is about 28 km) are coarser than most useful cells. The `sample` and `overlay` / `mass_preserve` transfer modes (Lesson 28) now cover that case, and `auto` resolution picks a sensible starting resolution.
 

@@ -1,10 +1,10 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use raster_h3_core::raster::geotiff::TiffByteOrder;
-use raster_h3_core::raster::predictor::{
+use dggs_stream_core::raster::geotiff::TiffByteOrder;
+use dggs_stream_core::raster::predictor::{
     unpack_f32, unpack_f64, unpack_integer_samples, ChunkEncoding,
 };
+use libfuzzer_sys::fuzz_target;
 use tiff::tags::{PhotometricInterpretation, Predictor};
 
 fuzz_target!(|data: &[u8]| {

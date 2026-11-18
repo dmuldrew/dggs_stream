@@ -11,8 +11,8 @@ use std::time::Instant;
 use tempfile::NamedTempFile;
 use tiff::decoder::{Decoder, DecodingResult};
 
-use raster_h3::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 
 fn write_benchmark_deflate_geotiff(path: &Path, width: u32, height: u32, tile_w: u32, tile_h: u32) {
     let mut file = BufWriter::new(File::create(path).unwrap());
@@ -120,7 +120,7 @@ fn main() {
         "========================================================================================="
     );
     println!(
-        "       raster_h3 Benchmark: SIMD-Accelerated Chunk Decompression (libdeflater)           "
+        "       dggs_stream Benchmark: SIMD-Accelerated Chunk Decompression (libdeflater)           "
     );
     println!(
         "========================================================================================="

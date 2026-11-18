@@ -2,7 +2,7 @@
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-EXTENSION_NAME=raster_h3
+EXTENSION_NAME=dggs_stream
 
 # Stable C extension API only (src/ffi/duckdb_c.rs requests v1.2.0), so one
 # build loads on DuckDB v1.2.0 and later.

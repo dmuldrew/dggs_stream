@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [Polars API Reference →](polars-api-reference.md)
 
-This document is the complete **SQL** reference for the `raster_h3` DuckDB extension ([DuckDB deep dive](engines/duckdb.md)), including table functions for continuous and categorical raster aggregation, direct Parquet and PMTiles v3 vector export, and scalar utility functions. For the Python package (Polars `LazyFrame`s, Arrow streams and Python helpers) see the [Polars API Reference](polars-api-reference.md).
+This document is the complete **SQL** reference for the `dggs_stream` DuckDB extension ([DuckDB deep dive](engines/duckdb.md)), including table functions for continuous and categorical raster aggregation, direct Parquet and PMTiles v3 vector export, and scalar utility functions. For the Python package (Polars `LazyFrame`s, Arrow streams and Python helpers) see the [Polars API Reference](polars-api-reference.md).
 
 The other engines accept a subset of these parameters; see their deep dives under [Engines](engines/README.md). Statistic definitions and output column meanings apply to every engine.
 
@@ -50,6 +50,16 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `geom` | `BOOLEAN` | `false` | Emit a `geometry` column of the cell geometries (enables DuckDB Spatial interop); see [cell geometry](#cell-geometry). |
 | `quantiles` | `VARCHAR` | `None` | Streaming quantile targets: percentiles such as `'p50,p90,p99.5'` or `'0.05'`, aliases `median`/`q1`/`q2`/`q3`/`iqr`, or presets `'default'`, `'box'` (p25, p50, p75, iqr), `'tails'`, `'deciles'`. Percentiles must be finite and strictly between 0 and 100 (decimals between 0 and 1). Adds one nullable column per target; per-cell sketches are only built when the query selects or filters on one of these columns. |
 | `percentiles` | `VARCHAR` | `None` | Alias for `quantiles`. |
+| `grid` | `VARCHAR` | `'h3'` | Grid to index onto: `'h3'`, `'a5'`, `'s2'` or `'healpix'`. The `a5_`, `s2_` and `healpix_` table functions default to their own grid. The cell columns are then `{grid}_index` / `{grid}_hex`, and `resolution(s)` follow that grid's range (A5 and S2 0–30, HEALPix 0–29). See [Grids](grids.md). |
+| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area, moved N steps finer or coarser. |
+| `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`. |
+| `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics instead of NULL. |
+| `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'sample'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `sample_method` | `VARCHAR` | `'bilinear'` | With `transfer := 'sample'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
+| `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
+| `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
 
 On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can also come from [session options](#session-options-duckdb-20-build); an argument passed here takes precedence.
 
@@ -165,6 +175,19 @@ Every engine reads these from the GeoTIFF and applies them the same way:
 
 On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can also come from [session options](#session-options-duckdb-20-build); an argument passed here takes precedence.
 | `geom` | `BOOLEAN` | `false` | Emit a `geometry` column with OGC WKB 2D Polygon hexagons. |
+| `grid` | `VARCHAR` | `'h3'` | Grid to index onto: `'h3'`, `'a5'`, `'s2'` or `'healpix'`. The `a5_`, `s2_` and `healpix_` table functions default to their own grid. The cell columns are then `{grid}_index` / `{grid}_hex`, and `resolution(s)` follow that grid's range (A5 and S2 0–30, HEALPix 0–29). See [Grids](grids.md). |
+| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area, moved N steps finer or coarser. |
+| `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`; the long format does not return the empty cells. |
+| `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics (and class) instead of NULL. |
+| `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'sample'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `sample_method` | `VARCHAR` | `'bilinear'` | With `transfer := 'sample'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
+| `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
+| `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
+| `histogram` | `VARCHAR` | `None` | Per-cell histogram: `'values'`, `'N:min:max'` (N equal bins) or `'e0,e1,...'` (bin edges). The `histogram` column then holds it as JSON: `{"class": weight}` or `[[lower, upper, weight], ...]`. |
+| `histogram_weight` | `VARCHAR` | `'count'` | `'count'` or `'area'` (overlapped area in pixels; runs the weighted `overlay` transfer). |
+| `histogram_normalize` | `VARCHAR` | `'none'` | `'none'`, `'fraction'` or `'density'` (bins only). |
 
 ### Wide Format Output Schema (`format := 'wide'`, Default)
 | Column Name | Logical Type | Description |
@@ -374,10 +397,10 @@ SELECT current_setting('raster_h3_fetch_workers');
 
 | Option | Type | Default | Environment fallback | Effect |
 | :--- | :--- | :--- | :--- | :--- |
-| `raster_h3_use_duckdb_fs` | `BOOLEAN` | `false` | `RASTER_H3_USE_DUCKDB_FS` (`1`, `true`, `on`, `yes`) | Open every raster through DuckDB's file system instead of the built-in readers. Remote paths then use the loaded `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works (`s3://`, `gs://`, `az://`, `abfss://`, `hf://`, `http(s)://`, …). Local files are read through DuckDB too, so they lose the memory-mapped fast path. See [DuckDB file system](engines/duckdb.md#duckdb-file-system--secrets-duckdb-20-build). |
-| `raster_h3_fetch_workers` | `BIGINT` | `0` (unset) | `RASTER_H3_FETCH_WORKERS` | Default for the `fetch_workers` argument. |
-| `raster_h3_decode_budget_mb` | `BIGINT` | `0` (unset) | `RASTER_H3_DECODE_BUDGET_MB` | Default for the `decode_budget_mb` argument. |
-| `raster_h3_workers` | `BIGINT` | `0` (unset) | `RASTER_H3_WORKERS` | Default for the `workers` argument. |
+| `raster_h3_use_duckdb_fs` | `BOOLEAN` | `false` | `DGGS_STREAM_USE_DUCKDB_FS` (`1`, `true`, `on`, `yes`) | Open every raster through DuckDB's file system instead of the built-in readers. Remote paths then use the loaded `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works (`s3://`, `gs://`, `az://`, `abfss://`, `hf://`, `http(s)://`, …). Local files are read through DuckDB too, so they lose the memory-mapped fast path. See [DuckDB file system](engines/duckdb.md#duckdb-file-system--secrets-duckdb-20-build). |
+| `raster_h3_fetch_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_FETCH_WORKERS` | Default for the `fetch_workers` argument. |
+| `raster_h3_decode_budget_mb` | `BIGINT` | `0` (unset) | `DGGS_STREAM_DECODE_BUDGET_MB` | Default for the `decode_budget_mb` argument. |
+| `raster_h3_workers` | `BIGINT` | `0` (unset) | `DGGS_STREAM_WORKERS` | Default for the `workers` argument. |
 
 They apply to `h3_raster_continuous_aggregate`, `h3_raster_categorical_aggregate`, `h3_raster_to_parquet` and `h3_raster_to_pmtiles`, and are read when the query is planned. For the worker and budget options the order is: the function's own argument, then a positive session value, then the environment variable, then the built-in default. `raster_h3_use_duckdb_fs` is on when the session sets it to `true` or the environment variable is set. The environment variables are read only by the DuckDB 2.0 build.
 
@@ -412,8 +435,8 @@ ascending with duplicates removed. It wraps h3o's
 counterpart of H3's `polygonToCells`).
 
 The same function is available in Apache DataFusion and SedonaDB through
-[`raster-h3-sedona`](engines/datafusion.md#using-with-apache-datafusion-and-sedonadb)
-(`register_all` in Rust, `sd.register(raster_h3_sedona.scalar_functions())` in Python). There it
+[`dggs-stream-sedona`](engines/datafusion.md#using-with-apache-datafusion-and-sedonadb)
+(`register_all` in Rust, `sd.register(dggs_stream_sedona.scalar_functions())` in Python). There it
 returns `List<UInt64>`, takes `Binary` WKB or a geometry column, and refuses at planning a
 geometry whose CRS is set to something other than lon/lat. The containment modes, NULL
 handling and limits below are the same, except that an out-of-range `resolution` is always

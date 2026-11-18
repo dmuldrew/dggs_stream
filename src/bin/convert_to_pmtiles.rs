@@ -1,10 +1,10 @@
-use raster_h3::aggregator::multi_horizon::MultiResolutionConfig;
-use raster_h3::aggregator::SamplingPattern;
-use raster_h3::pmtiles::tiler::H3PmtilesTiler;
+use dggs_stream::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream::aggregator::SamplingPattern;
+use dggs_stream::pmtiles::tiler::H3PmtilesTiler;
 use std::path::Path;
 
 fn print_help() {
-    println!("raster_h3 PMTiles v3 Converter (GeoTIFF & Parquet)");
+    println!("dggs_stream PMTiles v3 Converter (GeoTIFF & Parquet)");
     println!("Usage:");
     println!("  convert_to_pmtiles --input <in.tif|in.parquet> --output <out.pmtiles> [options]");
     println!("  convert_to_pmtiles <in.tif> <out.pmtiles> [resolutions] [categorical] [nodata]");
@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!(
             "================================================================================"
         );
-        println!("raster_h3 PMTiles v3 Converter: Parquet Mode");
+        println!("dggs_stream PMTiles v3 Converter: Parquet Mode");
         println!(
             "================================================================================"
         );
@@ -195,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!(
             "================================================================================"
         );
-        println!("raster_h3 PMTiles v3 Converter: GeoTIFF Raster Mode");
+        println!("dggs_stream PMTiles v3 Converter: GeoTIFF Raster Mode");
         println!(
             "================================================================================"
         );

@@ -9,12 +9,12 @@
 //!
 //! Needs `data/CFL_HI.tif` (continuous) and `data/LF2024_FBFM40_HI.tif` (categorical).
 
-use raster_h3::core::aggregator::multi_horizon::{
+use dggs_stream::core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3::core::grid::GridKind;
-use raster_h3::core::raster::geotiff::GeoTiffStreamReader;
-use raster_h3::core::resolution::area_matched_resolution;
+use dggs_stream::core::grid::GridKind;
+use dggs_stream::core::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::core::resolution::area_matched_resolution;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;

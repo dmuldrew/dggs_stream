@@ -13,10 +13,10 @@ use tiff::encoder::colortype::Gray32Float;
 use tiff::encoder::TiffEncoder;
 use tiff::tags::Tag;
 
-use raster_h3::aggregator::{
+use dggs_stream::aggregator::{
     H3Accumulator, MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use raster_h3::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream::raster::geotiff::GeoTiffStreamReader;
 
 /// Generate a synthetic GeoTIFF raster of specified dimensions
 fn generate_benchmark_raster(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
@@ -143,7 +143,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
         std::collections::HashMap<
             u64,
             H3Accumulator,
-            raster_h3::aggregator::cell_hash::H3BuildHasher,
+            dggs_stream::aggregator::cell_hash::H3BuildHasher,
         >,
     > = pool_4.install(|| {
         let reader_mt = GeoTiffStreamReader::open(&path).unwrap();
@@ -153,7 +153,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
             .map(|chunk_idx| {
                 let chunk_reader = GeoTiffStreamReader::open(&path).unwrap();
                 let mut map = std::collections::HashMap::with_hasher(
-                    raster_h3::aggregator::cell_hash::H3BuildHasher,
+                    dggs_stream::aggregator::cell_hash::H3BuildHasher,
                 );
                 if let Ok((chunk, decoding)) = chunk_reader.read_chunk(chunk_idx) {
                     let gt = chunk_reader.metadata.geotransform;
@@ -198,7 +198,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
         std::collections::HashMap<
             u64,
             H3Accumulator,
-            raster_h3::aggregator::cell_hash::H3BuildHasher,
+            dggs_stream::aggregator::cell_hash::H3BuildHasher,
         >,
     > = pool_8.install(|| {
         let reader_mt = GeoTiffStreamReader::open(&path).unwrap();
@@ -208,7 +208,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
             .map(|chunk_idx| {
                 let chunk_reader = GeoTiffStreamReader::open(&path).unwrap();
                 let mut map = std::collections::HashMap::with_hasher(
-                    raster_h3::aggregator::cell_hash::H3BuildHasher,
+                    dggs_stream::aggregator::cell_hash::H3BuildHasher,
                 );
                 if let Ok((chunk, decoding)) = chunk_reader.read_chunk(chunk_idx) {
                     let gt = chunk_reader.metadata.geotransform;
@@ -284,7 +284,7 @@ fn main() {
         "========================================================================================="
     );
     println!(
-        "                       raster_h3 Real-World Scaling Benchmark Suite                      "
+        "                       dggs_stream Real-World Scaling Benchmark Suite                      "
     );
     println!(
         "========================================================================================="

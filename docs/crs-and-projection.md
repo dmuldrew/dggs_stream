@@ -2,14 +2,14 @@
 
 [← Back to README](../README.md) · [Optimal Raster Format](optimal-raster-format.md)
 
-`raster_h3` automatically detects the Coordinate Reference System (CRS) embedded in your GeoTIFF file and reprojects all pixel coordinates to WGS84 (EPSG:4326) for H3 indexing. You can also override the CRS manually via the `source_crs` parameter.
+dggs_stream automatically detects the Coordinate Reference System (CRS) embedded in your GeoTIFF file and reprojects all pixel coordinates to WGS84 (EPSG:4326) for H3 indexing. You can also override the CRS manually via the `source_crs` parameter.
 
 ## How CRS Detection Works
 
 1. **GeoTIFF metadata**: The extension reads the `ModelTiepointTag`, `ModelPixelScaleTag`, and `GeoKeyDirectoryTag` from the TIFF header to extract the embedded projection definition.
 2. **EPSG matching**: If an EPSG code is found, the transformer selects the optimal tier (Identity → Analytical → PROJ4).
 3. **PROJ string fallback**: If only a PROJ.4 definition string or WKT is present (e.g. Lambert Conformal Conic, Albers Equal-Area), it is parsed and transformed via `proj4rs`.
-4. **Mandatory Explicit CRS if Undetected**: If a GeoTIFF lacks embedded CRS metadata or uses an unrecognized projection code, `raster_h3` **strictly halts with an error** (`RasterH3Error::CrsNotDetected` / `UnsupportedEpsg`) instead of guessing. You must supply the CRS explicitly.
+4. **Mandatory Explicit CRS if Undetected**: If a GeoTIFF lacks embedded CRS metadata or uses an unrecognized projection code, dggs_stream **strictly halts with an error** (`RasterH3Error::CrsNotDetected` / `UnsupportedEpsg`) instead of guessing. You must supply the CRS explicitly.
 5. **Manual specification & override**: The `crs` (or `source_crs`) parameter accepts `'EPSG:XXXX'` codes or full PROJ.4 definition strings, taking strict precedence over any embedded metadata.
 
 ## Supported Projection Families
@@ -135,7 +135,7 @@ Built-in codes with a Helmert shift, chosen from the EPSG registry:
 
 PROJ itself may prefer a different transformation for these CRSs, for example
 a national grid (OSTN15 for OSGB36) or a regional ED50 Helmert. The tests in
-`crates/raster-h3-core/tests/it/datum_shifts.rs` check agreement with PROJ for the same parameters
+`crates/dggs-stream-core/tests/it/datum_shifts.rs` check agreement with PROJ for the same parameters
 (≤ 0.01 m) and with PROJ's preferred transformation (within the published
 accuracy above).
 
@@ -192,7 +192,7 @@ SELECT * FROM h3_raster_continuous_aggregate(
 
 ## Optimal Raster Format & Ingestion Speed
 
-While `raster_h3` supports arbitrary projected coordinate reference systems (Albers, UTM, Lambert Conformal Conic, etc.), the physical layout and projection of the source file significantly affect ingestion throughput (up to **4.5×–6× faster** with tiled WGS84 COGs).
+While dggs_stream supports arbitrary projected coordinate reference systems (Albers, UTM, Lambert Conformal Conic, etc.), the physical layout and projection of the source file significantly affect ingestion throughput (up to **4.5×–6× faster** with tiled WGS84 COGs).
 
 For complete benchmarks, in-depth architectural explanations, and universal GDAL recipes for continuous and categorical rasters:
 

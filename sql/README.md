@@ -1,6 +1,6 @@
 # DuckDB SQL Examples & Benchmark Queries
 
-This folder contains ready-to-run SQL query scripts for the `raster_h3` DuckDB extension:
+This folder contains ready-to-run SQL query scripts for the `dggs_stream` DuckDB extension:
 
 - **`demo.sql`**: Complete feature demonstration script showing:
   - Continuous pixel aggregation (`h3_raster_continuous_aggregate`)

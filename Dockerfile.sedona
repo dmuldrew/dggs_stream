@@ -1,4 +1,4 @@
-# Apache Sedona (Spark) with the raster-h3 Python package on every executor.
+# Apache Sedona (Spark) with the dggs-stream Python package on every executor.
 #
 # Used by the `sedona` service in docker-compose.yml:
 #   docker compose up --build sedona     # JupyterLab on http://localhost:8888
@@ -9,7 +9,7 @@
 ARG SEDONA_VERSION=1.9.1
 
 # ==============================================================================
-# Stage 1: build the raster-h3 wheel
+# Stage 1: build the dggs-stream wheel
 # ==============================================================================
 FROM rust:bookworm AS rust
 
@@ -25,7 +25,7 @@ COPY --from=rust /usr/local/cargo /usr/local/cargo
 
 WORKDIR /build
 
-# The wheel's build hook runs `cargo build -p raster-h3-python -p raster-h3-cli`
+# The wheel's build hook runs `cargo build -p dggs-stream-python -p dggs-stream-cli`
 # against the whole workspace, so every member manifest must be present.
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo/ ./.cargo/
@@ -34,15 +34,15 @@ COPY src/ ./src/
 COPY tests/ ./tests/
 COPY examples/ ./examples/
 
-ENV RASTER_H3_WORKSPACE=/build
+ENV DGGS_STREAM_WORKSPACE=/build
 # Drop Cargo's build directory in the same step: only the wheel is needed, and keeping
 # target/ would leave several GB in the build cache.
 RUN pip install --no-cache-dir "hatchling>=1.26" \
-    && pip wheel --no-deps --no-build-isolation -w /wheels crates/raster-h3-python \
+    && pip wheel --no-deps --no-build-isolation -w /wheels crates/dggs-stream-python \
     && rm -rf /build/target
 
 # ==============================================================================
-# Stage 2: Sedona + raster-h3
+# Stage 2: Sedona + dggs-stream
 # ==============================================================================
 FROM apache/sedona:${SEDONA_VERSION}
 
@@ -51,13 +51,13 @@ COPY --from=wheel /wheels/ /tmp/wheels/
 # The image installs its Python packages into the system interpreter (PEP 668 is
 # bypassed the same way upstream does it). pyarrow>=15 is needed for
 # `pyarrow.RecordBatchReader.from_stream`, which the demo uses to read the
-# raster_h3 Arrow stream batch by batch.
+# dggs_stream Arrow stream batch by batch.
 RUN pip3 install --no-cache-dir --break-system-packages \
-        "$(ls /tmp/wheels/raster_h3-*.whl)" "pyarrow>=15" \
+        "$(ls /tmp/wheels/dggs_stream-*.whl)" "pyarrow>=15" \
     && rm -rf /tmp/wheels \
-    && python3 -c "import raster_h3; print('raster_h3 OK:', raster_h3.h3_to_string(0x8828308281fffff))"
+    && python3 -c "import dggs_stream; print('dggs_stream OK:', dggs_stream.h3_to_string(0x8828308281fffff))"
 
-COPY examples/sedona_spark/ /opt/raster_h3/examples/
+COPY examples/sedona_spark/ /opt/dggs_stream/examples/
 
 # The base image sets PYSPARK_DRIVER_PYTHON=jupyter so `pyspark` opens a notebook.
 # That also breaks `spark-submit script.py`; run demos with `python3` instead.

@@ -19,7 +19,7 @@ updates:
         patterns: ['*']
 
   - package-ecosystem: cargo
-    directory: /crates/raster-h3-sedona
+    directory: /crates/dggs-stream-sedona
     schedule:
       interval: monthly
     ignore:
@@ -46,6 +46,6 @@ updates:
         patterns: ['*']
 
   - package-ecosystem: pip
-    directory: /crates/raster-h3-python
+    directory: /crates/dggs-stream-python
     schedule:
       interval: monthly

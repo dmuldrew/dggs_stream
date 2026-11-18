@@ -2,17 +2,23 @@
 # Run locally with `cargo deny check`; CI runs the same checks in the `deny` job.
 
 [graph]
-# Include feature-gated dependencies (e.g. raster-h3-pg's pg-extension) in every check.
+# Include feature-gated dependencies (e.g. dggs-stream-pg's pg-extension) in every check.
 all-features = true
 
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # chrono is unmaintained; no vulnerability is reported. It is not a direct dependency:
+    # it reaches the workspace and the fuzz crate only through parquet, and the SedonaDB
+    # adapter also through arrow and datafusion, all of which require it (every parquet
+    # release does). Remove this entry once arrow-rs drops chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained but only transitive via parquet/arrow/datafusion, which have no chrono-free release" },
+]
 
 [licenses]
 version = 2
-# raster_h3 is MIT; every license below is permissive and compatible with shipping it.
+# dggs_stream is MIT; every license below is permissive and compatible with shipping it.
 allow = [
     "MIT",
     "Apache-2.0",

@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md) · [← SQL API Reference](sql-api-reference.md)
 
-This document is the complete reference for the `raster_h3` Python package
+This document is the complete reference for the `dggs_stream` Python package
 ([Python & Polars deep dive](engines/python-polars.md)): the Polars IO source
 (`scan_raster_h3`, `read_raster_h3`), the Arrow PyCapsule stream (`RasterH3ArrowStream`),
 the direct Parquet and PMTiles v3 exporters, and the H3 helper functions. For the DuckDB
@@ -14,9 +14,9 @@ engine and documented once in the SQL reference.
 
 ```python
 import polars as pl
-import raster_h3
+import dggs_stream
 
-lf = raster_h3.scan_raster_h3("elevation.tif", 8)          # pl.LazyFrame
+lf = dggs_stream.scan_raster_h3("elevation.tif", 8)          # pl.LazyFrame
 df = lf.filter(pl.col("count") > 10).select("h3_index", "mean").collect()
 ```
 
@@ -32,8 +32,12 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | [`RasterH3ArrowStream(path, resolutions=8, **opts)`](#rasterh3arrowstream) | stream object | Arrow PyCapsule producer, batch iterator, PyArrow / dict conversion |
 | [`raster_to_parquet(input_path, output_path, resolutions=8, ...)`](#raster_to_parquet) | `int` | Stream a raster straight to Parquet / GeoParquet 1.1 |
 | [`raster_to_pmtiles(input_path, output_path, resolutions=8, ...)`](#raster_to_pmtiles) | `int` | Stream a raster straight to a PMTiles v3 vector archive |
-| [`parquet_to_pmtiles(parquet_path, output_path, h3_column=None)`](#parquet_to_pmtiles) | `int` | Transcode any H3-indexed Parquet file to a PMTiles v3 vector archive |
+| [`parquet_to_pmtiles(parquet_path, output_path, *, cell_column=None, grid=None)`](#parquet_to_pmtiles) | `int` | Transcode any cell-indexed Parquet file to a PMTiles v3 vector archive |
+| `scan_raster`, `read_raster` | as above | Grid-neutral aliases of `scan_raster_h3` and `read_raster_h3` |
+| `profile_raster(path, resolutions=8, **opts)` | `dict` | Run a scan with a runtime profile: `{"rows": ..., "profile": {...}}` ([Scan Options](scan-options.md#runtime-profile)) |
+| `auto_resolution(path, grid="h3", *, offset=0, crs=None)` | `int` | The resolution `resolutions="auto"` picks ([Grids](grids.md#automatic-resolution)) |
 | [H3 helpers](#h3-helper-functions) | scalars | `h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`, `h3_get_resolution`, `h3_is_valid`, `h3_to_wkb`, `h3_cell_to_parent`, `h3_polygon_to_cells` |
+| Grid helpers | scalars | `lonlat_to_cell`, `cell_to_string`, `string_to_cell`, `cell_is_valid`, `cell_to_lat`, `cell_to_lng`, `cell_resolution`, `cell_to_parent`, `cell_to_wkb`, `polygon_to_cells`, each with `grid="h3"` |
 
 ---
 
@@ -69,6 +73,17 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `min_count` | `float \| None` | `None` | Drop cells with fewer samples than this (`count`, or `total_count` for categorical scans). Inclusive: a cell with exactly `min_count` samples is kept. |
 | `min_mean` / `max_mean` | `float \| None` | `None` | Continuous only: drop cells whose `mean` is below / above this value (inclusive). |
 | `min_majority_fraction` | `float \| None` | `None` | Categorical only: drop cells whose majority class covers less than this fraction (0 to 1) of their samples. |
+| `grid` | `str \| None` | `"h3"` | `"h3"`, `"a5"`, `"s2"` or `"healpix"`. Cell columns become `{grid}_index` / `{grid}_hex` and `resolutions` follow that grid's range (`GRIDS[grid]` is the finest). `resolutions` also accepts `"auto"`, `"auto+N"`, `"auto-N"`. See [Grids](grids.md). |
+| `nodata_policy` | `str \| None` | `"omit"` | `"emit"` keeps cells whose samples are all NoData: `count` 0, null statistics. Refused with `min_count`. |
+| `emit_nodata_value` | `float \| None` | `None` | Under `"emit"`, the value of those statistics instead of null. |
+| `decimals` | `int \| None` | `None` | Round floating-point statistics to 0–15 decimals. Polars filters on `mean` and `majority_fraction` are then not pushed into the engine. |
+| `transfer` | `str \| None` | `"assign_centers"` | `"sample"` (value interpolated at each cell centre) or `"overlay"` (pixels weighted by overlap). See [Scan Options](scan-options.md#transfer-modes). |
+| `sample_method` | `str \| None` | `"bilinear"` | With `"sample"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
+| `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
+| `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `histogram` | `str \| Sequence[float] \| None` | `None` | Categorical only: `"values"`, `"N:min:max"` or bin edges. The `histogram` column becomes `List(Struct({class, weight}))` or `List(Struct({lower, upper, weight}))`. |
+| `histogram_weight` | `str \| None` | `"count"` | `"count"` or `"area"` (runs the weighted overlay). |
+| `histogram_normalize` | `str \| None` | `"none"` | `"none"`, `"fraction"`, `"density"` (bins only). |
 
 The filters (`min_count`, `min_mean`, `max_mean`, `min_majority_fraction`) run inside the
 engine, so dropped cells never reach Python. A Polars `filter` on the same columns is pushed
@@ -99,7 +114,7 @@ when the scan object is created. The one empty value that falls back to a defaul
 | A resolution outside 0–15, an unparsable `resolutions` string, or an empty one (`""` or `[]`) | `Invalid resolutions '16': expected H3 resolutions between 0 and 15, e.g. 7,8` |
 | `format` other than `wide` / `long` | `Invalid format 'tall': expected 'wide' or 'long'` |
 | `bbox` without exactly four numbers | `Invalid bbox '1,2,3': expected four numbers min_lon,min_lat,max_lon,max_lat` |
-| Unknown name in `columns` | `Column 'nope' not found in raster_h3 schema` |
+| Unknown name in `columns` | `Column 'nope' not found in dggs_stream schema` |
 | Unknown `sampling`, `overlap_rule` or `spectral_formula` name, invalid `quantiles` or `remap` | `Invalid sampling 'bilinear': expected one of center, 5point, ...` |
 | `band` (or a spectral formula band) the raster does not have | `band 3 does not exist: the raster has 2 band(s), numbered from 1` |
 | An option on the wrong kind of scan (`min_majority_fraction` or `remap` on a continuous scan; `spectral_formula`, `quantiles`, `min_mean` or `max_mean` on a categorical one) | `min_majority_fraction applies to categorical scans only` |
@@ -167,7 +182,7 @@ later to get filter and slice pushdown back.
 ### Example
 
 ```python
-lf = raster_h3.scan_raster_h3(
+lf = dggs_stream.scan_raster_h3(
     "temperature.tif",
     [7, 8],
     crs="EPSG:4326",
@@ -198,7 +213,7 @@ Eager form of `scan_raster_h3`, equivalent to
 is not installed.
 
 ```python
-df = raster_h3.read_raster_h3("landcover.tif", 8, categorical=True, format="long")
+df = dggs_stream.read_raster_h3("landcover.tif", 8, categorical=True, format="long")
 ```
 
 ---
@@ -237,7 +252,7 @@ The constructor arguments are kept as attributes of the same names (`path` as `s
 Any PyCapsule-aware library can read the stream directly:
 
 ```python
-stream = raster_h3.RasterH3ArrowStream("dem.tif", 8, columns=["h3_index", "mean", "wkb"])
+stream = dggs_stream.RasterH3ArrowStream("dem.tif", 8, columns=["h3_index", "mean", "wkb"])
 
 pl.from_arrow(stream)          # Polars
 pa.table(stream)               # PyArrow
@@ -365,7 +380,7 @@ Files written by releases before the Parquet footer fix fail in Polars with
 To write the scan schema itself, or a projection of it, use Polars:
 
 ```python
-(raster_h3.scan_raster_h3("elevation.tif", 8, columns=["h3_index", "mean", "count"])
+(dggs_stream.scan_raster_h3("elevation.tif", 8, columns=["h3_index", "mean", "count"])
     .sink_parquet("elevation_h3_slim.parquet"))
 ```
 
@@ -397,7 +412,7 @@ all resolutions.
 ## `parquet_to_pmtiles`
 
 ```python
-parquet_to_pmtiles(parquet_path, output_path, *, h3_column=None) -> int
+parquet_to_pmtiles(parquet_path, output_path, *, cell_column=None, grid=None, h3_column=None) -> int
 ```
 
 Transcodes an H3-indexed Parquet file (for example the output of
@@ -411,14 +426,16 @@ valid cell are skipped.
 | :--- | :--- | :--- | :--- |
 | `parquet_path` | `str \| Path` | — | Input Parquet file. |
 | `output_path` | `str \| Path` | — | Destination `.pmtiles` file. |
-| `h3_column` | `str \| None` | `None` (auto) | H3 column, integer or hex string, matched case-insensitively. By default the first of `h3_index`, `h3_hex`, `h3`, `cell` or `hex`. A named column that does not exist raises `RuntimeError` listing the available columns. |
+| `cell_column` | `str \| None` | `None` (auto) | Cell column, integer or hex string, matched case-insensitively. By default the first `{grid}_index` / `{grid}_hex` column, else `h3`, `cell` or `hex`. A named column that does not exist raises `RuntimeError` listing the available columns. |
+| `grid` | `str \| None` | `None` (from the column name) | The grid of the cells; by default read from the column's name (`s2_index`, `healpix_hex`, ...), H3 otherwise. |
+| `h3_column` | `str \| None` | `None` | Older name of `cell_column`. |
 
 ```python
-(raster_h3.scan_raster_h3("landcover.tif", 9, categorical=True)
+(dggs_stream.scan_raster_h3("landcover.tif", 9, categorical=True)
     .filter(pl.col("majority_fraction") > 0.6)
     .select("h3_index", "majority_class")
     .sink_parquet("landcover.parquet"))
-raster_h3.parquet_to_pmtiles("landcover.parquet", "landcover.pmtiles")
+dggs_stream.parquet_to_pmtiles("landcover.parquet", "landcover.pmtiles")
 ```
 
 ### Exporter errors and warnings
@@ -429,7 +446,7 @@ their coordinate transform failed or fell outside the valid latitude/longitude r
 still write the file and emit a `RuntimeWarning`:
 
 ```
-raster_h3: N valid sample(s) were dropped because their coordinate transform failed or
+dggs_stream: N valid sample(s) were dropped because their coordinate transform failed or
 fell outside the valid latitude/longitude range; check crs
 ```
 
@@ -464,12 +481,12 @@ other engine. Invalid input returns a sentinel rather than raising.
   [cell geometry](sql-api-reference.md#cell-geometry).
 
 ```python
-cell = raster_h3.string_to_h3("8828308281fffff")   # 613196570331971583
-raster_h3.h3_to_string(cell)                        # '8828308281fffff'
-raster_h3.h3_get_resolution(cell)                   # 8
-raster_h3.h3_cell_to_parent(cell, 6)                # 604189371209351167
-raster_h3.h3_cell_to_parent("8828308281fffff", 6)   # '86283082fffffff'
-raster_h3.h3_is_valid("not a cell")                 # False
+cell = dggs_stream.string_to_h3("8828308281fffff")   # 613196570331971583
+dggs_stream.h3_to_string(cell)                        # '8828308281fffff'
+dggs_stream.h3_get_resolution(cell)                   # 8
+dggs_stream.h3_cell_to_parent(cell, 6)                # 604189371209351167
+dggs_stream.h3_cell_to_parent("8828308281fffff", 6)   # '86283082fffffff'
+dggs_stream.h3_is_valid("not a cell")                 # False
 ```
 
 ### Applying helpers to columns
@@ -478,12 +495,12 @@ The helpers are not Polars expressions. Apply them to a column with `map_element
 avoid them where the scan already provides the value (`h3_hex`, `resolution`, `wkb`):
 
 ```python
-df = raster_h3.read_raster_h3("elevation.tif", 8, columns=["h3_index", "mean"])
+df = dggs_stream.read_raster_h3("elevation.tif", 8, columns=["h3_index", "mean"])
 df = df.with_columns(
-    pl.col("h3_index").map_elements(raster_h3.h3_to_lat, return_dtype=pl.Float64).alias("lat"),
-    pl.col("h3_index").map_elements(raster_h3.h3_to_lng, return_dtype=pl.Float64).alias("lng"),
+    pl.col("h3_index").map_elements(dggs_stream.h3_to_lat, return_dtype=pl.Float64).alias("lat"),
+    pl.col("h3_index").map_elements(dggs_stream.h3_to_lng, return_dtype=pl.Float64).alias("lng"),
     pl.col("h3_index")
-      .map_elements(lambda c: raster_h3.h3_cell_to_parent(c, 6), return_dtype=pl.UInt64)
+      .map_elements(lambda c: dggs_stream.h3_cell_to_parent(c, 6), return_dtype=pl.UInt64)
       .alias("parent_6"),
 )
 ```
@@ -527,11 +544,11 @@ how they share cells between adjacent polygons.
 import shapely
 
 aoi = shapely.box(-122.47, 37.73, -122.37, 37.81)
-cells = raster_h3.h3_polygon_to_cells(shapely.to_wkb(aoi), 8)
+cells = dggs_stream.h3_polygon_to_cells(shapely.to_wkb(aoi), 8)
 
 # Keep only the raster cells inside the area of interest
 inside = (
-    raster_h3.scan_raster_h3("elevation.tif", 8, bbox=aoi.bounds)
+    dggs_stream.scan_raster_h3("elevation.tif", 8, bbox=aoi.bounds)
     .filter(pl.col("h3_index").is_in(cells))
     .collect()
 )
@@ -539,7 +556,7 @@ inside = (
 # One row per (region, cell) from a GeoDataFrame
 regions = pl.DataFrame({
     "name": gdf["name"],
-    "h3_index": [raster_h3.h3_polygon_to_cells(shapely.to_wkb(g), 7, "covers") for g in gdf.geometry],
+    "h3_index": [dggs_stream.h3_polygon_to_cells(shapely.to_wkb(g), 7, "covers") for g in gdf.geometry],
 }).explode("h3_index").with_columns(pl.col("h3_index").cast(pl.UInt64))
 ```
 
@@ -553,4 +570,4 @@ regions = pl.DataFrame({
 | `polars.exceptions.ComputeError` | `LazyFrame.collect()` / `sink_*` on a `scan_raster_h3` frame | The same `RuntimeError`, raised inside the Polars IO source |
 | `ValueError` | `h3_polygon_to_cells` | Unknown containment mode, or too many cells |
 | `RuntimeWarning` | `raster_to_parquet`, `raster_to_pmtiles` | Valid pixels dropped by failed coordinate transforms |
-| `RuntimeError: Could not locate libraster_h3_python shared library` | First call of any function | Native library not found; see [Install](engines/python-polars.md#install) |
+| `RuntimeError: Could not locate libdggs_stream_python shared library` | First call of any function | Native library not found; see [Install](engines/python-polars.md#install) |

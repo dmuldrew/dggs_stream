@@ -1,0 +1,257 @@
+use std::ffi::{c_void, CString};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::ffi::{
+    duckdb_init_get_column_count, duckdb_init_get_column_index, duckdb_init_info,
+    duckdb_init_set_error, duckdb_init_set_init_data,
+};
+use crate::grid::GridKind;
+use crate::raster::geotiff::GeoTiffStreamReader;
+use crate::raster::mosaic::{MosaicReader, OverlapRule};
+
+/// Approximate H3 cell areas in m^2 by resolution (0 to 15) for query planner cardinality estimation
+pub const H3_AREA_M2: [f64; 16] = [
+    4.357e12, 6.097e11, 8.680e10, 1.239e10, 1.770e9, 2.529e8, 3.613e7, 5.161e6, 7.373e5, 1.053e5,
+    1.505e4, 2.150e3, 3.071e2, 4.387e1, 6.268e0, 8.954e-1,
+];
+
+/// Estimate query cardinality (number of H3 cells emitted) for a set of raster sources and resolutions
+pub fn estimate_raster_cardinality(
+    resolved_paths: &[PathBuf],
+    resolutions: &[u8],
+    remote_source_factory: Option<&dggs_stream_core::raster::http_range::RemoteSourceFactory>,
+) -> u64 {
+    estimate_raster_cardinality_for(
+        GridKind::H3,
+        resolved_paths,
+        resolutions,
+        remote_source_factory,
+    )
+}
+
+/// Estimate query cardinality (number of grid cells emitted) for `grid`.
+pub fn estimate_raster_cardinality_for(
+    grid: GridKind,
+    resolved_paths: &[PathBuf],
+    resolutions: &[u8],
+    remote_source_factory: Option<&dggs_stream_core::raster::http_range::RemoteSourceFactory>,
+) -> u64 {
+    if let Some(first_path) = resolved_paths.first() {
+        if let Ok(reader) =
+            GeoTiffStreamReader::open_with_remote_source_factory(first_path, remote_source_factory)
+        {
+            let w = reader.metadata.width as f64;
+            let h = reader.metadata.height as f64;
+            let total_pixels = (w * h) as u64 * resolved_paths.len() as u64;
+
+            let (x0, y0) = reader.metadata.geotransform.pixel_to_coord(0.0, 0.0);
+            let (x1, y1) = reader.metadata.geotransform.pixel_to_coord(w, h);
+            let dx = (x1 - x0).abs();
+            let dy = (y1 - y0).abs();
+
+            let area_m2 =
+                if matches!(reader.metadata.epsg, Some(4326)) || reader.metadata.epsg.is_none() {
+                    dx * 111_320.0 * dy * 110_540.0 * resolved_paths.len() as f64
+                } else {
+                    dx * dy * resolved_paths.len() as f64
+                };
+
+            let mut total_hex_est = 0u64;
+            for &res in resolutions {
+                let hex_area = grid.area_m2(res);
+                let hex_count = (area_m2 / hex_area).ceil() as u64;
+                total_hex_est = total_hex_est.saturating_add(hex_count.min(total_pixels).max(1));
+            }
+            total_hex_est.max(1)
+        } else {
+            10_000 * resolutions.len() as u64
+        }
+    } else {
+        10_000 * resolutions.len() as u64
+    }
+}
+
+/// Generic C-compatible deallocator for `Box<T>` allocated data pointers
+///
+/// # Safety
+/// `data` must be null or a pointer obtained from `Box::<T>::into_raw` that
+/// has not been freed. DuckDB calls this destructor exactly once.
+pub unsafe extern "C" fn delete_boxed<T>(data: *mut c_void) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !data.is_null() {
+            // SAFETY: non-null `data` came from `Box::<T>::into_raw` and DuckDB
+            // invokes this destructor exactly once, so it is reclaimed only here.
+            drop(unsafe { Box::from_raw(data.cast::<T>()) });
+        }
+    })) {
+        if let Err(secondary) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+        {
+            std::mem::forget(secondary);
+        }
+    }
+}
+
+/// Attach boxed global init state to DuckDB table function lifecycle with type-safe destructor and Send + Sync enforcement
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passed to the current init
+/// callback.
+pub unsafe fn set_table_function_init_data<T: Send + Sync + 'static>(
+    info: duckdb_init_info,
+    data: T,
+) {
+    // SAFETY: `info` is the live init handle (caller contract). DuckDB takes
+    // ownership of the boxed pointer and frees it once via `delete_boxed::<T>`,
+    // the matching type; `Send`/`Sync` bounds cover DuckDB's worker threads
+    // reading the state concurrently (global) or moving it (local).
+    unsafe {
+        duckdb_init_set_init_data(
+            info,
+            Box::into_raw(Box::new(data)) as *mut c_void,
+            Some(delete_boxed::<T>),
+        );
+    }
+}
+
+/// Attach boxed thread-local init state to DuckDB table function lifecycle with Send enforcement
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passed to the current init
+/// callback.
+pub unsafe fn set_table_function_local_init_data<T: Send + 'static>(
+    info: duckdb_init_info,
+    data: T,
+) {
+    // SAFETY: `info` is the live init handle (caller contract). DuckDB takes
+    // ownership of the boxed pointer and frees it once via `delete_boxed::<T>`,
+    // the matching type; `Send`/`Sync` bounds cover DuckDB's worker threads
+    // reading the state concurrently (global) or moving it (local).
+    unsafe {
+        duckdb_init_set_init_data(
+            info,
+            Box::into_raw(Box::new(data)) as *mut c_void,
+            Some(delete_boxed::<T>),
+        );
+    }
+}
+
+/// Open a raster mosaic reader from resolved paths, setting DuckDB init error on failure
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passed to the current init
+/// callback.
+pub unsafe fn open_mosaic_or_set_error(
+    info: duckdb_init_info,
+    paths: &[PathBuf],
+    bbox: Option<[f64; 4]>,
+    source_crs: Option<&str>,
+    overlap_rule: OverlapRule,
+    remote_source_factory: Option<&dggs_stream_core::raster::http_range::RemoteSourceFactory>,
+) -> Option<Arc<MosaicReader>> {
+    match MosaicReader::open_with_remote_source_factory(
+        paths,
+        bbox,
+        source_crs,
+        overlap_rule,
+        remote_source_factory,
+    ) {
+        Ok(m) => Some(Arc::new(m)),
+        Err(e) => {
+            let err_msg = CString::new(format!("Failed to open raster mosaic: {}", e))
+                .unwrap_or_else(|_| CString::new("Failed to open raster mosaic").unwrap());
+            // SAFETY: `info` is the live init handle (caller contract) and DuckDB
+            // copies the NUL-terminated message before `err_msg` drops.
+            unsafe { duckdb_init_set_error(info, err_msg.as_ptr()) };
+            None
+        }
+    }
+}
+
+/// Unified thread-local state for table function execution, carrying reusable scratch buffers for hex string and WKB encoding
+pub struct TableFunctionLocalData {
+    pub thread_id: usize,
+    pub hex_buf: [u8; 16],
+    pub wkb_buf: crate::encoding::WkbBuf,
+}
+
+impl Default for TableFunctionLocalData {
+    fn default() -> Self {
+        Self {
+            thread_id: 0,
+            hex_buf: [0u8; 16],
+            wkb_buf: [0u8; crate::encoding::WKB_BUF_LEN],
+        }
+    }
+}
+
+impl TableFunctionLocalData {
+    /// Resolve scratch buffers from thread-local state or fallback buffers
+    ///
+    /// # Safety
+    /// `ptr` must be null or point to a live `TableFunctionLocalData` that is
+    /// not otherwise borrowed for `'a`.
+    #[inline(always)]
+    pub unsafe fn get_scratch_buffers<'a>(
+        ptr: *mut TableFunctionLocalData,
+        fallback_hex: &'a mut [u8; 16],
+        fallback_wkb: &'a mut crate::encoding::WkbBuf,
+    ) -> (&'a mut [u8; 16], &'a mut crate::encoding::WkbBuf) {
+        if !ptr.is_null() {
+            // SAFETY: non-null `ptr` is a live `TableFunctionLocalData` with no
+            // other borrows for `'a` (caller contract); the two fields are
+            // disjoint, so the two `&mut` borrows don't alias.
+            unsafe { (&mut (*ptr).hex_buf, &mut (*ptr).wkb_buf) }
+        } else {
+            (fallback_hex, fallback_wkb)
+        }
+    }
+}
+
+/// Standard thread-local initialization callback for DuckDB table functions
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passes to this callback.
+pub unsafe extern "C" fn init_table_function_local(info: duckdb_init_info) {
+    // SAFETY: DuckDB passes this local-init callback a live `info` handle.
+    unsafe {
+        crate::ffi::ffi_init_guard(info, || {
+            let local_data = TableFunctionLocalData::default();
+            set_table_function_local_init_data(info, local_data);
+        });
+    }
+}
+
+/// Extract projected column indices requested by DuckDB projection pushdown
+///
+/// # Safety
+/// `info` must be the valid init info DuckDB passed to the current init
+/// callback.
+pub unsafe fn extract_projected_columns(info: duckdb_init_info) -> Vec<usize> {
+    // SAFETY: `info` is the live init handle (caller contract) and every index
+    // queried is below the column count DuckDB just reported.
+    let col_count = unsafe { duckdb_init_get_column_count(info) };
+    let mut projected_columns = Vec::with_capacity(col_count as usize);
+    for i in 0..col_count {
+        // SAFETY: as above, `i < col_count`.
+        projected_columns.push(unsafe { duckdb_init_get_column_index(info, i) } as usize);
+    }
+    projected_columns
+}
+
+// Compile-time verification that all global state types are Send + Sync and local state is Send
+const _: () = {
+    fn assert_send_sync<T: Send + Sync>() {}
+    fn assert_send<T: Send>() {}
+
+    let _ = assert_send_sync::<crate::functions::table_function::RasterH3GlobalData>;
+    let _ = assert_send_sync::<
+        crate::functions::categorical_table_function::RasterH3CategoricalGlobalData,
+    >;
+    let _ = assert_send_sync::<crate::functions::parquet_table_function::ParquetGlobalData>;
+    let _ = assert_send_sync::<crate::functions::pmtiles_table_function::PmtilesGlobalData>;
+    let _ = assert_send_sync::<crate::functions::pmtiles_table_function::ParquetPmtilesGlobalData>;
+
+    let _ = assert_send::<TableFunctionLocalData>;
+};

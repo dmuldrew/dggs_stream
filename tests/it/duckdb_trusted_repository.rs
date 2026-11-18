@@ -1,7 +1,7 @@
 //! DuckDB 2.0+ trusted custom extension repository end-to-end test. Run after
 //! `cargo build --lib` with
-//! `cargo test -p raster_h3 --test it duckdb_trusted_repository -- --ignored`.
-//! DUCKDB_BIN and RASTER_H3_LIBRARY optionally select the CLI and built library; the
+//! `cargo test -p dggs_stream --test it duckdb_trusted_repository -- --ignored`.
+//! DUCKDB_BIN and DGGS_STREAM_LIBRARY optionally select the CLI and built library; the
 //! test is a no-op against DuckDB < 2.0, which has no `CREATE EXTENSION REPOSITORY`.
 //! CI runs it in the DuckDB 2.0 step (see ci.yml).
 //!
@@ -96,12 +96,12 @@ impl Harness {
         std::fs::create_dir_all(&home).unwrap();
         let mut harness = Self {
             cli,
-            library: std::env::var_os("RASTER_H3_LIBRARY")
+            library: std::env::var_os("DGGS_STREAM_LIBRARY")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
                     let exe = std::env::current_exe().unwrap();
                     exe.parent().unwrap().parent().unwrap().join(format!(
-                        "{}raster_h3{}",
+                        "{}dggs_stream{}",
                         std::env::consts::DLL_PREFIX,
                         std::env::consts::DLL_SUFFIX
                     ))
@@ -167,7 +167,7 @@ impl Harness {
     }
 
     /// Builds `<temp>/<name>/` with the manifest pinning `manifest_key` and the
-    /// extension at `<version>/<platform>/raster_h3.duckdb_extension.gz`, signed with
+    /// extension at `<version>/<platform>/dggs_stream.duckdb_extension.gz`, signed with
     /// `signing_key` (or left unsigned).
     fn repository(&self, name: &str, manifest_key: &Path, signing_key: Option<&Path>) -> PathBuf {
         let repo = self.temp.path().join(name);
@@ -192,9 +192,9 @@ impl Harness {
             .arg("-i")
             .arg(&self.library)
             .arg("-o")
-            .arg(ext_dir.join("raster_h3.duckdb_extension.gz"))
+            .arg(ext_dir.join("dggs_stream.duckdb_extension.gz"))
             // Package with the C-API version tag matching the built library
-            // (the v1.5.6 build is selected via RASTER_H3_LIBRARY).
+            // (the v1.5.6 build is selected via DGGS_STREAM_LIBRARY).
             .args([
                 "-p",
                 &self.platform,
@@ -230,9 +230,9 @@ fn duckdb_trusted_repository_installs_signed_extension() {
     let good = h.repository("good_repo", &repo_key, Some(&repo_key));
     let out = h.run(&format!(
         "SET allow_extension_repositories = 'allowed';
-         CREATE EXTENSION REPOSITORY raster_h3_repo WITH PREFIX {};
-         INSTALL raster_h3 FROM raster_h3_repo;
-         LOAD raster_h3 FROM raster_h3_repo;
+         CREATE EXTENSION REPOSITORY dggs_stream_repo WITH PREFIX {};
+         INSTALL dggs_stream FROM dggs_stream_repo;
+         LOAD dggs_stream FROM dggs_stream_repo;
          {PROBE_SQL}",
         sql_path(&good)
     ));
@@ -246,7 +246,9 @@ fn duckdb_trusted_repository_installs_signed_extension() {
 
     // 2. A later session loads from the pinned repository without opting in again
     //    and without allow_unsigned_extensions; the signature is re-checked on LOAD.
-    let out = h.run(&format!("LOAD raster_h3 FROM raster_h3_repo; {PROBE_SQL}"));
+    let out = h.run(&format!(
+        "LOAD dggs_stream FROM dggs_stream_repo; {PROBE_SQL}"
+    ));
     let text = output_text(&out);
     assert!(
         out.status.success(),
@@ -259,7 +261,7 @@ fn duckdb_trusted_repository_installs_signed_extension() {
     let out = h.run(&format!(
         "SET allow_extension_repositories = 'allowed';
          CREATE EXTENSION REPOSITORY wrong_key_repo WITH PREFIX {};
-         INSTALL raster_h3 FROM wrong_key_repo;",
+         INSTALL dggs_stream FROM wrong_key_repo;",
         sql_path(&wrong)
     ));
     let text = output_text(&out);
@@ -273,7 +275,7 @@ fn duckdb_trusted_repository_installs_signed_extension() {
     let out = h.run(&format!(
         "SET allow_extension_repositories = 'allowed';
          CREATE EXTENSION REPOSITORY unsigned_repo WITH PREFIX {};
-         INSTALL raster_h3 FROM unsigned_repo;",
+         INSTALL dggs_stream FROM unsigned_repo;",
         sql_path(&unsigned)
     ));
     let text = output_text(&out);
