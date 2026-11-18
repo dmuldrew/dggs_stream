@@ -5,7 +5,7 @@
 
 use tiff::tags::{PhotometricInterpretation, Predictor};
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::TiffByteOrder;
 
 /// Trait for integer sample types that support wrapping addition for Horizontal Predictor decoding
@@ -247,7 +247,9 @@ pub struct ChunkEncoding {
 impl ChunkEncoding {
     fn validate(self, src_len: usize, dst_len: usize, sample_bytes: usize) -> Result<()> {
         let invalid = || {
-            RasterH3Error::InvalidMetadata("invalid or truncated decoded TIFF chunk layout".into())
+            DggsStreamError::InvalidMetadata(
+                "invalid or truncated decoded TIFF chunk layout".into(),
+            )
         };
         if self.spp == 0 || self.data_w == 0 || self.data_h == 0 || self.data_w > self.tile_w {
             return Err(invalid());
@@ -737,12 +739,12 @@ pub fn unpack_f32(src: &mut [u8], dst: &mut [f32], encoding: ChunkEncoding) -> R
             }
         }
         Predictor::Horizontal => {
-            return Err(RasterH3Error::InvalidMetadata(
+            return Err(DggsStreamError::InvalidMetadata(
                 "horizontal predictor unsupported for f32".into(),
             ));
         }
         _ => {
-            return Err(RasterH3Error::InvalidMetadata(
+            return Err(DggsStreamError::InvalidMetadata(
                 "unsupported predictor for f32".into(),
             ));
         }
@@ -859,12 +861,12 @@ pub fn unpack_f64(src: &mut [u8], dst: &mut [f64], encoding: ChunkEncoding) -> R
             }
         }
         Predictor::Horizontal => {
-            return Err(RasterH3Error::InvalidMetadata(
+            return Err(DggsStreamError::InvalidMetadata(
                 "horizontal predictor unsupported for f64".into(),
             ));
         }
         _ => {
-            return Err(RasterH3Error::InvalidMetadata(
+            return Err(DggsStreamError::InvalidMetadata(
                 "unsupported predictor for f64".into(),
             ));
         }

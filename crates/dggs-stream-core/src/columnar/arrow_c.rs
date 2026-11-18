@@ -13,7 +13,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::columnar::{ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch};
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 /// Arrow C Data Interface flag indicating the field is nullable (`ARROW_FLAG_NULLABLE = 2`).
 pub const ARROW_FLAG_NULLABLE: i64 = 2;
@@ -194,7 +194,7 @@ impl ArrowSchema {
     /// `self` must be a valid, unreleased `ArrowSchema` struct.
     pub unsafe fn to_column_schema(&self) -> Result<ColumnSchema> {
         if self.release.is_none() || self.format.is_null() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "ArrowSchema is released or null".into(),
             ));
         }
@@ -202,14 +202,14 @@ impl ArrowSchema {
         // schema (caller contract), is a NUL-terminated string owned by the schema.
         let fmt = unsafe { CStr::from_ptr(self.format) }.to_string_lossy();
         if fmt != "+s" {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "Expected top-level struct format '+s', got '{}'",
                 fmt
             )));
         }
         let mut fields = Vec::with_capacity(self.n_children.max(0) as usize);
         if self.n_children > 0 && self.children.is_null() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "ArrowSchema has children but a null children array".into(),
             ));
         }
@@ -218,7 +218,7 @@ impl ArrowSchema {
             // schema, points to `n_children` child pointers; `i < n_children`.
             let child_ptr = unsafe { *self.children.add(i) };
             if child_ptr.is_null() {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "Null child pointer in ArrowSchema".into(),
                 ));
             }
@@ -234,7 +234,7 @@ impl ArrowSchema {
                     .into_owned()
             };
             if child.format.is_null() {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Null format string for ArrowSchema child '{name}'"
                 )));
             }
@@ -253,13 +253,13 @@ impl ArrowSchema {
                 "+l" => match unsafe { histogram_type(child) } {
                     Some(data_type) => data_type,
                     None => {
-                        return Err(RasterH3Error::InvalidParameter(format!(
+                        return Err(DggsStreamError::InvalidParameter(format!(
                             "Unsupported Arrow list layout for column '{name}'"
                         )))
                     }
                 },
                 other => {
-                    return Err(RasterH3Error::InvalidParameter(format!(
+                    return Err(DggsStreamError::InvalidParameter(format!(
                         "Unsupported Arrow format '{}' for column '{}'",
                         other, name
                     )))
@@ -476,7 +476,7 @@ unsafe fn import_histogram(
     len: usize,
 ) -> Result<super::HistogramColumn> {
     let invalid =
-        |what: &str| RasterH3Error::InvalidParameter(format!("ArrowArray histogram {what}"));
+        |what: &str| DggsStreamError::InvalidParameter(format!("ArrowArray histogram {what}"));
     let mut column = super::HistogramColumn::new(binned);
     if len == 0 {
         return Ok(column);
@@ -569,13 +569,13 @@ unsafe fn read_var_len<'a>(
     // monotonically non-decreasing; either would panic (or read out of order)
     // in the per-row slices below, so validate instead of trusting the layout.
     if offsets[0] < 0 || offsets[..len].iter().zip(&offsets[1..]).any(|(a, b)| a > b) {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "ArrowArray variable-length offsets are not monotonically non-decreasing".into(),
         ));
     }
     let total_bytes = offsets[len] as usize;
     if total_bytes > 0 && data_ptr.is_null() {
-        return Err(RasterH3Error::InvalidParameter(
+        return Err(DggsStreamError::InvalidParameter(
             "ArrowArray variable-length column has data offsets but a null data buffer".into(),
         ));
     }
@@ -791,12 +791,12 @@ impl ArrowArray {
     /// `self` must be a valid, unreleased `ArrowArray` matching `schema`.
     pub unsafe fn to_record_batch(&self, schema: Arc<ColumnSchema>) -> Result<RecordBatch> {
         if self.release.is_none() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "ArrowArray is already released".into(),
             ));
         }
         if self.n_children as usize != schema.fields.len() {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "ArrowArray n_children ({}) != schema field count ({})",
                 self.n_children,
                 schema.fields.len()
@@ -807,7 +807,7 @@ impl ArrowArray {
         let mut columns = Vec::with_capacity(schema.fields.len());
 
         if self.n_children > 0 && self.children.is_null() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "ArrowArray has children but a null children array".into(),
             ));
         }
@@ -816,7 +816,7 @@ impl ArrowArray {
             // array, caller contract); `i < n_children` was checked above.
             let child_ptr = unsafe { *self.children.add(i) };
             if child_ptr.is_null() {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "Null child pointer {i} in ArrowArray"
                 )));
             }
@@ -828,7 +828,7 @@ impl ArrowArray {
                 _ => 2,
             };
             if child.n_buffers < expected_buffers || child.buffers.is_null() {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "ArrowArray child {i} has {} buffers, expected {expected_buffers}",
                     child.n_buffers
                 )));
@@ -838,7 +838,7 @@ impl ArrowArray {
             let start = child.offset.max(0) as usize + parent_offset;
             let len = num_rows;
             if (child.length.max(0) as usize) < parent_offset + len {
-                return Err(RasterH3Error::InvalidParameter(format!(
+                return Err(DggsStreamError::InvalidParameter(format!(
                     "ArrowArray child {i} length ({}) is shorter than parent offset + length ({})",
                     child.length,
                     parent_offset + len
@@ -1105,10 +1105,10 @@ impl ArrowArrayStream {
     /// `self` must be a valid, unreleased `ArrowArrayStream`.
     pub unsafe fn collect_batches(&mut self) -> Result<(Arc<ColumnSchema>, Vec<RecordBatch>)> {
         let get_schema_fn = self.get_schema.ok_or_else(|| {
-            RasterH3Error::InvalidParameter("ArrowArrayStream is released".into())
+            DggsStreamError::InvalidParameter("ArrowArrayStream is released".into())
         })?;
         let get_next_fn = self.get_next.ok_or_else(|| {
-            RasterH3Error::InvalidParameter("ArrowArrayStream missing get_next".into())
+            DggsStreamError::InvalidParameter("ArrowArrayStream missing get_next".into())
         })?;
 
         let mut raw_schema = ArrowSchema::empty();
@@ -1117,7 +1117,7 @@ impl ArrowArrayStream {
         // whose (empty) contents need no release if overwritten.
         let rc = unsafe { get_schema_fn(self, &mut raw_schema) };
         if rc != 0 {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "ArrowArrayStream.get_schema failed with code {}",
                 rc
             )));
@@ -1148,7 +1148,7 @@ impl ArrowArrayStream {
                 } else {
                     format!("ArrowArrayStream error code {}", rc)
                 };
-                return Err(RasterH3Error::StreamFailed(msg));
+                return Err(DggsStreamError::StreamFailed(msg));
             }
             if raw_array.release.is_none() {
                 break;
@@ -1442,7 +1442,7 @@ mod tests {
         // SAFETY: `arr` matches `schema` apart from the deliberately forged
         // offsets buffer under test.
         let err = unsafe { arr.to_record_batch(Arc::clone(&schema)) }.unwrap_err();
-        assert!(matches!(err, RasterH3Error::InvalidParameter(_)));
+        assert!(matches!(err, DggsStreamError::InvalidParameter(_)));
     }
 
     /// A negative first offset used to be silently clamped to 0 by `.max(0)`,
@@ -1458,7 +1458,7 @@ mod tests {
         // SAFETY: `arr` matches `schema` apart from the deliberately forged
         // offsets buffer under test.
         let err = unsafe { arr.to_record_batch(Arc::clone(&schema)) }.unwrap_err();
-        assert!(matches!(err, RasterH3Error::InvalidParameter(_)));
+        assert!(matches!(err, DggsStreamError::InvalidParameter(_)));
     }
 
     /// Offsets that reach into a null data buffer used to panic indexing an
@@ -1473,6 +1473,6 @@ mod tests {
         // SAFETY: `arr` matches `schema` apart from the deliberately forged
         // data buffer under test.
         let err = unsafe { arr.to_record_batch(Arc::clone(&schema)) }.unwrap_err();
-        assert!(matches!(err, RasterH3Error::InvalidParameter(_)));
+        assert!(matches!(err, DggsStreamError::InvalidParameter(_)));
     }
 }

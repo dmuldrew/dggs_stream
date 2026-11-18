@@ -325,14 +325,14 @@ system below is enabled.
 
 ### DuckDB file system & secrets (DuckDB 2.0 build)
 
-On the [DuckDB 2.0 build](#extension-builds), `SET raster_h3_use_duckdb_fs = true` opens
+On the [DuckDB 2.0 build](#extension-builds), `SET dggs_stream_use_duckdb_fs = true` opens
 rasters through DuckDB's own file system instead. Remote reads then follow the loaded
 `httpfs` configuration and `CREATE SECRET` credentials, and any scheme DuckDB serves works:
 
 ```sql
 INSTALL httpfs; LOAD httpfs;
 CREATE SECRET (TYPE gcs, KEY_ID '...', SECRET '...');
-SET raster_h3_use_duckdb_fs = true;
+SET dggs_stream_use_duckdb_fs = true;
 
 SELECT * FROM h3_raster_continuous_aggregate('gs://my-bucket/dem.tif', resolution := 8);
 ```
@@ -342,7 +342,7 @@ parallel, each on its own DuckDB file handle). With the option on, local files a
 through DuckDB too, so they lose the memory-mapped fast path; leave it off for local-only
 work. The `DGGS_STREAM_USE_DUCKDB_FS` environment variable turns it on as well. See
 [session options](../sql-api-reference.md#session-options-duckdb-20-build) for the related
-`raster_h3_fetch_workers`, `raster_h3_decode_budget_mb` and `raster_h3_workers` settings.
+`dggs_stream_fetch_workers`, `dggs_stream_decode_budget_mb` and `dggs_stream_workers` settings.
 
 ### Multi-file mosaics
 
@@ -624,7 +624,7 @@ The root crate keeps these symbols in the shared library through
 | `h3_to_string`, `string_to_h3`, `h3_to_lat`, `h3_to_lng`, `h3_get_resolution`, `h3_is_valid` (UBIGINT/VARCHAR), `h3_to_wkb` (UBIGINT/VARCHAR), `h3_cell_to_parent` (UBIGINT/VARCHAR), `h3_to_geometry` / `h3_cell_to_geometry` (UBIGINT/VARCHAR), `h3_polygon_to_cells` (BLOB, plus GEOMETRY on DuckDB ≥ 1.5; returns `UBIGINT[]`; on the DuckDB 2.0 build a bind callback rejects invalid constant arguments at plan time) | scalar | [`scalar.rs`](../../crates/dggs-stream-duckdb/src/functions/scalar.rs) |
 | `a5_*`, `s2_*`, `healpix_*` | the same table functions and scalars on the A5, Google S2 and HEALPix grids: `{grid}_raster_continuous_aggregate` (aliases `{grid}_raster_continuous`, `read_raster_{grid}`, `raster_to_{grid}`, `raster_{grid}`), `{grid}_raster_categorical_aggregate`, `{grid}_raster_to_parquet`, `{grid}_raster_to_pmtiles`; `{grid}_to_string`, `string_to_{grid}`, `{grid}_to_lat`, `{grid}_to_lng`, `{grid}_get_resolution`, `{grid}_is_valid` / `{grid}_is_valid_cell`, `{grid}_to_wkb`, `{grid}_to_geometry` / `{grid}_cell_to_geometry`, `{grid}_cell_to_parent`, `{grid}_lonlat_to_cell`, `{grid}_polygon_to_cells`. Resolutions: A5 and S2 0–30, HEALPix 0–29 (H3 0–15). Cell ids are `UBIGINT` (S2 ids can have the top bit set); HEALPix ids are NUNIQ, `4 * 4^depth + nested_pixel`. Output columns are `{grid}_index` / `{grid}_hex`; the `h3_` table functions also take `grid := 'a5' \| 's2' \| 'healpix'`. | table / scalar | [`table_function.rs`](../../crates/dggs-stream-duckdb/src/functions/table_function.rs), [`scalar.rs`](../../crates/dggs-stream-duckdb/src/functions/scalar.rs) |
 | `pmtiles` (DuckDB 2.0 build) | `COPY ... TO ... (FORMAT pmtiles)` format | [`copy_function.rs`](../../crates/dggs-stream-duckdb/src/functions/copy_function.rs) |
-| `raster_h3_use_duckdb_fs`, `raster_h3_fetch_workers`, `raster_h3_decode_budget_mb`, `raster_h3_workers` (DuckDB 2.0 build) | session options (`SET`) | [`config.rs`](../../crates/dggs-stream-duckdb/src/functions/config.rs) |
+| `dggs_stream_use_duckdb_fs`, `dggs_stream_fetch_workers`, `dggs_stream_decode_budget_mb`, `dggs_stream_workers` (DuckDB 2.0 build) | session options (`SET`) | [`config.rs`](../../crates/dggs-stream-duckdb/src/functions/config.rs) |
 
 The scalar kernels call `dggs_stream_core::scalar_ops`, so their results match the other
 engines (with the `0` vs `NULL` differences listed in the

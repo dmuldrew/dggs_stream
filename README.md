@@ -8,11 +8,15 @@
 
 A pure-Rust engine that streams multi-gigabyte geospatial raster files (GeoTIFF, Cloud-Optimized GeoTIFFs) in a single pass and aggregates them into the cells of a **Discrete Global Grid System (DGGS)**: [Uber H3](https://h3geo.org/) hexagons, [A5](https://a5geo.org/) pentagons, [Google S2](https://s2geometry.io/) cells or [HEALPix](https://healpix.sourceforge.io/) cells. It also generates cloud-native **PMTiles v3** vector pyramids for instant web visualization. Aggregation runs in a [bounded memory budget](docs/engineering.md#1-southernmost-scan-line-horizon-eviction) and spills to disk when needed. The same engine ships as a native DuckDB extension, DataFusion-style table providers, a Python/Polars package, a PostgreSQL extension and a command-line tool (see [Engines](#engines)).
 
+![Global cell boundaries on four Equal Earth maps: H3 hexagons and pentagons, A5 pentagons, S2 quadrilaterals, and HEALPix curved-edge quadrilaterals.](assets/global-grid-comparison.svg)
+
+Each panel shows every cell at the indicated level. Cell counts give a common reference because each grid defines its own resolution scale. [Compare grid properties](docs/grids.md).
+
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
 Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
-> **About the name.** dggs_stream streams raster files onto a DGGS in one pass (it is not a real-time event-stream system). It was previously called raster_h3, and the old names still work for now: `import raster_h3` (with a deprecation warning), `spark.read.format("raster_h3")`, the `raster-h3-cli` and `raster-h3` binaries, `RASTER_H3_*` environment variables, `CREATE EXTENSION raster_h3` in PostgreSQL, and DuckDB's `LOAD raster_h3` for a copy of the extension file named `raster_h3.duckdb_extension`. SQL function and setting names did not change (`h3_raster_continuous_aggregate`, `raster_h3_workers`, ...).
+> **Formerly raster_h3.** See the [changelog](CHANGELOG.md#unreleased) for the new names and migration details.
 
 | Output | Use Case | Available In |
 | :--- | :--- | :--- |
@@ -21,6 +25,8 @@ Statistics use pixel contributions, not ground-area weights. CRS projection tole
 | **GeoParquet 1.1** | GIS interchange (QGIS, GeoPandas, BigQuery) | DuckDB, Python, CLI |
 
 ---
+
+A5 uses the 1.0 cell-ID system. Existing A5 0.x data needs re-indexing or explicit ID migration before use. See [A5 index version](docs/grids.md#a5-index-version).
 
 ## 📖 Table of Contents
 
@@ -395,7 +401,7 @@ See [`h3_polygon_to_cells`](docs/sql-api-reference.md#h3_polygon_to_cells) for t
 import polars as pl
 import dggs_stream
 
-df = (dggs_stream.scan_raster_h3("dem.tif", 8)
+df = (dggs_stream.scan_raster("dem.tif", 8)
         .filter(pl.col("count") > 10)
         .select("h3_hex", "mean", "count")
         .collect())
@@ -427,7 +433,7 @@ for batch in plan.execute()? { /* RecordBatch with h3_index, mean */ }
 
 This is the layer under the DataFusion adapter below. Call `supports_filters_pushdown` to learn
 which predicates you still have to apply to the scan's rows. With compaction on, it reports every predicate `Unsupported` and the scan returns
-the full compacted table; `RasterH3Table` (below) then leaves those `WHERE` clauses to
+the full compacted table; `RasterTable` (below) then leaves those `WHERE` clauses to
 DataFusion. The adapter defers `LIMIT` until after all residual filters, including inexact
 pushdowns. See [filter pushdown](docs/engines/datafusion.md).
 
@@ -473,7 +479,7 @@ merged per cell.
 import pyarrow as pa, pyarrow.compute as pc, dggs_stream
 
 specs = dggs_stream.plan_partitions("dem.tif", target_chunks=256)          # driver
-parts = [pa.table(dggs_stream.RasterH3ArrowStream("dem.tif", 8, partition=s))  # workers
+parts = [pa.table(dggs_stream.RasterArrowStream("dem.tif", 8, partition=s))  # workers
          for s in specs]
 cells = pa.concat_tables(parts)
 final = cells.filter(pc.is_null(cells["partial_state"])).drop(["partial_state"])
@@ -637,12 +643,12 @@ This prevents silent spatial corruption — meter-based coordinates treated as d
 | Engine | Override |
 | :--- | :--- |
 | DuckDB | `h3_raster_continuous_aggregate('grid.tif', resolution := 8, source_crs := 'EPSG:32610')` |
-| Python | `dggs_stream.scan_raster_h3("grid.tif", 8, crs="EPSG:32610")` |
+| Python | `dggs_stream.scan_raster("grid.tif", 8, crs="EPSG:32610")` |
 | PostgreSQL | `h3_raster_continuous_aggregate('/data/grid.tif', 8, source_crs => 'EPSG:32610')` |
 | CLI | `dggs-stream-cli jsonl grid.tif -r 8 --crs EPSG:32610` |
 | DataFusion | `ContinuousRasterTableProvider::try_new("grid.tif", vec![8])?.with_crs("EPSG:32610")` |
 
-Valid pixels whose transform fails or lands outside the valid latitude/longitude range are dropped rather than aborting the stream; they are counted by `transform_failures()` (core streamers and batch readers) and reported by the engines: a `transform_failures` column in DuckDB's export summaries, a PostgreSQL `WARNING`, a Python `RuntimeWarning` from the exporters and `scan_raster_h3`, and a CLI warning on stderr. DuckDB (`strict_transforms := true`), Python (`strict_transforms=True`) and DataFusion (`with_strict_transforms(true)`) can fail the query instead. See [transform-failure diagnostics](docs/engines/core.md#transform-failure-diagnostics).
+Valid pixels whose transform fails or lands outside the valid latitude/longitude range are dropped rather than aborting the stream; they are counted by `transform_failures()` (core streamers and batch readers) and reported by the engines: a `transform_failures` column in DuckDB's export summaries, a PostgreSQL `WARNING`, a Python `RuntimeWarning` from the exporters and `scan_raster`, and a CLI warning on stderr. DuckDB (`strict_transforms := true`), Python (`strict_transforms=True`) and DataFusion (`with_strict_transforms(true)`) can fail the query instead. See [transform-failure diagnostics](docs/engines/core.md#transform-failure-diagnostics).
 
 For supported projection families, see [Supported CRS](docs/crs-and-projection.md). Helmert datum shifts (`+towgs84`, and built-in national grids such as `EPSG:27700` and `EPSG:28992`) are applied; grid-based shifts such as NAD27 are rejected (see [Datum Shifts](docs/crs-and-projection.md#datum-shifts)). To convert your dataset into zero-trig native WGS84 for maximum throughput, see [Optimal Raster Format & Ingestion Speed](docs/optimal-raster-format.md).
 

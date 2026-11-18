@@ -1,4 +1,4 @@
-"""`RasterH3ArrowStream` (Arrow PyCapsule protocol) read by real PyArrow and Polars:
+"""`RasterArrowStream` (Arrow PyCapsule protocol) read by real PyArrow and Polars:
 values against a direct per-pixel H3 reference, projection and limit, batches,
 categorical wide/long, and errors raised as Python exceptions.
 """
@@ -33,7 +33,7 @@ def test_values_match_direct_h3_reference(eager, gradient_expected):
 
 
 def test_polars_from_arrow_equals_pyarrow_table(dggs_stream, gradient_tif, eager):
-    stream = dggs_stream.RasterH3ArrowStream(gradient_tif, RES)
+    stream = dggs_stream.RasterArrowStream(gradient_tif, RES)
     try:
         df = frame(stream)
     except TypeError:
@@ -43,13 +43,13 @@ def test_polars_from_arrow_equals_pyarrow_table(dggs_stream, gradient_tif, eager
     assert sort(frame(stream)).equals(eager)
 
 
-def test_to_polars_and_read_raster_h3_equal_pyarrow_table(dggs_stream, gradient_tif, eager):
-    assert sort(dggs_stream.RasterH3ArrowStream(gradient_tif, RES).to_polars()).equals(eager)
-    assert sort(dggs_stream.read_raster_h3(gradient_tif, RES)).equals(eager)
+def test_to_polars_and_read_raster_equal_pyarrow_table(dggs_stream, gradient_tif, eager):
+    assert sort(dggs_stream.RasterArrowStream(gradient_tif, RES).to_polars()).equals(eager)
+    assert sort(dggs_stream.read_raster(gradient_tif, RES)).equals(eager)
 
 
 def test_pyarrow_table_types(dggs_stream, gradient_tif):
-    table = dggs_stream.RasterH3ArrowStream(gradient_tif, RES).to_pyarrow()
+    table = dggs_stream.RasterArrowStream(gradient_tif, RES).to_pyarrow()
     assert table.schema.field("h3_index").type == pa.uint64()
     assert table.schema.field("h3_hex").type in (pa.string(), pa.large_string())
     assert table.schema.field("count").type == pa.float64()
@@ -57,31 +57,31 @@ def test_pyarrow_table_types(dggs_stream, gradient_tif):
 
 
 def test_arrow_schema_capsule_matches_stream(dggs_stream, gradient_tif):
-    stream = dggs_stream.RasterH3ArrowStream(gradient_tif, RES, columns=KEY)
+    stream = dggs_stream.RasterArrowStream(gradient_tif, RES, columns=KEY)
     schema = pa.schema(stream)
     assert schema.names == KEY
     assert schema.equals(pa.table(stream).schema)
 
 
 def test_projection_and_limit(dggs_stream, gradient_tif, eager):
-    table = pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES, columns=KEY))
+    table = pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, columns=KEY))
     assert table.column_names == KEY
     assert sort(frame(table)).equals(eager.select(KEY))
 
-    table = pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES, columns=KEY, limit=3))
+    table = pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, columns=KEY, limit=3))
     assert table.column_names == KEY and table.num_rows == 3
     out = frame(table)
     assert sort(out).equals(semi(eager, out).select(KEY))
 
 
 def test_iter_batches_concatenate_to_full_scan(dggs_stream, gradient_tif, eager):
-    batches = list(dggs_stream.RasterH3ArrowStream(gradient_tif, RES).iter_batches(batch_size=7))
+    batches = list(dggs_stream.RasterArrowStream(gradient_tif, RES).iter_batches(batch_size=7))
     assert len(batches) > 1 and all(b.height <= 7 for b in batches)
     assert sort(pl.concat(batches)).equals(eager)
 
 
 def test_categorical_long_matches_reference(dggs_stream, classes_tif, classes_expected):
-    stream = dggs_stream.RasterH3ArrowStream(classes_tif, RES, categorical=True, format="long")
+    stream = dggs_stream.RasterArrowStream(classes_tif, RES, categorical=True, format="long")
     out = frame(pa.table(stream))
     got = {(r["h3_index"], r["category"]): r for r in out.iter_rows(named=True)}
     want = {
@@ -97,7 +97,7 @@ def test_categorical_long_matches_reference(dggs_stream, classes_tif, classes_ex
 
 
 def test_categorical_wide_matches_reference(dggs_stream, classes_tif, classes_expected):
-    out = frame(pa.table(dggs_stream.RasterH3ArrowStream(classes_tif, RES, categorical=True)))
+    out = frame(pa.table(dggs_stream.RasterArrowStream(classes_tif, RES, categorical=True)))
     assert out.height == len(classes_expected)
     for row in out.iter_rows(named=True):
         classes = classes_expected[row["h3_index"]]
@@ -113,34 +113,34 @@ def test_categorical_wide_matches_reference(dggs_stream, classes_tif, classes_ex
 def test_missing_file_raises(dggs_stream, tmp_path):
     missing = tmp_path / "missing.tif"
     with pytest.raises(RuntimeError):
-        pa.table(dggs_stream.RasterH3ArrowStream(missing, RES))
+        pa.table(dggs_stream.RasterArrowStream(missing, RES))
     with pytest.raises(RuntimeError):
-        dggs_stream.RasterH3ArrowStream(missing, RES).to_polars()
+        dggs_stream.RasterArrowStream(missing, RES).to_polars()
     with pytest.raises(RuntimeError):
-        list(dggs_stream.RasterH3ArrowStream(missing, RES).iter_batches())
+        list(dggs_stream.RasterArrowStream(missing, RES).iter_batches())
 
 
 def test_unknown_column_raises(dggs_stream, gradient_tif):
     with pytest.raises(RuntimeError, match="nope"):
-        pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES, columns=["h3_index", "nope"]))
+        pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, columns=["h3_index", "nope"]))
     with pytest.raises(RuntimeError, match="nope"):
-        pa.schema(dggs_stream.RasterH3ArrowStream(gradient_tif, RES, columns=["nope"]))
+        pa.schema(dggs_stream.RasterArrowStream(gradient_tif, RES, columns=["nope"]))
 
 
 def test_bad_input_raises(dggs_stream, gradient_tif, tmp_path):
     not_tiff = tmp_path / "not_a.tif"
     not_tiff.write_bytes(b"definitely not a TIFF")
     with pytest.raises(RuntimeError):
-        pa.table(dggs_stream.RasterH3ArrowStream(not_tiff, RES))
+        pa.table(dggs_stream.RasterArrowStream(not_tiff, RES))
     with pytest.raises(RuntimeError, match="bounding box"):
-        pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES, bbox=[5, 5, 6, 6]))
+        pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, bbox=[5, 5, 6, 6]))
     for bbox in ["1,2,3", "x,y,z,w", [1, 2, 3]]:
         with pytest.raises(RuntimeError, match="Invalid bbox"):
-            pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, RES, bbox=bbox))
+            pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, bbox=bbox))
     for res in [99, "abc", [8, 16], "", []]:
         with pytest.raises(RuntimeError, match="Invalid resolutions"):
-            pa.table(dggs_stream.RasterH3ArrowStream(gradient_tif, res))
+            pa.table(dggs_stream.RasterArrowStream(gradient_tif, res))
     with pytest.raises(RuntimeError, match="Invalid format"):
         pa.table(
-            dggs_stream.RasterH3ArrowStream(gradient_tif, RES, categorical=True, format="tall")
+            dggs_stream.RasterArrowStream(gradient_tif, RES, categorical=True, format="tall")
         )

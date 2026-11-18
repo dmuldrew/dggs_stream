@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 
 /// Latched lifecycle state of a streaming pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,24 +38,24 @@ impl StreamLifecycle {
     /// Returns:
     /// - `Ok(true)` if running
     /// - `Ok(false)` if finished
-    /// - `Err(RasterH3Error::StreamFailed)` if latched in failure
+    /// - `Err(DggsStreamError::StreamFailed)` if latched in failure
     pub fn ensure_runnable(&self) -> Result<bool> {
         match &self.state {
             StreamState::Running => Ok(true),
             StreamState::Finished => Ok(false),
-            StreamState::Failed(reason) => Err(RasterH3Error::StreamFailed(reason.clone())),
+            StreamState::Failed(reason) => Err(DggsStreamError::StreamFailed(reason.clone())),
         }
     }
 
-    /// Transition to `Failed` state and return the corresponding `RasterH3Error::StreamFailed`.
+    /// Transition to `Failed` state and return the corresponding `DggsStreamError::StreamFailed`.
     ///
     /// If already failed, preserves the original failure reason.
-    pub fn latch_failure(&mut self, reason: String) -> RasterH3Error {
+    pub fn latch_failure(&mut self, reason: String) -> DggsStreamError {
         match &self.state {
-            StreamState::Failed(existing) => RasterH3Error::StreamFailed(existing.clone()),
+            StreamState::Failed(existing) => DggsStreamError::StreamFailed(existing.clone()),
             _ => {
                 self.state = StreamState::Failed(reason.clone());
-                RasterH3Error::StreamFailed(reason)
+                DggsStreamError::StreamFailed(reason)
             }
         }
     }

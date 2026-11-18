@@ -153,7 +153,7 @@ fn strict_mode_fails_the_stream_instead_of_dropping_samples() {
     use dggs_stream_core::columnar::{
         CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader,
     };
-    use dggs_stream_core::error::RasterH3Error;
+    use dggs_stream_core::error::DggsStreamError;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("past_pole.tif");
@@ -170,7 +170,7 @@ fn strict_mode_fails_the_stream_instead_of_dropping_samples() {
         }
     };
     assert!(
-        matches!(err, RasterH3Error::TransformFailures(n) if n > 0),
+        matches!(err, DggsStreamError::TransformFailures(n) if n > 0),
         "{err}"
     );
     // The failure is latched: later reads fail too rather than looking like EOF.

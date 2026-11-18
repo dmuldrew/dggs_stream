@@ -613,7 +613,7 @@ pub struct CommonRasterParams {
     pub emit_geom: bool,
     pub execution: ExecutionParams,
     /// Routes raster byte-range reads through the DuckDB file system when
-    /// `raster_h3_use_duckdb_fs` is set (v1.5.6 build only).
+    /// `dggs_stream_use_duckdb_fs` is set (v1.5.6 build only).
     pub remote_source_factory: Option<dggs_stream_core::raster::http_range::RemoteSourceFactory>,
 }
 

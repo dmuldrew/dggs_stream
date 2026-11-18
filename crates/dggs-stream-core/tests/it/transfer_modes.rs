@@ -309,7 +309,7 @@ fn categorical_transfers_keep_class_codes() {
             cells.insert(rec.h3_index, rec.accumulator);
         })? > 0
         {}
-        Ok::<_, dggs_stream_core::error::RasterH3Error>(cells)
+        Ok::<_, dggs_stream_core::error::DggsStreamError>(cells)
     };
     for grid in GridKind::ALL {
         // Nearest sampling: each fine cell takes the class of the pixel under its centre.

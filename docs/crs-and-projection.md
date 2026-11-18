@@ -9,7 +9,7 @@ dggs_stream automatically detects the Coordinate Reference System (CRS) embedded
 1. **GeoTIFF metadata**: The extension reads the `ModelTiepointTag`, `ModelPixelScaleTag`, and `GeoKeyDirectoryTag` from the TIFF header to extract the embedded projection definition.
 2. **EPSG matching**: If an EPSG code is found, the transformer selects the optimal tier (Identity → Analytical → PROJ4).
 3. **PROJ string fallback**: If only a PROJ.4 definition string or WKT is present (e.g. Lambert Conformal Conic, Albers Equal-Area), it is parsed and transformed via `proj4rs`.
-4. **Mandatory Explicit CRS if Undetected**: If a GeoTIFF lacks embedded CRS metadata or uses an unrecognized projection code, dggs_stream **strictly halts with an error** (`RasterH3Error::CrsNotDetected` / `UnsupportedEpsg`) instead of guessing. You must supply the CRS explicitly.
+4. **Mandatory Explicit CRS if Undetected**: If a GeoTIFF lacks embedded CRS metadata or uses an unrecognized projection code, dggs_stream **strictly halts with an error** (`DggsStreamError::CrsNotDetected` / `UnsupportedEpsg`) instead of guessing. You must supply the CRS explicitly.
 5. **Manual specification & override**: The `crs` (or `source_crs`) parameter accepts `'EPSG:XXXX'` codes or full PROJ.4 definition strings, taking strict precedence over any embedded metadata.
 
 ## Supported Projection Families

@@ -6,13 +6,13 @@ use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
 use dggs_stream_core::encoding::{
     fast_hex_u64, h3_index_to_wkb, parse_hex_u64, WkbBuf, WKB_BUF_LEN,
 };
-use dggs_stream_core::error::{RasterH3Error, Result};
+use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::scalar_ops::{
     h3_cell_to_parent_str, h3_cell_to_parent_u64, h3_get_resolution, h3_is_valid_str,
     h3_is_valid_u64, h3_to_lat, h3_to_lng,
 };
 
-/// A vectorized H3 scalar function over [`ColumnArray`]s. [`crate::udf::RasterH3ScalarUdf`]
+/// A vectorized H3 scalar function over [`ColumnArray`]s. [`crate::udf::H3ScalarUdf`]
 /// adapts it to DataFusion's `ScalarUDFImpl`.
 pub trait H3ScalarFn: Send + Sync {
     /// Canonical function name in SQL.
@@ -40,7 +40,7 @@ impl H3ScalarFn for H3ToStringUdf {
 
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         if arg_types != [ArrowDataType::UInt64] {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_to_string expects (UInt64)".into(),
             ));
         }
@@ -49,7 +49,7 @@ impl H3ScalarFn for H3ToStringUdf {
 
     fn invoke(&self, args: &[ColumnArray]) -> Result<ColumnArray> {
         let Some(ColumnArray::UInt64 { values, validity }) = args.first() else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_to_string requires a UInt64 column".into(),
             ));
         };
@@ -87,7 +87,7 @@ impl H3ScalarFn for StringToH3Udf {
 
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         if arg_types != [ArrowDataType::Utf8] {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "string_to_h3 expects (Utf8)".into(),
             ));
         }
@@ -96,7 +96,7 @@ impl H3ScalarFn for StringToH3Udf {
 
     fn invoke(&self, args: &[ColumnArray]) -> Result<ColumnArray> {
         let Some(ColumnArray::Utf8 { values, validity }) = args.first() else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "string_to_h3 requires a Utf8 column".into(),
             ));
         };
@@ -121,7 +121,7 @@ impl H3ScalarFn for H3ToLatUdf {
 
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         if arg_types != [ArrowDataType::UInt64] {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_to_lat expects (UInt64)".into(),
             ));
         }
@@ -130,7 +130,7 @@ impl H3ScalarFn for H3ToLatUdf {
 
     fn invoke(&self, args: &[ColumnArray]) -> Result<ColumnArray> {
         let Some(ColumnArray::UInt64 { values, validity }) = args.first() else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_to_lat requires a UInt64 column".into(),
             ));
         };
@@ -152,7 +152,7 @@ impl H3ScalarFn for H3ToLngUdf {
 
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         if arg_types != [ArrowDataType::UInt64] {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_to_lng expects (UInt64)".into(),
             ));
         }
@@ -161,7 +161,7 @@ impl H3ScalarFn for H3ToLngUdf {
 
     fn invoke(&self, args: &[ColumnArray]) -> Result<ColumnArray> {
         let Some(ColumnArray::UInt64 { values, validity }) = args.first() else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_to_lng requires a UInt64 column".into(),
             ));
         };
@@ -183,7 +183,7 @@ impl H3ScalarFn for H3GetResolutionUdf {
 
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         if arg_types != [ArrowDataType::UInt64] {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_get_resolution expects (UInt64)".into(),
             ));
         }
@@ -192,7 +192,7 @@ impl H3ScalarFn for H3GetResolutionUdf {
 
     fn invoke(&self, args: &[ColumnArray]) -> Result<ColumnArray> {
         let Some(ColumnArray::UInt64 { values, validity }) = args.first() else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_get_resolution requires a UInt64 column".into(),
             ));
         };
@@ -219,7 +219,7 @@ impl H3ScalarFn for H3IsValidUdf {
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         match arg_types {
             [ArrowDataType::UInt64] | [ArrowDataType::Utf8] => Ok(ArrowDataType::Boolean),
-            _ => Err(RasterH3Error::InvalidParameter(
+            _ => Err(DggsStreamError::InvalidParameter(
                 "h3_is_valid expects (UInt64) or (Utf8)".into(),
             )),
         }
@@ -241,7 +241,7 @@ impl H3ScalarFn for H3IsValidUdf {
                     validity: validity.clone(),
                 })
             }
-            _ => Err(RasterH3Error::InvalidParameter(
+            _ => Err(DggsStreamError::InvalidParameter(
                 "h3_is_valid requires a UInt64 or Utf8 column".into(),
             )),
         }
@@ -263,7 +263,7 @@ impl H3ScalarFn for H3ToWkbUdf {
     fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
         match arg_types {
             [ArrowDataType::UInt64] | [ArrowDataType::Utf8] => Ok(ArrowDataType::Binary),
-            _ => Err(RasterH3Error::InvalidParameter(
+            _ => Err(DggsStreamError::InvalidParameter(
                 "h3_to_wkb expects (UInt64) or (Utf8)".into(),
             )),
         }
@@ -318,7 +318,7 @@ impl H3ScalarFn for H3ToWkbUdf {
                     validity: if has_null { Some(out_valid) } else { None },
                 })
             }
-            _ => Err(RasterH3Error::InvalidParameter(
+            _ => Err(DggsStreamError::InvalidParameter(
                 "h3_to_wkb requires a UInt64 or Utf8 column".into(),
             )),
         }
@@ -337,7 +337,7 @@ impl H3ScalarFn for H3CellToParentUdf {
         match arg_types {
             [ArrowDataType::UInt64, ArrowDataType::Int64] => Ok(ArrowDataType::UInt64),
             [ArrowDataType::Utf8, ArrowDataType::Int64] => Ok(ArrowDataType::Utf8),
-            _ => Err(RasterH3Error::InvalidParameter(
+            _ => Err(DggsStreamError::InvalidParameter(
                 "h3_cell_to_parent expects (UInt64, Int64) or (Utf8, Int64)".into(),
             )),
         }
@@ -345,7 +345,7 @@ impl H3ScalarFn for H3CellToParentUdf {
 
     fn invoke(&self, args: &[ColumnArray]) -> Result<ColumnArray> {
         if args.len() != 2 {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_cell_to_parent requires 2 arguments".into(),
             ));
         }
@@ -354,7 +354,7 @@ impl H3ScalarFn for H3CellToParentUdf {
             validity: res_valid,
         } = &args[1]
         else {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "h3_cell_to_parent second argument must be Int64".into(),
             ));
         };
@@ -406,7 +406,7 @@ impl H3ScalarFn for H3CellToParentUdf {
                     validity: if has_null { Some(out_valid) } else { None },
                 })
             }
-            _ => Err(RasterH3Error::InvalidParameter(
+            _ => Err(DggsStreamError::InvalidParameter(
                 "h3_cell_to_parent first argument must be UInt64 or Utf8".into(),
             )),
         }
@@ -530,8 +530,8 @@ impl GridScalarFn {
         self.op
     }
 
-    fn bad_args(&self, expected: &str) -> RasterH3Error {
-        RasterH3Error::InvalidParameter(format!("{} expects {expected}", self.name))
+    fn bad_args(&self, expected: &str) -> DggsStreamError {
+        DggsStreamError::InvalidParameter(format!("{} expects {expected}", self.name))
     }
 }
 

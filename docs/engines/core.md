@@ -47,6 +47,8 @@ Every adapter follows the same steps:
 1. Build a `MultiResolutionConfig` from its own parameters (`resolutions`, `custom_crs`,
    `custom_nodata`, `apply_scale_offset`, `bbox`, `overlap_rule`, `sampling`, `quantiles`,
    filters, …). See [band calibration and validity](../sql-api-reference.md#band-calibration-and-validity).
+   A5 uses 1.0 cell IDs. See [A5 index version](../grids.md#a5-index-version) before importing A5 0.x data.
+
    Grid-independent options set more fields: `with_grid(GridKind)` ([Grids](../grids.md));
    `ResolutionSpec::parse` and `ResolutionSpec::resolve` for `auto`; `transfer`;
    `set_histogram`; `nodata_policy`, `emit_nodata_value` and `decimals` (or
@@ -91,7 +93,7 @@ For pipelines that own the streamer (`H3ParquetWriter`, `H3PmtilesTiler`), set
 stream built from that configuration adds its failures to it.
 
 `MultiResolutionConfig::strict_transforms` (default `false`) turns the count into an error:
-the stream fails with `RasterH3Error::TransformFailures(n)` after the first kernel wave that
+the stream fails with `DggsStreamError::TransformFailures(n)` after the first kernel wave that
 drops a sample, and later reads return the latched `StreamFailed` error. `n` covers the work
 done so far, not the whole raster. Records already emitted before that wave stay emitted,
 so a strict consumer must treat the error as fatal to the whole result.
@@ -102,7 +104,7 @@ The engines surface the count, and strict mode, as follows:
 | :--- | :--- | :--- |
 | DuckDB | `transform_failures` column of the `h3_raster_to_parquet` / `h3_raster_to_pmtiles` summary row. The streaming aggregate functions have no warnings channel and report nothing. | `strict_transforms := true` on every table function |
 | PostgreSQL | One `WARNING` at the end of `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate`. | — |
-| Python | `RuntimeWarning` from `raster_to_parquet` / `raster_to_pmtiles`, and from `scan_raster_h3` / `RasterH3ArrowStream.iter_batches()` / `.to_dict()` once the scan completes. `to_polars()` / `read_raster_h3()` / `__arrow_c_stream__` hand the stream to Arrow and report nothing. | `strict_transforms=True` on `scan_raster_h3`, `read_raster_h3` and `RasterH3ArrowStream` |
+| Python | `RuntimeWarning` from `raster_to_parquet` / `raster_to_pmtiles`, and from `scan_raster` / `RasterArrowStream.iter_batches()` / `.to_dict()` once the scan completes. `to_polars()` / `read_raster()` / `__arrow_c_stream__` hand the stream to Arrow and report nothing. | `strict_transforms=True` on `scan_raster`, `read_raster` and `RasterArrowStream` |
 | CLI | Warning on stderr from every subcommand. | — |
 | DataFusion | `with_transform_failure_counter(Arc<AtomicU64>)` on either provider. | `with_strict_transforms(true)` |
 
@@ -425,7 +427,7 @@ rejected by that client). An engine can supply its own byte source instead:
 
 When a factory is set it opens **every** path, local ones included, and the prefetcher,
 cache and coalescing work on top of it unchanged. The DuckDB 2.0 build uses this to read
-through DuckDB's file system (`SET raster_h3_use_duckdb_fs = true`).
+through DuckDB's file system (`SET dggs_stream_use_duckdb_fs = true`).
 
 ### Mosaic decoder cache
 
@@ -693,12 +695,12 @@ floats become `null`; binary columns (`wkb`) are lowercase hex strings.
 | `H3PmtilesTiler::export_h3_features(features, path)` | PMTiles v3 from `H3Feature`s in any order, with bounded memory (external sort by latitude, 256 MiB buffer). Invalid H3 indexes are counted in `PmtilesExportSummary::invalid_features_dropped`. |
 | `pmtiles::ExternalFeatureExport::new(budget_bytes, spill_dir)` → `push(feature)` → `finish(path)` / `finish_into(writer)` | The exporter behind `export_h3_features`, with a custom buffer budget, spill directory (created only when a run is spilled) and output; `finish_into` streams the archive to any `std::io::Write`, such as a database file system. Each resolution present fills a band of zooms up to the next finer one (`pyramid::zoom_bands_for_resolutions`). See [zoom bands and the tile cap](../pmtiles.md#zoom-bands-for-h3-tables). |
 | `ExternalFeatureExport::with_zoom_limits(min_zoom, max_zoom)` | Clips those bands to `min_zoom..=max_zoom` (either may be `None`); a resolution whose band lies wholly outside is not tiled. DuckDB `COPY ... (min_zoom, max_zoom)` and SedonaDB's export use it. |
-| `pmtiles::pyramid::for_each_cell_tile_mercator(center, vertices, z, f)` | Calls `f(x, y)` for each tile a cell covers at zoom `z` and returns how many it emitted. A cell covering more than `MAX_TILE_OPS_PER_CELL_ZOOM` (65,536) tiles is skipped and `0` is returned; the tilers report such skips as `h3_cells_over_tile_cap` in the archive metadata. See [Cell Geometry in Vector Tiles](../pmtiles.md#cell-geometry-in-vector-tiles). |
+| `pmtiles::pyramid::for_each_cell_tile_mercator(center, vertices, z, f)` | Calls `f(x, y)` for each tile a cell covers at zoom `z` and returns how many it emitted. A cell covering more than `MAX_TILE_OPS_PER_CELL_ZOOM` (65,536) tiles is skipped and `0` is returned; the tilers report such skips as `cells_over_tile_cap` in the archive metadata. See [Cell Geometry in Vector Tiles](../pmtiles.md#cell-geometry-in-vector-tiles). |
 | `PmtilesWriter::new_in(..., spill_dir)` / `finish_into(writer)` | Low-level archive writer: tile spill file in a chosen directory, and the finished archive streamed to any writer (`finish(path)` writes atomically via a temporary file next to `path`). |
 
 ## Errors
 
-All fallible APIs return `dggs_stream_core::error::Result<T>` with `RasterH3Error`
+All fallible APIs return `dggs_stream_core::error::Result<T>` with `DggsStreamError`
 (`StreamFailed`, `Io`, `Tiff`, `InvalidMetadata`, `CrsNotDetected`, `CrsProjectionFailed`,
 `CrsError`, `UnsupportedEpsg`, `Proj`, `H3Error`, `InvalidParameter`, `DuckDbError`).
 `safe_panic_payload_to_string` turns a caught panic payload into a message without letting

@@ -12,7 +12,7 @@
 //! shares per unit of value (a density, bins only).
 
 use crate::aggregator::categorical::CategoricalAccumulator;
-use crate::error::{RasterH3Error, Result};
+use crate::error::{DggsStreamError, Result};
 use crate::transfer::TransferMode;
 
 /// Most bins a histogram may have. Each occupied bin of each cell is a counter in the
@@ -345,8 +345,8 @@ impl HistogramSpec {
     }
 }
 
-fn invalid(message: String) -> RasterH3Error {
-    RasterH3Error::InvalidParameter(message)
+fn invalid(message: String) -> DggsStreamError {
+    DggsStreamError::InvalidParameter(message)
 }
 
 #[cfg(test)]

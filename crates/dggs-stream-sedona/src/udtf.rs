@@ -23,7 +23,7 @@
 //! list of structs (`class, weight` or `lower, upper, weight`) instead of JSON text.
 //! A string argument holding a partition spec (a JSON
 //! object from `h3_raster_plan_partitions`) scans only that partition, adding a
-//! `partial_state` column (see [`crate::merge`]). Use [`RasterH3Table`] with a configured
+//! `partial_state` column (see [`crate::merge`]). Use [`RasterTable`] with a configured
 //! provider for the other options (nodata, quantiles, categorical format, ...).
 //!
 //! `h3_raster_plan_partitions(source [, target_chunks] [, crs])` splits a scan into
@@ -42,7 +42,7 @@ use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
 
 use crate::convert::to_df_error;
-use crate::table::RasterH3Table;
+use crate::table::RasterTable;
 use dggs_stream_core::aggregator::{NodataPolicy, OutputPolicy};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::resolution::ResolutionSpec;
@@ -118,7 +118,7 @@ fn continuous_table(
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
-    Ok(Arc::new(RasterH3Table::continuous(provider)))
+    Ok(Arc::new(RasterTable::continuous(provider)))
 }
 
 fn categorical_table(
@@ -142,7 +142,7 @@ fn categorical_table(
     if let Some(histogram) = args.histogram {
         provider = provider.with_histogram(histogram).map_err(to_df_error)?;
     }
-    Ok(Arc::new(RasterH3Table::categorical(provider)))
+    Ok(Arc::new(RasterTable::categorical(provider)))
 }
 
 /// `h3_raster_plan_partitions`

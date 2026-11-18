@@ -174,7 +174,7 @@ impl<A: SpillAccumulator> Overview<A> {
         })?;
         tiles.finish(|tile_id, cells| {
             let (z, x, y) = tile_id_to_zxy(tile_id);
-            let mut layer = MvtLayer::with_filter("h3_hexagons", filter.clone());
+            let mut layer = MvtLayer::with_filter(crate::pmtiles::CELL_LAYER_ID, filter.clone());
             for (id, acc) in cells.0 {
                 let (vertices, len) =
                     cell_boundary_mercator_for(grid, id).expect("validated parent");

@@ -22,7 +22,7 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::{col, lit, SessionContext};
 use dggs_stream_sedona::scan::{CategoricalRasterTableProvider, ContinuousRasterTableProvider};
-use dggs_stream_sedona::{RasterH3Table, GEOARROW_WKB_EXTENSION, GEOARROW_WKB_METADATA};
+use dggs_stream_sedona::{RasterTable, GEOARROW_WKB_EXTENSION, GEOARROW_WKB_METADATA};
 
 use common::write_tif_grid;
 
@@ -184,7 +184,7 @@ fn rows_as_strings(batches: &[RecordBatch]) -> Vec<String> {
 }
 
 /// Check `table` against a materialised copy for `queries` random geometries.
-async fn check(name: &str, table: RasterH3Table, seed: u64, queries: usize) {
+async fn check(name: &str, table: RasterTable, seed: u64, queries: usize) {
     let ctx = SessionContext::new();
     ctx.register_udf((*envelope_predicate("st_intersects", false)).clone());
     ctx.register_udf((*envelope_predicate("st_dwithin", true)).clone());
@@ -293,11 +293,11 @@ fn value(x: u32, y: u32) -> f32 {
     ((x * 7 + y * 13 + (x * y) % 11) % 23) as f32
 }
 
-fn continuous(tif: &tempfile::NamedTempFile, crs: &str, res: Vec<u8>) -> RasterH3Table {
+fn continuous(tif: &tempfile::NamedTempFile, crs: &str, res: Vec<u8>) -> RasterTable {
     let p = ContinuousRasterTableProvider::try_new(tif.path().to_str().unwrap(), res)
         .unwrap()
         .with_crs(crs);
-    RasterH3Table::continuous(p)
+    RasterTable::continuous(p)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -370,7 +370,7 @@ async fn categorical_utm_raster() {
         .with_crs("EPSG:32610");
     check(
         "categorical EPSG:32610 res 8",
-        RasterH3Table::categorical(p),
+        RasterTable::categorical(p),
         6,
         24,
     )

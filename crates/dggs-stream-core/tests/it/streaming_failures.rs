@@ -114,7 +114,7 @@ fn corrupt_chunk_exports_fail_and_preserve_existing_outputs() {
 fn parquet_failure_after_flushed_row_groups_is_not_published() {
     use dggs_stream_core::aggregator::accumulator::H3Accumulator;
     use dggs_stream_core::aggregator::multi_horizon::MultiContinuousRecord;
-    use dggs_stream_core::error::{RasterH3Error, Result};
+    use dggs_stream_core::error::{DggsStreamError, Result};
     use dggs_stream_core::parquet::writer::{
         run_parquet_streaming_pipeline, ContinuousRowGroupBuffer, ParquetStreamer,
     };
@@ -129,7 +129,7 @@ fn parquet_failure_after_flushed_row_groups_is_not_published() {
             F: FnMut(usize, Self::Record),
         {
             if self.remaining == 0 {
-                return Err(RasterH3Error::StreamFailed("late read failure".into()));
+                return Err(DggsStreamError::StreamFailed("late read failure".into()));
             }
             let n = n.min(self.remaining);
             for i in 0..n {

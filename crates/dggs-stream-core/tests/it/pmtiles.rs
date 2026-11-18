@@ -21,7 +21,7 @@ use helpers::create_temp_geotiff;
 
 #[test]
 fn test_mvt_protobuf_encoding() {
-    let mut layer = MvtLayer::new("h3_hexagons");
+    let mut layer = MvtLayer::new("dggs_cells");
 
     let v1 = h3o::LatLng::new(37.7749, -122.4194).unwrap();
     let cell = v1.to_cell(h3o::Resolution::Seven);
@@ -58,7 +58,7 @@ fn test_mvt_protobuf_encoding() {
 #[test]
 fn test_pmtiles_v3_header_and_archive_validation() {
     let bbox = [-122.5, 37.7, -122.3, 37.9];
-    let metadata_json = r#"{"name":"test_archive","vector_layers":[{"id":"h3_hexagons"}]}"#;
+    let metadata_json = r#"{"name":"test_archive","vector_layers":[{"id":"dggs_cells"}]}"#;
     let mut writer = PmtilesWriter::new(10, 12, bbox, metadata_json.to_string()).unwrap();
 
     let uncompressed_mvt = b"mock_mvt_tile_payload_bytes_for_testing";
@@ -121,7 +121,7 @@ fn test_pmtiles_v3_header_and_archive_validation() {
     let mut decompressed_json = String::new();
     gz.read_to_string(&mut decompressed_json).unwrap();
     assert!(
-        decompressed_json.contains("h3_hexagons"),
+        decompressed_json.contains("dggs_cells"),
         "Metadata must contain vector layer definition"
     );
 }
@@ -707,7 +707,7 @@ fn test_property_filter_and_mvt_encoding() {
     assert!(!filter.has_continuous(dggs_stream_core::pmtiles::mvt::PROP_STDDEV));
     assert!(!filter.needs_stddev());
 
-    let mut layer = MvtLayer::with_filter("h3_hexagons", filter);
+    let mut layer = MvtLayer::with_filter("dggs_cells", filter);
     let cell_idx: u64 = 0x8828308281fffff;
     let vertices = [
         MercatorPoint { x: 0.1, y: 0.1 },
@@ -948,7 +948,7 @@ fn test_mvt_class_iii_pentagon_10_vertices_preserved() {
         "Class III pentagon must retain all 10 vertices in MvtFeature"
     );
 
-    let mut layer = MvtLayer::new("h3_hexagons");
+    let mut layer = MvtLayer::new("dggs_cells");
     layer.add_feature(feat);
     let encoded = layer.encode();
     let decoded = mvt_decode::decode(&encoded);
@@ -1209,7 +1209,7 @@ fn world_tile_encodes_both_antimeridian_pieces_in_one_feature() {
             .unwrap()
             .to_cell(h3o::Resolution::Zero);
         let (vertices, count) = cell_boundary_mercator(cell);
-        let mut layer = MvtLayer::new("h3_hexagons");
+        let mut layer = MvtLayer::new("dggs_cells");
         layer.add_hexagon_mercator(u64::from(cell), &vertices[..count], 0, 0, 0, Vec::new());
         let decoded = mvt_decode::decode(&layer.encode());
         assert_eq!(decoded.len(), 1);
@@ -1292,7 +1292,7 @@ fn legacy_world_tile_preserves_both_antimeridian_pieces() {
             .unwrap()
             .to_cell(h3o::Resolution::Zero);
         let boundary = cell.boundary();
-        let mut layer = MvtLayer::new("h3_hexagons");
+        let mut layer = MvtLayer::new("dggs_cells");
         layer.add_hexagon(
             cell.into(),
             &boundary,
@@ -1396,6 +1396,51 @@ fn test_parquet_to_pmtiles_nullable_h3_column() {
     assert_eq!(summary.valid_features, 2);
     assert_eq!(summary.invalid_features_dropped, 1);
     assert!(summary.total_tiles > 0);
+}
+
+#[test]
+fn s2_parquet_archive_preserves_grid_and_exact_hex_id() {
+    use parquet::{
+        data_type::Int64Type, file::writer::SerializedFileWriter,
+        schema::parser::parse_message_type,
+    };
+
+    // A level-30 S2 cell whose low bit is lost by conversion to a JavaScript Number.
+    let cell = 0x1000_0000_0000_0001_i64;
+    let dir = tempfile::tempdir().unwrap();
+    for empty in [true, false] {
+        let input = dir.path().join("cells.parquet");
+        let output = dir.path().join("cells.pmtiles");
+        let schema = parse_message_type("message cells { REQUIRED INT64 s2_index; }").unwrap();
+        let mut writer = SerializedFileWriter::new(
+            File::create(&input).unwrap(),
+            schema.into(),
+            Default::default(),
+        )
+        .unwrap();
+        if !empty {
+            let mut group = writer.next_row_group().unwrap();
+            let mut col = group.next_column().unwrap().unwrap();
+            col.typed::<Int64Type>()
+                .write_batch(&[cell], None, None)
+                .unwrap();
+            col.close().unwrap();
+            group.close().unwrap();
+        }
+        writer.close().unwrap();
+        let summary = H3PmtilesTiler::process_parquet_to_pmtiles(&input, &output, None).unwrap();
+        assert_eq!(summary.valid_features, usize::from(!empty));
+        let metadata = read_pmtiles_metadata(output.to_str().unwrap());
+        assert_eq!(metadata["grid"], "s2");
+        assert_eq!(metadata["name"], "dggs_stream_pmtiles_export");
+        assert!(metadata["description"].as_str().unwrap().contains("s2"));
+        if !empty {
+            let features = archive_features(&std::fs::read(&output).unwrap());
+            assert!(features.iter().any(
+                |f| f.properties.get("s2_hex") == Some(&MvtValue::String(format!("{cell:x}")))
+            ));
+        }
+    }
 }
 
 /// Every feature in every tile of an archive. PMTiles tile data is a run of gzip
@@ -1526,6 +1571,41 @@ fn read_pmtiles_metadata(path: &str) -> serde_json::Value {
     serde_json::from_str(&json).unwrap()
 }
 
+#[test]
+fn s2_detail_and_overview_layers_match_archive_metadata() {
+    use dggs_stream_core::grid::GridKind;
+
+    let tif = NamedTempFile::new().unwrap();
+    create_temp_geotiff(tif.path(), 8, 8, tiff::tags::CompressionMethod::None).unwrap();
+    let output = NamedTempFile::new().unwrap().into_temp_path();
+    let resolution = 12;
+    H3PmtilesTiler::process_geotiff_to_pmtiles(
+        tif.path(),
+        &output,
+        MultiResolutionConfig::new(vec![resolution]).with_grid(GridKind::S2),
+    )
+    .unwrap();
+    let metadata = read_pmtiles_metadata(output.to_str().unwrap());
+    assert_eq!(metadata["grid"], "s2");
+    let layer = metadata["vector_layers"][0]["id"].as_str().unwrap();
+    assert_eq!(layer, "dggs_cells");
+
+    let archive = std::fs::read(&output).unwrap();
+    let (mut detail, mut overview) = (false, false);
+    for feature in archive_features(&archive) {
+        assert_eq!(feature.layer_name, layer);
+        let MvtValue::UInt(res) = feature.properties["resolution"] else {
+            panic!("expected unsigned cell resolution");
+        };
+        detail |= res == u64::from(resolution);
+        overview |= res < u64::from(resolution);
+    }
+    assert!(
+        detail && overview,
+        "expected both S2 detail and overview features"
+    );
+}
+
 /// A pole cell spans every longitude, so at fine zooms it would be enumerated
 /// into every tile column. Tiling skips it there and reports each skipped
 /// `(cell, zoom)` pair, overview parents included, in the archive metadata.
@@ -1555,7 +1635,7 @@ fn test_polar_cells_over_tile_cap_reported_in_metadata() {
     // parent at zoom 17. The resolution-10 parent at zoom 16 covers exactly
     // 65,536 tiles, which is within the cap.
     let metadata = read_pmtiles_metadata(pmtiles_path);
-    assert_eq!(metadata["h3_cells_over_tile_cap"], 3, "{metadata}");
+    assert_eq!(metadata["cells_over_tile_cap"], 3, "{metadata}");
 }
 
 /// Archives without pole cells carry no skip count.
@@ -1572,10 +1652,7 @@ fn test_tile_cap_metadata_absent_without_polar_cells() {
     )
     .unwrap();
     let metadata = read_pmtiles_metadata(pmtiles_path);
-    assert!(
-        metadata.get("h3_cells_over_tile_cap").is_none(),
-        "{metadata}"
-    );
+    assert!(metadata.get("cells_over_tile_cap").is_none(), "{metadata}");
 }
 
 /// Tiles per zoom in a PMTiles archive whose entries all sit in the root directory.
@@ -1740,5 +1817,5 @@ fn preindexed_export_reports_capped_cells_in_sparse_bands() {
     let path = NamedTempFile::new().unwrap().into_temp_path();
     exporter.finish(&path).unwrap();
     let metadata = read_pmtiles_metadata(path.to_str().unwrap());
-    assert_eq!(metadata["h3_cells_over_tile_cap"], 1);
+    assert_eq!(metadata["cells_over_tile_cap"], 1);
 }

@@ -16,13 +16,23 @@ every grid.
 The resolution scales don't line up across grids: "resolution 9" is a different cell size on
 each one. To ask for the same cell size on any grid, use [`auto`](#automatic-resolution).
 
+## A5 index version
+
+A5 uses the 1.0 cell-ID system. IDs generated with A5 0.x can refer to different cells
+under 1.0, even when they pass validation. Rebuild raster aggregates and polygon indexes
+from their source data together before joining them. To keep existing aggregates, migrate
+each stored 0.x ID explicitly with the upstream Rust `a5::migrate(old_id)` function and
+regenerate any geometry or archive derived from the IDs. Apply migration only to known
+0.x data, because the ID itself carries no version. This project does not automatically
+migrate imported IDs.
+
 ## Choosing a grid in each engine
 
 | Engine | How to pick the grid |
 | :--- | :--- |
 | DuckDB | Per-grid functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...), or `grid := 's2'` on the `h3_` table functions |
 | PostgreSQL | Per-grid functions: `{grid}_raster_continuous_aggregate`, `{grid}_raster_categorical_aggregate`, `{grid}_auto_resolution` and the scalar set |
-| Python / Polars | `grid=` on `scan_raster_h3` (alias `scan_raster`), `read_raster`, `merge_partials`, the exporters and the scalar helpers (`lonlat_to_cell`, `cell_to_parent`, `polygon_to_cells`, ...); `GRIDS` maps each grid to its finest resolution |
+| Python / Polars | `grid=` on `scan_raster`, `read_raster`, `merge_partials`, the exporters and the scalar helpers (`lonlat_to_cell`, `cell_to_parent`, `polygon_to_cells`, ...); `GRIDS` maps each grid to its finest resolution |
 | DataFusion / SedonaDB | `{grid}_raster_{continuous,categorical}_aggregate`, or a grid-name argument (`'s2'`) on any table function; `with_grid(GridKind::S2)` on the providers; per-grid scalar UDFs under DuckDB's names |
 | CLI | `--grid h3\|a5\|s2\|healpix`; `-r` is checked against that grid's range |
 | Rust (`dggs-stream-core`) | `MultiResolutionConfig::with_grid(GridKind::S2)`; `scalar_ops::grid_*` helpers |

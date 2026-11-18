@@ -6,7 +6,7 @@ use dggs_stream_core::aggregator::multi_horizon::{QuantileTarget, ScanPartition,
 use dggs_stream_core::aggregator::{CategoryRemapper, SamplingPattern};
 use dggs_stream_core::aggregator::{NodataPolicy, OutputPolicy};
 use dggs_stream_core::columnar::CategoricalFormat;
-use dggs_stream_core::error::{RasterH3Error, Result};
+use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, OverlapRule};
 use dggs_stream_core::resolution::ResolutionSpec;
@@ -38,7 +38,7 @@ pub(crate) unsafe fn parse_c_resolutions(
     try_parse_resolutions_str_for(grid, &s)
         .map(ResolutionSpec::Fixed)
         .ok_or_else(|| {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "Invalid resolutions '{s}': expected 'auto', 'auto+N', 'auto-N' or {} \
                  resolutions between 0 and {}, e.g. 7,8",
                 grid.label(),
@@ -50,7 +50,7 @@ pub(crate) unsafe fn parse_c_resolutions(
 /// A grid name (`h3`, `a5`, `s2`, `healpix`, case-insensitive).
 pub(crate) fn parse_grid(name: &str) -> Result<GridKind> {
     GridKind::parse(name).ok_or_else(|| {
-        RasterH3Error::InvalidParameter(format!(
+        DggsStreamError::InvalidParameter(format!(
             "Invalid grid '{name}': expected {}",
             GridKind::EXPECTED
         ))
@@ -76,7 +76,7 @@ pub(crate) fn grid_of_options(options: Option<&str>) -> Result<GridKind> {
         return Ok(GridKind::H3);
     };
     let opts: PyScanOptions = serde_json::from_str(json)
-        .map_err(|e| RasterH3Error::InvalidParameter(format!("Invalid scan options: {e}")))?;
+        .map_err(|e| DggsStreamError::InvalidParameter(format!("Invalid scan options: {e}")))?;
     opts.grid.as_deref().map_or(Ok(GridKind::H3), parse_grid)
 }
 
@@ -90,7 +90,7 @@ pub(crate) unsafe fn parse_c_format(ptr: *const c_char) -> Result<CategoricalFor
         None => Ok(CategoricalFormat::Wide),
         Some(s) if s.eq_ignore_ascii_case("wide") => Ok(CategoricalFormat::Wide),
         Some(s) if s.eq_ignore_ascii_case("long") => Ok(CategoricalFormat::Long),
-        Some(s) => Err(RasterH3Error::InvalidParameter(format!(
+        Some(s) => Err(DggsStreamError::InvalidParameter(format!(
             "Invalid format '{s}': expected 'wide' or 'long'"
         ))),
     }
@@ -129,7 +129,7 @@ pub(crate) unsafe fn build_py_scan_config(
     // `opt_cstr` requires.
     unsafe {
         let path_str = opt_cstr(path)
-            .ok_or_else(|| RasterH3Error::InvalidParameter("Missing input raster path".into()))?;
+            .ok_or_else(|| DggsStreamError::InvalidParameter("Missing input raster path".into()))?;
         let fmt = parse_c_format(format)?;
         let crs_opt = opt_cstr(crs);
         // `auto` is measured on the raster, opened (headers only) as the scan will.
@@ -144,7 +144,7 @@ pub(crate) unsafe fn build_py_scan_config(
         let bbox_opt = opt_cstr(bbox)
             .map(|s| {
                 parse_bbox_strict(&s).ok_or_else(|| {
-                    RasterH3Error::InvalidParameter(format!(
+                    DggsStreamError::InvalidParameter(format!(
                         "Invalid bbox '{s}': expected four numbers min_lon,min_lat,max_lon,max_lat"
                     ))
                 })
@@ -229,7 +229,7 @@ pub(crate) fn output_policy_of(
     let mut policy = OutputPolicy::default();
     if let Some(name) = nodata_policy {
         policy.nodata = NodataPolicy::parse(name).ok_or_else(|| {
-            RasterH3Error::InvalidParameter(format!(
+            DggsStreamError::InvalidParameter(format!(
                 "Invalid nodata_policy '{name}': expected {}",
                 NodataPolicy::EXPECTED
             ))
@@ -237,7 +237,7 @@ pub(crate) fn output_policy_of(
     }
     if let Some(value) = emit_nodata_value {
         if !policy.emits_nodata() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "emit_nodata_value needs nodata_policy 'emit'".into(),
             ));
         }
@@ -246,7 +246,7 @@ pub(crate) fn output_policy_of(
     if let Some(decimals) = decimals {
         let max = i64::from(dggs_stream_core::aggregator::output_policy::MAX_DECIMALS);
         if !(0..=max).contains(&decimals) {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "decimals must be between 0 and {max}, got {decimals}"
             )));
         }
@@ -266,7 +266,7 @@ pub(crate) fn parse_overlap_rule_strict(name: &str) -> Result<OverlapRule> {
     match name.trim().to_ascii_lowercase().as_str() {
         "cutline" | "voronoi" | "nearest" | "first" | "priority" | "painter" | "average"
         | "mean" | "all" | "multi_temporal" => Ok(OverlapRule::parse(name)),
-        _ => Err(RasterH3Error::InvalidParameter(format!(
+        _ => Err(DggsStreamError::InvalidParameter(format!(
             "Invalid overlap_rule '{name}': expected one of {OVERLAP_RULE_NAMES}"
         ))),
     }
@@ -282,8 +282,8 @@ fn band_option(name: &str, value: Option<i64>, default: usize) -> Result<usize> 
     match value {
         None => Ok(default),
         Some(b) if b >= 1 => usize::try_from(b)
-            .map_err(|_| RasterH3Error::InvalidParameter(format!("{name} {b} is too large"))),
-        Some(b) => Err(RasterH3Error::InvalidParameter(format!(
+            .map_err(|_| DggsStreamError::InvalidParameter(format!("{name} {b} is too large"))),
+        Some(b) => Err(DggsStreamError::InvalidParameter(format!(
             "{name} must be at least 1 (bands are 1-indexed), got {b}"
         ))),
     }
@@ -296,7 +296,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         return Ok(());
     };
     let opts: PyScanOptions = serde_json::from_str(json)
-        .map_err(|e| RasterH3Error::InvalidParameter(format!("Invalid scan options: {e}")))?;
+        .map_err(|e| DggsStreamError::InvalidParameter(format!("Invalid scan options: {e}")))?;
 
     cfg.band = band_option("band", opts.band, 1)?;
     if let Some(name) = &opts.sampling {
@@ -307,12 +307,12 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     }
     if let Some(frac) = opts.min_majority_fraction {
         if !cfg.categorical {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "min_majority_fraction applies to categorical scans only".into(),
             ));
         }
         if !(0.0..=1.0).contains(&frac) {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "min_majority_fraction must be between 0 and 1, got {frac}"
             )));
         }
@@ -320,7 +320,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     }
     if let Some(spec) = &opts.quantiles {
         if cfg.categorical {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "quantiles apply to continuous scans only".into(),
             ));
         }
@@ -328,7 +328,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     }
     if let Some(spec) = &opts.remap {
         if !cfg.categorical {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "remap applies to categorical scans only".into(),
             ));
         }
@@ -349,12 +349,12 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     if let Some(spec) = &cfg.histogram {
         // A histogram is a categorical aggregation; area weights run `overlay`.
         if !cfg.categorical {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "histogram options apply to categorical scans only".into(),
             ));
         }
         if cfg.partition.is_some() {
-            return Err(RasterH3Error::InvalidParameter(
+            return Err(DggsStreamError::InvalidParameter(
                 "histogram options cannot be combined with a partition".into(),
             ));
         }
@@ -367,7 +367,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     )?;
     for (name, value) in [("min_mean", opts.min_mean), ("max_mean", opts.max_mean)] {
         if value.is_some() && cfg.categorical {
-            return Err(RasterH3Error::InvalidParameter(format!(
+            return Err(DggsStreamError::InvalidParameter(format!(
                 "{name} applies to continuous scans only"
             )));
         }
@@ -385,7 +385,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     match &opts.spectral_formula {
         None => {
             if band_args.iter().any(Option::is_some) {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "nir_band, red_band, green_band, blue_band and swir_band need a \
                      spectral_formula"
                         .into(),
@@ -394,7 +394,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         }
         Some(name) => {
             if cfg.categorical {
-                return Err(RasterH3Error::InvalidParameter(
+                return Err(DggsStreamError::InvalidParameter(
                     "spectral_formula applies to continuous scans only".into(),
                 ));
             }
@@ -408,7 +408,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
                 band_option("swir_band", opts.swir_band, 6)?,
             )
             .ok_or_else(|| {
-                RasterH3Error::InvalidParameter(format!(
+                DggsStreamError::InvalidParameter(format!(
                     "Invalid spectral_formula '{name}': expected one of {SPECTRAL_FORMULA_NAMES}"
                 ))
             })?;
@@ -475,7 +475,7 @@ pub(crate) fn placeholder_partition() -> ScanPartition {
 pub(crate) unsafe fn parse_c_partition(partition: *const c_char) -> Result<ScanPartition> {
     // SAFETY: null or NUL-terminated (caller contract), as `opt_cstr` requires.
     let json = unsafe { opt_cstr(partition) }
-        .ok_or_else(|| RasterH3Error::InvalidParameter("Missing scan partition".into()))?;
+        .ok_or_else(|| DggsStreamError::InvalidParameter("Missing scan partition".into()))?;
     ScanPartition::from_json(&json)
 }
 

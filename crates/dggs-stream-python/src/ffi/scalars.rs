@@ -409,7 +409,7 @@ pub unsafe extern "C" fn raster_h3_py_auto_resolution(
     crs: *const c_char,
     out_err: *mut *mut c_char,
 ) -> c_int {
-    use dggs_stream_core::error::RasterH3Error;
+    use dggs_stream_core::error::DggsStreamError;
     use dggs_stream_core::raster::mosaic::resolve_raster_sources;
     use dggs_stream_core::resolution::ResolutionSpec;
     // SAFETY: the C string arguments are null or NUL-terminated and `out_err` is null or
@@ -417,9 +417,9 @@ pub unsafe extern "C" fn raster_h3_py_auto_resolution(
     unsafe {
         crate::ffi::ffi_call("auto_resolution", out_err, || {
             let grid = grid_of_code(grid)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("unknown grid code".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("unknown grid code".into()))?;
             let path = opt_cstr(path)
-                .ok_or_else(|| RasterH3Error::InvalidParameter("Missing raster path".into()))?;
+                .ok_or_else(|| DggsStreamError::InvalidParameter("Missing raster path".into()))?;
             let paths = resolve_raster_sources(&path)?;
             let resolutions = ResolutionSpec::Auto { offset }.resolve_paths(
                 grid,

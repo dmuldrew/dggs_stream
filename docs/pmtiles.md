@@ -69,7 +69,7 @@ As a result:
 
 ### Multi-Resolution SQL Examples
 
-These examples use the [DuckDB](engines/duckdb.md) extension. Python (`scan_raster_h3(path, [7, 8, 9])`) and the CLI (`-r 7,8,9`) take the same resolution lists; see the [Engines Overview](engines/README.md#same-task-every-engine).
+These examples use the [DuckDB](engines/duckdb.md) extension. Python (`scan_raster(path, [7, 8, 9])`) and the CLI (`-r 7,8,9`) take the same resolution lists; see the [Engines Overview](engines/README.md#same-task-every-engine).
 
 **Continuous** — elevation across resolutions 7, 8, and 9:
 ```sql
@@ -186,7 +186,7 @@ width of the map (millions of tiles per cell). Tiling skips a cell at any zoom w
 cover more than 65,536 tiles (`pyramid::MAX_TILE_OPS_PER_CELL_ZOOM`); it stays present at
 coarser zooms. `pyramid::for_each_cell_tile_mercator` returns the number of tiles it emitted,
 `0` for a skipped cell. Raster and table exporters record skipped `(cell, zoom)` pairs as
-`h3_cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
+`cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
 gap between resolutions can also trigger the cap for nonpolar cells and leave a zoom empty.
 
 ## PMTiles v3 Leaf Directory Architecture
@@ -197,12 +197,14 @@ For massive multi-resolution archives containing tens of thousands or millions o
 * **Root Always Fits**: `pmtiles::writer::build_directories(entries, max_root_bytes)` chooses the layout. If the compressed root of leaf pointers would exceed 16,257 bytes (about 30 million tiles), the leaf size grows in 20% steps until it fits, as go-pmtiles does; an archive whose root cannot fit fails instead of writing an out-of-spec root.
 * **Instant Scalability**: Compressed root directories remain under 150 bytes regardless of dataset size (e.g., 60,000+ tiles compressed from 87 KB down to 122 bytes), ensuring instantaneous startup and sub-millisecond viewport tile lookups.
 
-## Embedded Multi-Resolution Statistical Metadata (`h3_resolution_stats`)
+## Embedded Multi-Resolution Statistical Metadata (`resolution_stats`)
+
+The archive metadata includes a `grid` field (`h3`, `a5`, `s2`, or `healpix`). For an exact cell ID in a JavaScript client, read the grid’s hex-string property, such as `s2_hex`.
 
 dggs_stream automatically embeds rich statistical envelopes across all pyramid levels directly inside the PMTiles JSON metadata:
 ```json
 {
-  "h3_resolution_stats": {
+  "resolution_stats": {
     "5": {
       "cell_count": 512,
       "zooms": [5, 6],
@@ -221,7 +223,7 @@ This enables client applications to adaptively normalize color ramps, configure 
 | :--- | :--- |
 | **Host a serverless web map** | Upload to Amazon S3, Cloudflare R2, Google Cloud Storage, or GitHub Pages. No tile servers, no Docker, no infrastructure. |
 | **View offline** | Drag and drop into the [Hexagon Studio](../pmtiles_viewer/README.md) web viewer — works entirely client-side with no server or network connection. |
-| **Embed in dashboards** | Add as a MapLibre GL JS vector source. Embedded `h3_resolution_stats` auto-calibrate color ramps and slider bounds. |
+| **Embed in dashboards** | Add as a MapLibre GL JS vector source. Embedded `resolution_stats` auto-calibrate color ramps and slider bounds. |
 | **Share with stakeholders** | Email or Slack a single file. Recipients open it in any PMTiles-compatible viewer. |
 | **Version your maps** | `.pmtiles` files are immutable snapshots — ideal for Git LFS, S3 versioning, or CI/CD artifact pipelines. |
 
@@ -283,10 +285,10 @@ map.on('load', () => {
         url: 'pmtiles://https://my-maps-bucket.s3.amazonaws.com/landcover.pmtiles'
     });
     map.addLayer({
-        id: 'h3_hexagons_layer',
+        id: 'dggs_cells_layer',
         type: 'fill',
         source: 'h3_raster',
-        'source-layer': 'h3_hexagons',
+        'source-layer': 'dggs_cells',
         paint: {
             'fill-color': [
                 'interpolate', ['linear'], ['get', 'mean'],
@@ -306,7 +308,7 @@ That's it — GeoTIFF to interactive, zoomable web map in three steps.
 
 ---
 
-## PMTiles Hexagon Studio Web Viewer
+## PMTiles Grid Studio Web Viewer
 
 dggs_stream includes a browser-based visual exploration studio for inspecting continuous and categorical H3 vector pyramids. It runs entirely client-side via MapLibre GL JS with HTTP byte-range streaming or offline drag-and-drop.
 

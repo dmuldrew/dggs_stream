@@ -36,7 +36,7 @@ undocumented_unsafe_blocks = "warn"
 broken_intra_doc_links = "warn"
 
 [workspace.dependencies]
-a5 = "0.10.1"
+a5 = "1.0.0"
 healpix = "0.3.3"
 s2 = { version = "0.2.0", default-features = false }
 h3o = "0.11.1"
@@ -82,11 +82,6 @@ crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "dggs-stream"
-path = "crates/dggs-stream-cli/src/bin/dggs_stream.rs"
-
-# The binary's former name, kept so existing scripts keep working.
-[[bin]]
-name = "raster-h3"
 path = "crates/dggs-stream-cli/src/bin/dggs_stream.rs"
 
 [features]

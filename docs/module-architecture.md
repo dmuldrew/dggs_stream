@@ -18,7 +18,7 @@ Re-exports `dggs_stream_core::*` and declares the `ffi` and `functions` modules.
 Declares the engine modules below and re-exports `h3o` (`CellIndex`, `LatLng`, `Resolution`).
 
 ### [`dggs-stream-core/src/error.rs`](../crates/dggs-stream-core/src/error.rs) — Domain Error Types
-Defines `RasterH3Error` via `thiserror`, unifying all recoverable error types across the pipeline (I/O, TIFF decoding, metadata parsing, CRS detection, PROJ4, H3, invalid parameters, DuckDB C-FFI, and streaming failures). Exports the crate-wide `Result<T>` alias.
+Defines `DggsStreamError` via `thiserror`, unifying all recoverable error types across the pipeline (I/O, TIFF decoding, metadata parsing, CRS detection, PROJ4, H3, invalid parameters, DuckDB C-FFI, and streaming failures). Exports the crate-wide `Result<T>` alias.
 
 ---
 
@@ -167,7 +167,7 @@ Grid-independent options a scan can add to the default pixel-centre kernel. See 
 | [`categorical_table_function.rs`](../crates/dggs-stream-duckdb/src/functions/categorical_table_function.rs) | Registers and executes `h3_raster_categorical_aggregate` (alias `raster_h3_categorical`). Supports Wide and Long output format schemas (`CategoricalOutputFormat`) with majority fraction filtering and unnested long-row pivoting. |
 | [`pmtiles_table_function.rs`](../crates/dggs-stream-duckdb/src/functions/pmtiles_table_function.rs) | Registers `h3_raster_to_pmtiles`. Invokes the PMTiles tiling engine and emits a 1-row summary result containing output path, tile count, and archive size. |
 | [`copy_function.rs`](../crates/dggs-stream-duckdb/src/functions/copy_function.rs) | DuckDB 2.0 build only: the `pmtiles` COPY format (`COPY ... TO ... (FORMAT pmtiles)`). Bind parses `MIN_ZOOM`/`MAX_ZOOM`/`MEMORY_BUDGET_MB`; global init opens the destination through DuckDB's file system; sink validates cells, applies the zoom filter and feeds `ExternalFeatureExport`; finalize streams the archive to the destination. |
-| [`config.rs`](../crates/dggs-stream-duckdb/src/functions/config.rs) | `SET raster_h3_*` session options (registered on the DuckDB 2.0 build), their `DGGS_STREAM_*` environment fallbacks applied at bind time, the DuckDB file-system `RemoteSourceFactory` for `raster_h3_use_duckdb_fs`, and the `temp_directory` lookup used by COPY. On the default build the bind-time hooks are no-ops. |
+| [`config.rs`](../crates/dggs-stream-duckdb/src/functions/config.rs) | `SET raster_h3_*` session options (registered on the DuckDB 2.0 build), their `DGGS_STREAM_*` environment fallbacks applied at bind time, the DuckDB file-system `RemoteSourceFactory` for `dggs_stream_use_duckdb_fs`, and the `temp_directory` lookup used by COPY. On the default build the bind-time hooks are no-ops. |
 | [`parquet_table_function.rs`](../crates/dggs-stream-duckdb/src/functions/parquet_table_function.rs) | Registers `h3_raster_to_parquet`. Invokes the Parquet streaming writer and emits a 1-row summary result containing output path, row count, and file size. |
 
 #### Scalar Functions

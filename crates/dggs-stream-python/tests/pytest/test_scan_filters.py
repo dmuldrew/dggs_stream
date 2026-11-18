@@ -19,24 +19,24 @@ from conftest import RES, class_value, pixel_cells, sort  # noqa: E402
 
 MULTI = [8, RES]
 POLARS = tuple(int(x) for x in pl.__version__.split(".")[:2])
-# Before Polars 1.22, `scan_raster_h3` keeps filters out of the scan (those versions drop
+# Before Polars 1.22, `scan_raster` keeps filters out of the scan (those versions drop
 # some filters they hand to IO sources), so nothing is pushed and Polars filters instead.
 PUSHDOWN = POLARS >= (1, 22)
 
 
 @pytest.fixture
 def scans(dggs_stream, monkeypatch):
-    """Resolutions and options of every `RasterH3ArrowStream` the IO source opens; clear it
+    """Resolutions and options of every `RasterArrowStream` the IO source opens; clear it
     between building the LazyFrame and collecting."""
     calls = []
-    original = dggs_stream.RasterH3ArrowStream
+    original = dggs_stream.RasterArrowStream
 
     class Recording(original):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             calls.append({"resolutions": self.resolutions, "options": dict(self.options)})
 
-    monkeypatch.setattr(dggs_stream, "RasterH3ArrowStream", Recording)
+    monkeypatch.setattr(dggs_stream, "RasterArrowStream", Recording)
     return calls
 
 
@@ -65,7 +65,7 @@ def sort_cells(df):
 
 
 def test_quantile_columns_follow_the_base_schema(dggs_stream, gradient_tif):
-    lf = dggs_stream.scan_raster_h3(gradient_tif, RES, quantiles="p10,median,iqr")
+    lf = dggs_stream.scan_raster(gradient_tif, RES, quantiles="p10,median,iqr")
     schema = lf.collect_schema() if hasattr(lf, "collect_schema") else lf.schema
     assert list(schema)[-4:] == ["wkb", "p10", "median", "iqr"]
     df = lf.collect()
@@ -80,7 +80,7 @@ def test_quantile_columns_follow_the_base_schema(dggs_stream, gradient_tif):
 
 
 def test_single_pixel_cells_have_exact_quantiles(dggs_stream, gradient_tif):
-    df = dggs_stream.scan_raster_h3(gradient_tif, 13, quantiles="p50").collect()
+    df = dggs_stream.scan_raster(gradient_tif, 13, quantiles="p50").collect()
     single = df.filter(pl.col("count") == 1)
     assert single.height > 0
     assert single["p50"].to_list() == single["mean"].to_list()
@@ -97,24 +97,24 @@ def test_single_pixel_cells_have_exact_quantiles(dggs_stream, gradient_tif):
     ],
 )
 def test_quantile_specs(dggs_stream, gradient_tif, spec, names):
-    df = dggs_stream.read_raster_h3(gradient_tif, RES, quantiles=spec)
+    df = dggs_stream.read_raster(gradient_tif, RES, quantiles=spec)
     assert df.columns[df.columns.index("wkb") + 1 :] == names
-    lazy = dggs_stream.scan_raster_h3(gradient_tif, RES, quantiles=spec).collect()
+    lazy = dggs_stream.scan_raster(gradient_tif, RES, quantiles=spec).collect()
     assert lazy.columns == df.columns
 
 
 def test_quantile_projection(dggs_stream, gradient_tif):
-    full = dggs_stream.read_raster_h3(gradient_tif, RES, quantiles="p90")
-    lf = dggs_stream.scan_raster_h3(gradient_tif, RES, quantiles="p90")
+    full = dggs_stream.read_raster(gradient_tif, RES, quantiles="p90")
+    lf = dggs_stream.scan_raster(gradient_tif, RES, quantiles="p90")
     assert sort(lf.select("h3_index", "p90").collect()).equals(sort(full.select("h3_index", "p90")))
     assert sort(lf.select("h3_index", "mean").collect()).equals(sort(full.select("h3_index", "mean")))
-    stream = dggs_stream.RasterH3ArrowStream(gradient_tif, RES, quantiles="p90", columns=["p90", "h3_index"])
+    stream = dggs_stream.RasterArrowStream(gradient_tif, RES, quantiles="p90", columns=["p90", "h3_index"])
     assert stream.to_polars().columns == ["p90", "h3_index"]
 
 
 def test_arrow_schema_carries_quantile_columns(dggs_stream, gradient_tif):
     pa = pytest.importorskip("pyarrow")
-    stream = dggs_stream.RasterH3ArrowStream(gradient_tif, RES, quantiles="q1,q3")
+    stream = dggs_stream.RasterArrowStream(gradient_tif, RES, quantiles="q1,q3")
     assert pa.schema(stream).names[-2:] == ["q1", "q3"]
     assert pa.table(stream).schema.names == pa.schema(stream).names
 
@@ -129,7 +129,7 @@ def test_arrow_schema_carries_quantile_columns(dggs_stream, gradient_tif):
 )
 def test_quantile_errors(dggs_stream, gradient_tif, kwargs, error, match):
     with pytest.raises(error, match=match):
-        dggs_stream.RasterH3ArrowStream(gradient_tif, RES, **kwargs).to_dict()
+        dggs_stream.RasterArrowStream(gradient_tif, RES, **kwargs).to_dict()
 
 
 # -----------------------------------------------------------------------------
@@ -157,7 +157,7 @@ def remapped_counts(mapping):
     ids=["mapping", "range-string", "braces"],
 )
 def test_remap_merges_and_drops_classes(dggs_stream, classes_tif, remap):
-    df = dggs_stream.scan_raster_h3(
+    df = dggs_stream.scan_raster(
         classes_tif, RES, categorical=True, format="long", remap=remap
     ).collect()
     got = defaultdict(dict)
@@ -168,7 +168,7 @@ def test_remap_merges_and_drops_classes(dggs_stream, classes_tif, remap):
 
 
 def test_remap_passes_unmatched_classes_through(dggs_stream, classes_tif):
-    df = dggs_stream.read_raster_h3(classes_tif, RES, categorical=True, format="long", remap={5: 4})
+    df = dggs_stream.read_raster(classes_tif, RES, categorical=True, format="long", remap={5: 4})
     assert set(df["category"].unique().to_list()) == {1, 2, 3, 4}
 
 
@@ -185,7 +185,7 @@ def test_remap_passes_unmatched_classes_through(dggs_stream, classes_tif):
 )
 def test_remap_errors(dggs_stream, gradient_tif, kwargs, error, match):
     with pytest.raises(error, match=match):
-        dggs_stream.RasterH3ArrowStream(gradient_tif, RES, **kwargs).to_dict()
+        dggs_stream.RasterArrowStream(gradient_tif, RES, **kwargs).to_dict()
 
 
 # -----------------------------------------------------------------------------
@@ -203,16 +203,16 @@ def test_remap_errors(dggs_stream, gradient_tif, kwargs, error, match):
     ],
 )
 def test_continuous_filters_are_inclusive(dggs_stream, gradient_tif, kwargs, expr):
-    full = dggs_stream.read_raster_h3(gradient_tif, RES)
-    got = dggs_stream.read_raster_h3(gradient_tif, RES, **kwargs)
+    full = dggs_stream.read_raster(gradient_tif, RES)
+    got = dggs_stream.read_raster(gradient_tif, RES, **kwargs)
     expected = full.filter(expr)
     assert 0 < expected.height < full.height
     assert sort(got).equals(sort(expected))
 
 
 def test_categorical_min_count_uses_total_count(dggs_stream, classes_tif):
-    full = dggs_stream.read_raster_h3(classes_tif, RES, categorical=True)
-    got = dggs_stream.read_raster_h3(classes_tif, RES, categorical=True, min_count=20)
+    full = dggs_stream.read_raster(classes_tif, RES, categorical=True)
+    got = dggs_stream.read_raster(classes_tif, RES, categorical=True, min_count=20)
     assert sort(got).equals(sort(full.filter(pl.col("total_count") >= 20)))
 
 
@@ -227,7 +227,7 @@ def test_categorical_min_count_uses_total_count(dggs_stream, classes_tif):
 )
 def test_filter_errors(dggs_stream, gradient_tif, kwargs, error, match):
     with pytest.raises(error, match=match):
-        dggs_stream.RasterH3ArrowStream(gradient_tif, RES, **kwargs).to_dict()
+        dggs_stream.RasterArrowStream(gradient_tif, RES, **kwargs).to_dict()
 
 
 # -----------------------------------------------------------------------------
@@ -248,12 +248,12 @@ def test_filter_errors(dggs_stream, gradient_tif, kwargs, error, match):
         (pl.col("count") != 3, {}),
         (pl.col("sum") > 100, {}),
         # Polars before 1.22 drops this filter if the IO source sees it (a strict cast
-        # cannot be handed down); `scan_raster_h3` keeps it in Polars on those versions.
+        # cannot be handed down); `scan_raster` keeps it in Polars on those versions.
         (pl.col("count").cast(pl.Int64) > 10, {}),
     ],
 )
 def test_continuous_predicates(dggs_stream, gradient_tif, scans, expr, pushed):
-    lf = dggs_stream.scan_raster_h3(gradient_tif, RES)
+    lf = dggs_stream.scan_raster(gradient_tif, RES)
     expected = lf.collect().filter(expr)
     scans.clear()
     got = lf.filter(expr).collect()
@@ -264,8 +264,8 @@ def test_continuous_predicates(dggs_stream, gradient_tif, scans, expr, pushed):
 
 
 def test_pushdown_combines_with_explicit_filters(dggs_stream, gradient_tif, scans):
-    lf = dggs_stream.scan_raster_h3(gradient_tif, RES, min_count=15, max_mean=10)
-    expected = dggs_stream.read_raster_h3(gradient_tif, RES, min_count=15, max_mean=10).filter(
+    lf = dggs_stream.scan_raster(gradient_tif, RES, min_count=15, max_mean=10)
+    expected = dggs_stream.read_raster(gradient_tif, RES, min_count=15, max_mean=10).filter(
         (pl.col("count") > 5) & (pl.col("mean") < 12) & (pl.col("mean") > 6)
     )
     scans.clear()
@@ -287,7 +287,7 @@ def test_pushdown_combines_with_explicit_filters(dggs_stream, gradient_tif, scan
     ],
 )
 def test_resolution_predicates_narrow_the_scan(dggs_stream, gradient_tif, scans, expr, resolutions):
-    lf = dggs_stream.scan_raster_h3(gradient_tif, MULTI)
+    lf = dggs_stream.scan_raster(gradient_tif, MULTI)
     expected = lf.collect().filter(expr)
     scans.clear()
     got = lf.filter(expr).collect()
@@ -297,7 +297,7 @@ def test_resolution_predicates_narrow_the_scan(dggs_stream, gradient_tif, scans,
 
 
 def test_resolution_predicate_rejecting_every_resolution(dggs_stream, gradient_tif, scans):
-    lf = dggs_stream.scan_raster_h3(gradient_tif, MULTI)
+    lf = dggs_stream.scan_raster(gradient_tif, MULTI)
     scans.clear()
     got = lf.filter(pl.col("resolution") == 12).collect()
     assert got.is_empty()
@@ -318,7 +318,7 @@ def test_resolution_predicate_rejecting_every_resolution(dggs_stream, gradient_t
     ],
 )
 def test_categorical_wide_predicates(dggs_stream, classes_tif, scans, expr, pushed):
-    lf = dggs_stream.scan_raster_h3(classes_tif, RES, categorical=True)
+    lf = dggs_stream.scan_raster(classes_tif, RES, categorical=True)
     expected = lf.collect().filter(expr)
     scans.clear()
     got = lf.filter(expr).collect()
@@ -329,7 +329,7 @@ def test_categorical_wide_predicates(dggs_stream, classes_tif, scans, expr, push
 
 def test_categorical_long_count_is_per_class(dggs_stream, classes_tif, scans):
     """In the long layout `count` is one class's share of a cell, so it bounds nothing."""
-    lf = dggs_stream.scan_raster_h3(classes_tif, RES, categorical=True, format="long")
+    lf = dggs_stream.scan_raster(classes_tif, RES, categorical=True, format="long")
     expr = (pl.col("count") > 8) & (pl.col("total_count") > 10)
     expected = lf.collect().filter(expr)
     scans.clear()
@@ -340,7 +340,7 @@ def test_categorical_long_count_is_per_class(dggs_stream, classes_tif, scans):
 
 
 def test_pushdown_with_row_limit(dggs_stream, gradient_tif):
-    lf = dggs_stream.scan_raster_h3(gradient_tif, RES)
+    lf = dggs_stream.scan_raster(gradient_tif, RES)
     expr = pl.col("mean") > 9
     got = lf.filter(expr).head(5).collect()
     assert got.height == 5
@@ -350,7 +350,7 @@ def test_pushdown_with_row_limit(dggs_stream, gradient_tif):
 @pytest.mark.parametrize("resolutions", [[16], [8, 16], [], "8,x"])
 def test_resolution_pushdown_keeps_invalid_resolutions_an_error(dggs_stream, gradient_tif, resolutions):
     """A resolution filter must not hide an invalid `resolutions` argument."""
-    lf = dggs_stream.scan_raster_h3(gradient_tif, resolutions)
+    lf = dggs_stream.scan_raster(gradient_tif, resolutions)
     # Polars wraps the native error in a ComputeError in some versions, not in others.
     with pytest.raises(Exception, match="Invalid resolutions"):
         lf.filter(pl.col("resolution") == 8).collect()
@@ -360,7 +360,7 @@ def test_pushdown_without_native_scan_options(dggs_stream, gradient_tif, scans, 
     """With a native library predating the `_v2` entry points, filters are applied by Polars
     only: no options are pushed, so the scan does not fail for lack of them."""
     monkeypatch.setattr(dggs_stream, "_native_has_scan_options", lambda: False)
-    lf = dggs_stream.scan_raster_h3(gradient_tif, MULTI)
+    lf = dggs_stream.scan_raster(gradient_tif, MULTI)
     expr = (pl.col("count") > 10) & (pl.col("mean") < 9) & (pl.col("resolution") == RES)
     expected = lf.collect().filter(expr)
     scans.clear()

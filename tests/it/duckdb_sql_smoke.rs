@@ -594,14 +594,14 @@ fn real_sql_v156_features() {
     let parquet = duckdb.path("fs_export.parquet");
     let sql = format!(
         r#"
-        SET raster_h3_use_duckdb_fs = true;
-        SET raster_h3_workers = 2;
-        SET raster_h3_fetch_workers = 4;
-        SET raster_h3_decode_budget_mb = 8;
-        SELECT current_setting('raster_h3_use_duckdb_fs')::BOOLEAN = true
-            AND current_setting('raster_h3_workers')::INTEGER = 2
-            AND current_setting('raster_h3_fetch_workers')::INTEGER = 4
-            AND current_setting('raster_h3_decode_budget_mb')::INTEGER = 8;
+        SET dggs_stream_use_duckdb_fs = true;
+        SET dggs_stream_workers = 2;
+        SET dggs_stream_fetch_workers = 4;
+        SET dggs_stream_decode_budget_mb = 8;
+        SELECT current_setting('dggs_stream_use_duckdb_fs')::BOOLEAN = true
+            AND current_setting('dggs_stream_workers')::INTEGER = 2
+            AND current_setting('dggs_stream_fetch_workers')::INTEGER = 4
+            AND current_setting('dggs_stream_decode_budget_mb')::INTEGER = 8;
         SELECT status = 'SUCCESS' AND total_hexagons > 0
         FROM h3_raster_to_parquet({tif}, {parquet}, crs := 'EPSG:4326',
             resolutions := '7');

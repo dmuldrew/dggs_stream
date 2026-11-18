@@ -3,7 +3,7 @@
 //! Apache DataFusion adapter for `dggs_stream`, version-matched to
 //! [SedonaDB](https://github.com/apache/sedona-db) so the same objects register into a
 //! plain DataFusion `SessionContext` or into `SedonaContext::ctx`:
-//! - [`RasterH3Table`]: a real `datafusion::catalog::TableProvider` wrapping the
+//! - [`RasterTable`]: a real `datafusion::catalog::TableProvider` wrapping the
 //!   [`scan`] providers, with projection, limit and `Expr` filter pushdown
 //! - Table functions `h3_raster_continuous_aggregate` / `h3_raster_categorical_aggregate`,
 //!   and the same for the other grids (`a5_`, `s2_`, `healpix_` prefixes, or a grid-name
@@ -57,8 +57,8 @@ pub use pmtiles::{
     PmtilesWriteOptions,
 };
 pub use polyfill::H3PolygonToCells;
-pub use table::{RasterH3Table, TableKind};
-pub use udf::{scalar_udfs, LonLatToCell, RasterH3ScalarUdf};
+pub use table::{RasterTable, TableKind};
+pub use udf::{scalar_udfs, H3ScalarUdf, LonLatToCell};
 pub use udtf::{
     CategoricalAggregateFunction, ContinuousAggregateFunction, GridCategoricalAggregateFunction,
     GridContinuousAggregateFunction, PlanPartitionsFunction,

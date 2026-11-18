@@ -15,11 +15,11 @@ import polars as pl
 import dggs_stream
 
 # Lazy Polars scan with projection, predicate and row-limit pushdown
-lf = dggs_stream.scan_raster_h3("dem.tif", resolutions=[7, 8])
-lf.filter(pl.col("count") > 10).select("h3_index", "mean").collect()
+lf = dggs_stream.scan_raster("dem.tif", resolutions=[12, 13], grid="s2")
+lf.filter(pl.col("count") > 10).select("s2_index", "mean").collect()
 
 # Any Arrow PyCapsule consumer works too (pyarrow, DuckDB, ...)
-stream = dggs_stream.RasterH3ArrowStream("landcover.tif", 8, categorical=True)
+stream = dggs_stream.RasterArrowStream("landcover.tif", 8, categorical=True)
 for batch in stream.iter_batches(batch_size=50_000):
     ...
 
@@ -55,7 +55,7 @@ projection, filter and limit pushdown work the same on each.
 ```python
 import dggs_stream
 
-lf = dggs_stream.scan_raster("dem.tif", 14, grid="healpix")   # same as scan_raster_h3(..., grid=)
+lf = dggs_stream.scan_raster("dem.tif", 14, grid="healpix")
 lf.filter(pl.col("count") >= 4).select("healpix_index", "mean").collect()
 
 dggs_stream.raster_to_parquet("dem.tif", "cells.parquet", 15, grid="s2")

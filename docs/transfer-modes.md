@@ -43,8 +43,8 @@ be passed directly as the transfer (`transfer := 'bicubic'` is `interpolate` wit
 Edges and NoData:
 
 - Taps past the raster's edge repeat the edge pixel.
-- `bilinear` leaves out NoData taps and renormalises the remaining weights; it returns nothing
-  only when all four taps are NoData.
+- `bilinear` leaves out NoData taps and renormalises the remaining weights. It returns no value
+  when valid taps have zero total weight, including at the exact centre of a NoData pixel.
 - `bicubic` and `lanczos` fall back to `bilinear` when any of their taps is NoData, so NoData never
   leaks into a result.
 - Zero-alpha pixels count as NoData, as in the default mode.
@@ -135,7 +135,7 @@ SELECT sum(sum) FROM h3_raster_continuous_aggregate('population.tif', resolution
     transfer := 'overlay', mass_preserve := true);
 ```
 
-**Python / Polars** (keyword arguments of `scan_raster_h3` / `scan_raster` and the exporters)
+**Python / Polars** (keyword arguments of `scan_raster` and the exporters)
 
 ```python
 import dggs_stream as ds

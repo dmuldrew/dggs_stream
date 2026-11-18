@@ -91,7 +91,7 @@ fn print_help() {
 
 fn reject_partition(opts: &dggs_stream_cli::CliStreamOptions, subcmd: &str) -> Result<()> {
     if opts.partition.is_some() {
-        return Err(dggs_stream_core::error::RasterH3Error::InvalidParameter(format!(
+        return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(format!(
             "{subcmd} does not take --partition: scan partitions with `ipc` and combine them with `merge`"
         )));
     }
@@ -100,7 +100,7 @@ fn reject_partition(opts: &dggs_stream_cli::CliStreamOptions, subcmd: &str) -> R
 
 fn reject_histogram(opts: &dggs_stream_cli::CliStreamOptions, subcmd: &str) -> Result<()> {
     if opts.histogram.is_some() {
-        return Err(dggs_stream_core::error::RasterH3Error::InvalidParameter(format!(
+        return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(format!(
             "{subcmd} does not take --histogram: its files have no histogram column; use `ipc` or `jsonl`"
         )));
     }
@@ -143,7 +143,7 @@ fn main() {
             reject_partition(&opts, "parquet")?;
             reject_histogram(&opts, "parquet")?;
             let out_path = out.ok_or_else(|| {
-                dggs_stream_core::error::RasterH3Error::InvalidParameter(
+                dggs_stream_core::error::DggsStreamError::InvalidParameter(
                     "Missing -o / --output path for parquet export".into(),
                 )
             })?;
@@ -167,7 +167,7 @@ fn main() {
             reject_partition(&opts, "pmtiles")?;
             reject_histogram(&opts, "pmtiles")?;
             let out_path = out.ok_or_else(|| {
-                dggs_stream_core::error::RasterH3Error::InvalidParameter(
+                dggs_stream_core::error::DggsStreamError::InvalidParameter(
                     "Missing -o / --output path for pmtiles export".into(),
                 )
             })?;
