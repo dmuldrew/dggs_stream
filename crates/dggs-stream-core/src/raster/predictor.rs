@@ -665,7 +665,7 @@ pub fn unpack_f32(src: &mut [u8], dst: &mut [f32], encoding: ChunkEncoding) -> R
                 }
             }
         }
-        Predictor::None => {
+        Predictor::None | Predictor::Horizontal => {
             let dst_stride_bytes = dst_stride * 4;
 
             #[cfg(target_endian = "little")]
@@ -732,16 +732,20 @@ pub fn unpack_f32(src: &mut [u8], dst: &mut [f32], encoding: ChunkEncoding) -> R
                     }
                 }
             }
+            // Predictor 2 differences the integer bit patterns of IEEE samples.
+            if predictor == Predictor::Horizontal {
+                for row in dst[..dst_stride * data_h].chunks_exact_mut(dst_stride) {
+                    for i in spp..row.len() {
+                        row[i] =
+                            f32::from_bits(row[i].to_bits().wrapping_add(row[i - spp].to_bits()));
+                    }
+                }
+            }
             if photometric == PhotometricInterpretation::WhiteIsZero {
                 for item in dst.iter_mut() {
                     *item = 1.0 - *item;
                 }
             }
-        }
-        Predictor::Horizontal => {
-            return Err(DggsStreamError::InvalidMetadata(
-                "horizontal predictor unsupported for f32".into(),
-            ));
         }
         _ => {
             return Err(DggsStreamError::InvalidMetadata(
@@ -779,7 +783,7 @@ pub fn unpack_f64(src: &mut [u8], dst: &mut [f64], encoding: ChunkEncoding) -> R
                 }
             }
         }
-        Predictor::None => {
+        Predictor::None | Predictor::Horizontal => {
             let dst_stride_bytes = dst_stride * 8;
 
             #[cfg(target_endian = "little")]
@@ -854,16 +858,20 @@ pub fn unpack_f64(src: &mut [u8], dst: &mut [f64], encoding: ChunkEncoding) -> R
                     }
                 }
             }
+            // Predictor 2 differences the integer bit patterns of IEEE samples.
+            if predictor == Predictor::Horizontal {
+                for row in dst[..dst_stride * data_h].chunks_exact_mut(dst_stride) {
+                    for i in spp..row.len() {
+                        row[i] =
+                            f64::from_bits(row[i].to_bits().wrapping_add(row[i - spp].to_bits()));
+                    }
+                }
+            }
             if photometric == PhotometricInterpretation::WhiteIsZero {
                 for item in dst.iter_mut() {
                     *item = 1.0 - *item;
                 }
             }
-        }
-        Predictor::Horizontal => {
-            return Err(DggsStreamError::InvalidMetadata(
-                "horizontal predictor unsupported for f64".into(),
-            ));
         }
         _ => {
             return Err(DggsStreamError::InvalidMetadata(
@@ -965,23 +973,33 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_f32_invalid_predictor() {
-        let mut src = vec![0u8; 16];
-        let mut dst = vec![0.0f32; 4];
-        let result = unpack_f32(
+    fn unpack_f64_horizontal_predictor_preserves_interleaved_bits() {
+        let pixels = [1.5f64, -0.0, -8.25, 6.0, 99.0, 100.0].map(f64::to_bits);
+        let differences = [
+            pixels[0],
+            pixels[1],
+            pixels[2].wrapping_sub(pixels[0]),
+            pixels[3].wrapping_sub(pixels[1]),
+            pixels[4].wrapping_sub(pixels[2]),
+            pixels[5].wrapping_sub(pixels[3]),
+        ];
+        let mut src: Vec<u8> = differences.into_iter().flat_map(u64::to_be_bytes).collect();
+        let mut dst = [0.0; 4];
+        unpack_f64(
             &mut src,
             &mut dst,
             ChunkEncoding {
-                tile_w: 2,
+                tile_w: 3,
                 data_w: 2,
                 data_h: 1,
-                spp: 1,
-                byte_order: TiffByteOrder::LittleEndian,
+                spp: 2,
+                byte_order: TiffByteOrder::BigEndian,
                 predictor: Predictor::Horizontal,
                 photometric: PhotometricInterpretation::BlackIsZero,
             },
-        );
-        assert!(result.is_err());
+        )
+        .unwrap();
+        assert_eq!(dst.map(f64::to_bits), pixels[..4]);
     }
 
     #[test]
