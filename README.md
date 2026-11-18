@@ -12,7 +12,7 @@ Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) a
 
 Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
-> **About the name.** dggs_stream streams raster files onto a DGGS in one pass (it is not a real-time event-stream system). It was previously called raster_h3, and the old names still work for now: `spark.read.format("raster_h3")`, the `raster-h3-cli` and `raster-h3` binaries, `RASTER_H3_*` environment variables, `CREATE EXTENSION raster_h3` in PostgreSQL, and DuckDB's `LOAD raster_h3` for a copy of the extension file named `raster_h3.duckdb_extension`. SQL function and setting names did not change (`h3_raster_continuous_aggregate`, `raster_h3_workers`, ...).
+> **Formerly raster_h3.** See the [changelog](CHANGELOG.md#unreleased) for the new names and migration details.
 
 | Output | Use Case | Available In |
 | :--- | :--- | :--- |
