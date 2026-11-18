@@ -1841,7 +1841,7 @@ fn zstd_chunk_and_stream_parity() {
                     for rec in stream.fetch_next_batch(17).unwrap() {
                         assert!(cells
                             .insert(
-                                rec.h3_index,
+                                rec.cell_id,
                                 (
                                     rec.accumulator.count.to_bits(),
                                     rec.accumulator.sum.to_bits()
@@ -1870,7 +1870,7 @@ fn zstd_chunk_and_stream_parity() {
                             rec.accumulator.for_each_class(|class, count| {
                                 classes.insert(class, count.to_bits());
                             });
-                            assert!(cells.insert(rec.h3_index, classes).is_none());
+                            assert!(cells.insert(rec.cell_id, classes).is_none());
                         }
                     }
                     assert!(!cells.is_empty());
