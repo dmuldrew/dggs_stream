@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grid::GridKind;
 use crate::pmtiles::features::{
-    build_default_pmtiles_fields_for, build_pmtiles_metadata, H3Feature, PmtilesExportSummary,
+    build_default_pmtiles_fields_for, indexed_metadata, H3Feature, PmtilesExportSummary,
     TilePyramidAccumulator,
 };
 use crate::pmtiles::mvt::{MercatorPoint, MvtValue};
@@ -481,20 +481,12 @@ impl ExternalFeatureExport {
         }
         let capped_cells = accumulator.capped_cells;
         accumulator.flush_all(&mut writer)?;
-        let metadata = build_pmtiles_metadata(
-            "h3_pmtiles_export",
-            "H3 vector hexagon tile pyramid exported by dggs_stream",
+        let metadata = indexed_metadata(
+            grid,
             min_zoom,
             max_zoom,
-            crate::pmtiles::CELL_LAYER_ID,
-            "H3 hexagonal vector polygons with attributes",
             self.fields_metadata(),
-            (capped_cells > 0).then(|| {
-                serde_json::Map::from_iter([(
-                    crate::pmtiles::CELLS_OVER_TILE_CAP.to_string(),
-                    serde_json::json!(capped_cells),
-                )])
-            }),
+            capped_cells,
         );
         writer.set_metadata(bbox, metadata.to_string());
 

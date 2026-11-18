@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>PMTiles Hexagon Studio — Multi-Resolution H3 Pyramids</title>
+  <title>PMTiles Grid Studio — Multi-Resolution Grid Pyramids</title>
   <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -718,7 +718,7 @@
   <!-- HUD Real-Time Stats -->
   <div class="viewer-hud">
     <div>Zoom: <span id="hud-zoom">7.0</span></div>
-    <div>H3 Res: <span id="hud-h3-res">4</span></div>
+    <div>Res: <span id="hud-resolution">—</span></div>
     <div>Pitch: <span id="hud-pitch">0°</span></div>
   </div>
 
@@ -729,8 +729,8 @@
       <div class="viewer-brand">
         <div class="viewer-logo-sq">⬡</div>
         <div>
-          <div class="viewer-title">PMTiles Hexagon Studio</div>
-          <div class="viewer-sub">H3 Multi-Resolution Vector Engine</div>
+          <div class="viewer-title">PMTiles Grid Studio</div>
+          <div class="viewer-sub">Multi-Resolution Grid Cells</div>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
@@ -788,7 +788,7 @@
             <option value="min">min — Minimum Pixel Value</option>
             <option value="count">count — Valid Pixel Sampling Count</option>
             <option value="stddev">stddev — Standard Deviation</option>
-            <option value="resolution">resolution — Native H3 Pyramid Resolution</option>
+            <option value="resolution">resolution — Cell Resolution</option>
           </select>
         </div>
       </div>
@@ -800,7 +800,7 @@
         <!-- Continuous Controls Container -->
         <div id="continuous-controls-container" style="display: flex; flex-direction: column; gap: 10px;">
           <div class="viewer-toggle">
-            <span class="viewer-toggle-title">Adaptive Scale by H3 Res</span>
+            <span class="viewer-toggle-title">Adaptive Scale by Res</span>
             <label class="switch">
               <input type="checkbox" id="adaptive-color-toggle" checked>
               <span class="slider"></span>
@@ -914,7 +914,7 @@
         <div class="section-title">🧊 Geometry & 3D</div>
 
         <div class="viewer-toggle">
-          <span class="viewer-toggle-title">Hexagon Wireframe Borders</span>
+          <span class="viewer-toggle-title">Cell Borders</span>
           <label class="switch">
             <input type="checkbox" id="wireframe-toggle" checked>
             <span class="slider"></span>
@@ -922,7 +922,7 @@
         </div>
 
         <div class="viewer-toggle">
-          <span class="viewer-toggle-title">3D Hexagon Extrusion</span>
+          <span class="viewer-toggle-title">3D Cell Extrusion</span>
           <label class="switch">
             <input type="checkbox" id="extrusion-toggle">
             <span class="slider"></span>
@@ -1433,7 +1433,7 @@
           <option value="distinct_classes">distinct_classes — Count of Distinct Classes</option>
           <option value="entropy">entropy — Shannon Diversity / Boundary Index</option>
           <option value="count">count — Total Sampled Pixels</option>
-          <option value="resolution">resolution — Native H3 Pyramid Resolution</option>
+          <option value="resolution">resolution — Cell Resolution</option>
         `;
         if (selectedPalette === 'Viridis') {
           selectedPalette = 'Tableau 10';
@@ -1446,7 +1446,7 @@
           <option value="min">min — Minimum Pixel Value</option>
           <option value="count">count — Valid Pixel Sampling Count</option>
           <option value="stddev">stddev — Standard Deviation</option>
-          <option value="resolution">resolution — Native H3 Pyramid Resolution</option>
+          <option value="resolution">resolution — Cell Resolution</option>
         `;
         if (selectedPalette === 'Tableau 10' || selectedPalette === 'Bold Paired' || selectedPalette === 'Set 1' || selectedPalette.includes('Land Cover')) {
           selectedPalette = 'Viridis';
@@ -1642,7 +1642,7 @@
     function updateSliderRanges(prop, forceValues = false, targetRes = null) {
       if (targetRes === null && typeof map !== 'undefined' && map) {
         const z = map.getZoom();
-        targetRes = getEstimatedH3Res(z);
+        targetRes = resolutionAtZoom(z);
       }
 
       const bounds = getDataBoundsForProp(prop, targetRes);
@@ -1696,11 +1696,11 @@
           html += `
             <div class="stat-card" id="stat-card-res-${resKey}">
               <div class="stat-card-head">
-                <span class="stat-res-badge">H3 Res ${resKey}</span>
+                <span class="stat-res-badge">Res ${resKey}</span>
                 <span class="stat-zoom-badge">Zooms: ${zoomsStr}</span>
               </div>
               <div style="font-size: 11px; color: var(--theme-text); font-weight: 600;">
-                ${Number(s.cell_count || 0).toLocaleString()} Hexagons
+                ${Number(s.cell_count || 0).toLocaleString()} Cells
               </div>
               <div class="stat-grid">
                 <div class="stat-item">
@@ -1726,11 +1726,11 @@
           html += `
             <div class="stat-card" id="stat-card-res-${resKey}">
               <div class="stat-card-head">
-                <span class="stat-res-badge">H3 Res ${resKey}</span>
+                <span class="stat-res-badge">Res ${resKey}</span>
                 <span class="stat-zoom-badge">Zooms: ${zoomsStr}</span>
               </div>
               <div style="font-size: 11px; color: var(--theme-text); font-weight: 600;">
-                ${Number(s.cell_count || 0).toLocaleString()} Hexagons
+                ${Number(s.cell_count || 0).toLocaleString()} Cells
               </div>
               <div class="stat-grid">
                 <div class="stat-item">
@@ -1830,6 +1830,7 @@
       ]).then(([meta, h]) => {
         if (loadId !== sourceCounter) return;
         currentMetadata = meta;
+        updateResolutionDisplay();
         if (meta) {
           detectedClasses = extractDetectedClasses(meta);
           const detectedMode = detectDatasetType(meta);
@@ -2056,11 +2057,11 @@
           filterConditions.push(['!=', ['to-number', ['get', 'majority'], 0], 32767]);
           filterConditions.push(['!=', ['to-number', ['get', 'majority'], 0], 0]);
         } else {
-          filterConditions.push(['!=', ['to-number', ['get', 'mean'], -9999], -9999]);
-          filterConditions.push(['!=', ['to-number', ['get', 'mean'], -9999], -32768]);
-          filterConditions.push(['!=', ['to-number', ['get', 'mean'], -9999], 32767]);
+          const mean = ['to-number', ['get', 'mean'], -9999];
+          filterConditions.push(['any', ['!', ['has', 'mean']],
+            ['all', ['!=', mean, -9999], ['!=', mean, -32768], ['!=', mean, 32767]]]);
         }
-        filterConditions.push(['>', ['to-number', ['get', 'count'], 0], 0]);
+        filterConditions.push(['any', ['!', ['has', 'count']], ['>', ['to-number', ['get', 'count'], 0], 0]]);
       }
 
       if (currentMode === 'categorical' && categoricalFilter !== null) {
@@ -2213,7 +2214,7 @@
         const maj = parseInt(p.majority, 10);
         const mean = parseFloat(p.mean);
         const cnt = parseFloat(p.count);
-        if (maj === -9999 || maj === 0 || maj === -32768 || maj === 32767 || mean === -9999 || mean === -32768 || mean === 32767 || cnt === 0 || isNaN(cnt) || cnt <= 0) {
+        if (maj === -9999 || maj === 0 || maj === -32768 || maj === 32767 || mean === -9999 || mean === -32768 || mean === 32767 || (p.count != null && (!Number.isFinite(cnt) || cnt <= 0))) {
           map.getCanvas().style.cursor = '';
           popup.remove();
           return;
@@ -2232,7 +2233,7 @@
 
         const html = `
           <div class="tip-header">
-            <span class="tip-hex">${p.h3_hex || 'Hexagon'}</span>
+            <span class="tip-hex">${cellLabel(p, currentMetadata)}</span>
             <span class="tip-res">Res ${p.resolution ?? '?'}</span>
           </div>
           <div class="tip-grid">
@@ -2268,7 +2269,7 @@
 
       const html = `
         <div class="tip-header">
-          <span class="tip-hex">${p.h3_hex || 'Hexagon'}</span>
+          <span class="tip-hex">${cellLabel(p, currentMetadata)}</span>
           <span class="tip-res">Res ${p.resolution ?? '?'}</span>
         </div>
         <div class="tip-grid">
@@ -2301,7 +2302,14 @@
       popup.setLngLat(e.lngLat).setHTML(html).addTo(map);
     });
 
-    function getEstimatedH3Res(z) {
+    function cellLabel(properties, metadata) {
+      const grids = ['h3', 'a5', 's2', 'healpix'];
+      const grid = metadata?.grid ?? grids.find(name => typeof properties[name + '_hex'] === 'string');
+      const hex = grids.includes(grid) && properties[grid + '_hex'];
+      return typeof hex === 'string' && /^[0-9a-f]+$/i.test(hex) ? hex : 'Cell';
+    }
+
+    function resolutionAtZoom(z) {
       const intZ = Math.floor(z);
       const resStats = currentMetadata?.resolution_stats;
       if (resStats && typeof resStats === 'object') {
@@ -2311,26 +2319,22 @@
           }
         }
       }
-      if (intZ >= 14) return 9;
-      if (intZ === 13) return 8;
-      if (intZ >= 11) return 7;
-      if (intZ === 10) return 6;
-      return 5;
+      return null;
     }
 
     let lastActiveRes = null;
 
-    map.on('move', () => {
+    function updateResolutionDisplay() {
       const z = map.getZoom();
       document.getElementById('hud-zoom').innerText = z.toFixed(1);
       document.getElementById('hud-pitch').innerText = `${Math.round(map.getPitch())}°`;
 
-      const estimatedRes = getEstimatedH3Res(z);
-      document.getElementById('hud-h3-res').innerText = estimatedRes;
+      const estimatedRes = resolutionAtZoom(z);
+      document.getElementById('hud-resolution').innerText = estimatedRes ?? '—';
 
       const isAdaptive = document.getElementById('adaptive-color-toggle')?.checked;
       const prop = document.getElementById('property-select')?.value;
-      const resStats = currentMetadata?.resolution_stats?.[estimatedRes.toString()];
+      const resStats = currentMetadata?.resolution_stats?.[estimatedRes];
 
       if (estimatedRes !== lastActiveRes) {
         lastActiveRes = estimatedRes;
@@ -2363,7 +2367,8 @@
         document.getElementById('legend-max').innerText = Number(maxVal).toLocaleString(undefined, {maximumFractionDigits: 1});
         document.getElementById('legend-palette-label').innerText = selectedPalette.toUpperCase();
       }
-    });
+    }
+    map.on('move', updateResolutionDisplay);
 
     // Tab Navigation
     document.querySelectorAll('.viewer-tab').forEach(tab => {
@@ -2481,14 +2486,14 @@
     document.getElementById('property-select').addEventListener('change', (e) => {
       updateSection2View();
       const z = map.getZoom();
-      const currentRes = getEstimatedH3Res(z);
+      const currentRes = resolutionAtZoom(z);
       updateSliderRanges(e.target.value, true, currentRes);
       addOrUpdateHexLayers();
     });
 
     document.getElementById('adaptive-color-toggle')?.addEventListener('change', (e) => {
       const z = map.getZoom();
-      const currentRes = getEstimatedH3Res(z);
+      const currentRes = resolutionAtZoom(z);
       const prop = document.getElementById('property-select').value;
       if (e.target.checked) {
         updateSliderRanges(prop, true, currentRes);
@@ -2525,7 +2530,7 @@
       }
 
       const z = map.getZoom();
-      const currentRes = getEstimatedH3Res(z);
+      const currentRes = resolutionAtZoom(z);
 
       if (vals.length > 0) {
         vals.sort((a, b) => a - b);
@@ -2559,7 +2564,7 @@
     document.getElementById('reset-bounds-btn')?.addEventListener('click', () => {
       const prop = document.getElementById('property-select').value;
       const z = map.getZoom();
-      const currentRes = getEstimatedH3Res(z);
+      const currentRes = resolutionAtZoom(z);
       updateSliderRanges(prop, true, currentRes);
       const adaptiveToggle = document.getElementById('adaptive-color-toggle');
       if (adaptiveToggle) {
@@ -2707,6 +2712,7 @@
       ]).then(([meta, h]) => {
         if (loadId !== sourceCounter) return;
         currentMetadata = meta;
+        updateResolutionDisplay();
         if (meta) {
           detectedClasses = extractDetectedClasses(meta);
           const detectedMode = detectDatasetType(meta);
