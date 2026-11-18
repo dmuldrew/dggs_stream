@@ -15,7 +15,7 @@ use dggs_stream_cli::{parse_stream_args, stream_raster_to_writer, StreamOutputFo
 use dggs_stream_core::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use dggs_stream_core::columnar::ColumnArray;
 use dggs_stream_core::grid::GridKind;
-use dggs_stream_core::transfer::{SampleMethod, TransferMode};
+use dggs_stream_core::transfer::{Interpolation, TransferMode};
 use dggs_stream_python::{PyRasterScanner, PyScanConfig};
 use dggs_stream_sedona::register_all;
 
@@ -74,17 +74,17 @@ fn cases() -> Vec<Case> {
         Case {
             name: "sample, bilinear",
             offset: 1,
-            cli: &["--transfer", "sample", "--sample-method", "bilinear"],
-            sql: &["transfer=sample", "sample_method=bilinear"],
-            transfer: TransferMode::Sample(SampleMethod::Bilinear),
+            cli: &["--transfer", "interpolate", "--interpolation", "bilinear"],
+            sql: &["transfer=interpolate", "interpolation=bilinear"],
+            transfer: TransferMode::Interpolate(Interpolation::Bilinear),
             output: OutputPolicy::default(),
         },
         Case {
             name: "sample, bicubic",
             offset: 1,
-            cli: &["--transfer", "sample", "--sample-method", "bicubic"],
-            sql: &["transfer=sample", "sample_method=bicubic"],
-            transfer: TransferMode::Sample(SampleMethod::Bicubic),
+            cli: &["--transfer", "interpolate", "--interpolation", "bicubic"],
+            sql: &["transfer=interpolate", "interpolation=bicubic"],
+            transfer: TransferMode::Interpolate(Interpolation::Bicubic),
             output: OutputPolicy::default(),
         },
     ]
@@ -253,7 +253,7 @@ async fn engines_agree_on_every_grid_and_transfer_mode() {
                 }
                 // An interpolated linear field is the field itself at each cell centre,
                 // away from the raster's edge.
-                TransferMode::Sample(_) => {
+                TransferMode::Interpolate(_) => {
                     let mut interior = 0;
                     for (cell, (_, _, mean)) in &from_cli {
                         let (_, lon) = grid.center_lat_lng(*cell).unwrap();

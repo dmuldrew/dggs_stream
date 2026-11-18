@@ -980,8 +980,8 @@ fn test_transfer_modes() {
         let sampled = scan(
             matched + 2,
             vec![
-                ("transfer", MockVal::Str("sample".into())),
-                ("sample_method", MockVal::Str("nearest".into())),
+                ("transfer", MockVal::Str("interpolate".into())),
+                ("interpolation", MockVal::Str("nearest".into())),
             ],
         )
         .unwrap();
@@ -997,8 +997,8 @@ fn test_transfer_modes() {
         for (bad, needle) in [
             (vec![("transfer", MockVal::Str("smear".into()))], "transfer"),
             (
-                vec![("sample_method", MockVal::Str("bilinear".into()))],
-                "sample_method",
+                vec![("interpolation", MockVal::Str("bilinear".into()))],
+                "interpolation",
             ),
             (
                 vec![("mass_preserve", MockVal::Bool(true))],
@@ -1196,7 +1196,7 @@ fn test_histogram_parameters() {
             vec![("histogram_weight", MockVal::Str("mass".into()))],
             vec![
                 ("histogram_weight", MockVal::Str("area".into())),
-                ("transfer", MockVal::Str("sample".into())),
+                ("transfer", MockVal::Str("interpolate".into())),
             ],
         ] {
             assert!(scan(bad.clone()).is_err(), "{grid}: {bad:?}");
@@ -1244,19 +1244,19 @@ fn test_cross_engine_consistency_with_the_cli() {
         (
             "sample, bilinear",
             "auto+1",
-            &["--transfer", "sample", "--sample-method", "bilinear"],
+            &["--transfer", "interpolate", "--interpolation", "bilinear"],
             vec![
-                ("transfer", text("sample")),
-                ("sample_method", text("bilinear")),
+                ("transfer", text("interpolate")),
+                ("interpolation", text("bilinear")),
             ],
         ),
         (
             "sample, bicubic",
             "auto+1",
-            &["--transfer", "sample", "--sample-method", "bicubic"],
+            &["--transfer", "interpolate", "--interpolation", "bicubic"],
             vec![
-                ("transfer", text("sample")),
-                ("sample_method", text("bicubic")),
+                ("transfer", text("interpolate")),
+                ("interpolation", text("bicubic")),
             ],
         ),
     ];

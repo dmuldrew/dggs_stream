@@ -240,7 +240,7 @@ impl HistogramSpec {
 
     /// The transfer mode a scan with this histogram runs: area weights need a weighted
     /// `overlay`, which is chosen when the scan asks for the default mode and refused for
-    /// `sample` and for an unweighted overlay (which would weight each pixel 1).
+    /// `interpolate` and for an unweighted overlay (which would weight each pixel 1).
     pub fn transfer_mode(&self, requested: TransferMode) -> Result<TransferMode> {
         match (self.weight, requested) {
             (HistogramWeight::Count, mode) => Ok(mode),
@@ -259,8 +259,8 @@ impl HistogramSpec {
             ) => Err(invalid(
                 "histogram weight 'area' needs a weighted overlay (overlay_weighted=true)".into(),
             )),
-            (HistogramWeight::Area, TransferMode::Sample(_)) => Err(invalid(
-                "histogram weight 'area' needs transfer 'overlay', not 'sample'".into(),
+            (HistogramWeight::Area, TransferMode::Interpolate(_)) => Err(invalid(
+                "histogram weight 'area' needs transfer 'overlay', not 'interpolate'".into(),
             )),
         }
     }
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn area_weights_run_overlay() {
-        use crate::transfer::SampleMethod;
+        use crate::transfer::Interpolation;
         let area = HistogramSpec {
             weight: HistogramWeight::Area,
             ..Default::default()
@@ -422,7 +422,7 @@ mod tests {
             TransferMode::Overlay { weighted: true, .. }
         ));
         assert!(area
-            .transfer_mode(TransferMode::Sample(SampleMethod::Nearest))
+            .transfer_mode(TransferMode::Interpolate(Interpolation::Nearest))
             .is_err());
         let unweighted = TransferMode::Overlay {
             weighted: false,

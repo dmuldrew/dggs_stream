@@ -2,9 +2,9 @@
 
 use super::window::RowWindow;
 
-/// The interpolation kernel of [`super::TransferMode::Sample`].
+/// The interpolation kernel of [`super::TransferMode::Interpolate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum SampleMethod {
+pub enum Interpolation {
     /// The value of the pixel holding the point.
     Nearest,
     /// Linear in each direction over the 2 x 2 nearest pixel centres.
@@ -17,7 +17,7 @@ pub enum SampleMethod {
     Lanczos,
 }
 
-impl SampleMethod {
+impl Interpolation {
     /// The accepted names, for error messages.
     pub const EXPECTED: &'static str = "'nearest', 'bilinear', 'bicubic' or 'lanczos'";
 
@@ -92,13 +92,13 @@ fn lanczos_weights(t: f64) -> [f64; 6] {
 /// Taps past the raster's edge repeat the edge pixel. Bilinear interpolation leaves out
 /// NoData taps and renormalises; the wider kernels fall back to bilinear when any of
 /// their taps is NoData, and bilinear to nothing when all four are.
-pub fn interpolate(window: &RowWindow, method: SampleMethod, col: f64, row: f64) -> Option<f64> {
+pub fn interpolate(window: &RowWindow, method: Interpolation, col: f64, row: f64) -> Option<f64> {
     let (width, height) = (i64::from(window.width()), i64::from(window.raster_height()));
     if !(col >= 0.0 && row >= 0.0 && col < width as f64 && row < height as f64) {
         return None;
     }
     let tap = |i: i64, j: i64| window.get(i.clamp(0, width - 1), j.clamp(0, height - 1));
-    if method == SampleMethod::Nearest {
+    if method == Interpolation::Nearest {
         return tap(col.floor() as i64, row.floor() as i64);
     }
     // Position relative to pixel centres.
@@ -117,8 +117,8 @@ pub fn interpolate(window: &RowWindow, method: SampleMethod, col: f64, row: f64)
         Some(value)
     };
     let wide = match method {
-        SampleMethod::Bicubic => separable(&cubic_weights(fx), &cubic_weights(fy), -1),
-        SampleMethod::Lanczos => separable(&lanczos_weights(fx), &lanczos_weights(fy), -2),
+        Interpolation::Bicubic => separable(&cubic_weights(fx), &cubic_weights(fy), -1),
+        Interpolation::Lanczos => separable(&lanczos_weights(fx), &lanczos_weights(fy), -2),
         _ => None,
     };
     if wide.is_some() {
@@ -165,10 +165,10 @@ mod tests {
             f64::from(c * c) + 3.0 * f64::from(r) - 0.25 * f64::from(c * r)
         });
         for method in [
-            SampleMethod::Nearest,
-            SampleMethod::Bilinear,
-            SampleMethod::Bicubic,
-            SampleMethod::Lanczos,
+            Interpolation::Nearest,
+            Interpolation::Bilinear,
+            Interpolation::Bicubic,
+            Interpolation::Lanczos,
         ] {
             for r in 0..7u32 {
                 for c in 0..9u32 {
@@ -183,7 +183,7 @@ mod tests {
             assert_eq!(interpolate(&w, method, -0.1, 3.0), None);
             assert_eq!(interpolate(&w, method, 9.0, 3.0), None);
             assert_eq!(interpolate(&w, method, 3.0, 7.0), None);
-            assert_eq!(SampleMethod::parse(method.as_str()), Some(method));
+            assert_eq!(Interpolation::parse(method.as_str()), Some(method));
         }
     }
 
@@ -197,9 +197,9 @@ mod tests {
             let mut x = 3.05;
             while x < 13.0 {
                 let exact = field(x, y);
-                let bilinear = interpolate(&w, SampleMethod::Bilinear, x, y).unwrap();
-                let bicubic = interpolate(&w, SampleMethod::Bicubic, x, y).unwrap();
-                let lanczos = interpolate(&w, SampleMethod::Lanczos, x, y).unwrap();
+                let bilinear = interpolate(&w, Interpolation::Bilinear, x, y).unwrap();
+                let bicubic = interpolate(&w, Interpolation::Bicubic, x, y).unwrap();
+                let lanczos = interpolate(&w, Interpolation::Lanczos, x, y).unwrap();
                 assert!((bilinear - exact).abs() < 1e-10, "bilinear at ({x}, {y})");
                 assert!((bicubic - exact).abs() < 1e-10, "bicubic at ({x}, {y})");
                 // Lanczos ripples by a couple of percent of the slope on a ramp.
@@ -207,7 +207,7 @@ mod tests {
                     (lanczos - exact).abs() < 0.1,
                     "lanczos at ({x}, {y}): {lanczos} vs {exact}"
                 );
-                let nearest = interpolate(&w, SampleMethod::Nearest, x, y).unwrap();
+                let nearest = interpolate(&w, Interpolation::Nearest, x, y).unwrap();
                 assert_eq!(nearest, field(x.floor() + 0.5, y.floor() + 0.5));
                 x += 0.37;
             }
@@ -230,14 +230,14 @@ mod tests {
         while y < 15.0 {
             let mut x = 5.1;
             while x < 15.0 {
-                let got = interpolate(&w, SampleMethod::Bicubic, x, y).unwrap();
+                let got = interpolate(&w, Interpolation::Bicubic, x, y).unwrap();
                 assert!((got - quadratic(x, y)).abs() < 1e-9);
                 let (sx, sy) = (x * 2.0, y * 2.0);
                 let exact = smooth(sx, sy);
                 let err = |m| (interpolate(&s, m, sx, sy).unwrap() - exact).abs();
-                linear_err = linear_err.max(err(SampleMethod::Bilinear));
-                cubic_err = cubic_err.max(err(SampleMethod::Bicubic));
-                lanczos_err = lanczos_err.max(err(SampleMethod::Lanczos));
+                linear_err = linear_err.max(err(Interpolation::Bilinear));
+                cubic_err = cubic_err.max(err(Interpolation::Bicubic));
+                lanczos_err = lanczos_err.max(err(Interpolation::Lanczos));
                 x += 0.43;
             }
             y += 0.47;
@@ -254,9 +254,9 @@ mod tests {
         // A NoData pixel at (4, 4).
         let w = window(9, 9, |c, r| if (c, r) == (4, 4) { f64::NAN } else { 10.0 });
         for method in [
-            SampleMethod::Bilinear,
-            SampleMethod::Bicubic,
-            SampleMethod::Lanczos,
+            Interpolation::Bilinear,
+            Interpolation::Bicubic,
+            Interpolation::Lanczos,
         ] {
             // Near the hole the remaining taps still give the constant.
             assert_eq!(interpolate(&w, method, 5.2, 5.2), Some(10.0));
@@ -266,12 +266,12 @@ mod tests {
             assert!((interpolate(&w, method, 0.1, 0.1).unwrap() - 10.0).abs() < 1e-12);
             assert!((interpolate(&w, method, 8.9, 8.9).unwrap() - 10.0).abs() < 1e-12);
         }
-        assert_eq!(interpolate(&w, SampleMethod::Nearest, 4.5, 4.5), None);
+        assert_eq!(interpolate(&w, Interpolation::Nearest, 4.5, 4.5), None);
         // Dead centre of the hole, bilinear has only that tap.
-        assert_eq!(interpolate(&w, SampleMethod::Bilinear, 4.5, 4.5), None);
+        assert_eq!(interpolate(&w, Interpolation::Bilinear, 4.5, 4.5), None);
         let all_nodata = window(4, 4, |_, _| f64::NAN);
         assert_eq!(
-            interpolate(&all_nodata, SampleMethod::Bicubic, 2.0, 2.0),
+            interpolate(&all_nodata, Interpolation::Bicubic, 2.0, 2.0),
             None
         );
     }

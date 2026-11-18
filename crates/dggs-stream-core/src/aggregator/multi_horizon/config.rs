@@ -435,7 +435,7 @@ impl MultiResolutionConfig {
     /// and duplicate records from the requested parent resolution (7). Therefore, adjacent
     /// resolutions cannot be combined with hierarchical compaction.
     /// Ask for a per-cell histogram. Area weights run the `overlay` transfer mode, so a
-    /// scan left on the default mode switches to it; `sample` is refused.
+    /// scan left on the default mode switches to it; `interpolate` is refused.
     pub fn set_histogram(&mut self, spec: crate::histogram::HistogramSpec) -> Result<()> {
         spec.validate()?;
         self.transfer = spec.transfer_mode(self.transfer)?;

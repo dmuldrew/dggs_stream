@@ -904,7 +904,7 @@ async fn nodata_policy_and_decimals_on_every_grid() {
 #[tokio::test(flavor = "multi_thread")]
 async fn transfer_modes_on_every_grid() {
     use dggs_stream_core::resolution::area_matched_resolution;
-    use dggs_stream_sedona::{SampleMethod, TransferMode};
+    use dggs_stream_sedona::{Interpolation, TransferMode};
     let value = |c: u32, r: u32| ((c * 7 + r * 13) % 23 + 1) as f32;
     let tif = common::write_tif_grid(SIZE, SIZE, (-122.45, 37.80), 0.001, value);
     let src = source(&tif);
@@ -972,7 +972,7 @@ async fn transfer_modes_on_every_grid() {
         let fine = matched + 2;
         let fine_centres = query(from(fine, "")).await;
         for method in ["nearest", "bilinear", "bicubic", "lanczos"] {
-            let options = format!(", 'transfer=sample', 'sample_method={method}'");
+            let options = format!(", 'transfer=interpolate', 'interpolation={method}'");
             let sampled = query(from(fine, &options)).await;
             assert!(sampled.0 > 3 * fine_centres.0, "{grid} {method}");
             assert_eq!(sampled.1, sampled.0 as f64, "one sample per cell");
@@ -982,7 +982,7 @@ async fn transfer_modes_on_every_grid() {
             &format!(
                 "SELECT {} FROM {} WHERE mean >= 12 LIMIT 5",
                 grid.hex_column_name(),
-                from(fine, ", 'transfer=sample'")
+                from(fine, ", 'transfer=interpolate'")
             ),
         )
         .await;
@@ -993,7 +993,7 @@ async fn transfer_modes_on_every_grid() {
             .unwrap()
             .with_grid(grid)
             .with_crs("EPSG:4326")
-            .with_transfer(TransferMode::Sample(SampleMethod::Nearest));
+            .with_transfer(TransferMode::Interpolate(Interpolation::Nearest));
         let table_ctx = context();
         table_ctx
             .register_table("sampled", Arc::new(RasterTable::continuous(provider)))
@@ -1031,7 +1031,7 @@ async fn transfer_modes_on_every_grid() {
 
         for bad in [
             ", 'transfer=smear'",
-            ", 'sample_method=bilinear'",
+            ", 'interpolation=bilinear'",
             ", 'mass_preserve=true'",
             ", 'transfer=overlay', 'mass_preserve=perhaps'",
         ] {

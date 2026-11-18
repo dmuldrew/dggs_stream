@@ -15,7 +15,7 @@ use dggs_stream_core::histogram::{
 };
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::resolution::area_matched_resolution;
-use dggs_stream_core::transfer::{SampleMethod, TransferMode};
+use dggs_stream_core::transfer::{Interpolation, TransferMode};
 use dggs_stream_core::GridKind;
 
 use crate::helpers::TestGeoTiffBuilder;
@@ -255,7 +255,7 @@ fn inconsistent_histograms_are_refused() {
         weight: HistogramWeight::Area,
         ..Default::default()
     };
-    config.transfer = TransferMode::Sample(SampleMethod::Nearest);
+    config.transfer = TransferMode::Interpolate(Interpolation::Nearest);
     assert!(config.set_histogram(area.clone()).is_err());
     // Set behind `set_histogram`'s back, the mismatch is caught when the scan starts.
     config.transfer = TransferMode::AssignCenters;

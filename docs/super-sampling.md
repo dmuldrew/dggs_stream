@@ -2,6 +2,10 @@
 
 [← Back to README](../README.md)
 
+> Sub-pixel sampling refines the default `assign_centers` transfer. For cells smaller than the
+> pixels (interpolation at cell centres) or exact area weighting, see
+> [Transfer Modes](transfer-modes.md); those modes replace sampling and can't be combined with it.
+
 When a raster pixel lies across the boundary between two or more H3 hexagons, single-point center sampling assigns 100% of the pixel's value to whichever cell contains the center point. 
 
 With **Sub-Pixel Super-Sampling**, multiple sample offsets (dx_i, dy_i) are evaluated within each pixel's unit box [0, 1] x [0, 1] with fractional weights:

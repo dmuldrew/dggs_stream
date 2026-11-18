@@ -200,7 +200,7 @@ On the pixel-centre path the kernel's time is split into `crs_transform`, `grid_
 and `accumulate`. Without `stream-profile` the split is an upper estimate from a few
 probed pixels per window, scaled by the share of pixels indexed; when the estimate
 exceeds the kernel's measured time only the `crs_transform` : `grid_index` ratio is
-reported. `sample` and `overlay` report the kernel whole.
+reported. `interpolate` and `overlay` report the kernel whole.
 
 The same report is available as `dggs-stream ... --profile` (stderr), Python
 `dggs_stream.profile_raster(...)`, DuckDB `profile := true` (stderr, and
@@ -263,7 +263,8 @@ clamped to 1–16,384 pixels. The per-sample cost comes from the kernel's
 | Kernel | Bytes per sample and resolution |
 | :--- | :--- |
 | Continuous, no quantiles | `inline_worker_bytes_per_sample::<ContinuousAccumulator>()` (260 B) |
-| Continuous with quantiles, categorical | 1 KiB (covers sketch and class-count state) |
+| Categorical | `inline_worker_bytes_per_sample::<CategoricalAccumulator>() + OVERFLOW_BYTES_PER_CLASS` (460 B: the inline slot plus the most heap a new class can add) |
+| Continuous with quantiles | 1 KiB (covers the sketch) |
 | Custom kernels (default) | `max(1 KiB, 8 × size_of::<Accumulator>())` |
 
 `inline_worker_bytes_per_sample::<A>()` is stated in the terms the budget check

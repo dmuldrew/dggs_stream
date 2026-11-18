@@ -10,7 +10,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tiff::decoder::DecodingResult;
 
-use crate::aggregator::categorical::CategoricalAccumulator;
+use crate::aggregator::categorical::{CategoricalAccumulator, OVERFLOW_BYTES_PER_CLASS};
 use crate::aggregator::remap::CategoryRemapper;
 use crate::error::Result;
 use crate::raster::geotiff::GeoTiffStreamReader;
@@ -51,6 +51,15 @@ impl HorizonStreamKernel for CategoricalKernel {
     #[inline(always)]
     fn new_parent_accumulator(&self) -> Self::Accumulator {
         CategoricalAccumulator::default()
+    }
+
+    /// A sample adds at most one map entry (the inline slot cost) and at most
+    /// one class to one cell, whose heap storage stays within
+    /// [`OVERFLOW_BYTES_PER_CLASS`] per class: the classes of a worker cell
+    /// never outnumber its samples.
+    fn worker_bytes_per_sample(&self) -> usize {
+        super::controller::inline_worker_bytes_per_sample::<CategoricalAccumulator>()
+            + OVERFLOW_BYTES_PER_CLASS
     }
 
     #[inline(always)]
@@ -119,7 +128,7 @@ impl HorizonStreamKernel for CategoricalKernel {
 pub struct MultiCategoricalHorizonStreamer {
     inner: MultiHorizonStreamer<CategoricalKernel>,
     remapper: Option<Arc<CategoryRemapper>>,
-    /// The `sample` / `overlay` stream, when `config.transfer` is not the default; the
+    /// The `interpolate` / `overlay` stream, when `config.transfer` is not the default; the
     /// horizon kernel in `inner` is then idle.
     transfer: Option<Box<crate::transfer::TransferStream<CategoricalAccumulator>>>,
     transfer_mode: crate::transfer::TransferMode,

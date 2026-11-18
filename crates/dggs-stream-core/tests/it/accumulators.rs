@@ -378,53 +378,63 @@ fn test_simd_span_large_integers_precision_preservation() {
 }
 
 #[test]
-fn test_categorical_16_slot_inline_and_heap_spillover() {
-    use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
+fn test_categorical_inline_list_and_map_storage() {
+    use dggs_stream_core::aggregator::categorical::{
+        CategoricalAccumulator, INLINE_CAPACITY, LIST_CAPACITY,
+    };
 
     let mut cat = CategoricalAccumulator::new();
+    let inline = INLINE_CAPACITY as i64;
 
-    // 1. Add 16 distinct classes: should remain 100% inline with zero heap allocation
-    for c in 1..=16 {
+    // 1. Up to INLINE_CAPACITY distinct classes: inline, no heap allocation.
+    for c in 1..=inline {
         cat.update_weighted(c, (c * 10) as f64);
     }
-
-    assert_eq!(cat.inline_len, 16);
     assert!(
-        cat.heap_counts.is_none(),
-        "Must stay inline up to 16 classes"
+        cat.is_inline(),
+        "must stay inline up to INLINE_CAPACITY classes"
     );
-    assert_eq!(cat.unique_classes(), 16);
-    let expected_sum: f64 = (1..=16).map(|c| (c * 10) as f64).sum();
+    assert_eq!(cat.heap_bytes(), 0);
+    assert_eq!(cat.unique_classes(), INLINE_CAPACITY);
+    let mut expected_sum: f64 = (1..=inline).map(|c| (c * 10) as f64).sum();
     assert_eq!(cat.total_count, expected_sum);
-    assert_eq!(cat.get_class_count(5), 50.0);
-    assert_eq!(cat.get_class_count(16), 160.0);
-
+    assert_eq!(cat.get_class_count(2), 20.0);
     let (maj_cls, maj_count, maj_frac) = cat.majority();
-    assert_eq!(maj_cls, 16);
-    assert_eq!(maj_count, 160.0);
-    assert!((maj_frac - (160.0 / expected_sum)).abs() < 1e-6);
+    assert_eq!(maj_cls, inline);
+    assert_eq!(maj_count, (inline * 10) as f64);
+    assert!((maj_frac - (inline * 10) as f64 / expected_sum).abs() < 1e-12);
 
-    // 2. Add 17th class: should spill to heap
-    cat.update_weighted(17, 200.0);
-    assert!(
-        cat.heap_counts.is_some(),
-        "Must spill to heap on 17th class"
-    );
-    assert_eq!(cat.unique_classes(), 17);
-    assert_eq!(cat.total_count, expected_sum + 200.0);
-    assert_eq!(cat.get_class_count(17), 200.0);
-    assert_eq!(cat.majority().0, 17);
+    // 2. One more class: moves to heap storage, keeping every count.
+    cat.update_weighted(inline + 1, 200.0);
+    expected_sum += 200.0;
+    assert!(!cat.is_inline(), "must spill past INLINE_CAPACITY classes");
+    assert!(cat.heap_bytes() > 0);
+    assert_eq!(cat.unique_classes(), INLINE_CAPACITY + 1);
+    assert_eq!(cat.total_count, expected_sum);
+    assert_eq!(cat.get_class_count(inline + 1), 200.0);
+    assert_eq!(cat.get_class_count(2), 20.0);
+    assert_eq!(cat.majority().0, inline + 1);
 
-    // 3. Merge with another inline accumulator
+    // 3. Past LIST_CAPACITY classes (hash map tier).
+    let top = LIST_CAPACITY as i64 + 10;
+    for c in inline + 2..=top {
+        cat.update(c);
+        expected_sum += 1.0;
+    }
+    assert_eq!(cat.unique_classes(), top as usize);
+    assert_eq!(cat.total_count, expected_sum);
+    assert_eq!(cat.get_class_count(inline + 1), 200.0);
+    assert_eq!(cat.majority().0, inline + 1);
+
+    // 4. Merge an inline accumulator into it.
     let mut cat2 = CategoricalAccumulator::new();
     cat2.update_weighted(1, 20.0);
-    cat2.update_weighted(18, 50.0);
-
+    cat2.update_weighted(top + 1, 50.0);
     cat.merge(&cat2);
-    assert_eq!(cat.unique_classes(), 18);
+    assert_eq!(cat.unique_classes(), top as usize + 1);
     assert_eq!(cat.get_class_count(1), 30.0);
-    assert_eq!(cat.get_class_count(18), 50.0);
-    assert_eq!(cat.total_count, expected_sum + 200.0 + 70.0);
+    assert_eq!(cat.get_class_count(top + 1), 50.0);
+    assert_eq!(cat.total_count, expected_sum + 70.0);
 }
 
 #[test]

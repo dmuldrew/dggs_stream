@@ -72,9 +72,10 @@ pub trait HorizonStreamKernel: Send + Sync + 'static {
     /// Worst-case worker bytes one sample can add to one resolution's map: a
     /// new table entry, its owned accumulator state and its eviction key.
     /// Window sizes are derived from it, so it must not understate. The
-    /// default of 1 KiB covers table slack plus quantile or category state;
-    /// kernels with inline-only accumulators can return
-    /// [`inline_worker_bytes_per_sample`] instead for larger windows.
+    /// default of 1 KiB covers table slack plus quantile state; kernels with
+    /// inline-only accumulators can return [`inline_worker_bytes_per_sample`]
+    /// instead for larger windows, and kernels whose heap state per sample is
+    /// bounded can add that bound to it.
     fn worker_bytes_per_sample(&self) -> usize {
         1024usize.max(size_of::<Self::Accumulator>().saturating_mul(8))
     }

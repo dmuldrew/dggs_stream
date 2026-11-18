@@ -1,18 +1,49 @@
+use crate::aggregator::multi_horizon::spill::table_bytes;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Maximum number of distinct categories tracked inline without heap allocation.
-pub const INLINE_CAPACITY: usize = 16;
+/// Distinct categories held inline, without heap allocation.
+///
+/// Kept small so that horizon and worker maps, which charge every capacity
+/// slot at the full accumulator size, hold several times more cells per byte.
+/// Cells with more classes move to a compact overflow list.
+pub const INLINE_CAPACITY: usize = 4;
 
-/// High-performance accumulator for categorical class frequencies per H3 cell.
-/// Uses an inline 16-slot array for zero-heap allocation in >99.99% of cells,
-/// with an optional boxed hash map for complex multi-class boundaries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Distinct categories held in the overflow list before it becomes a hash map.
+/// The list keeps insertion order and is scanned linearly, which beats hashing
+/// at land-cover cardinalities and stores 16 bytes per class.
+pub const LIST_CAPACITY: usize = 64;
+
+/// Upper bound on [`CategoricalAccumulator::heap_bytes`] per distinct class,
+/// for an accumulator grown only by `update`, `update_weighted` and `merge`.
+///
+/// Each sample adds at most one class to one cell, so this also bounds the heap
+/// bytes a sample can add, which worker window sizing relies on. The worst case
+/// is the hash map tier just after it grows (about 69 bytes per class under
+/// the `table_bytes` charge); the list tier stays under 34.
+pub const OVERFLOW_BYTES_PER_CLASS: usize = 72;
+
+/// Heap storage of a cell with more than [`INLINE_CAPACITY`] classes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Overflow {
+    /// Up to [`LIST_CAPACITY`] classes in insertion order.
+    List(Vec<(i64, f64)>),
+    /// More than [`LIST_CAPACITY`] classes.
+    Map(HashMap<i64, f64, FxBuildHasher>),
+}
+
+/// Accumulator of categorical class frequencies for one cell.
+///
+/// Up to [`INLINE_CAPACITY`] classes are stored inline; more move, in insertion
+/// order, to a boxed list and above [`LIST_CAPACITY`] to a boxed hash map.
+/// Classes are visited in insertion order for cells of up to [`LIST_CAPACITY`]
+/// classes, so sums over classes do not depend on the storage tier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoricalAccumulator {
-    pub inline_entries: [(i64, f64); INLINE_CAPACITY],
-    pub inline_len: u8,
-    pub heap_counts: Option<Box<HashMap<i64, f64, FxBuildHasher>>>,
+    inline_entries: [(i64, f64); INLINE_CAPACITY],
+    inline_len: u8,
+    overflow: Option<Box<Overflow>>,
     pub total_count: f64,
 }
 
@@ -22,9 +53,24 @@ impl Default for CategoricalAccumulator {
         Self {
             inline_entries: [(0, 0.0); INLINE_CAPACITY],
             inline_len: 0,
-            heap_counts: None,
+            overflow: None,
             total_count: 0.0,
         }
+    }
+}
+
+/// Equal totals and equal per-class counts, whatever the storage tier or order.
+impl PartialEq for CategoricalAccumulator {
+    fn eq(&self, other: &Self) -> bool {
+        if self.total_count != other.total_count || self.unique_classes() != other.unique_classes()
+        {
+            return false;
+        }
+        let mut equal = true;
+        self.for_each_class(|cat, cnt| {
+            equal &= other.get_class_count(cat) == cnt;
+        });
+        equal
     }
 }
 
@@ -34,30 +80,58 @@ impl CategoricalAccumulator {
         Self::default()
     }
 
+    /// Whether every class is stored inline, with no heap allocation.
+    #[inline(always)]
+    pub fn is_inline(&self) -> bool {
+        self.overflow.is_none()
+    }
+
+    /// Bytes of heap storage owned by this accumulator, as the aggregation budget
+    /// charges them (by capacity, not by the classes in use).
+    pub fn heap_bytes(&self) -> usize {
+        self.overflow.as_deref().map_or(0, |overflow| {
+            size_of::<Overflow>()
+                + match overflow {
+                    Overflow::List(list) => list.capacity() * size_of::<(i64, f64)>(),
+                    Overflow::Map(map) => table_bytes::<i64, f64>(map.capacity()),
+                }
+        })
+    }
+
     /// Iterate through all category-count pairs
     pub fn for_each_class<F: FnMut(i64, f64)>(&self, mut f: F) {
-        if let Some(ref heap) = self.heap_counts {
-            for (&cat, &cnt) in heap.iter() {
-                f(cat, cnt);
+        match self.overflow.as_deref() {
+            None => {
+                let len = self.inline_len as usize;
+                for &(cat, cnt) in &self.inline_entries[..len] {
+                    f(cat, cnt);
+                }
             }
-        } else {
-            let len = self.inline_len as usize;
-            for &(cat, cnt) in &self.inline_entries[..len] {
-                f(cat, cnt);
+            Some(Overflow::List(list)) => {
+                for &(cat, cnt) in list {
+                    f(cat, cnt);
+                }
+            }
+            Some(Overflow::Map(map)) => {
+                for (&cat, &cnt) in map {
+                    f(cat, cnt);
+                }
             }
         }
     }
 
     /// Get count for a specific category
     pub fn get_class_count(&self, category: i64) -> f64 {
-        if let Some(ref heap) = self.heap_counts {
-            heap.get(&category).copied().unwrap_or(0.0)
-        } else {
-            let len = self.inline_len as usize;
-            self.inline_entries[..len]
+        let find = |entries: &[(i64, f64)]| {
+            entries
                 .iter()
                 .find(|&&(cat, _)| cat == category)
                 .map_or(0.0, |&(_, cnt)| cnt)
+        };
+        match self.overflow.as_deref() {
+            None => find(&self.inline_entries[..self.inline_len as usize]),
+            Some(Overflow::List(list)) => find(list),
+            Some(Overflow::Map(map)) => map.get(&category).copied().unwrap_or(0.0),
         }
     }
 
@@ -77,33 +151,62 @@ impl CategoricalAccumulator {
         }
         self.total_count += weight;
 
-        if let Some(ref mut heap) = self.heap_counts {
-            *heap.entry(category).or_insert(0.0) += weight;
-            return;
-        }
-
-        let len = self.inline_len as usize;
-        if let Some(entry) = self.inline_entries[..len]
-            .iter_mut()
-            .find(|(cat, _)| *cat == category)
-        {
-            entry.1 += weight;
-            return;
-        }
-
-        if len < INLINE_CAPACITY {
-            self.inline_entries[len] = (category, weight);
-            self.inline_len += 1;
-        } else {
-            // Spill to heap
-            let mut map: HashMap<i64, f64, FxBuildHasher> =
-                HashMap::with_capacity_and_hasher(32, FxBuildHasher);
-            for &(cat, cnt) in &self.inline_entries {
-                map.insert(cat, cnt);
+        if self.overflow.is_none() {
+            let len = self.inline_len as usize;
+            if let Some(entry) = self.inline_entries[..len]
+                .iter_mut()
+                .find(|(cat, _)| *cat == category)
+            {
+                entry.1 += weight;
+            } else if len < INLINE_CAPACITY {
+                self.inline_entries[len] = (category, weight);
+                self.inline_len += 1;
+            } else {
+                self.spill_inline(category, weight);
             }
-            map.insert(category, weight);
-            self.heap_counts = Some(Box::new(map));
+            return;
         }
+        self.update_overflow(category, weight);
+    }
+
+    /// Move the full inline array, plus one new class, to an overflow list.
+    #[cold]
+    fn spill_inline(&mut self, category: i64, weight: f64) {
+        let mut list = Vec::with_capacity(2 * INLINE_CAPACITY);
+        list.extend_from_slice(&self.inline_entries);
+        list.push((category, weight));
+        self.inline_entries = [(0, 0.0); INLINE_CAPACITY];
+        self.inline_len = 0;
+        self.overflow = Some(Box::new(Overflow::List(list)));
+    }
+
+    fn update_overflow(&mut self, category: i64, weight: f64) {
+        let Some(overflow) = self.overflow.as_deref_mut() else {
+            return;
+        };
+        let promoted = match overflow {
+            Overflow::Map(map) => {
+                *map.entry(category).or_insert(0.0) += weight;
+                return;
+            }
+            Overflow::List(list) => {
+                if let Some(entry) = list.iter_mut().find(|(cat, _)| *cat == category) {
+                    entry.1 += weight;
+                    return;
+                }
+                if list.len() < LIST_CAPACITY {
+                    list.push((category, weight));
+                    return;
+                }
+                // Sized to the classes held, so the table stays within
+                // `OVERFLOW_BYTES_PER_CLASS`.
+                let mut map = HashMap::with_capacity_and_hasher(list.len() + 1, FxBuildHasher);
+                map.extend(list.iter().copied());
+                map.insert(category, weight);
+                map
+            }
+        };
+        *overflow = Overflow::Map(promoted);
     }
 
     /// Merge another categorical accumulator
@@ -149,10 +252,10 @@ impl CategoricalAccumulator {
     /// Return number of unique categories present (richness)
     #[inline(always)]
     pub fn unique_classes(&self) -> usize {
-        if let Some(ref heap) = self.heap_counts {
-            heap.len()
-        } else {
-            self.inline_len as usize
+        match self.overflow.as_deref() {
+            None => self.inline_len as usize,
+            Some(Overflow::List(list)) => list.len(),
+            Some(Overflow::Map(map)) => map.len(),
         }
     }
 
@@ -597,9 +700,9 @@ mod tests {
             assert_eq!(acc.unique_classes(), 0, "weight {w} must not add a class");
         }
 
-        // Inline and heap storage: bad weights leave earlier samples intact,
+        // Inline, list and map storage: bad weights leave earlier samples intact,
         // whether they name an existing class or a new one.
-        for classes in [3i64, INLINE_CAPACITY as i64 + 4] {
+        for classes in [3i64, INLINE_CAPACITY as i64 + 4, LIST_CAPACITY as i64 + 4] {
             let mut acc = CategoricalAccumulator::new();
             for c in 0..classes {
                 acc.update_weighted(c, 2.0);
@@ -634,68 +737,120 @@ mod tests {
     fn test_categorical_inline_to_heap_spillover_boundary() {
         let mut acc = CategoricalAccumulator::new();
         assert_eq!(acc.unique_classes(), 0);
-        assert!(acc.heap_counts.is_none());
+        assert!(acc.is_inline());
 
-        // Fill up to exactly 16 unique classes (INLINE_CAPACITY)
-        for c in 0..16 {
+        // Fill exactly INLINE_CAPACITY classes: no heap.
+        for c in 0..INLINE_CAPACITY as i64 {
             acc.update_weighted(c, 1.0);
             assert_eq!(acc.unique_classes(), (c + 1) as usize);
-            assert!(
-                acc.heap_counts.is_none(),
-                "Must remain in inline storage for <= 16 classes"
-            );
+            assert!(acc.is_inline(), "<= INLINE_CAPACITY classes stay inline");
+            assert_eq!(acc.heap_bytes(), 0);
         }
-        assert_eq!(acc.inline_len, 16);
-        assert_eq!(acc.total_count, 16.0);
+        assert_eq!(acc.total_count, INLINE_CAPACITY as f64);
 
-        // Update existing class 5: must NOT trigger heap spillover
-        acc.update_weighted(5, 4.0);
+        // Updating an existing class does not allocate.
+        acc.update_weighted(1, 4.0);
         assert!(
-            acc.heap_counts.is_none(),
-            "Updating existing class must not allocate heap"
+            acc.is_inline(),
+            "updating an existing class must not allocate"
         );
-        assert_eq!(acc.unique_classes(), 16);
-        assert_eq!(acc.get_class_count(5), 5.0);
-        assert_eq!(acc.total_count, 20.0);
+        assert_eq!(acc.get_class_count(1), 5.0);
 
-        // Add 17th class: triggers spillover to heap
+        // One more class moves to the overflow list, keeping every count.
         acc.update_weighted(100, 10.0);
-        assert!(
-            acc.heap_counts.is_some(),
-            "Adding 17th class must spill to heap HashMap"
-        );
-        assert_eq!(acc.unique_classes(), 17);
-        assert_eq!(acc.total_count, 30.0);
-
-        // Verify all 16 previous classes are preserved in heap map
-        for c in 0..16 {
-            let expected = if c == 5 { 5.0 } else { 1.0 };
-            assert_eq!(
-                acc.get_class_count(c),
-                expected,
-                "Preserved class count mismatch for class {}",
-                c
-            );
+        assert!(!acc.is_inline());
+        assert!(acc.heap_bytes() > 0);
+        assert_eq!(acc.unique_classes(), INLINE_CAPACITY + 1);
+        for c in 0..INLINE_CAPACITY as i64 {
+            assert_eq!(acc.get_class_count(c), if c == 1 { 5.0 } else { 1.0 });
         }
         assert_eq!(acc.get_class_count(100), 10.0);
 
-        // Add more classes to heap
-        for c in 200..233 {
+        // Past LIST_CAPACITY the list becomes a map, still keeping every count.
+        for c in 200..200 + LIST_CAPACITY as i64 {
             acc.update(c);
         }
-        assert_eq!(acc.unique_classes(), 17 + 33); // 50 unique classes
+        assert_eq!(acc.unique_classes(), INLINE_CAPACITY + 1 + LIST_CAPACITY);
+        assert!(matches!(acc.overflow.as_deref(), Some(Overflow::Map(_))));
+        assert_eq!(acc.get_class_count(1), 5.0);
+        assert_eq!(acc.get_class_count(100), 10.0);
+        assert_eq!(acc.get_class_count(200 + LIST_CAPACITY as i64 - 1), 1.0);
 
-        // Test merge of another accumulator that has 16 inline classes
+        // Merging an inline accumulator into the map.
         let mut acc2 = CategoricalAccumulator::new();
-        for c in 0..16 {
+        for c in 0..INLINE_CAPACITY as i64 {
             acc2.update_weighted(c, 2.0);
         }
         acc.merge(&acc2);
-
-        // Class 5 should now have 5.0 + 2.0 = 7.0
-        assert_eq!(acc.get_class_count(5), 7.0);
-        // Class 0 should have 1.0 + 2.0 = 3.0
+        assert_eq!(acc.get_class_count(1), 7.0);
         assert_eq!(acc.get_class_count(0), 3.0);
+    }
+
+    #[test]
+    fn accumulator_is_compact() {
+        assert!(
+            size_of::<CategoricalAccumulator>() <= 88,
+            "{} bytes",
+            size_of::<CategoricalAccumulator>()
+        );
+    }
+
+    #[test]
+    fn classes_are_visited_in_insertion_order_up_to_list_capacity() {
+        let mut acc = CategoricalAccumulator::new();
+        let order: Vec<i64> = (0..LIST_CAPACITY as i64)
+            .map(|i| (i * 37) % 101 - 50)
+            .collect();
+        for (i, &c) in order.iter().enumerate() {
+            acc.update_weighted(c, 1.0 + i as f64);
+            let mut seen = Vec::new();
+            acc.for_each_class(|cat, _| seen.push(cat));
+            assert_eq!(seen, order[..=i], "after {} classes", i + 1);
+        }
+    }
+
+    #[test]
+    fn heap_bytes_per_class_stay_within_the_worker_allowance() {
+        // Every update adds a new class: the worst case for heap per sample.
+        let mut acc = CategoricalAccumulator::new();
+        let mut worst = 0.0f64;
+        for k in 1..=5000usize {
+            acc.update(k as i64 * 7919);
+            worst = worst.max(acc.heap_bytes() as f64 / k as f64);
+            assert!(
+                acc.heap_bytes() <= OVERFLOW_BYTES_PER_CLASS * k,
+                "{} heap bytes for {k} classes",
+                acc.heap_bytes()
+            );
+        }
+        // Merges grow storage the same way.
+        for parts in [2usize, 3, 50] {
+            let mut merged = CategoricalAccumulator::new();
+            let mut k = 0;
+            for p in 0..parts {
+                let mut part = CategoricalAccumulator::new();
+                for c in 0..(1000 / parts) as i64 {
+                    part.update_weighted(c * parts as i64 + p as i64, 0.5);
+                }
+                merged.merge(&part);
+                k += part.unique_classes();
+                assert!(merged.heap_bytes() <= OVERFLOW_BYTES_PER_CLASS * k);
+            }
+        }
+        assert!(worst > 0.0);
+    }
+
+    #[test]
+    fn equality_ignores_storage_order() {
+        let mut a = CategoricalAccumulator::new();
+        let mut b = CategoricalAccumulator::new();
+        for c in 0..10 {
+            a.update(c);
+            b.update(9 - c);
+        }
+        assert_eq!(a, b);
+        b.update(3);
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -778,7 +933,7 @@ mod tests {
         // Keys must be ordered numerically: "1" before "3"
         assert_eq!(json, r#"{"1": 0.7500, "3": 0.2500}"#);
 
-        // Test with > 16 classes (heap path)
+        // Test with > 16 classes (stack buffer of histogram_json exceeded)
         for i in 4..25 {
             acc.update_weighted(i, 1.0);
         }
