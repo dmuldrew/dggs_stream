@@ -132,7 +132,7 @@ On CONUS (`BP_CONUS.tif`, Albers EPSG:5070), removing lookahead and pairing exac
 ### Lesson 9: The H3 Low-Bit Sharding Trap (`SplitMix64`)
 * **The Bug (Commits `5992406`, `791b4bd`):** To reduce lock contention, resolution maps were partitioned into 32 shards (`ShardedResolutionMap`). Initially, shard selection used `h3_index & 31` or standard `FxHash`. However, in the H3 bit layout, **every unused finer resolution slot (3 bits per resolution up to 15) is filled with `111_2`**. For any H3 resolution $\le 13$, the lowest 6+ bits are identical (`0b111111...`) across **every single hexagon on Earth**!
 * **Impact:** All hexagons at Resolutions 0–13 collapsed into a single shard (Shard 31), leaving 31 of 32 shards completely empty and causing severe hash collisions.
-* **The Fix:** Replaced the shard selector and map hasher with a `SplitMix64` finalizer (`H3BuildHasher`) that mixes all 64 bits (including base cell and high-order face/IJK digits) down to the low bits, restoring uniform 32-way distribution and $O(1)$ shard byte accounting (`067d742`).
+* **The Fix:** Replaced the shard selector and map hasher with a `SplitMix64` finalizer (`CellIdBuildHasher`) that mixes all 64 bits (including base cell and high-order face/IJK digits) down to the low bits, restoring uniform 32-way distribution and $O(1)$ shard byte accounting (`067d742`).
 
 ### Lesson 10: Rayon `pool.install()` Reentrancy Trap
 * **The Bug:** To avoid deadlocks when called inside an existing Rayon thread, the controller checked `if rayon::current_thread_index().is_some()` and fell back to serial iteration. Consequently, any user or benchmark invoking dggs_stream inside `pool.install(|| ...)` silently ran **single-threaded on 1 core** regardless of pool size!

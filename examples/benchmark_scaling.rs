@@ -144,7 +144,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
         std::collections::HashMap<
             u64,
             ContinuousAccumulator,
-            dggs_stream::aggregator::cell_hash::H3BuildHasher,
+            dggs_stream::aggregator::cell_hash::CellIdBuildHasher,
         >,
     > = pool_4.install(|| {
         let reader_mt = GeoTiffStreamReader::open(&path).unwrap();
@@ -154,7 +154,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
             .map(|chunk_idx| {
                 let chunk_reader = GeoTiffStreamReader::open(&path).unwrap();
                 let mut map = std::collections::HashMap::with_hasher(
-                    dggs_stream::aggregator::cell_hash::H3BuildHasher,
+                    dggs_stream::aggregator::cell_hash::CellIdBuildHasher,
                 );
                 if let Ok((chunk, decoding)) = chunk_reader.read_chunk(chunk_idx) {
                     let gt = chunk_reader.metadata.geotransform;
@@ -201,7 +201,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
         std::collections::HashMap<
             u64,
             ContinuousAccumulator,
-            dggs_stream::aggregator::cell_hash::H3BuildHasher,
+            dggs_stream::aggregator::cell_hash::CellIdBuildHasher,
         >,
     > = pool_8.install(|| {
         let reader_mt = GeoTiffStreamReader::open(&path).unwrap();
@@ -211,7 +211,7 @@ fn run_scaling_benchmark(width: u32, height: u32, resolution: u8) -> BenchmarkRe
             .map(|chunk_idx| {
                 let chunk_reader = GeoTiffStreamReader::open(&path).unwrap();
                 let mut map = std::collections::HashMap::with_hasher(
-                    dggs_stream::aggregator::cell_hash::H3BuildHasher,
+                    dggs_stream::aggregator::cell_hash::CellIdBuildHasher,
                 );
                 if let Ok((chunk, decoding)) = chunk_reader.read_chunk(chunk_idx) {
                     let gt = chunk_reader.metadata.geotransform;

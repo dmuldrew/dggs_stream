@@ -11,7 +11,7 @@ use super::pipeline::{
     run_pipelined, run_serial, spill_resolution, CellMaps, MergeTarget, WindowJob, WindowJobs,
 };
 use super::{HorizonStreamKernel, MultiHorizonStreamer};
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::error::{DggsStreamError, Result};
 use crate::raster::prefetch::MosaicPrefetchItem;
 
@@ -282,7 +282,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                 free.iter_mut().flatten().for_each(HashMap::clear);
                 free.resize_with(map_sets, || {
                     (0..resolution_u8s.len())
-                        .map(|_| HashMap::with_hasher(H3BuildHasher))
+                        .map(|_| HashMap::with_hasher(CellIdBuildHasher))
                         .collect()
                 });
                 self.worker_maps = free;

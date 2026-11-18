@@ -15,7 +15,7 @@ use super::super::sharded_map::ShardedResolutionMap;
 use super::super::spill::SpillRuns;
 use super::pipeline::{shared_aggregation_pool, worker_map_fixed_bytes};
 use super::{HorizonStreamKernel, MultiHorizonStreamer, PartitionOutput};
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::geotiff::GeoTiffStreamReader;
@@ -266,7 +266,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             worker_maps: (0..map_sets)
                 .map(|_| {
                     (0..num_res)
-                        .map(|_| HashMap::with_hasher(H3BuildHasher))
+                        .map(|_| HashMap::with_hasher(CellIdBuildHasher))
                         .collect()
                 })
                 .collect(),

@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rust cell hashing helpers `H3BuildHasher`, `H3Hasher`, and `mix_h3` are now `CellIdBuildHasher`, `CellIdHasher`, and `mix_cell_id`. Hash values and shard assignment are preserved.
+
 - Rust callers now use `ContinuousAccumulator` in place of `H3Accumulator` for continuous cell statistics on every grid.
 
 - Rust PostgreSQL consumers of `PgContinuousRow` and `PgCategoricalRow` now use `cell_id` and `cell_hex` in place of `h3_index` and `h3_hex`.

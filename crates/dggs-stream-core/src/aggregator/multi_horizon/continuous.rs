@@ -1,4 +1,4 @@
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use std::collections::HashMap;
 use tiff::decoder::DecodingResult;
 
@@ -36,7 +36,7 @@ fn process_continuous_slice_into_maps<T: SimdSpanAccumulate + Default>(
     slice: &[T],
     native_nodata: Option<T>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, CellIdBuildHasher>],
 ) {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("fma") {
@@ -60,7 +60,7 @@ unsafe fn process_continuous_slice_into_maps_fma<T: SimdSpanAccumulate + Default
     slice: &[T],
     native_nodata: Option<T>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, CellIdBuildHasher>],
 ) {
     process_continuous_slice_into_maps_impl(ctx, slice, native_nodata, options, chunk_maps);
 }
@@ -71,7 +71,7 @@ fn process_continuous_slice_into_maps_impl<T: SimdSpanAccumulate + Default>(
     slice: &[T],
     native_nodata: Option<T>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, CellIdBuildHasher>],
 ) {
     let emit = ctx.emit_nodata;
     let engine = ContinuousEngine {
@@ -322,7 +322,7 @@ pub fn process_continuous_chunk_payload_into(
     decoding_result: &DecodingResult,
     nodata: Option<f64>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, CellIdBuildHasher>],
 ) -> bool {
     process_continuous_borrowed_into(
         window,
@@ -339,7 +339,7 @@ pub fn process_continuous_borrowed_into(
     samples: super::borrowed::BorrowedSamples<'_>,
     nodata: Option<f64>,
     options: ContinuousOptions,
-    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, ContinuousAccumulator, CellIdBuildHasher>],
 ) -> bool {
     if !window.emit_nodata
         && window.samples_per_pixel <= 1
@@ -381,7 +381,7 @@ mod tests {
             spectral_formula: None,
             track_quantiles: true,
         };
-        let bits = |maps: &[HashMap<u64, ContinuousAccumulator, H3BuildHasher>]| {
+        let bits = |maps: &[HashMap<u64, ContinuousAccumulator, CellIdBuildHasher>]| {
             let mut out: Vec<_> = maps
                 .iter()
                 .enumerate()
