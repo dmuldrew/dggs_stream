@@ -158,3 +158,25 @@ fn s2_polar_faces_cover_every_longitude_at_level_zero() {
         }
     }
 }
+
+#[test]
+fn a5_compacted_polygon_expands_to_requested_resolution() {
+    use dggs_stream_core::grid::GridKind;
+    use dggs_stream_core::scalar_ops::a5_polygon_to_cells_wkb;
+
+    let grid = GridKind::A5;
+    let cell = grid.cell_at(37.8, -122.4, 5).unwrap();
+    let mut vertices = [(0.0, 0.0); 10];
+    let count = grid.boundary_lng_lat(cell, &mut vertices);
+    let mut ring: Vec<_> = vertices[..count]
+        .iter()
+        .map(|&(x, y)| Coord { x, y })
+        .collect();
+    ring.push(ring[0]);
+    let wkb = polygon_wkb(&Polygon::new(LineString::new(ring), vec![]));
+    let cells = a5_polygon_to_cells_wkb(&wkb, 7, ContainmentMode::ContainsCentroid).unwrap();
+    assert!(!cells.is_empty());
+    assert!(cells.iter().all(|&id| grid.resolution(id) == Some(7)));
+    assert!(cells.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(cells.contains(&grid.cell_at(37.8, -122.4, 7).unwrap()));
+}

@@ -16,6 +16,16 @@ every grid.
 The resolution scales don't line up across grids: "resolution 9" is a different cell size on
 each one. To ask for the same cell size on any grid, use [`auto`](#automatic-resolution).
 
+## A5 index version
+
+A5 uses the 1.0 cell-ID system. IDs generated with A5 0.x can refer to different cells
+under 1.0, even when they pass validation. Rebuild raster aggregates and polygon indexes
+from their source data together before joining them. To keep existing aggregates, migrate
+each stored 0.x ID explicitly with the upstream Rust `a5::migrate(old_id)` function and
+regenerate any geometry or archive derived from the IDs. Apply migration only to known
+0.x data, because the ID itself carries no version. This project does not automatically
+migrate imported IDs.
+
 ## Choosing a grid in each engine
 
 | Engine | How to pick the grid |

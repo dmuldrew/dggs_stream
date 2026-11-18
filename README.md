@@ -22,6 +22,8 @@ Statistics use pixel contributions, not ground-area weights. CRS projection tole
 
 ---
 
+A5 uses the 1.0 cell-ID system. Existing A5 0.x data needs re-indexing or explicit ID migration before use. See [A5 index version](docs/grids.md#a5-index-version).
+
 ## 📖 Table of Contents
 
 - [Motivation & Project Goals](#motivation--project-goals)
