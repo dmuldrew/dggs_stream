@@ -12,7 +12,7 @@ use crate::helpers;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer,
 };
-use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream_core::pmtiles::PmtilesTiler;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -86,7 +86,7 @@ fn test_conus_batch_and_evict_pipeline_simulation() {
         geoparquet: false,
     };
 
-    let total_written = H3ParquetWriter::write_continuous_streamer_to_parquet_with_progress(
+    let total_written = ParquetWriter::write_continuous_streamer_to_parquet_with_progress(
         streamer_parquet,
         &out_parquet,
         parquet_config,

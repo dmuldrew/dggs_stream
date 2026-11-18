@@ -3,7 +3,7 @@
 //! Downloads CONUS GeoTIFF tiles in latitudinal bands from the USFS GeoPlatform ImageServer,
 //! aggregates them into multi-resolution H3 hexagonal indices (e.g. Res 8 and 9),
 //! streams them into Parquet partitions and/or PMTiles v3 archives using the unified
-//! `H3ParquetWriter` and `PmtilesTiler` engines, and immediately evicts raw GeoTIFF tiles
+//! `ParquetWriter` and `PmtilesTiler` engines, and immediately evicts raw GeoTIFF tiles
 //! to keep total disk usage strictly bounded under 2.5 GB.
 //!
 //! Usage:
@@ -25,7 +25,7 @@ use rayon::prelude::*;
 
 use dggs_stream::aggregator::multi_horizon::{MultiResolutionConfig, MultiScanHorizonStreamer};
 use dggs_stream::aggregator::sampling::SamplingPattern;
-use dggs_stream::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream::pmtiles::PmtilesTiler;
 use dggs_stream::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
@@ -367,18 +367,17 @@ fn process_band_streaming(
             let streamer = MultiScanHorizonStreamer::new_mosaic(Arc::clone(&mosaic), &config)?;
 
             let mut next_log = 2_000_000usize;
-            let total_written =
-                H3ParquetWriter::write_continuous_streamer_to_parquet_with_progress(
-                    streamer,
-                    &out_parquet,
-                    parquet_config.clone(),
-                    |count| {
-                        if count >= next_log {
-                            let elapsed = t_stream.elapsed().as_secs_f64();
-                            let rss_str = get_process_rss_mb()
-                                .map(|r| format!(", RSS: {:.1} MB", r))
-                                .unwrap_or_default();
-                            println!(
+            let total_written = ParquetWriter::write_continuous_streamer_to_parquet_with_progress(
+                streamer,
+                &out_parquet,
+                parquet_config.clone(),
+                |count| {
+                    if count >= next_log {
+                        let elapsed = t_stream.elapsed().as_secs_f64();
+                        let rss_str = get_process_rss_mb()
+                            .map(|r| format!(", RSS: {:.1} MB", r))
+                            .unwrap_or_default();
+                        println!(
                             "    Band {}: Streamed {:>5.1}M hexagons in {:>5.1}s ({:.1} khex/s{})...",
                             band_index,
                             count as f64 / 1_000_000.0,
@@ -386,10 +385,10 @@ fn process_band_streaming(
                             (count as f64 / 1000.0) / elapsed.max(0.001),
                             rss_str
                         );
-                            next_log += 2_000_000;
-                        }
-                    },
-                )?;
+                        next_log += 2_000_000;
+                    }
+                },
+            )?;
 
             let p_size_mb = fs::metadata(&out_parquet)
                 .map(|m| m.len() as f64 / (1024.0 * 1024.0))

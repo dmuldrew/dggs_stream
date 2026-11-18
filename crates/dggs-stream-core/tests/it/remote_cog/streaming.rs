@@ -372,7 +372,7 @@ fn test_remote_cog_to_parquet_streaming_pipeline() {
     }
 
     use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
-    use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+    use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
     let local_path = helpers::data_path("CFL_HI.tif");
@@ -402,7 +402,7 @@ fn test_remote_cog_to_parquet_streaming_pipeline() {
         let _ = std::fs::remove_file(temp_parquet_path);
     }
 
-    let total_rows = H3ParquetWriter::process_raster_source_to_parquet(
+    let total_rows = ParquetWriter::process_raster_source_to_parquet(
         &remote_url,
         temp_parquet_path,
         config,

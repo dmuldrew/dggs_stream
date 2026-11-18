@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rust: `H3ParquetWriter` is now `ParquetWriter`. The writer uses the grid in the scan configuration or streamer.
+
 - Rust PMTiles exports now take an explicit grid: use `PmtilesTiler::export_features(grid, features, path)` and `CellFeature { cell_id, properties }` in place of `H3PmtilesTiler::export_h3_features` and `H3Feature`. Pass `GridKind::H3` for existing H3 inputs.
 
 - **Breaking A5 index change:** upgraded `a5` from 0.10.1 to 1.0.0. A5 uses a new cell-ID ordering. Rebuild existing A5 raster aggregates and polygon indexes together before joining them, or explicitly migrate stored 0.x IDs with upstream Rust `a5::migrate`. Validity checks cannot identify which ID version a value came from. Polygon fills expand the new compacted covering to the requested resolution and exclude its compaction marker from the allocation budget.

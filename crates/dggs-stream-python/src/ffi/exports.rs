@@ -10,7 +10,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::error::{safe_panic_payload_to_string, DggsStreamError, Result};
-use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream_core::pmtiles::PmtilesTiler;
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 
@@ -228,7 +228,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
 
             if categorical == 0 {
                 let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)?;
-                H3ParquetWriter::write_continuous_streamer_to_parquet(
+                ParquetWriter::write_continuous_streamer_to_parquet(
                     streamer,
                     Path::new(&out_str),
                     pq_cfg,
@@ -236,7 +236,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
                 .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))
             } else {
                 let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)?;
-                H3ParquetWriter::write_categorical_streamer_to_parquet(
+                ParquetWriter::write_categorical_streamer_to_parquet(
                     streamer,
                     Path::new(&out_str),
                     pq_cfg,

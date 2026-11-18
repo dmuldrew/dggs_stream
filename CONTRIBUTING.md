@@ -109,7 +109,7 @@ crates/dggs-stream-core/src/
 ├── parquet/                 # Native OGC GeoParquet 1.1 streaming exporter
 │   ├── geoparquet_metadata.rs # Specification-compliant GeoParquet 1.1 JSON metadata builder
 │   ├── pipeline.rs          # Double-buffered channel streaming pipeline & row-group buffers
-│   ├── writer.rs            # High-level H3ParquetWriter facade & columnar schema buffers
+│   ├── writer.rs            # High-level ParquetWriter facade & columnar schema buffers
 │   └── mod.rs
 ├── pmtiles/                 # Native PMTiles v3 & Mapbox Vector Tile (MVT) generation
 │   ├── features.rs          # H3 feature property extraction & JSON encoding

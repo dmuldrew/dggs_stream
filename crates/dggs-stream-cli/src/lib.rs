@@ -32,7 +32,7 @@ use dggs_stream_core::columnar::{
 use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::histogram::HistogramSpec;
-use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream_core::pmtiles::{PmtilesExportSummary, PmtilesTiler};
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::ResolutionSpec;
@@ -944,10 +944,10 @@ pub fn export_raster_to_parquet_with_transfer(
 
     let rows = if !categorical {
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)?;
-        H3ParquetWriter::write_continuous_streamer_to_parquet(streamer, output_path, pq_cfg)
+        ParquetWriter::write_continuous_streamer_to_parquet(streamer, output_path, pq_cfg)
     } else {
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)?;
-        H3ParquetWriter::write_categorical_streamer_to_parquet(streamer, output_path, pq_cfg)
+        ParquetWriter::write_categorical_streamer_to_parquet(streamer, output_path, pq_cfg)
     }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed));

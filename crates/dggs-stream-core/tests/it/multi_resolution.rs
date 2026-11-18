@@ -14,7 +14,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiScanHorizonStreamer,
 };
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
-use dggs_stream_core::parquet::{H3ParquetWriter, ParquetExportConfig};
+use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use helpers::create_wave_test_geotiff as create_test_geotiff;
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -453,7 +453,7 @@ fn test_parquet_continuous_streaming_export_and_sorting() {
         ..Default::default()
     };
 
-    let total_written = H3ParquetWriter::write_continuous_streamer_to_parquet(
+    let total_written = ParquetWriter::write_continuous_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
@@ -520,7 +520,7 @@ fn test_parquet_categorical_streaming_export_and_sorting() {
         ..Default::default()
     };
 
-    let total_written = H3ParquetWriter::write_categorical_streamer_to_parquet(
+    let total_written = ParquetWriter::write_categorical_streamer_to_parquet(
         streamer,
         &parquet_path,
         parquet_config,
