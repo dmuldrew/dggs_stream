@@ -72,7 +72,7 @@ pub struct CliStreamOptions {
     /// `--nodata-policy`, `--emit-nodata-value` and `--decimals`: whether all-NoData
     /// cells are output and with what value, and the decimal rounding of statistics.
     pub output: OutputPolicy,
-    /// `--transfer`, `--sample-method`, `--overlay-weighted` and `--mass-preserve`: how
+    /// `--transfer`, `--interpolation`, `--overlay-weighted` and `--mass-preserve`: how
     /// pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
     /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
@@ -898,7 +898,7 @@ pub fn export_raster_to_parquet_with_policy(
     )
 }
 
-/// [`export_raster_to_parquet_with_policy`] with a [`TransferMode`] (`sample` or
+/// [`export_raster_to_parquet_with_policy`] with a [`TransferMode`] (`interpolate` or
 /// `overlay` instead of pixel-centre assignment) and an optional runtime profile.
 #[allow(clippy::too_many_arguments)]
 pub fn export_raster_to_parquet_with_transfer(
@@ -1177,7 +1177,7 @@ pub fn parse_stream_args(
     let mut partition_spec: Option<String> = None;
     let mut partition_index: Option<usize> = None;
     let mut raw_resolutions: Option<(String, String)> = None;
-    let (mut transfer, mut sample_method) = (None::<String>, None::<String>);
+    let (mut transfer, mut interpolation) = (None::<String>, None::<String>);
     let (mut overlay_weighted, mut mass_preserve) = (None::<bool>, None::<bool>);
     let mut histogram = [None::<String>, None, None];
 
@@ -1247,7 +1247,7 @@ pub fn parse_stream_args(
                 opts.columns = Some(cols);
             }
             "--transfer" => transfer = Some(value()?.to_string()),
-            "--sample-method" => sample_method = Some(value()?.to_string()),
+            "--interpolation" => interpolation = Some(value()?.to_string()),
             "--overlay-weighted" => {
                 let v = value()?;
                 overlay_weighted = Some(match v.to_ascii_lowercase().as_str() {
@@ -1332,7 +1332,7 @@ pub fn parse_stream_args(
 
     opts.transfer = TransferMode::from_options(
         transfer.as_deref(),
-        sample_method.as_deref(),
+        interpolation.as_deref(),
         overlay_weighted,
         mass_preserve,
     )?;
@@ -1950,7 +1950,7 @@ mod tests {
             &["--histogram", "0:0:1"][..],
             &["--histogram", "values", "--histogram-normalize", "density"],
             &["--histogram-weight", "mass"],
-            &["--histogram-weight", "area", "--transfer", "sample"],
+            &["--histogram-weight", "area", "--transfer", "interpolate"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }
@@ -2022,8 +2022,8 @@ mod tests {
                     "-r",
                     "auto+2",
                     "--transfer",
-                    "sample",
-                    "--sample-method",
+                    "interpolate",
+                    "--interpolation",
                     method,
                 ])
                 .unwrap();
@@ -2039,10 +2039,10 @@ mod tests {
         }
         for bad in [
             &["--transfer", "smear"][..],
-            &["--sample-method", "bilinear"],
+            &["--interpolation", "bilinear"],
             &["--mass-preserve"],
             &["--transfer", "overlay", "--overlay-weighted", "maybe"],
-            &["--transfer", "sample", "--sample-method", "cubic9"],
+            &["--transfer", "interpolate", "--interpolation", "cubic9"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }

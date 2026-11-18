@@ -232,7 +232,7 @@ See [Scan Options](../scan-options.md) for what each option does.
 -- Cells finer than the pixels: a bicubic value at each cell centre
 SELECT h3_index, mean
 FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto+2',
-                                    transfer := 'sample', sample_method := 'bicubic');
+                                    transfer := 'interpolate', interpolation := 'bicubic');
 
 -- Population: each pixel split across the cells it overlaps; sum adds up to the raster total
 SELECT h3_index, sum AS population

@@ -572,14 +572,14 @@ def plane_tif(tmp_path_factory):
 
 
 @pytest.mark.parametrize("grid", GRIDS)
-def test_transfer_sample(dggs_stream, plane_tif, grid):
+def test_transfer_interpolate(dggs_stream, plane_tif, grid):
     index = f"{grid}_index"
     res = dggs_stream.auto_resolution(plane_tif, grid, offset=2)
     centres = dggs_stream.scan_raster(plane_tif, res, grid=grid).collect()
     assert dggs_stream.scan_raster(plane_tif, res, grid=grid, transfer="assign_centers").collect().height == centres.height
     for method, tolerance in [("nearest", 2.1), ("bilinear", 2e-3), ("bicubic", 2e-3), ("lanczos", 0.2)]:
         df = dggs_stream.scan_raster(
-            plane_tif, res, grid=grid, transfer="sample", sample_method=method
+            plane_tif, res, grid=grid, transfer="interpolate", interpolation=method
         ).collect()
         # Cells two steps finer than the pixels: sampling fills what centres leave empty.
         assert df.height > 3 * centres.height
@@ -597,7 +597,7 @@ def test_transfer_sample(dggs_stream, plane_tif, grid):
     lazy = dggs_stream.scan_raster(plane_tif, res, grid=grid, transfer="bicubic")
     assert lazy.select(pl.len()).collect().item() == df.height
     assert lazy.select(index, "mean").head(5).collect().shape == (5, 2)
-    table = pa.table(dggs_stream.RasterArrowStream(plane_tif, res, grid=grid, transfer="sample", limit=7))
+    table = pa.table(dggs_stream.RasterArrowStream(plane_tif, res, grid=grid, transfer="interpolate", limit=7))
     assert table.num_rows == 7
 
 
@@ -632,7 +632,7 @@ def test_transfer_overlay_conserves_mass(dggs_stream, gradient_tif, tmp_path, gr
     assert written == preserved.height
     assert pl.read_parquet(out)["sum_value"].sum() == pytest.approx(total, rel=1e-9)
     assert dggs_stream.raster_to_pmtiles(
-        gradient_tif, tmp_path / "sample.pmtiles", res, grid=grid, transfer="sample"
+        gradient_tif, tmp_path / "sample.pmtiles", res, grid=grid, transfer="interpolate"
     ) > 0
 
 
@@ -640,7 +640,7 @@ def test_transfer_overlay_conserves_mass(dggs_stream, gradient_tif, tmp_path, gr
 def test_transfer_categorical(dggs_stream, classes_tif, grid):
     res = dggs_stream.auto_resolution(classes_tif, grid, offset=2)
     nearest = dggs_stream.scan_raster(
-        classes_tif, res, grid=grid, categorical=True, transfer="sample", sample_method="nearest"
+        classes_tif, res, grid=grid, categorical=True, transfer="interpolate", interpolation="nearest"
     ).collect()
     assert nearest.height > 3 * 48 * 48
     for cell, cls in zip(nearest[f"{grid}_index"], nearest["majority_class"]):
@@ -649,7 +649,7 @@ def test_transfer_categorical(dggs_stream, classes_tif, grid):
         assert cls == class_value(c, r)
     # Polars wraps the scan's error in its own exception type.
     with pytest.raises(Exception, match="nearest"):
-        dggs_stream.scan_raster(classes_tif, res, grid=grid, categorical=True, transfer="sample").collect()
+        dggs_stream.scan_raster(classes_tif, res, grid=grid, categorical=True, transfer="interpolate").collect()
     overlay = dggs_stream.scan_raster(
         classes_tif, dggs_stream.auto_resolution(classes_tif, grid, offset=-2), grid=grid,
         categorical=True, transfer="overlay",
@@ -663,8 +663,8 @@ def test_transfer_option_errors(dggs_stream, gradient_tif):
 
     for kw, needle in [
         (dict(transfer="smear"), "transfer"),
-        (dict(sample_method="bilinear"), "sample_method"),
-        (dict(transfer="overlay", sample_method="bilinear"), "sample_method"),
+        (dict(interpolation="bilinear"), "interpolation"),
+        (dict(transfer="overlay", interpolation="bilinear"), "interpolation"),
         (dict(mass_preserve=True), "mass_preserve"),
         (dict(transfer="overlay", overlay_weighted=False, mass_preserve=True), "mass_preserve"),
         (dict(transfer="overlay", sampling="5point"), "sampling"),
@@ -690,7 +690,7 @@ def test_profile_raster(dggs_stream, gradient_tif, grid, transfer):
     assert {"fetch", "tiff_decode", "kernel", "horizon", "serialize"} <= names
     kernel = next(p for p in profile["phases"] if p["name"] == "kernel")
     assert kernel["wall_ms"] > 0
-    # Only the pixel-centre kernel is split further; sample and overlay report it whole.
+    # Only the pixel-centre kernel is split further; interpolate and overlay report it whole.
     if transfer == "assign_centers":
         split = {c["name"] for c in kernel["children"]}
         assert {"crs_transform", "grid_index"} <= split <= {"crs_transform", "grid_index", "accumulate"}
@@ -795,7 +795,7 @@ def test_histogram_option_errors(dggs_stream, classes_tif):
         (dict(histogram=[2, 1]), "ascending"),
         (dict(histogram="values", histogram_normalize="density"), "density"),
         (dict(histogram_weight="mass"), "weight"),
-        (dict(histogram_weight="area", transfer="sample"), "overlay"),
+        (dict(histogram_weight="area", transfer="interpolate"), "overlay"),
         (dict(histogram_weight="area", transfer="overlay", overlay_weighted=False), "weighted"),
         (dict(histogram="2:0:9", remap={1: 2}), "remap"),
     ]:

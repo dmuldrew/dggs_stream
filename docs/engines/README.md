@@ -62,7 +62,7 @@ keep working. `cargo build --release` at the root still produces
 | Parquet → PMTiles transcoding | ✅ | — | ✅ (`parquet_to_pmtiles`) | — | ✅ (`parquet-to-pmtiles`) |
 | Grids (`h3`, `a5`, `s2`, `healpix`) ([Grids](../grids.md)) | ✅ | ✅ | ✅ | ✅ | ✅ (`--grid`) |
 | `auto` resolution | ✅ | ✅ | ✅ | ✅ (`{grid}_auto_resolution`) | ✅ (`-r auto`) |
-| Transfer modes (`sample`, `overlay`) ([Scan Options](../scan-options.md)) | ✅ | ✅ | ✅ | — | ✅ |
+| Transfer modes (`interpolate`, `overlay`) ([Scan Options](../scan-options.md)) | ✅ | ✅ | ✅ | — | ✅ |
 | Structured histograms | ✅ (JSON text) | ✅ (`List<Struct>`) | ✅ (`List(Struct)`) | — | ✅ (`ipc`, `jsonl`) |
 | NoData policy (`emit`) and `decimals` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Runtime profile | ✅ (`profile := true`) | ✅ (`with_profile`) | ✅ (`profile_raster`) | — | ✅ (`--profile`) |
@@ -153,7 +153,7 @@ For the full test inventory, see [Test Coverage](../testing.md).
 | Test | What it checks | How to run |
 | :--- | :--- | :--- |
 | [`root/multi_engine_e2e.rs`](../../tests/it/multi_engine_e2e.rs) | Generates synthetic continuous and categorical GeoTIFFs and compares per-cell results from the core batch readers and Arrow C stream, the CLI (subprocess: `ipc`, `jsonl`, `parquet`, `pmtiles`), DataFusion (scan, pushdown, scalar UDFs), Python (a `python3` subprocess loading `libdggs_stream_python`), the PostgreSQL SRFs and fmgr scalars in-process, and DuckDB when a `duckdb` binary is on `PATH`. | `cargo test -p dggs_stream --test it multi_engine_e2e` |
-| [`dggs-stream-sedona/tests/cross_engine.rs`](../../crates/dggs-stream-sedona/tests/cross_engine.rs) and DuckDB's `test_cross_engine_consistency_with_the_cli` | The CLI, DuckDB, the Python scanner and DataFusion SQL on all four grids: the same cells and statistics for centre assignment, `emit` with `decimals`, mass-preserving `overlay` and bilinear / bicubic `sample`, plus checks of the shared result (mass conservation, a linear field reproduced by interpolation). | `cargo test --test cross_engine` in `crates/dggs-stream-sedona`; `cargo test -p dggs-stream-duckdb test_cross_engine` |
+| [`dggs-stream-sedona/tests/cross_engine.rs`](../../crates/dggs-stream-sedona/tests/cross_engine.rs) and DuckDB's `test_cross_engine_consistency_with_the_cli` | The CLI, DuckDB, the Python scanner and DataFusion SQL on all four grids: the same cells and statistics for centre assignment, `emit` with `decimals`, mass-preserving `overlay` and bilinear / bicubic `interpolate`, plus checks of the shared result (mass conservation, a linear field reproduced by interpolation). | `cargo test --test cross_engine` in `crates/dggs-stream-sedona`; `cargo test -p dggs-stream-duckdb test_cross_engine` |
 | [`root/pg_extension_e2e.rs`](../../tests/it/pg_extension_e2e.rs) | Builds the real PostgreSQL module in Docker, installs it into `postgres:<major>` containers and compares `psql` output to the in-process SRFs. | `cargo test -p dggs_stream --test it pg_extension_e2e -- --ignored --nocapture` |
 | [`crates/dggs-stream-python/tests/wheel_smoke.py`](../../crates/dggs-stream-python/tests/wheel_smoke.py) | Installs a built wheel and exercises the Python API and the bundled `dggs-stream-cli`. | Run by `cibuildwheel` in [`wheels.yml`](../../.github/workflows/wheels.yml) |
 

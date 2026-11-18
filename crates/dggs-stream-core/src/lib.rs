@@ -35,7 +35,7 @@ pub mod run_profile;
 pub mod scalar_ops;
 /// Cross-format dataset transcoding pipelines (e.g. Parquet to PMTiles).
 pub mod transcode;
-/// Transfer modes: how pixels map onto cells (`assign_centers`, `sample`, `overlay`).
+/// Transfer modes: how pixels map onto cells (`assign_centers`, `interpolate`, `overlay`).
 pub mod transfer;
 
 pub use a5;
