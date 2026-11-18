@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use crate::aggregator::remap::CategoryRemapper;
 use crate::aggregator::sampling::SamplingPattern;
@@ -160,7 +160,7 @@ impl QuantileTarget {
 /// Evaluates a list of [`QuantileTarget`]s against one cell with a single
 /// sorted sweep of its sketch, instead of one sweep (and key sort) per target.
 ///
-/// Values match [`H3Accumulator::quantile`] and [`H3Accumulator::iqr`] exactly.
+/// Values match [`ContinuousAccumulator::quantile`] and [`ContinuousAccumulator::iqr`] exactly.
 #[derive(Debug, Clone, Default)]
 pub struct QuantilePlan {
     /// Distinct probabilities to query, deduplicated by bit pattern.
@@ -212,7 +212,7 @@ impl QuantilePlan {
     }
 
     /// Replace `out` with one value per target for `acc` (NaN when it has no sketch).
-    pub fn evaluate_into(&self, acc: &H3Accumulator, out: &mut Vec<f64>) {
+    pub fn evaluate_into(&self, acc: &ContinuousAccumulator, out: &mut Vec<f64>) {
         out.clear();
         if self.is_empty() {
             return;

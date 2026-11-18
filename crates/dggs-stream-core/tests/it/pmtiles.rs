@@ -1022,7 +1022,7 @@ fn test_pmtiles_antimeridian_straddling_cell_tile_range_and_unwrap() {
 
 #[test]
 fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
-    use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+    use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
     use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
     use dggs_stream_core::aggregator::multi_horizon::{
         MultiCategoricalRecord, MultiContinuousRecord, RecordStreamer,
@@ -1084,7 +1084,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
         .map(|(i, &c)| {
             let val = ((i + 1) * 10) as f64;
             // Two unit-weight pixels per child, so the sample variance has 13 degrees of freedom.
-            let mut accumulator = H3Accumulator::new(val);
+            let mut accumulator = ContinuousAccumulator::new(val);
             accumulator.update(val);
             MultiContinuousRecord {
                 resolution: 6,

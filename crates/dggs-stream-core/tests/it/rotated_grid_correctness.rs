@@ -13,7 +13,7 @@
 
 use crate::helpers;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
@@ -62,7 +62,7 @@ fn test_rotated_and_south_to_north_grids_match_exhaustive_reference() {
             let res = Resolution::try_from(9).unwrap();
 
             // 1. Compute exhaustive per-sample reference with zero early eviction
-            let mut expected_continuous: HashMap<u64, H3Accumulator> = HashMap::new();
+            let mut expected_continuous: HashMap<u64, ContinuousAccumulator> = HashMap::new();
             let mut expected_categorical: HashMap<u64, HashMap<i64, f64>> = HashMap::new();
 
             for r in 0..height {
@@ -96,7 +96,7 @@ fn test_rotated_and_south_to_north_grids_match_exhaustive_reference() {
 
             let mut continuous_streamer = MultiScanHorizonStreamer::new(reader, &config).unwrap();
 
-            let mut streamed_continuous: HashMap<u64, H3Accumulator> = HashMap::new();
+            let mut streamed_continuous: HashMap<u64, ContinuousAccumulator> = HashMap::new();
             let mut emitted_order: Vec<u64> = Vec::new();
 
             loop {

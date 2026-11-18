@@ -15,7 +15,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
     QuantileTarget, SpectralFormula,
 };
-use dggs_stream_core::aggregator::H3Accumulator;
+use dggs_stream_core::aggregator::ContinuousAccumulator;
 use dggs_stream_core::columnar::{
     CategoricalBatchReader, CategoricalFormat, ContinuousBatchReader,
 };
@@ -83,7 +83,7 @@ fn gdal_metadata(items: &[(&str, usize, f64)]) -> String {
     format!("<GDALMetadata>\n  <Item name=\"AREA_OR_POINT\">Area</Item>\n{body}</GDALMetadata>\n")
 }
 
-fn drain(mut streamer: MultiScanHorizonStreamer) -> HashMap<(u8, u64), H3Accumulator> {
+fn drain(mut streamer: MultiScanHorizonStreamer) -> HashMap<(u8, u64), ContinuousAccumulator> {
     let mut cells = HashMap::new();
     loop {
         let batch = streamer.fetch_next_batch(4096).unwrap();
@@ -101,7 +101,7 @@ fn drain(mut streamer: MultiScanHorizonStreamer) -> HashMap<(u8, u64), H3Accumul
     }
 }
 
-fn run(path: &Path, config: &MultiResolutionConfig) -> HashMap<(u8, u64), H3Accumulator> {
+fn run(path: &Path, config: &MultiResolutionConfig) -> HashMap<(u8, u64), ContinuousAccumulator> {
     let reader = GeoTiffStreamReader::open(path).unwrap();
     drain(MultiScanHorizonStreamer::new(reader, config).unwrap())
 }

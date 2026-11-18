@@ -46,7 +46,7 @@ Phase 1 introduced two foundational primitives that remain at the heart of dggs_
 2. **In-Register Run Accumulation (Option 5):** Maintaining `run_cell`, `run_sum`, `run_min`, `run_max`, and `run_count` in local scalar variables (CPU registers) across contiguous horizontal pixels sharing the same H3 cell, flushing to the hash map only when a cell boundary is crossed.
 
 ### Lesson 1: Register Accumulation Eliminates ~98% of Hash Probes
-At H3 Resolution 8 or 9 on a 30-meter raster, a single hexagon spans ~15 to 35 consecutive horizontal pixels. Updating a `HashMap<u64, H3Accumulator>` on every pixel caused continuous L1/L2 cache misses and hash computation overhead. Accumulating contiguous runs in registers reduced hash table probes by **~98%** and replaced conditional min/max branches with branchless hardware instructions (`minsd`/`maxsd`).
+At H3 Resolution 8 or 9 on a 30-meter raster, a single hexagon spans ~15 to 35 consecutive horizontal pixels. Updating a `HashMap<u64, ContinuousAccumulator>` on every pixel caused continuous L1/L2 cache misses and hash computation overhead. Accumulating contiguous runs in registers reduced hash table probes by **~98%** and replaced conditional min/max branches with branchless hardware instructions (`minsd`/`maxsd`).
 
 ---
 
@@ -316,7 +316,7 @@ Latitude is the natural eviction key for north-up rasters, but Albers rows curve
 ### Lesson 30: Measure What the Portable Build Costs Before Tuning the Math
 Two scheduling changes and one build change account for most of this phase's speed:
 * **Pipelined windows instead of waves.** Each wave of kernel windows used to wait for its slowest window, and workers idled during the serial merge. Windows now go to long-lived workers that take the next job as soon as they finish. The calling thread merges finished map sets strictly in window order, so output does not depend on timing (a run matches the serial run of the same windows bit for bit). Eviction keys for new cells are extra worker jobs.
-* **Worker windows sized from the accumulator.** Continuous streams without quantiles size windows by `inline_worker_bytes_per_sample::<H3Accumulator>()` (260 B per sample and resolution) instead of a flat 1 KiB. With 5-point sampling at resolution 9 on `BP_CONUS.tif`, system CPU (Rayon workers sleeping and waking between tiny waves) drops by about 62%, and wall time from 39.0 to 36.0 minutes.
+* **Worker windows sized from the accumulator.** Continuous streams without quantiles size windows by `inline_worker_bytes_per_sample::<ContinuousAccumulator>()` (260 B per sample and resolution) instead of a flat 1 KiB. With 5-point sampling at resolution 9 on `BP_CONUS.tif`, system CPU (Rayon workers sleeping and waking between tiny waves) drops by about 62%, and wall time from 39.0 to 36.0 minutes.
 * **Hardware FMA chosen at run time.** h3o's indexing math calls `f64::mul_add`, which a portable x86-64 build compiles to a software routine. That routine cost 11–16% of all instructions in the streaming benchmarks. On CPUs with FMA, the continuous and categorical kernels now run a second copy compiled with hardware fused multiply-add. The output is unchanged bit for bit, because both forms are correctly rounded. On a 4-core Xeon, the criterion `streaming` benchmarks run 13–28% faster, and `worker_scaling` streams 16–28% faster at resolutions 7 and 9.
 
 ### Lesson 31: A URL from SQL Is Untrusted Input

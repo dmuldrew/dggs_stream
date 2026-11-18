@@ -1,9 +1,9 @@
 use crate::aggregator::quantiles::QuantileSketch;
 
-/// High-performance pixel accumulator for H3 cell statistics with single-pass Welford online variance
+/// Pixel accumulator for continuous cell statistics with single-pass Welford online variance
 /// and optional streaming non-parametric quantile estimation.
 #[derive(Debug, Clone, PartialEq)]
-pub struct H3Accumulator {
+pub struct ContinuousAccumulator {
     pub sum: f64,
     pub count: f64,
     pub min: f64,
@@ -15,7 +15,7 @@ pub struct H3Accumulator {
     pub quantiles: Option<Box<QuantileSketch>>,
 }
 
-impl Default for H3Accumulator {
+impl Default for ContinuousAccumulator {
     #[inline(always)]
     fn default() -> Self {
         Self {
@@ -30,7 +30,7 @@ impl Default for H3Accumulator {
     }
 }
 
-impl H3Accumulator {
+impl ContinuousAccumulator {
     /// Initialize with a single finite pixel value, or an empty accumulator if invalid.
     #[inline(always)]
     pub fn new(val: f64) -> Self {
@@ -357,44 +357,47 @@ mod tests {
         let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
         let weights = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0];
         for value in values {
-            assert_eq!(H3Accumulator::new(value), H3Accumulator::default());
             assert_eq!(
-                H3Accumulator::new_weighted(value, 1.0),
-                H3Accumulator::default()
+                ContinuousAccumulator::new(value),
+                ContinuousAccumulator::default()
+            );
+            assert_eq!(
+                ContinuousAccumulator::new_weighted(value, 1.0),
+                ContinuousAccumulator::default()
             );
         }
         for weight in weights {
             assert_eq!(
-                H3Accumulator::new_weighted(42.0, weight),
-                H3Accumulator::default()
+                ContinuousAccumulator::new_weighted(42.0, weight),
+                ContinuousAccumulator::default()
             );
         }
 
         for (value, weight) in [(42.0, 1.0), (-3.0, 0.25)] {
-            let mut expected = H3Accumulator::default();
+            let mut expected = ContinuousAccumulator::default();
             expected.update_weighted(value, weight);
-            assert_eq!(H3Accumulator::new_weighted(value, weight), expected);
+            assert_eq!(ContinuousAccumulator::new_weighted(value, weight), expected);
         }
-        let mut expected = H3Accumulator::default();
+        let mut expected = ContinuousAccumulator::default();
         expected.update(42.0);
-        assert_eq!(H3Accumulator::new(42.0), expected);
+        assert_eq!(ContinuousAccumulator::new(42.0), expected);
 
         // Invalid first observations must not poison later valid updates or merges.
-        let mut acc = H3Accumulator::new_weighted(5.0, f64::NAN);
+        let mut acc = ContinuousAccumulator::new_weighted(5.0, f64::NAN);
         acc.update(42.0);
-        acc.merge(&H3Accumulator::new(f64::INFINITY));
+        acc.merge(&ContinuousAccumulator::new(f64::INFINITY));
         assert_eq!(acc, expected);
     }
 
     #[test]
     fn update_rejects_non_finite_values() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let mut acc = H3Accumulator::default();
+            let mut acc = ContinuousAccumulator::default();
             acc.update(bad);
             assert_eq!(acc.count, 0.0, "update({bad}) must not count a sample");
         }
         // A NaN after valid samples must not poison them either.
-        let mut acc = H3Accumulator::default();
+        let mut acc = ContinuousAccumulator::default();
         acc.update(1.0);
         acc.update(f64::NAN);
         acc.update(f64::INFINITY);
@@ -405,11 +408,11 @@ mod tests {
     fn update_weighted_rejects_bad_weights_and_values() {
         // NaN slips past `weight <= 0.0`, infinity inflates count forever.
         for bad_w in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
-            let mut acc = H3Accumulator::default();
+            let mut acc = ContinuousAccumulator::default();
             acc.update_weighted(5.0, bad_w);
             assert_eq!(acc.count, 0.0, "weight {bad_w} must be rejected");
         }
-        let mut acc = H3Accumulator::default();
+        let mut acc = ContinuousAccumulator::default();
         acc.update_weighted(f64::NAN, 1.0);
         acc.update_weighted(f64::INFINITY, 1.0);
         assert_eq!(acc.count, 0.0);
@@ -419,10 +422,10 @@ mod tests {
     fn merge_does_not_adopt_partial_sketch() {
         // Self has unsketched samples; other's sketch covers only its own
         // samples. Adopting it would report quantiles for a subset.
-        let mut a = H3Accumulator::default();
+        let mut a = ContinuousAccumulator::default();
         a.update(1.0);
         a.update(2.0);
-        let mut b = H3Accumulator::with_quantiles();
+        let mut b = ContinuousAccumulator::with_quantiles();
         b.update(3.0);
         b.update(4.0);
         a.merge(&b);
@@ -435,9 +438,9 @@ mod tests {
     fn merge_keeps_self_sketch_for_stats_only_other() {
         // Span kernels feed self.quantiles separately from the stats merge,
         // so a stats-only merge must leave an existing sketch intact.
-        let mut a = H3Accumulator::with_quantiles();
+        let mut a = ContinuousAccumulator::with_quantiles();
         a.update(1.0);
-        let mut b = H3Accumulator::default();
+        let mut b = ContinuousAccumulator::default();
         b.update(2.0);
         a.merge(&b);
         assert!(a.quantiles.is_some());
@@ -446,8 +449,8 @@ mod tests {
 
     #[test]
     fn merge_adopts_sketch_when_self_was_empty() {
-        let mut a = H3Accumulator::with_quantiles();
-        let mut b = H3Accumulator::with_quantiles();
+        let mut a = ContinuousAccumulator::with_quantiles();
+        let mut b = ContinuousAccumulator::with_quantiles();
         b.update(3.0);
         a.merge(&b);
         assert!(a.quantiles.is_some());

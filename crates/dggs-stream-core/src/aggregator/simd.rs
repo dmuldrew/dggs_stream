@@ -1,10 +1,10 @@
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::nodata::{NativeNoData, PixelValidity};
 
 /// Trait for types that support high-throughput SIMD / multi-lane scanline span accumulation.
 pub trait SimdSpanAccumulate: NativeNoData {
-    /// Vectorized accumulation of a contiguous horizontal span into an H3Accumulator.
-    fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> H3Accumulator;
+    /// Vectorized accumulation of a contiguous horizontal span into an ContinuousAccumulator.
+    fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> ContinuousAccumulator;
 
     /// Scalar conversion of a single value to f64 (for sub-pixel sampling or fallback points).
     fn to_f64_val(self) -> f64;
@@ -28,9 +28,9 @@ impl SimdSpanAccumulate for f32 {
         PixelValidity::new(nodata).is_valid(self)
     }
 
-    fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> H3Accumulator {
+    fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> ContinuousAccumulator {
         if slice.is_empty() {
-            return H3Accumulator::default();
+            return ContinuousAccumulator::default();
         }
 
         match nodata {
@@ -43,7 +43,7 @@ impl SimdSpanAccumulate for f32 {
 }
 
 #[inline]
-fn accumulate_span_f32_no_nodata(slice: &[f32]) -> H3Accumulator {
+fn accumulate_span_f32_no_nodata(slice: &[f32]) -> ContinuousAccumulator {
     let mut sum0 = 0.0f64;
     let mut sum1 = 0.0f64;
     let mut sum2 = 0.0f64;
@@ -154,7 +154,7 @@ fn accumulate_span_f32_no_nodata(slice: &[f32]) -> H3Accumulator {
     let total_count =
         ((count0 + count1) + (count2 + count3) + (count4 + count5) + (count6 + count7)) as f64;
     if total_count == 0.0 {
-        return H3Accumulator::default();
+        return ContinuousAccumulator::default();
     }
 
     let total_sum = ((sum0 + sum1) + (sum2 + sum3)) + ((sum4 + sum5) + (sum6 + sum7));
@@ -165,7 +165,13 @@ fn accumulate_span_f32_no_nodata(slice: &[f32]) -> H3Accumulator {
 
     // Fast-path: uniform span (e.g. flat water or uniform elevation) has zero variance
     if total_min == total_max {
-        return H3Accumulator::from_stats(total_sum, total_count, total_min, total_max, 0.0);
+        return ContinuousAccumulator::from_stats(
+            total_sum,
+            total_count,
+            total_min,
+            total_max,
+            0.0,
+        );
     }
 
     // Pass 2: Vectorized M2 variance computation
@@ -259,11 +265,11 @@ fn accumulate_span_f32_no_nodata(slice: &[f32]) -> H3Accumulator {
 
     let total_m2 = ((m2_0 + m2_1) + (m2_2 + m2_3)) + ((m2_4 + m2_5) + (m2_6 + m2_7));
 
-    H3Accumulator::from_stats(total_sum, total_count, total_min, total_max, total_m2)
+    ContinuousAccumulator::from_stats(total_sum, total_count, total_min, total_max, total_m2)
 }
 
 #[inline]
-fn accumulate_span_f32_with_nodata(slice: &[f32], nd: f32) -> H3Accumulator {
+fn accumulate_span_f32_with_nodata(slice: &[f32], nd: f32) -> ContinuousAccumulator {
     let mut sum0 = 0.0f64;
     let mut sum1 = 0.0f64;
     let mut sum2 = 0.0f64;
@@ -374,7 +380,7 @@ fn accumulate_span_f32_with_nodata(slice: &[f32], nd: f32) -> H3Accumulator {
     let total_count =
         ((count0 + count1) + (count2 + count3) + (count4 + count5) + (count6 + count7)) as f64;
     if total_count == 0.0 {
-        return H3Accumulator::default();
+        return ContinuousAccumulator::default();
     }
 
     let total_sum = ((sum0 + sum1) + (sum2 + sum3)) + ((sum4 + sum5) + (sum6 + sum7));
@@ -384,7 +390,13 @@ fn accumulate_span_f32_with_nodata(slice: &[f32], nd: f32) -> H3Accumulator {
         ((max0.max(max1)).max(max2.max(max3))).max((max4.max(max5)).max(max6.max(max7))) as f64;
 
     if total_min == total_max {
-        return H3Accumulator::from_stats(total_sum, total_count, total_min, total_max, 0.0);
+        return ContinuousAccumulator::from_stats(
+            total_sum,
+            total_count,
+            total_min,
+            total_max,
+            0.0,
+        );
     }
 
     let mean = total_sum / total_count;
@@ -452,7 +464,7 @@ fn accumulate_span_f32_with_nodata(slice: &[f32], nd: f32) -> H3Accumulator {
 
     let total_m2 = ((m2_0 + m2_1) + (m2_2 + m2_3)) + ((m2_4 + m2_5) + (m2_6 + m2_7));
 
-    H3Accumulator::from_stats(total_sum, total_count, total_min, total_max, total_m2)
+    ContinuousAccumulator::from_stats(total_sum, total_count, total_min, total_max, total_m2)
 }
 
 // =========================================================================
@@ -470,9 +482,9 @@ impl SimdSpanAccumulate for f64 {
         PixelValidity::new(nodata).is_valid(self)
     }
 
-    fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> H3Accumulator {
+    fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> ContinuousAccumulator {
         if slice.is_empty() {
-            return H3Accumulator::default();
+            return ContinuousAccumulator::default();
         }
 
         let mut sum0 = 0.0f64;
@@ -547,14 +559,20 @@ impl SimdSpanAccumulate for f64 {
 
         let total_count = ((count0 + count1) + (count2 + count3)) as f64;
         if total_count == 0.0 {
-            return H3Accumulator::default();
+            return ContinuousAccumulator::default();
         }
         let total_sum = (sum0 + sum1) + (sum2 + sum3);
         let total_min = (min0.min(min1)).min(min2.min(min3));
         let total_max = (max0.max(max1)).max(max2.max(max3));
 
         if total_min == total_max {
-            return H3Accumulator::from_stats(total_sum, total_count, total_min, total_max, 0.0);
+            return ContinuousAccumulator::from_stats(
+                total_sum,
+                total_count,
+                total_min,
+                total_max,
+                0.0,
+            );
         }
 
         let mean = total_sum / total_count;
@@ -594,7 +612,7 @@ impl SimdSpanAccumulate for f64 {
             }
         }
 
-        H3Accumulator::from_stats(
+        ContinuousAccumulator::from_stats(
             total_sum,
             total_count,
             total_min,
@@ -621,9 +639,9 @@ macro_rules! impl_simd_span_integer {
                 PixelValidity::new(nodata).is_valid(self)
             }
 
-            fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> H3Accumulator {
+            fn accumulate_span(slice: &[Self], nodata: Option<Self>) -> ContinuousAccumulator {
                 if slice.is_empty() {
-                    return H3Accumulator::default();
+                    return ContinuousAccumulator::default();
                 }
 
                 let mut sum0 = 0.0f64;
@@ -723,7 +741,7 @@ macro_rules! impl_simd_span_integer {
 
                 let total_count = ((count0 + count1) + (count2 + count3)) as f64;
                 if total_count == 0.0 {
-                    return H3Accumulator::default();
+                    return ContinuousAccumulator::default();
                 }
 
                 let total_sum = (sum0 + sum1) + (sum2 + sum3);
@@ -731,7 +749,7 @@ macro_rules! impl_simd_span_integer {
                 let total_max = (max0.max(max1)).max(max2.max(max3)) as f64;
 
                 if total_min == total_max {
-                    return H3Accumulator::from_stats(
+                    return ContinuousAccumulator::from_stats(
                         total_sum,
                         total_count,
                         total_min,
@@ -797,7 +815,7 @@ macro_rules! impl_simd_span_integer {
                     }
                 }
 
-                H3Accumulator::from_stats(
+                ContinuousAccumulator::from_stats(
                     total_sum,
                     total_count,
                     total_min,
@@ -840,7 +858,7 @@ mod tests {
         ];
         for marker in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -9999.0, 4.0] {
             for len in 0..=values.len() {
-                let mut expected = H3Accumulator::default();
+                let mut expected = ContinuousAccumulator::default();
                 for &v in &values[..len] {
                     if v.is_valid(Some(marker)) {
                         expected.update(v as f64);

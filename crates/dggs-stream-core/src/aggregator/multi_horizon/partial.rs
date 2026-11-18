@@ -6,7 +6,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::error::{DggsStreamError, Result};
 
@@ -28,7 +28,7 @@ pub trait PartialState: SpillAccumulator + Default {
     const KIND: u8;
 }
 
-impl PartialState for H3Accumulator {
+impl PartialState for ContinuousAccumulator {
     const KIND: u8 = 1;
 }
 

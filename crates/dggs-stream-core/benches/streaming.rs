@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::cell_hash::H3BuildHasher;
 use dggs_stream_core::aggregator::multi_horizon::{
@@ -74,7 +74,7 @@ fn single_quantile(c: &mut Criterion) {
         ("positive_16", (1..=16).map(f64::from).collect::<Vec<_>>()),
         ("mixed_1024", (-512..512).map(f64::from).collect()),
     ] {
-        let mut acc = H3Accumulator::with_quantiles();
+        let mut acc = ContinuousAccumulator::with_quantiles();
         for value in values {
             acc.update(value);
         }
