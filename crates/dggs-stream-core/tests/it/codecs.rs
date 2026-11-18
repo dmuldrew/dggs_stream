@@ -1,4 +1,4 @@
-//! Compressed-chunk codecs: SIMD-accelerated Deflate (`libdeflater`) and fast LZW (`weezl`).
+//! Compressed-chunk codecs: SIMD-accelerated Deflate (`libdeflater`) fast LZW (`weezl`), and ZSTD.
 //!
 //! The Deflate tests verify exact bitwise parity with standard `flate2`/`tiff` decoders across tiled and striped
 //! layouts, horizontal and floating-point predictors, corrupted stream handling, and buffer auto-resizing.
@@ -1644,5 +1644,287 @@ fn test_overlong_deflate_tile_falls_back_to_generic_decoder() {
             .map(|i| ground_truth[((i / 16) * 32 + idx * 16 + i % 16) as usize])
             .collect();
         assert_eq!(f32_samples(&data), expected);
+    }
+}
+
+// Use TIFF's directory writer with manually framed chunks since its image encoder
+// cannot write compression tag 50000.
+pub(super) fn write_zstd_fixture(
+    tiled: bool,
+    bits: u16,
+    sample_format: u16,
+    predictor: u16,
+    compression: u16,
+    payloads: &[Vec<u8>],
+) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    let mut encoder = TiffEncoder::new(file.as_file_mut()).unwrap();
+    let mut ifd = encoder.image_directory().unwrap();
+    let mut offsets = Vec::new();
+    let mut counts = Vec::new();
+    for payload in payloads {
+        offsets.push(if payload.is_empty() {
+            0
+        } else {
+            u32::try_from(ifd.write_data(payload.as_slice()).unwrap()).unwrap()
+        });
+        counts.push(u32::try_from(payload.len()).unwrap());
+    }
+
+    ifd.write_tag(Tag::ImageWidth, 45u32).unwrap();
+    ifd.write_tag(Tag::ImageLength, 23u32).unwrap();
+    ifd.write_tag(Tag::BitsPerSample, bits).unwrap();
+    ifd.write_tag(Tag::SampleFormat, sample_format).unwrap();
+    ifd.write_tag(Tag::Compression, compression).unwrap();
+    ifd.write_tag(Tag::PhotometricInterpretation, 1u16).unwrap();
+    ifd.write_tag(Tag::SamplesPerPixel, 1u16).unwrap();
+    ifd.write_tag(Tag::Predictor, predictor).unwrap();
+    if tiled {
+        ifd.write_tag(Tag::TileWidth, 16u32).unwrap();
+        ifd.write_tag(Tag::TileLength, 16u32).unwrap();
+        ifd.write_tag(Tag::TileOffsets, offsets.as_slice()).unwrap();
+        ifd.write_tag(Tag::TileByteCounts, counts.as_slice())
+            .unwrap();
+    } else {
+        ifd.write_tag(Tag::RowsPerStrip, 8u32).unwrap();
+        ifd.write_tag(Tag::StripOffsets, offsets.as_slice())
+            .unwrap();
+        ifd.write_tag(Tag::StripByteCounts, counts.as_slice())
+            .unwrap();
+    }
+    ifd.write_tag(Tag::ModelPixelScaleTag, &[0.001f64, 0.001, 0.0][..])
+        .unwrap();
+    ifd.write_tag(
+        Tag::ModelTiepointTag,
+        &[0.0f64, 0.0, 0.0, -122.45, 37.85, 0.0][..],
+    )
+    .unwrap();
+    ifd.write_tag(Tag::GdalNodata, "0").unwrap();
+    ifd.finish().unwrap();
+    file.flush().unwrap();
+    file
+}
+
+#[test]
+fn zstd_chunk_and_stream_parity() {
+    use dggs_stream_core::aggregator::multi_horizon::{
+        MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
+    };
+    use std::collections::{BTreeMap, HashMap};
+
+    let mut config = MultiResolutionConfig::single(10);
+    config.custom_crs = Some("EPSG:4326".into());
+    for tiled in [false, true] {
+        for (bytes, sample_format, predictor) in [
+            (1, 1, 1),
+            (1, 1, 2),
+            (2, 2, 1),
+            (2, 2, 2),
+            (4, 3, 1),
+            (4, 3, 2),
+            (4, 3, 3),
+        ] {
+            let (stored_w, chunk_h, chunks_across) = if tiled { (16, 16, 3) } else { (45, 8, 1) };
+            let chunk_count = if tiled { 6 } else { 3 };
+            let mut raw_chunks = Vec::new();
+            let mut frames = Vec::new();
+            let mut expected = Vec::new();
+            for chunk in 0..chunk_count {
+                let x0 = (chunk % chunks_across) * stored_w;
+                let y0 = (chunk / chunks_across) * chunk_h;
+                let data_w = stored_w.min(45 - x0);
+                let data_h = chunk_h.min(23 - y0);
+                let stored_h = if tiled { chunk_h } else { data_h };
+                let sparse = tiled && chunk == 1;
+                let mut raw = Vec::new();
+                let mut encoded = Vec::new();
+                let mut visible = Vec::new();
+                for y in 0..stored_h {
+                    let mut row = Vec::new();
+                    for x in 0..stored_w {
+                        let value = if sparse {
+                            0
+                        } else {
+                            ((x0 + x + 11 * (y0 + y)) % 29 + 1) as i16
+                        };
+                        let bits = match bytes {
+                            1 => value as u32,
+                            2 => (-value) as u16 as u32,
+                            4 => (f32::from(-value) * 0.5).to_bits(),
+                            _ => unreachable!(),
+                        };
+                        if x < data_w && y < data_h {
+                            visible.push(bits);
+                        }
+                        row.push(bits);
+                        raw.extend_from_slice(&bits.to_le_bytes()[..bytes]);
+                    }
+                    match predictor {
+                        1 => encoded.extend_from_slice(&raw[raw.len() - stored_w * bytes..]),
+                        2 => {
+                            let mut prev = 0u32;
+                            for bits in row {
+                                encoded.extend_from_slice(
+                                    &bits.wrapping_sub(prev).to_le_bytes()[..bytes],
+                                );
+                                prev = bits;
+                            }
+                        }
+                        3 => {
+                            let mut prev = 0u8;
+                            for byte in 0..4 {
+                                for bits in &row {
+                                    let value = bits.to_be_bytes()[byte];
+                                    encoded.push(value.wrapping_sub(prev));
+                                    prev = value;
+                                }
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                raw_chunks.push(raw);
+                frames.push(if sparse {
+                    Vec::new()
+                } else {
+                    zstd::bulk::compress(&encoded, 1).unwrap()
+                });
+                expected.push(visible);
+            }
+
+            let bits = (bytes * 8) as u16;
+            let zstd = write_zstd_fixture(tiled, bits, sample_format, predictor, 50000, &frames);
+            let raw = write_zstd_fixture(tiled, bits, sample_format, 1, 1, &raw_chunks);
+            let reader = GeoTiffStreamReader::open(zstd.path()).unwrap();
+            assert_eq!(
+                reader.chunk_info.as_ref().unwrap().compression,
+                CompressionMethod::ZSTD
+            );
+            let mut decoder = reader.open_decoder().unwrap();
+            let capacity = stored_w * chunk_h;
+            let mut buffer = match bytes {
+                1 => DecodingResult::U8(Vec::with_capacity(capacity)),
+                2 => DecodingResult::I16(Vec::with_capacity(capacity)),
+                4 => DecodingResult::F32(Vec::with_capacity(capacity)),
+                _ => unreachable!(),
+            };
+            let mut previous_ptr = None;
+            for (index, expected) in expected.iter().enumerate() {
+                (_, buffer) = decoder.read_chunk_into(index as u32, buffer).unwrap();
+                let (ptr, actual): (_, Vec<u32>) = match &buffer {
+                    DecodingResult::U8(v) => (
+                        v.as_ptr().cast::<u8>(),
+                        v.iter().map(|&v| u32::from(v)).collect(),
+                    ),
+                    DecodingResult::I16(v) => (
+                        v.as_ptr().cast::<u8>(),
+                        v.iter().map(|&v| u32::from(v as u16)).collect(),
+                    ),
+                    DecodingResult::F32(v) => (
+                        v.as_ptr().cast::<u8>(),
+                        v.iter().map(|v| v.to_bits()).collect(),
+                    ),
+                    _ => panic!("unexpected sample type"),
+                };
+                assert_eq!(
+                    &actual, expected,
+                    "tiled={tiled}, bits={bits}, predictor={predictor}, chunk={index}"
+                );
+                assert_eq!(*previous_ptr.get_or_insert(ptr), ptr);
+            }
+
+            let scan = |path: &Path| {
+                let reader = GeoTiffStreamReader::open(path).unwrap();
+                let mut stream = MultiScanHorizonStreamer::new(reader, &config).unwrap();
+                let mut cells = HashMap::new();
+                while !stream.is_finished() {
+                    for rec in stream.fetch_next_batch(17).unwrap() {
+                        assert!(cells
+                            .insert(
+                                rec.h3_index,
+                                (
+                                    rec.accumulator.count.to_bits(),
+                                    rec.accumulator.sum.to_bits()
+                                )
+                            )
+                            .is_none());
+                    }
+                }
+                assert!(!cells.is_empty());
+                cells
+            };
+            assert_eq!(scan(zstd.path()), scan(raw.path()));
+
+            if sample_format != 3 {
+                let categorical = |path: &Path| {
+                    let reader = GeoTiffStreamReader::open(path).unwrap();
+                    let mut stream = MultiCategoricalHorizonStreamer::new(reader, &config).unwrap();
+                    let mut cells = HashMap::new();
+                    loop {
+                        let batch = stream.fetch_next_batch(17).unwrap();
+                        if batch.is_empty() {
+                            break;
+                        }
+                        for rec in batch {
+                            let mut classes = BTreeMap::new();
+                            rec.accumulator.for_each_class(|class, count| {
+                                classes.insert(class, count.to_bits());
+                            });
+                            assert!(cells.insert(rec.h3_index, classes).is_none());
+                        }
+                    }
+                    assert!(!cells.is_empty());
+                    cells
+                };
+                assert_eq!(categorical(zstd.path()), categorical(raw.path()));
+            }
+        }
+    }
+}
+
+#[test]
+fn zstd_malformed_chunks_fail_with_codec_error() {
+    let exact = zstd::bulk::compress(&[29; 360], 1).unwrap();
+    let mut bad_magic = exact.clone();
+    bad_magic[0] ^= 0xff;
+    let mut truncated = exact.clone();
+    truncated.pop();
+    for (payload, message) in [
+        (bad_magic, "decompression failed"),
+        (truncated, "decompression failed"),
+        (zstd::bulk::compress(&[29; 359], 1).unwrap(), "did not fill"),
+        (
+            zstd::bulk::compress(&[29; 361], 1).unwrap(),
+            "decompression failed",
+        ),
+    ] {
+        let file = write_zstd_fixture(
+            false,
+            8,
+            1,
+            1,
+            50000,
+            &[exact.clone(), payload.clone(), vec![]],
+        );
+        let reader = GeoTiffStreamReader::open(file.path()).unwrap();
+        let mut decoder = reader.open_decoder().unwrap();
+        let (_, buffer) = decoder.read_chunk(0).unwrap();
+        let error = decoder.read_chunk_into(1, buffer).unwrap_err().to_string();
+        assert!(
+            error.contains("ZSTD chunk") && error.contains(message),
+            "{error}"
+        );
+
+        let error = decoder
+            .read_chunk_from_compressed_bytes(0, &payload, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ZSTD chunk") && error.contains(message),
+            "{error}"
+        );
+        assert!(
+            matches!(decoder.read_chunk(0).unwrap().1, DecodingResult::U8(v) if v == [29; 360])
+        );
     }
 }

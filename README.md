@@ -686,7 +686,7 @@ For datasets spanning ±180° longitude, dggs_stream automatically wraps coordin
 
 ### BigTIFF & Codec Compatibility
 
-Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
+Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, ZSTD, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
 
 ```bash
 gdal_translate -co COMPRESS=DEFLATE input.tif output.tif
