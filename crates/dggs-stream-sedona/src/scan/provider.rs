@@ -11,6 +11,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
 use dggs_stream_core::aggregator::remap::CategoryRemapper;
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::aggregator::{NodataPolicy, OutputPolicy};
+use dggs_stream_core::columnar::multiband::{resolve_bands, wide_schema, MultiBandBatchReader};
 use dggs_stream_core::columnar::{
     with_partial_state_field, ArrowArrayStream, CategoricalBatchReader, CategoricalFormat,
     ColumnSchema, ContinuousBatchReader, PartitionedBatchReader, RecordBatch,
@@ -537,6 +538,7 @@ fn partitioned_scan(
 
 /// Physical execution plan for continuous H3 raster aggregation.
 pub struct ContinuousRasterExec {
+    bands: Option<Vec<usize>>,
     paths: Vec<PathBuf>,
     config: MultiResolutionConfig,
     projection: Option<Vec<usize>>,
@@ -558,6 +560,22 @@ impl RasterScanExec for ContinuousRasterExec {
         if self.empty {
             return Ok(Box::new(std::iter::empty()));
         }
+        if let Some(bands) = &self.bands {
+            let [path] = self.paths.as_slice() else {
+                return Err(DggsStreamError::InvalidParameter(
+                    "bands requires one input raster".into(),
+                ));
+            };
+            let raster = dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open_with_remote_source_factory(path,self.config.remote_source_factory.as_ref())?;
+            return Ok(Box::new(MultiBandBatchReader::open(
+                raster,
+                &self.config,
+                bands,
+                self.projection.as_deref(),
+                self.batch_size,
+                self.limit,
+            )?));
+        }
         let reader = open_or_empty(self.bbox_pushed, || {
             ContinuousBatchReader::open(
                 &self.paths,
@@ -577,6 +595,7 @@ impl RasterScanExec for ContinuousRasterExec {
 /// `RasterScan` for `h3_raster_continuous_aggregate`.
 #[derive(Clone)]
 pub struct ContinuousRasterTableProvider {
+    bands: Option<Vec<usize>>,
     pub paths: Vec<PathBuf>,
     pub config: MultiResolutionConfig,
     pub batch_size: usize,
@@ -591,6 +610,7 @@ impl ContinuousRasterTableProvider {
             resolutions
         };
         Ok(Self {
+            bands: None,
             paths,
             config: MultiResolutionConfig::new(res),
             batch_size: 2048,
@@ -677,6 +697,16 @@ impl ContinuousRasterTableProvider {
         self
     }
 
+    /// Select an ordered comma-separated set of bands, or all bands, for wide output.
+    pub fn with_bands(mut self, selector: &str) -> Result<Self> {
+        self.bands = Some(resolve_bands(
+            &self.paths,
+            selector,
+            self.config.remote_source_factory.as_ref(),
+        )?);
+        Ok(self)
+    }
+
     pub fn with_band(mut self, band: usize) -> Self {
         self.config.band = band.max(1);
         self
@@ -754,6 +784,9 @@ impl ContinuousRasterTableProvider {
 
 impl RasterScan for ContinuousRasterTableProvider {
     fn schema(&self) -> Arc<ColumnSchema> {
+        if let Some(bands) = &self.bands {
+            return Arc::new(wide_schema(self.config.grid, bands, &self.config.quantiles));
+        }
         let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles)
             .with_output_policy(&self.config.output_policy());
         match self.config.partition {
@@ -784,6 +817,13 @@ impl RasterScan for ContinuousRasterTableProvider {
         filters
             .iter()
             .map(|f| match f {
+                FilterPredicate::MinCount(_)
+                | FilterPredicate::MaxMean(_)
+                | FilterPredicate::MinMean(_)
+                    if self.bands.is_some() =>
+                {
+                    FilterPushdownStatus::Unsupported
+                }
                 FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
                     FilterPushdownStatus::Unsupported
                 }
@@ -808,6 +848,11 @@ impl RasterScan for ContinuousRasterTableProvider {
         filters: &[FilterPredicate],
         limit: Option<usize>,
     ) -> Result<Box<dyn RasterScanExec>> {
+        if self.bands.is_some() && self.config.partition.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "bands cannot be combined with partition".into(),
+            ));
+        }
         if self.config.partition.is_some() {
             let base = ColumnSchema::continuous_for(self.config.grid, &self.config.quantiles)
                 .with_output_policy(&self.config.output_policy());
@@ -826,7 +871,14 @@ impl RasterScan for ContinuousRasterTableProvider {
         let mut empty = false;
         // Unsupported predicates must not alter child aggregation or resolution selection.
         let pushed_filters = if compacts(&config) { &[][..] } else { filters };
+        let mut limit = reader_limit(&self.config, filters, limit);
         for f in pushed_filters {
+            if self.bands.is_some()
+                && !matches!(f, FilterPredicate::Bbox(_) | FilterPredicate::Resolution(_))
+            {
+                limit = None;
+                continue;
+            }
             match *f {
                 FilterPredicate::MinMean(v) => {
                     config.min_mean = Some(config.min_mean.map_or(v, |c| c.max(v)));
@@ -846,12 +898,13 @@ impl RasterScan for ContinuousRasterTableProvider {
         };
 
         Ok(Box::new(ContinuousRasterExec {
+            bands: self.bands.clone(),
             paths: self.paths.clone(),
             config,
             projection: projection.map(|p| p.to_vec()),
             schema,
             batch_size: self.batch_size,
-            limit: reader_limit(&self.config, filters, limit),
+            limit,
             empty,
             bbox_pushed,
         }))

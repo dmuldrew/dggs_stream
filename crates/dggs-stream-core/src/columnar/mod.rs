@@ -4,6 +4,7 @@
 
 pub mod arrow_c;
 pub mod ipc;
+pub mod multiband;
 pub mod partitioned;
 
 use std::path::PathBuf;
