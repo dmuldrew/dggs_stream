@@ -736,11 +736,21 @@ fn block_bbox(
     let &(centre_lon, _) = points.first()?;
     let (mut south, mut north) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut west, mut east) = (0.0f64, 0.0f64);
+    // These transforms return continuous, unwrapped longitudes. Taking the
+    // short way around would alias both edges of a full turn to the same meridian.
+    let affine_longitude = matches!(
+        tile.crs_transformer,
+        CrsTransformer::Wgs84Identity | CrsTransformer::WebMercatorFast
+    );
     for &(lon, lat) in &points {
         south = south.min(lat);
         north = north.max(lat);
-        // Longitude relative to the centre, the short way round.
-        let offset = (lon - centre_lon + 540.0).rem_euclid(360.0) - 180.0;
+        let offset = lon - centre_lon;
+        let offset = if affine_longitude {
+            offset
+        } else {
+            (offset + 540.0).rem_euclid(360.0) - 180.0
+        };
         west = west.min(offset);
         east = east.max(offset);
     }

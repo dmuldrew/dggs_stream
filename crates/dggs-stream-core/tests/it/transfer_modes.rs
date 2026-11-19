@@ -132,6 +132,65 @@ fn sampling_fills_cells_finer_than_pixels_with_interpolated_values() {
 }
 
 #[test]
+fn full_width_interpolation_matches_every_h3_centre_in_the_latitude_band() {
+    let grid = GridKind::H3;
+    let config = config(grid, 2, TransferMode::Interpolate(Interpolation::Nearest));
+    for west in [-180.0, 0.0] {
+        let (_tmp, path) = TestGeoTiffBuilder::new(360, 8)
+            .origin(west, 4.0)
+            .pixel_size(1.0)
+            .create_f32_tempfile(|col, _| (west + f64::from(col)).rem_euclid(360.0) as f32);
+        let actual: BTreeMap<_, _> = scan(&path, &config)
+            .into_iter()
+            .map(|(cell, acc)| (cell, acc.mean()))
+            .collect();
+
+        // Enumerate H3 independently of the transfer kernel's candidate bounding box.
+        let expected: BTreeMap<_, _> = h3o::CellIndex::base_cells()
+            .flat_map(|base| base.children(h3o::Resolution::Two))
+            .filter_map(|cell| {
+                let id = u64::from(cell);
+                let (lat, lon) = grid.center_lat_lng(id).unwrap();
+                ((0.0..8.0).contains(&(4.0 - lat))).then_some((id, lon.floor().rem_euclid(360.0)))
+            })
+            .collect();
+        assert_eq!(actual.len(), expected.len(), "raster starts at {west}");
+        assert_eq!(actual, expected, "raster starts at {west}");
+    }
+}
+
+#[test]
+fn full_width_overlay_matches_a_regional_scan_inside_the_longitude_gap() {
+    let grid = GridKind::H3;
+    let config = config(grid, 4, TransferMode::OVERLAY);
+    let make_tile = |west, width, col_offset| {
+        TestGeoTiffBuilder::new(width, 2)
+            .origin(west, 0.25)
+            .pixel_size(0.25)
+            .create_f32_tempfile(|c, r| ((c + col_offset) % 17 + r) as f32)
+    };
+    for west in [-180.0, 0.0] {
+        let (_global, path) = make_tile(west, 1440, 0);
+        let actual = scan(&path, &config);
+        // Same pixels around the omitted strip, with ample margins on both sides.
+        let (_region, path) = make_tile(west + 330.0, 64, 1320);
+        let mut checked = 0;
+        for (id, expected) in scan(&path, &config) {
+            let (_, lon) = grid.center_lat_lng(id).unwrap();
+            if (336.0..339.0).contains(&(lon - west).rem_euclid(360.0)) {
+                let cell = actual
+                    .get(&id)
+                    .expect("global overlay missed regional cell");
+                assert!((cell.count - expected.count).abs() < 1e-8);
+                assert!((cell.sum - expected.sum).abs() < 1e-7);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+}
+
+#[test]
 fn sampling_a_projected_raster_follows_its_crs() {
     // 30 m UTM zone 10N pixels; the field is linear in easting and northing.
     let field = |x: f64, y: f64| 0.01 * (x - 500_000.0) + 0.02 * (4_200_000.0 - y);
