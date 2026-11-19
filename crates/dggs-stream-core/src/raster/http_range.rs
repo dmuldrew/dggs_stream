@@ -301,7 +301,10 @@ fn is_aws_s3_host(host: &str) -> bool {
         Some("dualstack") => labels.next(),
         service => service,
     };
-    matches!(service, Some("s3" | "s3-fips"))
+    matches!(
+        service,
+        Some("s3" | "s3-fips" | "s3-accesspoint" | "s3-object-lambda" | "s3-outposts")
+    )
 }
 
 /// Whether a parsed URL host is an AWS S3 endpoint or belongs to the
@@ -1626,6 +1629,11 @@ mod tests {
             ("http://bucket.s3.amazonaws.com/a.tif", false),
             ("https://s3.dualstack.eu-west-1.amazonaws.com/a.tif", true),
             ("https://s3.amazonaws.com/a.tif", true),
+            ("https://tiles-123456789012.s3-accesspoint.us-east-1.amazonaws.com/a.tif", true),
+            ("https://tiles-123456789012.s3-object-lambda.us-east-1.amazonaws.com/a.tif", true),
+            ("https://tiles-123456789012.op-0123456789abcdef0.s3-outposts.us-east-1.amazonaws.com/a.tif", true),
+            ("https://tiles.lambda.us-east-1.amazonaws.com/a.tif", false),
+            ("https://tiles.s3-control.us-east-1.amazonaws.com/a.tif", false),
             ("https://bucket.s3-us-west-2.amazonaws.com/a.tif", true),
             (
                 "https://bucket.s3-fips.us-gov-west-1.amazonaws.com/a.tif",
