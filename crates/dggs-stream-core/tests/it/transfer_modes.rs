@@ -8,6 +8,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
 };
 use dggs_stream_core::aggregator::ContinuousAccumulator;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::area_matched_resolution;
 use dggs_stream_core::transfer::{Interpolation, TransferMode};
 use dggs_stream_core::GridKind;
@@ -33,8 +34,12 @@ fn pixel_centre(c: u32, r: u32) -> (f64, f64) {
 
 fn scan(path: &Path, config: &MultiResolutionConfig) -> BTreeMap<u64, ContinuousAccumulator> {
     let reader = GeoTiffStreamReader::open(path).unwrap();
-    let mut streamer = MultiScanHorizonStreamer::new(reader, config).unwrap();
+    let streamer = MultiScanHorizonStreamer::new(reader, config).unwrap();
     assert_eq!(streamer.transfer_mode(), config.transfer);
+    collect_cells(streamer)
+}
+
+fn collect_cells(mut streamer: MultiScanHorizonStreamer) -> BTreeMap<u64, ContinuousAccumulator> {
     let mut cells = BTreeMap::new();
     while streamer
         .drain_completed_into(777, |_, rec| {
@@ -260,6 +265,40 @@ fn seam_pieces_in_one_source_pixel_are_one_observation() {
             }
             assert_eq!(acc.sum_w2, acc.count * acc.count);
         }
+    }
+}
+
+#[test]
+fn projected_mosaic_keeps_cells_across_uncertified_tile_bounds() {
+    let tile = |width, start_col| {
+        TestGeoTiffBuilder::new(width, 16)
+            .epsg(2154)
+            .origin(700_000.0 + 100.0 * f64::from(start_col), 6_600_000.0)
+            .pixel_size(100.0)
+            .create_f32_tempfile(|col, _| if col + start_col < 16 { 3.0 } else { 11.0 })
+    };
+    let (_full, full_path) = tile(32, 0);
+    let (_left, left_path) = tile(16, 0);
+    let (_right, right_path) = tile(16, 16);
+    let config = config(GridKind::H3, 9, TransferMode::OVERLAY);
+    let expected = scan(&full_path, &config);
+    assert!(expected.values().any(|a| a.min == 3.0 && a.max == 11.0));
+
+    let mut mosaic =
+        MosaicReader::open(&[left_path, right_path], None, None, OverlapRule::First).unwrap();
+    let right = &mut mosaic.tiles[1];
+    assert!(!right.crs_transformer.bounds_certified());
+    // Inject an underestimated western extent. This exercises the safety
+    // contract independently of the projection sampler's current probe spacing.
+    right.bounds_wgs84[0] = right.bounds_wgs84[2] - 0.00001;
+    let actual =
+        collect_cells(MultiScanHorizonStreamer::new_mosaic(mosaic.into(), &config).unwrap());
+    assert!(expected.keys().eq(actual.keys()));
+    for (id, a) in actual {
+        let reference = &expected[&id];
+        assert_eq!((a.min, a.max), (reference.min, reference.max));
+        assert!((a.count - reference.count).abs() < 1e-8, "count for {id}");
+        assert!((a.sum - reference.sum).abs() < 1e-7, "sum for {id}");
     }
 }
 

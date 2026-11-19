@@ -135,8 +135,8 @@ struct Pending<A> {
     acc: A,
     /// Whether any pixel (valid or not) overlapped it.
     touched: bool,
-    /// Past this row (exclusive) of tile `last_tile` nothing more overlaps the cell.
-    end_row: i64,
+    /// Exclusive end row in `last_tile`, once the cell has been located on that tile.
+    end_row: Option<i64>,
     /// The last tile whose footprint the cell may overlap.
     last_tile: usize,
 }
@@ -543,19 +543,21 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 continue;
             }
             slots.push(cell);
-            let last_tile = if several_tiles {
-                last_overlapping_tile(&mosaic, self.grid, cell, block.tile)
-            } else {
-                block.tile
-            };
             let track_quantiles = self.track_quantiles;
+            let grid = self.grid;
             let pending = self.pending.entry(cell).or_insert_with(|| Pending {
                 acc: A::empty(track_quantiles),
                 touched: false,
-                end_row,
-                last_tile,
+                end_row: None,
+                last_tile: if several_tiles {
+                    last_overlapping_tile(&mosaic, grid, cell, block.tile)
+                } else {
+                    block.tile
+                },
             });
-            pending.end_row = end_row;
+            if block.tile == pending.last_tile {
+                pending.end_row = Some(end_row);
+            }
         }
 
         // A bbox selects pixels by their centres, as the centre kernel does; a cell
@@ -627,7 +629,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             .iter()
             .filter(|(_, p)| {
                 last_block_of_resolution
-                    || (p.last_tile == block.tile && (p.end_row <= end || block.last_of_tile))
+                    || (p.last_tile == block.tile
+                        && (p.end_row.is_some_and(|row| row <= end) || block.last_of_tile))
                     || p.last_tile < block.tile
             })
             .map(|(cell, _)| *cell)
@@ -1004,11 +1007,12 @@ fn visit_cell_polygons(
 /// The highest tile index from `from` on whose footprint may overlap `cell`.
 fn last_overlapping_tile(mosaic: &MosaicReader, grid: GridKind, cell: u64, from: usize) -> usize {
     let Some([west, south, east, north]) = grid.wgs84_bbox(cell) else {
-        return from;
+        return mosaic.tiles.len() - 1;
     };
     let mut last = from;
     for (idx, tile) in mosaic.tiles.iter().enumerate().skip(from + 1) {
-        let [t_west, t_south, t_east, t_north] = tile.bounds_wgs84;
+        let [t_west, t_south, t_east, t_north] =
+            tile.crs_transformer.rejection_bounds(tile.bounds_wgs84);
         let lat_overlap = south <= t_north && north >= t_south;
         // Boxes that cross the antimeridian are taken to overlap in longitude.
         let lon_overlap = west > east || t_west > t_east || (west <= t_east && east >= t_west);
