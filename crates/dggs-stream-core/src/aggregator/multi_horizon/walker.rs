@@ -170,7 +170,7 @@ pub fn walk_direct<T, Acc, E, N>(
 /// Walk a window of `ctx.samples_per_pixel` interleaved values; `read` reduces
 /// one pixel's values (a band selection or spectral index) to a sample.
 #[inline(always)]
-pub fn walk_interleaved<'a, T: 'a, Acc, E, R>(
+pub fn walk_interleaved<'a, T, Acc, E, R>(
     ctx: &WalkContext<'_>,
     slice: &'a [T],
     read: R,
@@ -238,7 +238,7 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn walk<'a, T: 'a, Acc, E, N, R>(
+fn walk<'a, T, Acc, E, N, R>(
     ctx: &WalkContext<'_>,
     slice: &'a [T],
     spp: usize,
@@ -311,7 +311,7 @@ fn walk<'a, T: 'a, Acc, E, N, R>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn walk_grid<'a, T: 'a, Acc, E, N, R, B>(
+fn walk_grid<'a, T, Acc, E, N, R, B>(
     ctx: &WalkContext<'_>,
     res_u8s: &[u8],
     slice: &'a [T],

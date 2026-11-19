@@ -680,7 +680,13 @@ fn single_pass_band_statistics_match_independent_scans() {
             quantiles: vec![QuantileTarget::Percentile(0.5, "p50".into())],
             ..Default::default()
         };
-        let mut stream = MultiBandStreamer::new(reader.clone(), &cfg, selection).unwrap();
+        let profile = dggs_stream_core::run_profile::RunProfile::new();
+        let scan_config = MultiResolutionConfig {
+            profile: Some(profile.clone()),
+            aggregation_budget_bytes: 512 * 1024,
+            ..cfg.clone()
+        };
+        let mut stream = MultiBandStreamer::new(reader.clone(), &scan_config, selection).unwrap();
         let expected: Vec<_> = ids
             .iter()
             .map(|&band| {
@@ -725,5 +731,46 @@ fn single_pass_band_statistics_match_independent_scans() {
             }
         }
         assert!(keys.is_empty());
+        drop(stream);
+        assert_eq!(
+            profile.report().chunks,
+            u64::from(reader.chunk_layout.total_chunks)
+        );
+    }
+}
+
+#[test]
+fn multi_band_scan_honors_internal_mask_and_spills() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use dggs_stream_core::aggregator::NodataPolicy;
+    use dggs_stream_core::run_profile::RunProfile;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/internal-mask.tif");
+    for policy in [NodataPolicy::Omit, NodataPolicy::Emit] {
+        let mut cfg = MultiResolutionConfig::single(12);
+        cfg.nodata_policy = policy;
+        let mut expected = run(&path, &cfg);
+        if policy == NodataPolicy::Emit {
+            assert!(expected.values().any(|a| a.count == 0.0));
+        }
+        let profile = RunProfile::new();
+        cfg.profile = Some(profile.clone());
+        cfg.aggregation_budget_bytes = 64 * 1024;
+        let reader = GeoTiffStreamReader::open(&path).unwrap();
+        let mut stream = MultiBandStreamer::new(reader, &cfg, Bands::All).unwrap();
+        loop {
+            let rows = stream.fetch_next_batch(11).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for r in rows {
+                let want = expected.remove(&(r.resolution, r.cell_id)).unwrap();
+                let a = &r.statistics[0];
+                assert_eq!((a.count, a.sum), (want.count, want.sum));
+            }
+        }
+        drop(stream);
+        assert!(expected.is_empty());
+        assert!(profile.report().spill_runs > 0);
     }
 }

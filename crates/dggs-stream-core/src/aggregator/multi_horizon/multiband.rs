@@ -34,6 +34,27 @@ pub struct MultiBandRecord {
 /// A center-assignment scan that shares TIFF decoding, projection and grid
 /// indexing across the selected bands. Each band's NoData and calibration are
 /// evaluated independently. Alpha transparency applies to the whole pixel.
+///
+/// ```no_run
+/// use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+/// use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+/// use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+///
+/// # fn main() -> dggs_stream_core::error::Result<()> {
+/// let reader = GeoTiffStreamReader::open("imagery.tif")?;
+/// let config = MultiResolutionConfig::single(8);
+/// let mut scan = MultiBandStreamer::new(reader, &config, Bands::Selected(&[4, 1]))?;
+/// loop {
+///     let rows = scan.fetch_next_batch(1024)?;
+///     if rows.is_empty() { break; }
+///     for row in rows {
+///         let nir = &row.statistics[0];
+///         if nir.count > 0.0 { println!("{} {}", row.cell_id, nir.mean()); }
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct MultiBandStreamer {
     inner: MultiHorizonStreamer<Kernel>,
 }
@@ -219,7 +240,7 @@ impl HorizonStreamKernel for Kernel {
                 slice,
                 |pixel| {
                     if is_transparent(ctx, pixel) {
-                        return ctx.emit_nodata.then_some(&pixel[..0]);
+                        return engine.masked_sample();
                     }
                     (ctx.emit_nodata
                         || self
@@ -254,6 +275,9 @@ impl<T: SimdSpanAccumulate> BandEngine<'_, T> {
 
 impl<'a, T: SimdSpanAccumulate + 'a> ScanlineEngine<T, BandStats> for BandEngine<'a, T> {
     type Sample = &'a [T];
+    fn masked_sample(&self) -> Option<Self::Sample> {
+        self.ctx.emit_nodata.then_some(&[])
+    }
     fn combine_sample_weights(&self) -> bool {
         true
     }
