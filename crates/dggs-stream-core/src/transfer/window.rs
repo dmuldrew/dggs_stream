@@ -120,6 +120,8 @@ impl RowWindow {
         } else {
             crate::raster::metadata::BandScaling::IDENTITY
         };
+        // Open lazily so cached and sparse chunks need no TIFF decoder.
+        let mut decoder = None;
         for chunk_row in chunk_rows {
             for chunk_col in 0..layout.chunks_across {
                 let index = chunk_row * layout.chunks_across + chunk_col;
@@ -136,7 +138,11 @@ impl RowWindow {
                         if tile.reader.is_sparse_chunk(index) {
                             out.resize(bounds.width as usize * bounds.height as usize, f64::NAN);
                         } else {
-                            let (_, data) = tile.reader.read_chunk(index)?;
+                            let decoder = match &mut decoder {
+                                Some(decoder) => decoder,
+                                slot @ None => slot.insert(tile.reader.open_decoder()?),
+                            };
+                            let (_, data) = decoder.read_chunk(index)?;
                             let samples = BorrowedSamples::from(&data);
                             crate::dispatch_samples!(samples, nodata, |slice, nd| {
                                 convert(
