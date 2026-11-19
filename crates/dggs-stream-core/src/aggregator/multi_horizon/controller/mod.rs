@@ -207,6 +207,7 @@ pub struct MultiHorizonStreamer<K: HorizonStreamKernel> {
     worker_tasks: usize,
     /// Dedicated kernel pool (`aggregation_workers`); None uses the ambient pool.
     pool: Option<Arc<rayon::ThreadPool>>,
+    mask_cache: crate::raster::geotiff::MaskChunkCache,
     worker_budget: usize,
     /// Most chunks per batch.
     batch_size: usize,
