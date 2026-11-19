@@ -1,4 +1,5 @@
 //! TIFF transparency masks are separate images, with their own chunk grid.
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 use std::sync::Arc;
@@ -120,8 +121,7 @@ impl InternalMask {
             (
                 w,
                 tags.find_tag_unsigned::<u32>(Tag::RowsPerStrip)?
-                    .unwrap_or(h)
-                    .min(h),
+                    .unwrap_or(h),
                 Tag::StripOffsets,
                 Tag::StripByteCounts,
             )
@@ -186,16 +186,78 @@ impl InternalMask {
         let mut zstd = (self.compression == CompressionMethod::ZSTD)
             .then(zstd::bulk::Decompressor::new)
             .transpose()?;
-        ChunkDecoder::decode_chunk_bytes_into(
-            deflate.as_mut(),
-            lzw.as_mut(),
-            zstd.as_mut(),
-            self.compression,
-            payload.as_ref(),
-            &mut packed,
-        )
-        .map_err(|e| e.into_inner())?;
+        let mut decode = |out: &mut [u8]| {
+            ChunkDecoder::decode_chunk_bytes_into(
+                deflate.as_mut(),
+                lzw.as_mut(),
+                zstd.as_mut(),
+                self.compression,
+                payload.as_ref(),
+                out,
+            )
+        };
+        match decode(&mut packed) {
+            Ok(()) => {}
+            Err(super::FastDecodeError::Unsupported(_))
+                if !self.tiled && height < self.layout.chunk_height =>
+            {
+                // Some writers pad the last Deflate strip to RowsPerStrip. Retry only
+                // that nominal layout, still enforcing the decoder's allocation limit.
+                let padded_size = src_stride
+                    .checked_mul(self.layout.chunk_height as usize)
+                    .filter(|n| *n <= limits.decoding_buffer_size)
+                    .ok_or_else(|| invalid("padded strip too large"))?;
+                packed.resize(padded_size, 0);
+                decode(&mut packed).map_err(|e| e.into_inner())?;
+                packed.truncate(size);
+            }
+            Err(e) => return Err(e.into_inner()),
+        }
         Ok(Some(packed))
+    }
+}
+
+/// Retain at most one shared mask block per scan, across adjacent data tiles.
+/// Matching grids stream directly without retaining an extra decoded block.
+#[derive(Default)]
+pub(crate) struct MaskChunkCache {
+    block: Option<(Arc<InternalMask>, u32, Vec<u8>)>,
+}
+
+impl MaskChunkCache {
+    fn read<'a>(
+        &'a mut self,
+        reader: &GeoTiffStreamReader,
+        mask: &Arc<InternalMask>,
+        idx: u32,
+        chunk: RasterChunk,
+        data: RasterChunk,
+    ) -> Result<Option<Cow<'a, [u8]>>> {
+        const MAX_RETAINED_BYTES: usize = 2 << 20;
+        let shared = chunk.width > data.width || chunk.height > data.height;
+        if !shared {
+            return Ok(mask
+                .decode(&reader.source, idx, chunk.height)?
+                .map(Cow::Owned));
+        }
+        if !self
+            .block
+            .as_ref()
+            .is_some_and(|(owner, key, _)| Arc::ptr_eq(owner, mask) && *key == idx)
+        {
+            self.block = None;
+            let Some(bytes) = mask.decode(&reader.source, idx, chunk.height)? else {
+                return Ok(None);
+            };
+            if bytes.capacity() > MAX_RETAINED_BYTES {
+                return Ok(Some(Cow::Owned(bytes)));
+            }
+            self.block = Some((Arc::clone(mask), idx, bytes));
+        }
+        Ok(self
+            .block
+            .as_ref()
+            .map(|(_, _, bytes)| Cow::Borrowed(bytes.as_slice())))
     }
 }
 
@@ -224,7 +286,11 @@ impl GeoTiffStreamReader {
     }
 
     /// Read the validity mask over a data chunk, regardless of the mask's tile/strip size.
-    pub(crate) fn read_mask(&self, bounds: RasterChunk) -> Result<Option<MaskWindow>> {
+    pub(crate) fn read_mask(
+        &self,
+        bounds: RasterChunk,
+        cache: &mut MaskChunkCache,
+    ) -> Result<Option<MaskWindow>> {
         let Some(mask) = &self.metadata.internal_mask else {
             return Ok(None);
         };
@@ -247,7 +313,7 @@ impl GeoTiffStreamReader {
             for c in bounds.col_offset / layout.chunk_width..right.div_ceil(layout.chunk_width) {
                 let idx = r * layout.chunks_across + c;
                 let chunk = layout.get_chunk_bounds(idx, self.metadata.width, self.metadata.height);
-                let Some(packed) = mask.decode(&self.source, idx, chunk.height)? else {
+                let Some(packed) = cache.read(self, mask, idx, chunk, bounds)? else {
                     continue;
                 };
                 let src_stride = layout.chunk_width.div_ceil(8) as usize;
@@ -272,5 +338,43 @@ impl GeoTiffStreamReader {
         }
         // An all-valid chunk can still use the single-band SIMD walk.
         Ok((valid_pixels != u64::from(bounds.width) * u64::from(bounds.height)).then_some(window))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::RasterSource;
+    use super::*;
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+
+    #[test]
+    fn final_deflate_strip_accepts_exact_or_nominal_rows() {
+        fn decode(last_strip: &[u8], nominal_rows: u32) -> Result<Vec<u8>> {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(last_strip)?;
+            let compressed = encoder.finish()?;
+            let mut mmap = memmap2::MmapMut::map_anon(1 + compressed.len())?;
+            mmap[1..].copy_from_slice(&compressed);
+            let source = RasterSource::Local(Arc::new(mmap.make_read_only()?));
+            let layout = ChunkLayout::new_tiled(9, 3, 9, nominal_rows);
+            let idx = layout.total_chunks - 1;
+            let mask = InternalMask {
+                layout,
+                tiled: false,
+                compression: CompressionMethod::Deflate,
+                lsb_first: false,
+                offsets: vec![1; layout.total_chunks as usize],
+                lengths: vec![compressed.len() as u64; layout.total_chunks as usize],
+            };
+            Ok(mask.decode(&source, idx, 1)?.unwrap())
+        }
+        let valid = [0x42, 0x80];
+        assert_eq!(decode(&valid, 2).unwrap(), valid);
+        assert_eq!(decode(&[0x42, 0x80, 0xff, 0xff], 2).unwrap(), valid);
+        assert!(decode(&[0x42], 2).is_err());
+        assert!(decode(&[0; 3], 2).is_err());
+        assert!(decode(&[0; 5], 2).is_err());
+        assert!(decode(&[0; 4], u32::MAX).is_err());
     }
 }
