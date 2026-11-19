@@ -472,6 +472,8 @@ let reader = ContinuousBatchReader::open(&paths, &MultiResolutionConfig::new(vec
 
 For continuous statistics from several bands of one interleaved TIFF, `MultiBandStreamer` shares decoding and cell assignment and returns one accumulator per band. [Rust multi-band scans](docs/engines/core.md#multi-band-continuous-scans)
 
+Select bands 3 and 1 with `--bands 3,1` in CLI IPC or JSONL output, `bands := '3,1'` in DuckDB, or `'bands=3,1'` in DataFusion and SedonaDB SQL. Each cell has columns such as `band_3_mean` and `band_1_count`. [DuckDB example](docs/engines/duckdb.md#multiple-bands-in-one-pass)
+
 Continuous readers build per-cell quantile sketches only when a configured quantile
 column is projected (or the full schema is requested). The schema is unchanged;
 `ContinuousBatchReader::tracks_quantiles()` reports the decision, and
