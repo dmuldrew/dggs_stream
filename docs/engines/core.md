@@ -149,6 +149,29 @@ The subtype counters are disjoint subsets of `waves`. Serial execution and the
 helper-thread bridge avoid Rayon work-stealing deadlocks when callers hold locks.
 `stream-profile` additionally enables hot-path per-sample worker counters and timers.
 
+### Multi-band continuous scans
+
+Use `MultiBandStreamer` for center assignment on one interleaved TIFF. `Bands::All` selects the bands in file order. An explicit selection uses one-based indices and preserves their order.
+
+```rust
+use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+
+let raster = GeoTiffStreamReader::open("imagery.tif")?;
+let mut scan = MultiBandStreamer::new(raster, &MultiResolutionConfig::single(8), Bands::Selected(&[4, 1]))?;
+loop {
+    let batch = scan.fetch_next_batch(1024)?;
+    if batch.is_empty() { break; }
+    for row in batch {
+        let band4 = &row.statistics[0];
+        if band4.count > 0.0 { println!("{} {}", row.cell_id, band4.mean()); }
+    }
+}
+```
+
+The bands share decoding, projection, and cell indexing. Calibration and NoData apply to each band independently. A cell retained by one band can have a zero count in another.
+
 ### Histograms
 
 `MultiResolutionConfig::set_histogram(HistogramSpec)` asks a categorical scan for a

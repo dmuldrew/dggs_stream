@@ -20,14 +20,19 @@ use crate::transfer::TransferMode;
 
 /// Band numbers are one-based. Records retain the requested order.
 pub enum Bands<'a> {
+    /// Include every TIFF sample band in file order.
     All,
+    /// Include the listed one-based bands in order. Each number must be distinct.
     Selected(&'a [usize]),
 }
 
 /// One occupied cell. A band with no valid samples has count zero.
 pub struct MultiBandRecord {
+    /// Resolution of the output cell on the configured grid.
     pub resolution: u8,
+    /// Grid-native identifier of the output cell.
     pub cell_id: u64,
+    /// One accumulator per selected band, in selection order.
     pub statistics: Vec<ContinuousAccumulator>,
 }
 
@@ -60,6 +65,8 @@ pub struct MultiBandStreamer {
 }
 
 impl MultiBandStreamer {
+    /// Open a continuous center-assignment scan over one interleaved raster.
+    /// Returns an error for an empty, duplicate or out-of-range band selection.
     pub fn new(
         reader: GeoTiffStreamReader,
         config: &MultiResolutionConfig,
@@ -110,6 +117,15 @@ impl MultiBandStreamer {
     /// Read at most `max_rows` completed cells.
     pub fn fetch_next_batch(&mut self, max_rows: usize) -> Result<Vec<MultiBandRecord>> {
         self.inner.fetch_next_batch(max_rows)
+    }
+}
+
+impl Drop for MultiBandStreamer {
+    fn drop(&mut self) {
+        self.inner.publish_profile();
+        if let Some(profile) = self.inner.run_profile() {
+            profile.stream_finished();
+        }
     }
 }
 
