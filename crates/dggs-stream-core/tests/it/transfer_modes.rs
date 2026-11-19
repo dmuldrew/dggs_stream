@@ -717,3 +717,125 @@ fn transfer_modes_skip_transparent_pixels() {
         }
     }
 }
+
+#[test]
+fn internal_mask_matches_nodata_without_discarding_valid_black_pixels() {
+    // GDAL-generated tiled GeoTIFF. The right and bottom tiles are partial.
+    // Values alternate in pairs of columns (0, 0, 30, 30). The validity
+    // pattern cuts across those pairs, and the left three columns are masked.
+    let masked = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/internal-mask.tif");
+    let reader = GeoTiffStreamReader::open(&masked).unwrap();
+    assert!(reader.has_internal_mask());
+    let gt = reader.metadata.geotransform;
+    let valid = |x: u32, y: u32| x >= 3 && !(x + y).is_multiple_of(3);
+    let (_tmp, reference) = TestGeoTiffBuilder::new(19, 17)
+        .origin(gt.c0, gt.f0)
+        .pixel_size_xy(gt.a, -gt.e)
+        .gdal_nodata("255")
+        .create_tempfile(|x, y| {
+            if !valid(x, y) {
+                255u8
+            } else if x % 4 < 2 {
+                0
+            } else {
+                30
+            }
+        });
+    let grid = GridKind::H3;
+    for mode in [
+        TransferMode::AssignCenters,
+        TransferMode::OVERLAY,
+        TransferMode::Interpolate(Interpolation::Nearest),
+        TransferMode::Interpolate(Interpolation::Bilinear),
+    ] {
+        for policy in [
+            dggs_stream_core::aggregator::NodataPolicy::Omit,
+            dggs_stream_core::aggregator::NodataPolicy::Emit,
+        ] {
+            let mut opts = config(grid, matched(grid, 0), mode);
+            opts.nodata_policy = policy;
+            let expected = scan(&reference, &opts);
+            let actual = scan(&masked, &opts);
+            assert!(expected.values().any(|a| a.min == 0.0 && a.count > 0.0));
+            assert!(actual.keys().eq(expected.keys()), "{mode:?} {policy:?}");
+            for (id, a) in actual {
+                let e = &expected[&id];
+                assert!(
+                    (a.count - e.count).abs() < 1e-8 && (a.sum - e.sum).abs() < 1e-7,
+                    "{mode:?} {policy:?} {id}"
+                );
+            }
+        }
+    }
+    let mut classes = MultiCategoricalHorizonStreamer::new(
+        reader,
+        &config(grid, matched(grid, 0), TransferMode::AssignCenters),
+    )
+    .unwrap();
+    let mut black = 0.0;
+    while classes
+        .drain_completed_into(50, |_, rec| black += rec.accumulator.get_class_count(0))
+        .unwrap()
+        > 0
+    {}
+    let expected_black = (0..17)
+        .flat_map(|y| (0..19).map(move |x| (x, y)))
+        .filter(|&(x, y)| valid(x, y) && x % 4 < 2)
+        .count();
+    assert_eq!(black, expected_black as f64);
+}
+
+#[test]
+fn striped_subifd_mask_combines_with_alpha() {
+    use tiff::{
+        encoder::{colortype::RGBA8, TiffEncoder},
+        tags::Tag,
+    };
+    let file = tempfile::NamedTempFile::new().unwrap();
+    {
+        let mut enc = TiffEncoder::new(std::fs::File::create(file.path()).unwrap()).unwrap();
+        let mut mask = enc.extra_directory().unwrap();
+        // Three nine-pixel rows in two strips, least significant bit first.
+        let a = mask.write_data(&[1u8, 0, 2, 0][..]).unwrap() as u32;
+        let b = mask.write_data(&[0u8, 1][..]).unwrap() as u32;
+        mask.write_tag(Tag::NewSubfileType, 4u32).unwrap();
+        mask.write_tag(Tag::ImageWidth, 9u32).unwrap();
+        mask.write_tag(Tag::ImageLength, 3u32).unwrap();
+        mask.write_tag(Tag::RowsPerStrip, 2u32).unwrap();
+        mask.write_tag(Tag::FillOrder, 2u16).unwrap();
+        mask.write_tag(Tag::PhotometricInterpretation, 4u16)
+            .unwrap();
+        mask.write_tag(Tag::StripOffsets, &[a, b][..]).unwrap();
+        mask.write_tag(Tag::StripByteCounts, &[4u32, 2][..])
+            .unwrap();
+        let ptr = mask.finish_with_offsets().unwrap();
+        let mut image = enc.new_image::<RGBA8>(9, 3).unwrap();
+        image.rows_per_strip(1).unwrap();
+        let tags = image.encoder();
+        tags.write_tag(Tag::SubIfd, ptr.offset).unwrap();
+        tags.write_tag(Tag::ExtraSamples, &[2u16][..]).unwrap();
+        tags.write_tag(Tag::ModelPixelScaleTag, &[PIXEL, PIXEL, 0.0][..])
+            .unwrap();
+        tags.write_tag(
+            Tag::ModelTiepointTag,
+            &[0.0, 0.0, 0.0, ORIGIN.0, ORIGIN.1, 0.0][..],
+        )
+        .unwrap();
+        tags.write_tag(
+            Tag::GeoKeyDirectoryTag,
+            &[1u16, 1, 0, 1, 2048, 0, 1, 4326][..],
+        )
+        .unwrap();
+        let samples: Vec<_> = (0..27u8)
+            .flat_map(|i| [i, 0, 0, if i == 10 { 0 } else { 255 }])
+            .collect();
+        image.write_data(&samples).unwrap();
+    }
+    // Only pixels 0, 10 and 26 have a set mask bit. Alpha removes pixel 10.
+    let cells = scan(
+        file.path(),
+        &config(GridKind::H3, 9, TransferMode::AssignCenters),
+    );
+    assert_eq!(cells.values().map(|a| a.count).sum::<f64>(), 2.0);
+    assert_eq!(cells.values().map(|a| a.sum).sum::<f64>(), 26.0);
+}

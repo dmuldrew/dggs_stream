@@ -422,3 +422,31 @@ fn test_remote_cog_to_parquet_streaming_pipeline() {
     // Clean up
     let _ = std::fs::remove_file(temp_parquet_path);
 }
+
+#[test]
+fn internal_mask_is_honored_over_http() {
+    use dggs_stream_core::aggregator::multi_horizon::{
+        MultiResolutionConfig, MultiScanHorizonStreamer,
+    };
+    if !MockHttpServer::is_networking_supported() {
+        eprintln!("Skipping test: localhost networking not permitted");
+        return;
+    }
+    let fixture = include_bytes!("../../fixtures/internal-mask.tif");
+    let server = MockHttpServer::start(fixture.to_vec());
+    let reader = GeoTiffStreamReader::open(format!("{}/masked.tif", server.url_base)).unwrap();
+    assert!(reader.has_internal_mask());
+    let mut scan =
+        MultiScanHorizonStreamer::new(reader, &MultiResolutionConfig::single(9)).unwrap();
+    let mut count = 0.0;
+    while scan
+        .drain_completed_into(50, |_, rec| count += rec.accumulator.count)
+        .unwrap()
+        > 0
+    {}
+    let valid = (0..17)
+        .flat_map(|y| (3..19).map(move |x| (x, y)))
+        .filter(|(x, y)| (x + y) % 3 != 0)
+        .count();
+    assert_eq!(count, valid as f64);
+}

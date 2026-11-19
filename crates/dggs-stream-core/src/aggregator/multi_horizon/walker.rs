@@ -31,6 +31,11 @@ pub use crate::aggregator::nodata::is_slice_all_native_nodata;
 pub trait ScanlineEngine<T, Acc> {
     type Sample: Copy;
 
+    /// Contribution of a masked pixel under the active NoData policy.
+    fn masked_sample(&self) -> Option<Self::Sample> {
+        None
+    }
+
     /// Opt in only when combining weights for the same pixel preserves semantics.
     fn combine_sample_weights(&self) -> bool {
         false
@@ -102,6 +107,8 @@ pub struct WalkContext<'a> {
     /// Per-band stored-to-physical calibration, indexed by zero-based band;
     /// empty means stored values are used unchanged.
     pub band_scaling: &'a [BandScaling],
+    /// Internal TIFF validity bits for this data chunk.
+    pub mask: Option<&'a crate::raster::geotiff::MaskWindow>,
     /// Zero-based interleaved alpha sample; pixels with zero alpha are skipped.
     pub alpha_sample: Option<u16>,
     /// `NodataPolicy::Emit`: NoData pixels are walked too, so the cells they fall in
@@ -146,7 +153,8 @@ pub fn walk_direct<T, Acc, E, N>(
     E: ScanlineEngine<T, Acc>,
     N: Fn(&[T]) -> bool,
 {
-    let batch = ctx.sampling.is_single_point() && !engine.needs_pixel_coordinates();
+    let batch =
+        ctx.mask.is_none() && ctx.sampling.is_single_point() && !engine.needs_pixel_coordinates();
     walk(
         ctx,
         slice,
@@ -220,6 +228,7 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
         samples_per_pixel: 1,
         owner: None,
         band_scaling: &[],
+        mask: None,
         alpha_sample: None,
         emit_nodata: false,
         histogram_bins: None,
@@ -389,11 +398,16 @@ fn walk_grid<T, Acc, E, N, R, B>(
         }
 
         for c in cols.clone() {
-            let Some(sample) = read(&row[c * spp..(c + 1) * spp]) else {
+            let col = chunk.col_offset as usize + c;
+            let sample = if ctx.mask.is_some_and(|mask| !mask.is_valid(col, row_idx)) {
+                engine.masked_sample()
+            } else {
+                read(&row[c * spp..(c + 1) * spp])
+            };
+            let Some(sample) = sample else {
                 continue;
             };
             positions.clear();
-            let col = chunk.col_offset as usize + c;
             for (k, sp) in ctx.sampling.points.iter().enumerate() {
                 let Some((lon, lat)) = projector
                     .project(col, row_idx, k, *sp)
@@ -885,6 +899,7 @@ pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<
                 samples_per_pixel: 1,
                 owner: None,
                 band_scaling: &[],
+                mask: None,
                 alpha_sample: None,
                 emit_nodata: false,
                 histogram_bins: None,
@@ -977,6 +992,7 @@ mod tests {
                 samples_per_pixel: 1,
                 owner: None,
                 band_scaling: &[],
+                mask: None,
                 alpha_sample: None,
                 emit_nodata: false,
                 histogram_bins: None,
@@ -1067,6 +1083,7 @@ mod tests {
             samples_per_pixel: 1,
             owner: None,
             band_scaling: &[],
+            mask: None,
             alpha_sample: None,
             emit_nodata: false,
             histogram_bins: None,
@@ -1116,6 +1133,7 @@ mod tests {
                     samples_per_pixel: 1,
                     owner: None,
                     band_scaling: &[],
+                    mask: None,
                     alpha_sample: None,
                     emit_nodata: false,
                     histogram_bins: None,
@@ -1177,6 +1195,7 @@ mod tests {
                     samples_per_pixel: 1,
                     owner: None,
                     band_scaling: &[],
+                    mask: None,
                     alpha_sample: None,
                     emit_nodata: false,
                     histogram_bins: None,

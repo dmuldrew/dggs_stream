@@ -4,6 +4,9 @@
 //! with buffer recycling, supporting DEFLATE, LZW, ZSTD, and uncompressed formats.
 //! It supports both local files (via memory mapping) and remote cloud storage (via HTTP range requests).
 
+mod mask;
+use mask::InternalMask;
+pub use mask::MaskWindow;
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::{Cursor, Seek};
@@ -56,6 +59,7 @@ pub struct GeoTiffMetadata {
     /// Zero-based alpha sample (TIFF `ExtraSamples`); a pixel whose alpha
     /// is zero is transparent and has no observation.
     pub alpha_sample: Option<u16>,
+    internal_mask: Option<Arc<InternalMask>>,
 }
 
 impl GeoTiffMetadata {
@@ -206,9 +210,15 @@ impl<'a> DecoderSource<'a> {
             .ok_or_else(|| DggsStreamError::InvalidMetadata("invalid chunk bytes".into()))?
             as usize;
 
+        self.byte_range(offset, len)
+    }
+
+    fn byte_range(&self, offset: u64, len: usize) -> Result<ChunkPayload<'a>> {
         match self {
             DecoderSource::Local(mmap) => {
-                let off = offset as usize;
+                let off = usize::try_from(offset).map_err(|_| {
+                    DggsStreamError::InvalidMetadata("chunk offset out of bounds".into())
+                })?;
                 if off.checked_add(len).is_none_or(|end| end > mmap.len()) {
                     return Err(DggsStreamError::InvalidMetadata(
                         "chunk offset out of bounds".into(),
@@ -225,6 +235,15 @@ impl<'a> DecoderSource<'a> {
 }
 
 impl RasterSource {
+    fn byte_range(&self, offset: u64, len: usize) -> Result<ChunkPayload<'_>> {
+        match self {
+            Self::Local(mmap) => DecoderSource::Local(mmap).byte_range(offset, len),
+            Self::Remote(remote) => {
+                DecoderSource::Remote(Arc::clone(remote)).byte_range(offset, len)
+            }
+        }
+    }
+
     /// Read chunk byte payload for a specific chunk index using chunk offsets and byte counts
     pub fn get_chunk_payload(
         &self,
@@ -1103,6 +1122,7 @@ impl GeoTiffStreamReader {
             samples_per_pixel,
             band_scaling,
             alpha_sample,
+            internal_mask: InternalMask::find(decoder, width, height)?,
         };
 
         let compression = match decoder.get_tag_u32(Tag::Compression) {

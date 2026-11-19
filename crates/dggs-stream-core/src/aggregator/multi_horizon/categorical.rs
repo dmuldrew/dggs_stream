@@ -354,6 +354,10 @@ impl<'a, T: CategoricalUniformity> ScanlineEngine<T, CategoricalAccumulator>
         }
     }
 
+    fn masked_sample(&self) -> Option<Self::Sample> {
+        self.emit_nodata.then_some(NODATA_CLASS)
+    }
+
     #[inline(always)]
     fn get_sample(&self, pixel: T) -> Option<i64> {
         let class = self.resolve_category(pixel);
