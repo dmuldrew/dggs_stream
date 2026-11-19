@@ -91,7 +91,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             let (tile, index, bounds, _, _) = item;
             let reader = &mosaic.tiles[*tile].reader;
             if reader.has_internal_mask() && !reader.is_sparse_chunk(*index) {
-                if let Some(mask) = reader.read_mask(*bounds)? {
+                if let Some(mask) = reader.read_mask(*bounds, &mut self.mask_cache)? {
                     masks.insert((*tile, *index), mask);
                 }
             }

@@ -261,6 +261,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             output_byte_limit,
             peak_active_bytes: 0,
             finished_sets: Vec::new(),
+            mask_cache: Default::default(),
             new_cell_buffer: Vec::new(),
             key_chunk_buffer: Vec::new(),
             worker_maps: (0..map_sets)

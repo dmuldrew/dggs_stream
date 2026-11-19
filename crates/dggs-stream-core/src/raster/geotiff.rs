@@ -6,6 +6,7 @@
 
 mod mask;
 use mask::InternalMask;
+pub(crate) use mask::MaskChunkCache;
 pub use mask::MaskWindow;
 use memmap2::Mmap;
 use std::fs::File;
