@@ -1418,8 +1418,7 @@ fn test_lzw_buffer_auto_resizing_hardening() {
 }
 
 /// Write a well-formed `PlanarConfiguration=Planar` GeoTIFF: `bands` planes of
-/// `width × height` u8 samples, one strip per plane. The chunk layout itself is
-/// valid, so opening must fail at the explicit planar rejection, not earlier.
+/// `width × height` u8 samples, one strip per plane. Each plane has a distinct constant value.
 pub fn write_planar_geotiff(path: &Path, width: u32, height: u32, bands: u32) {
     let mut file = BufWriter::new(File::create(path).unwrap());
     file.write_all(b"II\x2a\x00\x08\x00\x00\x00").unwrap();

@@ -303,7 +303,7 @@ impl RemoteChunkPrefetchQueue {
         // Servers that ignore Range headers hand us the whole file at probe
         // time; reads are served from memory, so prefetch buys nothing and
         // its range requests would fail.
-        if remote_source.is_complete_file() {
+        if remote_source.is_complete_file() || reader.is_planar() {
             return None;
         }
         let info = reader.chunk_info.as_ref()?;
@@ -351,7 +351,9 @@ impl RemoteChunkPrefetchQueue {
             match tile.reader.remote_source() {
                 // Whole file is already in memory; reads serve from the cache,
                 // so skip it like a local tile.
-                Some(src) if src.is_complete_file() => sources.push(None),
+                Some(src) if src.is_complete_file() || tile.reader.is_planar() => {
+                    sources.push(None)
+                }
                 Some(src) => {
                     has_remote = true;
                     sources.push(Some(Arc::clone(src)));

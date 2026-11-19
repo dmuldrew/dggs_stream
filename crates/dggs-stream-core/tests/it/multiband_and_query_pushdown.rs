@@ -634,17 +634,15 @@ fn borrowed_interleaved_windows_match_across_job_sizes() {
 }
 
 #[test]
-fn test_planar_configuration_rejected() {
+fn planar_strips_return_samples_in_pixel_order() {
     let temp_file = NamedTempFile::new().unwrap();
     crate::codecs::write_planar_geotiff(temp_file.path(), 32, 32, 4);
-    let err = match GeoTiffStreamReader::open(temp_file.path()) {
-        Ok(_) => panic!("planar TIFF must be rejected at open"),
-        Err(err) => err,
+    let reader = GeoTiffStreamReader::open(temp_file.path()).unwrap();
+    let (_, data) = reader.read_chunk(0).unwrap();
+    let tiff::decoder::DecodingResult::U8(values) = data else {
+        panic!("expected bytes")
     };
-    assert!(
-        err.to_string().contains("PlanarConfiguration"),
-        "unexpected error: {err}"
-    );
+    assert_eq!(values, [10, 50, 90, 130].repeat(32 * 32));
 }
 
 /// A band (or spectral formula band) the raster does not have is refused when the stream

@@ -42,7 +42,7 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `decode_budget_mb` | `BIGINT` | `256` | Memory for decoded chunks held at once (decoding, queued, being aggregated, idle for reuse), in MiB. Decoding waits for room; a single chunk larger than the budget is decoded only when no other is held. |
 | `compaction_budget_mb` | `BIGINT` | `None` | Opt-in limit on pending `compact` sibling groups, in MiB. Past it, the groups nearest completion are emitted as individual children. Samples and totals are unchanged, but which groups compact can vary between runs. Unset keeps compaction deterministic and its memory unbounded. |
 | `strict_transforms` | `BOOLEAN` | `false` | Fail the query when a valid sample point cannot be transformed to WGS84 (wrong or out-of-domain CRS) instead of skipping it. See [transform-failure diagnostics](engines/core.md#transform-failure-diagnostics). |
-| `bands` | `VARCHAR` | omitted | Ordered band numbers (e.g. '3,1') or 'all' for wide continuous statistics on one interleaved raster with center assignment. |
+| `bands` | `VARCHAR` | omitted | Ordered band numbers (e.g. '3,1') or 'all' for wide continuous statistics on one interleaved or band-separated raster with center assignment. |
 | `formula` | `VARCHAR` | `None` | Spectral index formula: `'ndvi'`, `'ndwi'`, `'nbr'`, `'evi'`. Requires multi-band raster. |
 | `nir_band`, `red_band`, `green_band`, `blue_band`, `swir_band` | `BIGINT` | `auto` | 1-indexed band assignments for spectral index formulas. |
 | `min_count` | `DOUBLE` | `None` | Minimum weighted pixel count threshold — cells below this are excluded from output. |

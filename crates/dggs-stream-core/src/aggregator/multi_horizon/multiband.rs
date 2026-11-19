@@ -1,4 +1,4 @@
-//! Single-pass continuous statistics for selected interleaved bands.
+//! Single-pass continuous statistics for selected TIFF bands.
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 
@@ -65,10 +65,10 @@ pub struct MultiBandStreamer {
 }
 
 impl MultiBandStreamer {
-    /// Open a continuous center-assignment scan over one interleaved raster.
+    /// Open a continuous center-assignment scan over one interleaved or band-separated raster.
     /// Returns an error for an empty, duplicate or out-of-range band selection.
     pub fn new(
-        reader: GeoTiffStreamReader,
+        mut reader: GeoTiffStreamReader,
         config: &MultiResolutionConfig,
         bands: Bands<'_>,
     ) -> Result<Self> {
@@ -105,6 +105,7 @@ impl MultiBandStreamer {
                 "single-band row filters are undefined for multi-band scans".into(),
             ));
         }
+        let bands = reader.project_bands(bands);
         let kernel = Kernel {
             bands,
             quantiles: config.track_quantiles(),

@@ -21,3 +21,21 @@ ORDER BY band_3_mean;
 ----
 8	1	0
 12	0	1
+
+# Compare each selected column, including NULLs, to its independent band scan.
+query I
+WITH wide AS (
+    SELECT h3_index, band_3_mean, band_1_mean
+    FROM raster_h3('crates/dggs-stream-core/tests/fixtures/multiband-12-planar.tif', resolution := 12, bands := '3,1')
+), b3 AS (
+    SELECT h3_index, mean AS mean3 FROM raster_h3('crates/dggs-stream-core/tests/fixtures/multiband-12-interleaved.tif', resolution := 12, band := 3)
+), b1 AS (
+    SELECT h3_index, mean AS mean1 FROM raster_h3('crates/dggs-stream-core/tests/fixtures/multiband-12-interleaved.tif', resolution := 12, band := 1)
+), ref AS (
+    SELECT h3_index, mean3, mean1 FROM b3 FULL JOIN b1 USING (h3_index)
+)
+SELECT count(*) FROM wide FULL JOIN ref USING (h3_index)
+WHERE wide.h3_index IS NULL OR ref.h3_index IS NULL
+   OR band_3_mean IS DISTINCT FROM mean3 OR band_1_mean IS DISTINCT FROM mean1;
+----
+0

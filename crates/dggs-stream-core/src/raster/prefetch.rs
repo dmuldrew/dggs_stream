@@ -956,7 +956,8 @@ impl PrefetchedMosaicReader {
                         if let (Some(profile), Some(timer)) = (worker_profile.as_deref(), timer) {
                             use crate::run_profile::{Counter, Phase};
                             timer.stop(profile, Phase::Decode);
-                            profile.count(Counter::Chunks, 1);
+                            profile
+                                .count(Counter::Chunks, reader.physical_chunks_present(chunk_idx));
                             profile.count(Counter::DecodedBytes, actual as u64);
                         }
                         worker_budget.settle(charged, actual);

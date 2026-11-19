@@ -151,7 +151,7 @@ helper-thread bridge avoid Rayon work-stealing deadlocks when callers hold locks
 
 ### Multi-band continuous scans
 
-Use `MultiBandStreamer` for center assignment on one interleaved TIFF. `Bands::All` selects the bands in file order. An explicit selection uses one-based indices and preserves their order.
+Use `MultiBandStreamer` for center assignment on one interleaved or band-separated TIFF. `Bands::All` selects the bands in file order. An explicit selection uses one-based indices and preserves their order. For band-separated tiles or strips (`PlanarConfiguration=Separate`), the reader decodes each selected plane and any alpha sample once per spatial chunk. An internal transparency mask is read independently.
 
 ```rust
 use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};

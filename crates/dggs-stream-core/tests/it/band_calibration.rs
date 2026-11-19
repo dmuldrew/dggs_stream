@@ -799,3 +799,58 @@ fn dropping_multiband_scan_announces_work_done() {
     assert_eq!(announced.windows, profile.report().windows);
     assert_eq!(announced.pixels_read, profile.report().pixels_read);
 }
+
+#[test]
+fn twelve_band_layouts_match_independent_calibrated_scans() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let chunky = fixtures.join("multiband-12-interleaved.tif");
+    let cfg = MultiResolutionConfig::single(12);
+    let expected = [3, 1].map(|band| {
+        run(
+            &chunky,
+            &MultiResolutionConfig {
+                band,
+                ..cfg.clone()
+            },
+        )
+    });
+    // Distinct NoData regions in bands 3 and 1; the first seven columns have zero alpha.
+    for (reference, count) in expected.iter().zip([84 * 103, 85 * 103]) {
+        assert_eq!(
+            reference.values().map(|a| a.count).sum::<f64>(),
+            f64::from(count)
+        );
+    }
+    for layout in ["interleaved", "planar"] {
+        let path = fixtures.join(format!("multiband-12-{layout}.tif"));
+        let reader = GeoTiffStreamReader::open(&path).unwrap();
+        assert_eq!(reader.metadata.alpha_sample, Some(11));
+        assert_eq!(reader.metadata.band_scaling(3).scale, 0.5);
+        assert_eq!(reader.metadata.band_scaling(1).offset, -10.0);
+        let mut scan = MultiBandStreamer::new(reader, &cfg, Bands::Selected(&[3, 1])).unwrap();
+        let mut keys: std::collections::HashSet<_> =
+            expected.iter().flat_map(|m| m.keys().copied()).collect();
+        loop {
+            let rows = scan.fetch_next_batch(64).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                let key = (row.resolution, row.cell_id);
+                assert!(keys.remove(&key));
+                for (stat, reference) in row.statistics.iter().zip(&expected) {
+                    if let Some(want) = reference.get(&key) {
+                        assert_eq!(
+                            (stat.sum, stat.count, stat.min, stat.max),
+                            (want.sum, want.count, want.min, want.max)
+                        );
+                    } else {
+                        assert_eq!(stat.count, 0.0);
+                    }
+                }
+            }
+        }
+        assert!(keys.is_empty());
+    }
+}
