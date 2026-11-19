@@ -1022,3 +1022,93 @@ fn last_overlapping_tile(mosaic: &MosaicReader, grid: GridKind, cell: u64, from:
     }
     last
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raster::mosaic::OverlapRule;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn projected_final_tile_finishes_cells_at_their_last_row() {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+        let make_tile = |start: u32| {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut encoder = TiffEncoder::new(file.as_file()).unwrap();
+            let mut image = encoder.new_image::<colortype::Gray32Float>(16, 64).unwrap();
+            let tags = image.encoder();
+            tags.write_tag(
+                Tag::GeoKeyDirectoryTag,
+                &[1u16, 1, 0, 1, 3072, 0, 1, 2154][..],
+            )
+            .unwrap();
+            tags.write_tag(Tag::ModelPixelScaleTag, &[100.0f64, 100.0, 0.0][..])
+                .unwrap();
+            tags.write_tag(
+                Tag::ModelTiepointTag,
+                &[
+                    0.0f64,
+                    0.0,
+                    0.0,
+                    700_000.0 + 100.0 * f64::from(start),
+                    6_600_000.0,
+                    0.0,
+                ][..],
+            )
+            .unwrap();
+            let pixels: Vec<_> = (0..64)
+                .flat_map(|r| (0..16).map(move |c| (start + c + r) as f32))
+                .collect();
+            image.write_data(&pixels).unwrap();
+            file
+        };
+        let left = make_tile(0);
+        let right = make_tile(16);
+        let paths = [left.path().to_owned(), right.path().to_owned()];
+        let mosaic = Arc::new(MosaicReader::open(&paths, None, None, OverlapRule::First).unwrap());
+        let mut config = MultiResolutionConfig::single(9);
+        config.transfer = TransferMode::OVERLAY;
+        let scan =
+            || TransferStream::<ContinuousAccumulator>::new(mosaic.clone(), &config).unwrap();
+        let drain = |mut s: TransferStream<ContinuousAccumulator>| {
+            let mut cells = BTreeMap::new();
+            while s
+                .drain_into(128, |_, _, id, a| {
+                    assert!(cells.insert(id, a).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            cells
+        };
+        let reference = drain(scan());
+        let mut split = scan();
+        let last = split.blocks.pop().unwrap();
+        assert_eq!((last.tile, last.rows.clone()), (1, 0..64));
+        // Split the final tile explicitly so this small regression is independent
+        // of the production planner's target block size.
+        for rows in [0..32, 32..64] {
+            split.blocks.push(Block {
+                bbox: block_bbox(split.grid, 9, &mosaic.tiles[1], &rows, &last.cols, true),
+                last_of_tile: rows.end == 64,
+                rows,
+                ..last.clone()
+            });
+        }
+        split.advance_until_completed(1).unwrap();
+        assert_eq!(split.next_block, 2);
+        assert!(!split.output.is_empty());
+        assert!(split
+            .pending
+            .values()
+            .any(|p| p.end_row.is_some_and(|r| r > 32) && p.touched));
+        let actual = drain(split);
+        assert!(reference.keys().eq(actual.keys()));
+        for (id, a) in actual {
+            let want = &reference[&id];
+            assert!((a.count - want.count).abs() < 1e-8);
+            assert!((a.sum - want.sum).abs() < 1e-7);
+        }
+    }
+}
