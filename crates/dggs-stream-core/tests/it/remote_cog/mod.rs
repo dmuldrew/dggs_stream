@@ -113,15 +113,6 @@ impl MockHttpServer {
             .expect("Failed to bind ephemeral port")
     }
 
-    /// A server on another loopback address (`127.0.0.2`), so a redirect can
-    /// cross hosts; `None` where that address is not configured (macOS by default).
-    fn start_on_second_loopback(file_bytes: Vec<u8>) -> Option<Self> {
-        let server = Self::try_start_on("127.0.0.2", file_bytes, 0)?;
-        let addr = format!("127.0.0.2:{}", server.port).parse().ok()?;
-        TcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
-        Some(server)
-    }
-
     fn try_start_on(ip: &str, file_bytes: Vec<u8>, failure_count: usize) -> Option<Self> {
         let listener = TcpListener::bind((ip, 0)).ok()?;
         let port = listener.local_addr().unwrap().port();

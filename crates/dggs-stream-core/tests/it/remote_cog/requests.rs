@@ -274,10 +274,10 @@ fn credentials_do_not_follow_a_redirect_to_another_host() {
         return;
     }
     let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
-    let Some(other) = MockHttpServer::start_on_second_loopback(data.clone()) else {
-        eprintln!("Skipping test: 127.0.0.2 is not a usable loopback address here");
-        return;
-    };
+    // Distinct URL hosts on one loopback interface also work on systems
+    // that only configure 127.0.0.1.
+    let other = MockHttpServer::start(data.clone());
+    let other_url = format!("http://localhost:{}", other.port);
     let listed = MockHttpServer::start(data.clone());
     let vars = [
         "DGGS_STREAM_AUTH_TOKEN",
@@ -312,7 +312,7 @@ fn credentials_do_not_follow_a_redirect_to_another_host() {
             recorded_lowercase(&other).len(),
         );
         let away = fetch(format!(
-            "{}/redirect_to_127.0.0.2_{}/away.tif",
+            "{}/redirect_to_localhost_{}/away.tif",
             listed.url_base, other.port
         ));
         let (listed_mid, other_mid) = (
@@ -321,7 +321,7 @@ fn credentials_do_not_follow_a_redirect_to_another_host() {
         );
         let back = fetch(format!(
             "{}/redirect_to_127.0.0.1_{}/back.tif",
-            other.url_base, listed.port
+            other_url, listed.port
         ));
         for name in vars {
             std::env::remove_var(name);
