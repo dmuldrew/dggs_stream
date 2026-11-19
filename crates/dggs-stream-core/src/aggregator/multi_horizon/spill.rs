@@ -7,7 +7,8 @@ use std::path::Path;
 
 use super::sharded_map::AccumulatorMerge;
 use crate::aggregator::{
-    accumulator::H3Accumulator, categorical::CategoricalAccumulator, quantiles::QuantileSketch,
+    accumulator::ContinuousAccumulator, categorical::CategoricalAccumulator,
+    quantiles::QuantileSketch,
 };
 
 pub trait SpillAccumulator: AccumulatorMerge {
@@ -71,7 +72,7 @@ fn count(input: &mut impl Read, limit: usize) -> io::Result<usize> {
     Ok(n)
 }
 
-impl SpillAccumulator for H3Accumulator {
+impl SpillAccumulator for ContinuousAccumulator {
     fn write_state(&self, out: &mut impl Write) -> io::Result<()> {
         for v in [
             self.sum,
@@ -357,20 +358,20 @@ mod tests {
 
     #[test]
     fn binary_codec_preserves_quantile_state_and_nonfinite_statistics() {
-        let mut a = H3Accumulator::with_quantiles();
+        let mut a = ContinuousAccumulator::with_quantiles();
         for value in [-100.0, -1.0, 0.0, 0.1, 12.0, 1000.0] {
             a.update_weighted(value, 0.25);
         }
         let mut bytes = Vec::new();
         a.write_state(&mut bytes).unwrap();
-        let b = H3Accumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap();
+        let b = ContinuousAccumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap();
         assert_eq!(a, b);
-        let a = H3Accumulator::default();
+        let a = ContinuousAccumulator::default();
         let mut bytes = Vec::new();
         a.write_state(&mut bytes).unwrap();
         assert_eq!(
             a,
-            H3Accumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap()
+            ContinuousAccumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap()
         );
     }
 
@@ -411,7 +412,7 @@ mod tests {
 
     #[test]
     fn decoder_accepts_states_the_accumulator_can_reach() {
-        let read = |b: Vec<u8>| H3Accumulator::read_state(&mut Cursor::new(b), 65536);
+        let read = |b: Vec<u8>| ContinuousAccumulator::read_state(&mut Cursor::new(b), 65536);
         let (nan, inf) = (f64::NAN, f64::INFINITY);
         // [sum, count, sum_w2, min, max, m2]
         // Empty: min and max keep their infinite sentinels.
@@ -473,7 +474,8 @@ mod tests {
             ),
         ];
         for (case, bytes) in continuous {
-            let err = H3Accumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap_err();
+            let err =
+                ContinuousAccumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{case}: {err}");
         }
 
@@ -498,13 +500,13 @@ mod tests {
     #[test]
     fn corrupt_partial_states_are_rejected_on_decode() {
         use super::super::partial::{decode_partial_state, encode_partial_state};
-        let mut acc = H3Accumulator::default();
+        let mut acc = ContinuousAccumulator::default();
         acc.update(4.0);
         let mut bytes = encode_partial_state(&acc);
-        decode_partial_state::<H3Accumulator>(&bytes, 65536).unwrap();
+        decode_partial_state::<ContinuousAccumulator>(&bytes, 65536).unwrap();
         // The count follows the 4-byte magic, the version, the kind and the 8-byte sum.
         bytes[14..22].copy_from_slice(&f64::NAN.to_bits().to_le_bytes());
-        let err = decode_partial_state::<H3Accumulator>(&bytes, 65536).unwrap_err();
+        let err = decode_partial_state::<ContinuousAccumulator>(&bytes, 65536).unwrap_err();
         assert!(err.to_string().contains("invalid count"), "{err}");
     }
 
@@ -525,10 +527,10 @@ mod tests {
     fn repeated_runs_merge_late_contributions_once_and_clean_up() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let mut runs = SpillRuns::<H3Accumulator>::new(65536, Some(dir.path()));
+            let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, Some(dir.path()));
             for n in 1..=37 {
                 runs.push_sorted((0..100).map(|k| {
-                    let mut acc = H3Accumulator::with_quantiles();
+                    let mut acc = ContinuousAccumulator::with_quantiles();
                     acc.update(n as f64);
                     (k, acc)
                 }))
@@ -551,8 +553,9 @@ mod tests {
 
     #[test]
     fn truncated_runs_are_errors_not_eof() {
-        let mut runs = SpillRuns::<H3Accumulator>::new(65536, None);
-        runs.push_sorted([(1, H3Accumulator::new(2.0))]).unwrap();
+        let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, None);
+        runs.push_sorted([(1, ContinuousAccumulator::new(2.0))])
+            .unwrap();
         runs.levels[0].as_ref().unwrap().file.set_len(9).unwrap();
         let mut reader = runs.finish().unwrap().unwrap();
         assert!(reader.next_record().is_err());

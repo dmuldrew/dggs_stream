@@ -720,7 +720,7 @@ fn test_property_filter_and_mvt_encoding() {
         MercatorPoint { x: 0.2, y: 0.2 },
     ];
     let props = FeatureProperties::Continuous {
-        h3_index: cell_idx,
+        cell_id: cell_idx,
         resolution: 8,
         mean: 42.5,
         sum: 850.0,
@@ -929,7 +929,7 @@ fn test_mvt_class_iii_pentagon_10_vertices_preserved() {
     let (tx, ty) =
         dggs_stream_core::pmtiles::tiler::lon_lat_to_tile_xy(center.lng(), center.lat(), 11);
     let props = FeatureProperties::Continuous {
-        h3_index: pentagon_res7.into(),
+        cell_id: pentagon_res7.into(),
         resolution: 7,
         mean: 10.0,
         sum: 100.0,
@@ -1022,7 +1022,7 @@ fn test_pmtiles_antimeridian_straddling_cell_tile_range_and_unwrap() {
 
 #[test]
 fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
-    use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+    use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
     use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
     use dggs_stream_core::aggregator::multi_horizon::{
         MultiCategoricalRecord, MultiContinuousRecord, RecordStreamer,
@@ -1084,7 +1084,7 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
         .map(|(i, &c)| {
             let val = ((i + 1) * 10) as f64;
             // Two unit-weight pixels per child, so the sample variance has 13 degrees of freedom.
-            let mut accumulator = H3Accumulator::new(val);
+            let mut accumulator = ContinuousAccumulator::new(val);
             accumulator.update(val);
             MultiContinuousRecord {
                 resolution: 6,
@@ -1463,6 +1463,54 @@ fn archive_features(archive: &[u8]) -> Vec<mvt_decode::Feature> {
         .read_to_end(&mut tiles)
         .unwrap();
     mvt_decode::decode(&tiles)
+}
+
+#[test]
+fn raster_tiles_preserve_cell_ids_for_every_grid() {
+    use dggs_stream_core::GridKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tif = dir.path().join("pixel.tif");
+    helpers::TestGeoTiffBuilder::new(1, 1)
+        .origin(140.0, -40.0)
+        .pixel_size(0.001)
+        .write_fn::<u8, _, _>(&tif, |_, _| 7)
+        .unwrap();
+    for grid in GridKind::ALL {
+        let cell_id = grid.cell_at(-40.0005, 140.0005, 10).unwrap();
+        if grid == GridKind::S2 {
+            assert!(cell_id > i64::MAX as u64);
+        }
+        for categorical in [false, true] {
+            let output = dir.path().join("pixel.pmtiles");
+            let config = MultiResolutionConfig::single(10).with_grid(grid);
+            let count = if categorical {
+                PmtilesTiler::process_categorical_geotiff_to_pmtiles(&tif, &output, config)
+            } else {
+                PmtilesTiler::process_geotiff_to_pmtiles(&tif, &output, config)
+            }
+            .unwrap();
+            assert_eq!(count, 1);
+            let features = archive_features(&std::fs::read(output).unwrap());
+            // Lower zooms can contain overview parents with their own IDs.
+            let mut native = features
+                .iter()
+                .filter(|f| f.properties.get("resolution") == Some(&MvtValue::UInt(10)))
+                .peekable();
+            assert!(native.peek().is_some(), "{grid}, categorical={categorical}");
+            for feature in native {
+                assert_eq!(feature.id, cell_id);
+                assert_eq!(
+                    feature.properties[grid.index_column_name()],
+                    MvtValue::UInt(cell_id)
+                );
+                assert_eq!(
+                    feature.properties[grid.hex_column_name()],
+                    MvtValue::String(format!("{cell_id:x}"))
+                );
+            }
+        }
+    }
 }
 
 // Regression: the exporter's default `h3_hex` property was written with a leading

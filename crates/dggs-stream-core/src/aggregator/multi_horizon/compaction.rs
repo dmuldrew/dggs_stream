@@ -14,7 +14,7 @@
 //! compaction: those children are emitted individually and their remaining
 //! siblings can never form a complete group, so no parent duplicates them.
 
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::grid::{GridKind, MAX_GRID_RESOLUTIONS};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -85,7 +85,7 @@ impl Ord for HeapEntry {
 pub struct HierarchicalCompactor<K: HorizonStreamKernel> {
     grid: GridKind,
     enabled: bool,
-    pending: HashMap<u64, Group<K::Accumulator>, H3BuildHasher>,
+    pending: HashMap<u64, Group<K::Accumulator>, CellIdBuildHasher>,
     /// Per child resolution, groups by `siblings_south`, northernmost first.
     completion: Vec<BinaryHeap<HeapEntry>>,
     /// Groups by `emit_south`, northernmost first.
@@ -114,7 +114,7 @@ impl<K: HorizonStreamKernel> HierarchicalCompactor<K> {
         Self {
             grid,
             enabled,
-            pending: HashMap::with_hasher(H3BuildHasher),
+            pending: HashMap::with_hasher(CellIdBuildHasher),
             completion: (0..RESOLUTIONS).map(|_| BinaryHeap::new()).collect(),
             emit: BinaryHeap::new(),
             group_bytes: 0,
@@ -164,7 +164,7 @@ impl<K: HorizonStreamKernel> HierarchicalCompactor<K> {
 
     /// Clear all pending compaction state.
     pub fn clear(&mut self) {
-        self.pending = HashMap::with_hasher(H3BuildHasher);
+        self.pending = HashMap::with_hasher(CellIdBuildHasher);
         self.completion
             .iter_mut()
             .for_each(|h| *h = BinaryHeap::new());
@@ -433,7 +433,7 @@ fn decompose<K: HorizonStreamKernel>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregator::accumulator::H3Accumulator;
+    use crate::aggregator::accumulator::ContinuousAccumulator;
     use crate::aggregator::horizon_streamer::compute_cell_south_lat;
     use crate::aggregator::multi_horizon::continuous_streamer::ContinuousKernel;
     use h3o::{CellIndex, LatLng, Resolution};
@@ -494,7 +494,13 @@ mod tests {
             emit_south = emit_south.max(compute_cell_south_lat((*parent).into()));
             for child in &children[..6] {
                 emit_south = emit_south.max(compute_cell_south_lat((*child).into()));
-                compactor.push_cell(&k, 8, (*child).into(), H3Accumulator::new(1.0), &mut output);
+                compactor.push_cell(
+                    &k,
+                    8,
+                    (*child).into(),
+                    ContinuousAccumulator::new(1.0),
+                    &mut output,
+                );
             }
         }
         assert!(output.is_empty());
@@ -549,7 +555,13 @@ mod tests {
             // fits; the rest stay pending until forced out.
             let n = if i % 5 == 0 { 7 } else { 6 };
             for child in &children[..n] {
-                compactor.push_cell(&k, 8, (*child).into(), H3Accumulator::new(1.0), &mut output);
+                compactor.push_cell(
+                    &k,
+                    8,
+                    (*child).into(),
+                    ContinuousAccumulator::new(1.0),
+                    &mut output,
+                );
                 pushed += 1;
                 assert!(
                     compactor.estimated_bytes() <= limit,
@@ -598,10 +610,16 @@ mod tests {
         assert_eq!(children.len(), 4);
 
         for &child in &children[..3] {
-            compactor.push_cell(&k, 10, child, H3Accumulator::new(2.0), &mut output);
+            compactor.push_cell(&k, 10, child, ContinuousAccumulator::new(2.0), &mut output);
             assert!(output.is_empty());
         }
-        compactor.push_cell(&k, 10, children[3], H3Accumulator::new(2.0), &mut output);
+        compactor.push_cell(
+            &k,
+            10,
+            children[3],
+            ContinuousAccumulator::new(2.0),
+            &mut output,
+        );
         let records = drain(&mut output);
         assert_eq!(records, vec![(9, parent, 4.0)]);
     }
@@ -622,10 +640,16 @@ mod tests {
             assert_eq!(children.len(), 4, "{grid}");
 
             for &child in &children[..3] {
-                compactor.push_cell(&k, 10, child, H3Accumulator::new(2.0), &mut output);
+                compactor.push_cell(&k, 10, child, ContinuousAccumulator::new(2.0), &mut output);
                 assert!(output.is_empty());
             }
-            compactor.push_cell(&k, 10, children[3], H3Accumulator::new(2.0), &mut output);
+            compactor.push_cell(
+                &k,
+                10,
+                children[3],
+                ContinuousAccumulator::new(2.0),
+                &mut output,
+            );
             assert_eq!(drain(&mut output), vec![(9, parent, 4.0)], "{grid}");
         }
     }

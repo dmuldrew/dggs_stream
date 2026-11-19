@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
-use dggs_stream_core::aggregator::cell_hash::H3BuildHasher;
+use dggs_stream_core::aggregator::cell_hash::CellIdBuildHasher;
 use dggs_stream_core::aggregator::multi_horizon::{
     MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer, QuantilePlan,
     QuantileTarget,
@@ -74,7 +74,7 @@ fn single_quantile(c: &mut Criterion) {
         ("positive_16", (1..=16).map(f64::from).collect::<Vec<_>>()),
         ("mixed_1024", (-512..512).map(f64::from).collect()),
     ] {
-        let mut acc = H3Accumulator::with_quantiles();
+        let mut acc = ContinuousAccumulator::with_quantiles();
         for value in values {
             acc.update(value);
         }
@@ -149,7 +149,7 @@ fn h3_map(c: &mut Criterion) {
     group.throughput(Throughput::Elements((cells.len() * 2) as u64));
     group.bench_function("res10_insert_remove", |b| {
         b.iter(|| {
-            let mut map: HashMap<u64, u64, H3BuildHasher> = HashMap::default();
+            let mut map: HashMap<u64, u64, CellIdBuildHasher> = HashMap::default();
             for &cell in &cells {
                 map.insert(cell, cell);
             }

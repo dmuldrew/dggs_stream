@@ -112,7 +112,7 @@ fn corrupt_chunk_exports_fail_and_preserve_existing_outputs() {
 
 #[test]
 fn parquet_failure_after_flushed_row_groups_is_not_published() {
-    use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+    use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
     use dggs_stream_core::aggregator::multi_horizon::MultiContinuousRecord;
     use dggs_stream_core::error::{DggsStreamError, Result};
     use dggs_stream_core::parquet::writer::{
@@ -141,7 +141,7 @@ fn parquet_failure_after_flushed_row_groups_is_not_published() {
                             .unwrap()
                             .to_cell(h3o::Resolution::Eight)
                             .into(),
-                        accumulator: H3Accumulator::new(42.0),
+                        accumulator: ContinuousAccumulator::new(42.0),
                     },
                 );
             }

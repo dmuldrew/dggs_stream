@@ -262,7 +262,7 @@ clamped to 1–16,384 pixels. The per-sample cost comes from the kernel's
 
 | Kernel | Bytes per sample and resolution |
 | :--- | :--- |
-| Continuous, no quantiles | `inline_worker_bytes_per_sample::<H3Accumulator>()` (260 B) |
+| Continuous, no quantiles | `inline_worker_bytes_per_sample::<ContinuousAccumulator>()` (260 B) |
 | Categorical | `inline_worker_bytes_per_sample::<CategoricalAccumulator>() + OVERFLOW_BYTES_PER_CLASS` (460 B: the inline slot plus the most heap a new class can add) |
 | Continuous with quantiles | 1 KiB (covers the sketch) |
 | Custom kernels (default) | `max(1 KiB, 8 × size_of::<Accumulator>())` |
@@ -615,8 +615,8 @@ about 115 buckets per decade per sign. When `min == max` exactly, every quantile
 `dggs_stream_core::aggregator::multi_horizon::QuantilePlan` builds on it for
 `QuantileTarget` lists: `QuantilePlan::new(&targets)` deduplicates the probabilities
 (IQR shares p25/p75 with any explicit targets), and
-`evaluate_into(&H3Accumulator, &mut Vec<f64>)` writes one value per target, equal to
-`H3Accumulator::quantile` / `iqr` (NaN when the accumulator has no sketch). The core
+`evaluate_into(&ContinuousAccumulator, &mut Vec<f64>)` writes one value per target, equal to
+`ContinuousAccumulator::quantile` / `iqr` (NaN when the accumulator has no sketch). The core
 continuous reader and the DuckDB scan evaluate all projected quantile columns of a
 cell this way. Plans with just one distinct probability use the scalar sketch
 query directly (including repeated projections of that probability), avoiding the

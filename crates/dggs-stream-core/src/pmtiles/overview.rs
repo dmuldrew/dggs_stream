@@ -197,14 +197,16 @@ impl<A: SpillAccumulator> Overview<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregator::accumulator::H3Accumulator;
+    use crate::aggregator::accumulator::ContinuousAccumulator;
 
     #[test]
     fn merges_repeated_keys_across_spills_with_bounded_buffer() {
         let mut buffer = BufferedMerge::new(4096);
         for pass in 0..4 {
             for key in 0..1000 {
-                buffer.push(key, H3Accumulator::new(pass as f64)).unwrap();
+                buffer
+                    .push(key, ContinuousAccumulator::new(pass as f64))
+                    .unwrap();
                 assert!(buffer.map.estimated_bytes() < 4096);
             }
         }

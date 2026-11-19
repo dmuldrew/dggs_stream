@@ -566,16 +566,13 @@ fn benchmark_supersampling() {
 
 #[test]
 fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
-    use dggs_stream_core::aggregator::cell_hash::H3BuildHasher;
+    use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
     use dggs_stream_core::aggregator::multi_horizon::{
         categorical::process_categorical_chunk_payload_into,
         continuous::{process_continuous_chunk_payload_into, ContinuousOptions},
         WalkContext,
     };
     use dggs_stream_core::aggregator::sampling::SamplePoint;
-    use dggs_stream_core::aggregator::{
-        accumulator::H3Accumulator, categorical::CategoricalAccumulator,
-    };
     use dggs_stream_core::crs::CrsTransformer;
     use dggs_stream_core::raster::{geotransform::GeoTransform, RasterChunk};
     use h3o::{LatLng, Resolution};
@@ -643,7 +640,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
                     ],
                 },
             ] {
-                let mut expected = vec![HashMap::<u64, H3Accumulator>::new(); 2];
+                let mut expected = vec![HashMap::<u64, ContinuousAccumulator>::new(); 2];
                 let mut classes = vec![HashMap::<(u64, i64), f64>::new(); 2];
                 let mut retained = 0;
                 for (idx, &value) in values.iter().enumerate() {
@@ -677,7 +674,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
                         for (cell, weight) in weights {
                             expected[i]
                                 .entry(cell)
-                                .or_insert_with(H3Accumulator::with_quantiles)
+                                .or_insert_with(ContinuousAccumulator::with_quantiles)
                                 .update_weighted(value as f64, weight);
                         }
                     }
@@ -700,8 +697,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
                     histogram_bins: None,
                 };
                 for quantiles in [false, true] {
-                    let mut actual =
-                        vec![HashMap::<u64, H3Accumulator, H3BuildHasher>::default(); 2];
+                    let mut actual = vec![HashMap::default(); 2];
                     let scope =
                         dggs_stream_core::aggregator::multi_horizon::profile::WorkerScope::new();
                     process_continuous_chunk_payload_into(
@@ -763,8 +759,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
                         }
                     }
                 }
-                let mut actual =
-                    vec![HashMap::<u64, CategoricalAccumulator, H3BuildHasher>::default(); 2];
+                let mut actual = vec![HashMap::default(); 2];
                 process_categorical_chunk_payload_into(
                     &window,
                     &decoded,

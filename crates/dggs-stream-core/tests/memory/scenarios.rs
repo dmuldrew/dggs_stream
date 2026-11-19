@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::sharded_map::ShardedResolutionMap;
 use dggs_stream_core::aggregator::multi_horizon::spill::{SpillAccumulator, SpillRuns};
@@ -264,9 +264,9 @@ fn fill_and_spill<A: SpillAccumulator>(make: impl Fn(u64) -> A) -> Metrics {
 
 fn spill_sorted_run(variant: &str) -> Metrics {
     match variant {
-        "plain" => fill_and_spill(|cell| H3Accumulator::new((cell % 1000) as f64)),
+        "plain" => fill_and_spill(|cell| ContinuousAccumulator::new((cell % 1000) as f64)),
         "quantiles" => fill_and_spill(|cell| {
-            let mut acc = H3Accumulator::with_quantiles();
+            let mut acc = ContinuousAccumulator::with_quantiles();
             for k in 0..8 {
                 acc.update(((cell >> k) % 5000) as f64 * 0.37 + 1.0);
             }

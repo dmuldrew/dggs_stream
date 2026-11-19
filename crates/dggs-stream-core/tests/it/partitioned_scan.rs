@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::multi_horizon::{
     decode_partial_state, encode_partial_state, plan_partitions, MultiCategoricalHorizonStreamer,
@@ -80,7 +80,7 @@ fn single_continuous(
     paths: &[PathBuf],
     rule: OverlapRule,
     config: &MultiResolutionConfig,
-) -> Cells<H3Accumulator> {
+) -> Cells<ContinuousAccumulator> {
     let mut s = MultiScanHorizonStreamer::new_mosaic(Arc::new(open(paths, rule)), config).unwrap();
     let mut cells = Cells::new();
     while s
@@ -105,7 +105,7 @@ fn partitioned_continuous(
     rule: OverlapRule,
     config: &MultiResolutionConfig,
     target_chunks: usize,
-) -> Run<H3Accumulator> {
+) -> Run<ContinuousAccumulator> {
     let plan = plan_partitions(&open(paths, rule), target_chunks).unwrap();
     let mut merger = MultiScanHorizonStreamer::partial_merger(config);
     let mut cells = Cells::new();
@@ -254,8 +254,8 @@ fn close(a: f64, b: f64, what: &str, key: (u8, u64)) {
 }
 
 fn assert_same_continuous(
-    single: &Cells<H3Accumulator>,
-    run: &Run<H3Accumulator>,
+    single: &Cells<ContinuousAccumulator>,
+    run: &Run<ContinuousAccumulator>,
     quantiles: &[f64],
 ) {
     assert!(!single.is_empty());
@@ -603,12 +603,12 @@ fn plans_cover_every_chunk_once() {
 
 #[test]
 fn partial_states_round_trip_and_reject_corruption() {
-    let mut acc = H3Accumulator::with_quantiles();
+    let mut acc = ContinuousAccumulator::with_quantiles();
     for v in [1.0, 2.5, 7.0, -3.0, 0.0] {
         acc.update(v);
     }
     let bytes = encode_partial_state(&acc);
-    let back: H3Accumulator = decode_partial_state(&bytes, STATE_LIMIT).unwrap();
+    let back: ContinuousAccumulator = decode_partial_state(&bytes, STATE_LIMIT).unwrap();
     assert_eq!(
         (back.count, back.sum, back.min, back.max),
         (acc.count, acc.sum, acc.min, acc.max)
@@ -616,9 +616,9 @@ fn partial_states_round_trip_and_reject_corruption() {
     assert_eq!(back.quantile(0.5), acc.quantile(0.5));
 
     // Fractional weights keep their sum of squares, and so the weighted variance.
-    let mut weighted = H3Accumulator::new_weighted(100.0, 0.4);
+    let mut weighted = ContinuousAccumulator::new_weighted(100.0, 0.4);
     weighted.update_weighted(200.0, 0.6);
-    let back: H3Accumulator =
+    let back: ContinuousAccumulator =
         decode_partial_state(&encode_partial_state(&weighted), STATE_LIMIT).unwrap();
     assert_eq!(back, weighted);
     assert!((back.variance() - 5000.0).abs() < 1e-8);
@@ -626,13 +626,16 @@ fn partial_states_round_trip_and_reject_corruption() {
     // Version 1 states lack sum(w^2) and are refused rather than misread.
     let mut v1 = bytes.clone();
     v1[4] = 1;
-    assert!(decode_partial_state::<H3Accumulator>(&v1, STATE_LIMIT).is_err());
+    assert!(decode_partial_state::<ContinuousAccumulator>(&v1, STATE_LIMIT).is_err());
 
-    assert!(decode_partial_state::<H3Accumulator>(&bytes[..bytes.len() - 1], STATE_LIMIT).is_err());
-    assert!(decode_partial_state::<H3Accumulator>(b"nope", STATE_LIMIT).is_err());
+    assert!(
+        decode_partial_state::<ContinuousAccumulator>(&bytes[..bytes.len() - 1], STATE_LIMIT)
+            .is_err()
+    );
+    assert!(decode_partial_state::<ContinuousAccumulator>(b"nope", STATE_LIMIT).is_err());
     let mut extra = bytes.clone();
     extra.push(0);
-    assert!(decode_partial_state::<H3Accumulator>(&extra, STATE_LIMIT).is_err());
+    assert!(decode_partial_state::<ContinuousAccumulator>(&extra, STATE_LIMIT).is_err());
     // A continuous state is not a categorical one.
     assert!(decode_partial_state::<CategoricalAccumulator>(&bytes, STATE_LIMIT).is_err());
 

@@ -1,4 +1,4 @@
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use std::collections::HashMap;
 use tiff::decoder::DecodingResult;
 
@@ -111,7 +111,7 @@ fn process_categorical_slice_into_maps<T: CategoricalUniformity + Default>(
     native_nodata: Option<T>,
     band: usize,
     remapper: Option<&CategoryRemapper>,
-    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, CellIdBuildHasher>],
 ) {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("fma") {
@@ -143,7 +143,7 @@ unsafe fn process_categorical_slice_into_maps_fma<T: CategoricalUniformity + Def
     native_nodata: Option<T>,
     band: usize,
     remapper: Option<&CategoryRemapper>,
-    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, CellIdBuildHasher>],
 ) {
     process_categorical_slice_into_maps_impl(ctx, slice, native_nodata, band, remapper, chunk_maps);
 }
@@ -155,7 +155,7 @@ fn process_categorical_slice_into_maps_impl<T: CategoricalUniformity + Default>(
     native_nodata: Option<T>,
     band: usize,
     remapper: Option<&CategoryRemapper>,
-    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, CellIdBuildHasher>],
 ) {
     let emit = ctx.emit_nodata;
     let mut engine = CategoricalEngine::new(native_nodata, remapper);
@@ -381,7 +381,7 @@ pub fn process_categorical_chunk_payload_into(
     nodata: Option<f64>,
     band: usize,
     remapper: Option<&CategoryRemapper>,
-    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, CellIdBuildHasher>],
 ) -> bool {
     process_categorical_borrowed_into(
         window,
@@ -400,7 +400,7 @@ pub fn process_categorical_borrowed_into(
     nodata: Option<f64>,
     band: usize,
     remapper: Option<&CategoryRemapper>,
-    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, H3BuildHasher>],
+    chunk_maps: &mut [HashMap<u64, CategoricalAccumulator, CellIdBuildHasher>],
 ) -> bool {
     if !window.emit_nodata && window.samples_per_pixel <= 1 && samples.all_nodata(nodata) {
         return false;

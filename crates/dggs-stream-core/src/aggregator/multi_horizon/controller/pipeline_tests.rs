@@ -2,8 +2,8 @@ use super::super::eviction_space::CellKeys;
 use super::super::sharded_map::ShardedResolutionMap;
 use super::super::spill::SpillRuns;
 use super::pipeline::{run_pipelined, CellMaps, MergeTarget, WindowJobs};
-use crate::aggregator::accumulator::H3Accumulator;
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::accumulator::ContinuousAccumulator;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::mosaic::MosaicReader;
@@ -199,7 +199,7 @@ fn scheduling_storage_is_bounded_for_half_a_million_windows() {
         peak_live.fetch_max(live.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
         Job(&live)
     });
-    let run_window = |_: Job<'_>, _: &mut CellMaps<H3Accumulator>| {
+    let run_window = |_: Job<'_>, _: &mut CellMaps<ContinuousAccumulator>| {
         (super::super::profile::WorkerProfile::default(), 0)
     };
     let compute_keys = |_: &[(usize, u64)]| Vec::new();
@@ -208,7 +208,7 @@ fn scheduling_storage_is_bounded_for_half_a_million_windows() {
     let mut metrics = super::super::profile::StreamProfile::default();
     let mut peak = 0;
     let mut free = (0..8)
-        .map(|_| vec![HashMap::with_hasher(H3BuildHasher)])
+        .map(|_| vec![HashMap::with_hasher(CellIdBuildHasher)])
         .collect();
     let mut finished = Vec::new();
     let mut target = MergeTarget {
@@ -252,17 +252,18 @@ fn run(jobs: usize, panic_at: Option<usize>) -> std::thread::Result<Result<Vec<u
         .num_threads(4)
         .build()
         .unwrap();
-    let mut shards: Vec<ShardedResolutionMap<H3Accumulator>> = vec![ShardedResolutionMap::new()];
+    let mut shards: Vec<ShardedResolutionMap<ContinuousAccumulator>> =
+        vec![ShardedResolutionMap::new()];
     let mut spill_runs = vec![SpillRuns::new(usize::MAX, None)];
     let mut metrics = super::super::profile::StreamProfile::default();
     let mut peak = 0;
-    let mut free: Vec<CellMaps<H3Accumulator>> = (0..8)
-        .map(|_| vec![HashMap::with_hasher(H3BuildHasher)])
+    let mut free: Vec<CellMaps<ContinuousAccumulator>> = (0..8)
+        .map(|_| vec![HashMap::with_hasher(CellIdBuildHasher)])
         .collect();
     let order = Mutex::new(Vec::new());
     // Window i adds one cell whose index records i, with a delay that
     // makes later windows finish first.
-    let run_window = |index: usize, maps: &mut CellMaps<H3Accumulator>| {
+    let run_window = |index: usize, maps: &mut CellMaps<ContinuousAccumulator>| {
         if Some(index) == panic_at {
             panic!("window {index} failed");
         }
@@ -274,7 +275,7 @@ fn run(jobs: usize, panic_at: Option<usize>) -> std::thread::Result<Result<Vec<u
                 .unwrap()
                 .to_cell(Resolution::Nine),
         );
-        maps[0].insert(cell, H3Accumulator::new(index as f64));
+        maps[0].insert(cell, ContinuousAccumulator::new(index as f64));
         (super::super::profile::WorkerProfile::default(), 0)
     };
     let compute_keys = |cells: &[(usize, u64)]| -> Vec<CellKeys> {

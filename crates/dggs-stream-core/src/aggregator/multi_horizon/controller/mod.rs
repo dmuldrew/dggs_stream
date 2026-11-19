@@ -36,7 +36,7 @@ use super::partition::{BoundaryClassifier, PartialCell};
 use super::sharded_map::{AccumulatorMerge, ShardedResolutionMap};
 use super::spill::{RunReader, SpillAccumulator, SpillRuns};
 use super::walker::WalkContext;
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::aggregator::sampling::SamplingPattern;
 use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
@@ -87,7 +87,7 @@ pub trait HorizonStreamKernel: Send + Sync + 'static {
         window: &WalkContext<'_>,
         decoding_result: &mut DecodingResult,
         nodata: Option<f64>,
-        local_maps: &mut [HashMap<u64, Self::Accumulator, H3BuildHasher>],
+        local_maps: &mut [HashMap<u64, Self::Accumulator, CellIdBuildHasher>],
     ) -> bool;
 
     /// Borrowed window override. Built-in kernels never allocate a pixel copy.
@@ -96,7 +96,7 @@ pub trait HorizonStreamKernel: Send + Sync + 'static {
         window: &WalkContext<'_>,
         samples: super::borrowed::BorrowedSamples<'_>,
         nodata: Option<f64>,
-        local_maps: &mut [HashMap<u64, Self::Accumulator, H3BuildHasher>],
+        local_maps: &mut [HashMap<u64, Self::Accumulator, CellIdBuildHasher>],
     ) -> bool {
         super::profile::copied(samples.bytes());
         let mut owned = samples.to_owned();

@@ -98,8 +98,8 @@ fn main() -> std::io::Result<()> {
 
     {
         use dggs_stream_core::aggregator::multi_horizon::encode_partial_state;
-        use dggs_stream_core::aggregator::{CategoricalAccumulator, H3Accumulator};
-        let mut continuous = H3Accumulator::with_quantiles();
+        use dggs_stream_core::aggregator::{CategoricalAccumulator, ContinuousAccumulator};
+        let mut continuous = ContinuousAccumulator::with_quantiles();
         for v in [-3.5, 0.0, 2.0, 1e-9, 4096.0] {
             continuous.update_weighted(v, 0.5);
         }

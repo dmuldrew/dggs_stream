@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use super::super::eviction_space::CellKeys;
 use super::super::sharded_map::ShardedResolutionMap;
 use super::super::spill::{SpillAccumulator, SpillRuns};
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::error::{DggsStreamError, Result};
 use crate::raster::mosaic::MosaicReader;
 use crate::raster::prefetch::MosaicPrefetchItem;
@@ -22,7 +22,7 @@ pub(super) type WindowJob<'a> = (
     bool,
 );
 /// One worker's per-resolution cell maps.
-pub(super) type CellMaps<A> = Vec<HashMap<u64, A, H3BuildHasher>>;
+pub(super) type CellMaps<A> = Vec<HashMap<u64, A, CellIdBuildHasher>>;
 
 /// A batch's windows, generated on demand without storage per window.
 pub(super) struct WindowJobs<'a> {

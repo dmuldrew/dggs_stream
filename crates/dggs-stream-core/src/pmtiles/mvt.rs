@@ -3,7 +3,7 @@
 //! Encodes H3 hexagonal geometries and statistical properties directly into
 //! standard MVT protocol buffer byte streams without intermediate GIS allocations.
 
-use crate::aggregator::cell_hash::H3BuildHasher;
+use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::grid::GridKind;
 use h3o::LatLng;
 use std::borrow::Cow;
@@ -147,11 +147,11 @@ impl std::hash::Hash for MvtValue {
 impl MvtValue {
     /// Construct a zero-allocation hex string MvtValue directly from an H3 cell integer
     #[inline(always)]
-    pub fn from_hex_u64(h3_index: u64) -> Self {
+    pub fn from_hex_u64(cell_id: u64) -> Self {
         let mut buf = [0u8; 16];
         // fast_hex_u64 writes the digits right-aligned; HexStr consumers read
         // buf[..len], so shift the digits back to the front of the buffer.
-        let len = crate::encoding::fast_hex_u64(h3_index, &mut buf).len();
+        let len = crate::encoding::fast_hex_u64(cell_id, &mut buf).len();
         buf.copy_within(16 - len.., 0);
         MvtValue::HexStr(buf, len as u8)
     }
@@ -343,7 +343,7 @@ impl PropertyFilter {
 #[derive(Debug, Clone)]
 pub enum FeatureProperties {
     Continuous {
-        h3_index: u64,
+        cell_id: u64,
         resolution: u8,
         mean: f64,
         sum: f64,
@@ -353,7 +353,7 @@ pub enum FeatureProperties {
         max: f64,
     },
     Categorical {
-        h3_index: u64,
+        cell_id: u64,
         resolution: u8,
         majority: i64,
         majority_fraction: f64,
@@ -386,7 +386,7 @@ impl FeatureProperties {
     {
         match self {
             FeatureProperties::Continuous {
-                h3_index,
+                cell_id,
                 resolution,
                 mean,
                 sum,
@@ -396,12 +396,12 @@ impl FeatureProperties {
                 max,
             } => {
                 if filter.has_continuous(PROP_H3_INDEX) {
-                    f(filter.grid.index_column_name(), &MvtValue::UInt(*h3_index));
+                    f(filter.grid.index_column_name(), &MvtValue::UInt(*cell_id));
                 }
                 if filter.has_continuous(PROP_H3_HEX) {
                     f(
                         filter.grid.hex_column_name(),
-                        &MvtValue::from_hex_u64(*h3_index),
+                        &MvtValue::from_hex_u64(*cell_id),
                     );
                 }
                 if filter.has_continuous(PROP_RESOLUTION) {
@@ -427,7 +427,7 @@ impl FeatureProperties {
                 }
             }
             FeatureProperties::Categorical {
-                h3_index,
+                cell_id,
                 resolution,
                 majority,
                 majority_fraction,
@@ -436,12 +436,12 @@ impl FeatureProperties {
                 count,
             } => {
                 if filter.has_categorical(PROP_CAT_H3_INDEX) {
-                    f(filter.grid.index_column_name(), &MvtValue::UInt(*h3_index));
+                    f(filter.grid.index_column_name(), &MvtValue::UInt(*cell_id));
                 }
                 if filter.has_categorical(PROP_CAT_H3_HEX) {
                     f(
                         filter.grid.hex_column_name(),
-                        &MvtValue::from_hex_u64(*h3_index),
+                        &MvtValue::from_hex_u64(*cell_id),
                     );
                 }
                 if filter.has_categorical(PROP_CAT_RESOLUTION) {
@@ -720,7 +720,7 @@ pub struct MvtLayer {
     pub extent: u32,
     pub features: Vec<MvtFeature>,
     pub property_filter: PropertyFilter,
-    pub seen_ids: HashSet<u64, H3BuildHasher>,
+    pub seen_ids: HashSet<u64, CellIdBuildHasher>,
 }
 
 impl MvtLayer {

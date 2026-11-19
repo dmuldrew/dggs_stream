@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 
-use dggs_stream_core::aggregator::accumulator::H3Accumulator;
+use dggs_stream_core::aggregator::accumulator::ContinuousAccumulator;
 use dggs_stream_core::aggregator::categorical::CategoricalAccumulator;
 use dggs_stream_core::aggregator::horizon_streamer::compute_cell_south_lat;
 use dggs_stream_core::aggregator::multi_horizon::spill::SpillAccumulator;
@@ -133,7 +133,10 @@ fn check_merge_and_eviction<A: SpillAccumulator + PartialEq + Debug>(first: A, s
 
 #[test]
 fn continuous_sharded_merge_and_eviction_preserve_statistics() {
-    check_merge_and_eviction(H3Accumulator::new(2.0), H3Accumulator::new(4.0));
+    check_merge_and_eviction(
+        ContinuousAccumulator::new(2.0),
+        ContinuousAccumulator::new(4.0),
+    );
 }
 
 #[test]
@@ -155,14 +158,14 @@ fn test_worker_results_merged_before_watermark_advancement() {
     let cell: u64 = LatLng::new(45.0, -120.0).unwrap().to_cell(res).into();
     let south_lat = compute_cell_south_lat(cell);
 
-    let mut map: ShardedResolutionMap<H3Accumulator> = ShardedResolutionMap::new();
+    let mut map: ShardedResolutionMap<ContinuousAccumulator> = ShardedResolutionMap::new();
 
     // Eviction before any merge finds nothing, even with the horizon past the cell.
     assert!(map.pop_completed(south_lat - 1.0).is_none());
 
     // Merge four worker partials for the same cell.
     for w in 1..=4 {
-        map.merge_owned(cell, H3Accumulator::new(w as f64));
+        map.merge_owned(cell, ContinuousAccumulator::new(w as f64));
     }
     assert_eq!(map.active_cell_count(), 1);
     let acc = map.get(cell).unwrap();

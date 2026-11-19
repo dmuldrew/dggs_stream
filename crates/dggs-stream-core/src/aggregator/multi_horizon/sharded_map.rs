@@ -1,9 +1,9 @@
-use crate::aggregator::cell_hash::{mix_h3, H3BuildHasher};
+use crate::aggregator::cell_hash::{mix_cell_id, CellIdBuildHasher};
 use std::collections::{BinaryHeap, HashMap};
 
 use super::eviction_space::CellKeys;
 use super::spill::table_bytes;
-use crate::aggregator::accumulator::H3Accumulator;
+use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::aggregator::horizon_streamer::compute_cell_south_lat;
 use crate::aggregator::quantiles::QuantileSketch;
@@ -15,13 +15,13 @@ pub const NUM_SHARDS: usize = 32;
 /// Unused H3 child digits fill the low bits with ones, so masking the low
 /// bits of a simple product sends every cell at resolutions 0..=13 to one shard.
 ///
-/// Shard maps hash with the same finalizer ([`H3BuildHasher`]), and hashbrown
+/// Shard maps hash with the same finalizer ([`CellIdBuildHasher`]), and hashbrown
 /// takes bucket positions from the low bits and tags from the top 7. The shard
 /// therefore comes from bits 32.., so keys within one shard still spread over
 /// every bucket and tag.
 #[inline(always)]
 pub fn get_shard(cell_u64: u64) -> usize {
-    ((mix_h3(cell_u64) >> 32) as usize) & (NUM_SHARDS - 1)
+    ((mix_cell_id(cell_u64) >> 32) as usize) & (NUM_SHARDS - 1)
 }
 
 /// Trait defining an accumulator that can be merged into another
@@ -34,7 +34,7 @@ pub trait AccumulatorMerge: Clone + Send + Sync + 'static {
     }
 }
 
-impl AccumulatorMerge for H3Accumulator {
+impl AccumulatorMerge for ContinuousAccumulator {
     fn heap_bytes(&self) -> usize {
         self.quantiles.as_ref().map_or(0, |q| {
             size_of::<QuantileSketch>()
@@ -45,7 +45,7 @@ impl AccumulatorMerge for H3Accumulator {
 
     #[inline(always)]
     fn merge(&mut self, other: &Self) {
-        H3Accumulator::merge(self, other);
+        ContinuousAccumulator::merge(self, other);
     }
 }
 
@@ -161,7 +161,7 @@ impl LatHistogram {
 /// checks, and pops completed cells incrementally. Merging and eviction both
 /// require exclusive access, so the phases cannot overlap in safe Rust.
 pub struct ShardedResolutionMap<A: AccumulatorMerge> {
-    shards: Vec<HashMap<u64, A, H3BuildHasher>>,
+    shards: Vec<HashMap<u64, A, CellIdBuildHasher>>,
     eviction: Vec<BinaryHeap<EvictionEntry>>,
     /// Southern-latitude bounds of held cells, when eviction keys are not
     /// latitudes (see [`Self::set_lat_tracking`]).
@@ -185,7 +185,7 @@ impl<A: AccumulatorMerge> ShardedResolutionMap<A> {
         let mut shards = Vec::with_capacity(NUM_SHARDS);
         let mut eviction = Vec::with_capacity(NUM_SHARDS);
         for _ in 0..NUM_SHARDS {
-            shards.push(HashMap::with_capacity_and_hasher(0, H3BuildHasher));
+            shards.push(HashMap::with_capacity_and_hasher(0, CellIdBuildHasher));
             eviction.push(BinaryHeap::new());
         }
         Self {
@@ -379,7 +379,7 @@ impl<A: super::spill::SpillAccumulator> ShardedResolutionMap<A> {
                 let key = entry.cell_u64;
                 let removed = self.shards[s].remove(&key);
                 if removed.is_some() && self.shards[s].is_empty() {
-                    self.shards[s] = HashMap::with_hasher(H3BuildHasher);
+                    self.shards[s] = HashMap::with_hasher(CellIdBuildHasher);
                     self.eviction[s] = BinaryHeap::new();
                 }
                 self.structure_bytes = self.structure_bytes - before + self.shard_bytes(s);
@@ -397,7 +397,7 @@ impl<A: super::spill::SpillAccumulator> ShardedResolutionMap<A> {
     pub fn take_sorted(&mut self) -> Vec<(u64, A)> {
         let mut records = Vec::with_capacity(self.active_cell_count());
         for (map, heap) in self.shards.iter_mut().zip(&mut self.eviction) {
-            let owned = std::mem::replace(map, HashMap::with_hasher(H3BuildHasher));
+            let owned = std::mem::replace(map, HashMap::with_hasher(CellIdBuildHasher));
             records.extend(owned);
             *heap = BinaryHeap::new();
         }
@@ -416,7 +416,7 @@ mod tests {
     use super::*;
     use h3o::{LatLng, Resolution};
 
-    fn recounted(map: &ShardedResolutionMap<H3Accumulator>) -> usize {
+    fn recounted(map: &ShardedResolutionMap<ContinuousAccumulator>) -> usize {
         let dynamic: usize = map
             .shards
             .iter()
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn incremental_estimate_matches_full_recount() {
-        let mut map = ShardedResolutionMap::<H3Accumulator>::new();
+        let mut map = ShardedResolutionMap::<ContinuousAccumulator>::new();
         let res = Resolution::try_from(7).unwrap();
         let cells: Vec<u64> = (0..2000)
             .map(|i| {
@@ -438,9 +438,9 @@ mod tests {
             .collect();
         for (i, &cell) in cells.iter().enumerate() {
             let mut acc = if i % 3 == 0 {
-                H3Accumulator::with_quantiles()
+                ContinuousAccumulator::with_quantiles()
             } else {
-                H3Accumulator::default()
+                ContinuousAccumulator::default()
             };
             acc.update(i as f64);
             map.merge_owned(cell, acc);
@@ -452,7 +452,7 @@ mod tests {
         }
         assert_eq!(map.estimated_bytes(), 0);
         for &cell in &cells[..500] {
-            map.merge_owned(cell, H3Accumulator::new(1.0));
+            map.merge_owned(cell, ContinuousAccumulator::new(1.0));
         }
         map.set_eviction_enabled(false);
         assert_eq!(map.estimated_bytes(), recounted(&map));
