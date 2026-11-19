@@ -135,8 +135,8 @@ struct Pending<A> {
     acc: A,
     /// Whether any pixel (valid or not) overlapped it.
     touched: bool,
-    /// Past this row (exclusive) of tile `last_tile` nothing more overlaps the cell.
-    end_row: i64,
+    /// Exclusive end row in `last_tile`, once the cell has been located on that tile.
+    end_row: Option<i64>,
     /// The last tile whose footprint the cell may overlap.
     last_tile: usize,
 }
@@ -543,19 +543,21 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 continue;
             }
             slots.push(cell);
-            let last_tile = if several_tiles {
-                last_overlapping_tile(&mosaic, self.grid, cell, block.tile)
-            } else {
-                block.tile
-            };
             let track_quantiles = self.track_quantiles;
+            let grid = self.grid;
             let pending = self.pending.entry(cell).or_insert_with(|| Pending {
                 acc: A::empty(track_quantiles),
                 touched: false,
-                end_row,
-                last_tile,
+                end_row: None,
+                last_tile: if several_tiles {
+                    last_overlapping_tile(&mosaic, grid, cell, block.tile)
+                } else {
+                    block.tile
+                },
             });
-            pending.end_row = end_row;
+            if block.tile == pending.last_tile {
+                pending.end_row = Some(end_row);
+            }
         }
 
         // A bbox selects pixels by their centres, as the centre kernel does; a cell
@@ -627,7 +629,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             .iter()
             .filter(|(_, p)| {
                 last_block_of_resolution
-                    || (p.last_tile == block.tile && (p.end_row <= end || block.last_of_tile))
+                    || (p.last_tile == block.tile
+                        && (p.end_row.is_some_and(|row| row <= end) || block.last_of_tile))
                     || p.last_tile < block.tile
             })
             .map(|(cell, _)| *cell)
@@ -1004,11 +1007,12 @@ fn visit_cell_polygons(
 /// The highest tile index from `from` on whose footprint may overlap `cell`.
 fn last_overlapping_tile(mosaic: &MosaicReader, grid: GridKind, cell: u64, from: usize) -> usize {
     let Some([west, south, east, north]) = grid.wgs84_bbox(cell) else {
-        return from;
+        return mosaic.tiles.len() - 1;
     };
     let mut last = from;
     for (idx, tile) in mosaic.tiles.iter().enumerate().skip(from + 1) {
-        let [t_west, t_south, t_east, t_north] = tile.bounds_wgs84;
+        let [t_west, t_south, t_east, t_north] =
+            tile.crs_transformer.rejection_bounds(tile.bounds_wgs84);
         let lat_overlap = south <= t_north && north >= t_south;
         // Boxes that cross the antimeridian are taken to overlap in longitude.
         let lon_overlap = west > east || t_west > t_east || (west <= t_east && east >= t_west);
@@ -1017,4 +1021,94 @@ fn last_overlapping_tile(mosaic: &MosaicReader, grid: GridKind, cell: u64, from:
         }
     }
     last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raster::mosaic::OverlapRule;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn projected_final_tile_finishes_cells_at_their_last_row() {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+        let make_tile = |start: u32| {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut encoder = TiffEncoder::new(file.as_file()).unwrap();
+            let mut image = encoder.new_image::<colortype::Gray32Float>(16, 64).unwrap();
+            let tags = image.encoder();
+            tags.write_tag(
+                Tag::GeoKeyDirectoryTag,
+                &[1u16, 1, 0, 1, 3072, 0, 1, 2154][..],
+            )
+            .unwrap();
+            tags.write_tag(Tag::ModelPixelScaleTag, &[100.0f64, 100.0, 0.0][..])
+                .unwrap();
+            tags.write_tag(
+                Tag::ModelTiepointTag,
+                &[
+                    0.0f64,
+                    0.0,
+                    0.0,
+                    700_000.0 + 100.0 * f64::from(start),
+                    6_600_000.0,
+                    0.0,
+                ][..],
+            )
+            .unwrap();
+            let pixels: Vec<_> = (0..64)
+                .flat_map(|r| (0..16).map(move |c| (start + c + r) as f32))
+                .collect();
+            image.write_data(&pixels).unwrap();
+            file
+        };
+        let left = make_tile(0);
+        let right = make_tile(16);
+        let paths = [left.path().to_owned(), right.path().to_owned()];
+        let mosaic = Arc::new(MosaicReader::open(&paths, None, None, OverlapRule::First).unwrap());
+        let mut config = MultiResolutionConfig::single(9);
+        config.transfer = TransferMode::OVERLAY;
+        let scan =
+            || TransferStream::<ContinuousAccumulator>::new(mosaic.clone(), &config).unwrap();
+        let drain = |mut s: TransferStream<ContinuousAccumulator>| {
+            let mut cells = BTreeMap::new();
+            while s
+                .drain_into(128, |_, _, id, a| {
+                    assert!(cells.insert(id, a).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            cells
+        };
+        let reference = drain(scan());
+        let mut split = scan();
+        let last = split.blocks.pop().unwrap();
+        assert_eq!((last.tile, last.rows.clone()), (1, 0..64));
+        // Split the final tile explicitly so this small regression is independent
+        // of the production planner's target block size.
+        for rows in [0..32, 32..64] {
+            split.blocks.push(Block {
+                bbox: block_bbox(split.grid, 9, &mosaic.tiles[1], &rows, &last.cols, true),
+                last_of_tile: rows.end == 64,
+                rows,
+                ..last.clone()
+            });
+        }
+        split.advance_until_completed(1).unwrap();
+        assert_eq!(split.next_block, 2);
+        assert!(!split.output.is_empty());
+        assert!(split
+            .pending
+            .values()
+            .any(|p| p.end_row.is_some_and(|r| r > 32) && p.touched));
+        let actual = drain(split);
+        assert!(reference.keys().eq(actual.keys()));
+        for (id, a) in actual {
+            let want = &reference[&id];
+            assert!((a.count - want.count).abs() < 1e-8);
+            assert!((a.sum - want.sum).abs() < 1e-7);
+        }
+    }
 }
