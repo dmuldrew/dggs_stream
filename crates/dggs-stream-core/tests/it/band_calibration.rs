@@ -774,3 +774,28 @@ fn multi_band_scan_honors_internal_mask_and_spills() {
         assert!(profile.report().spill_runs > 0);
     }
 }
+
+#[test]
+fn dropping_multiband_scan_announces_work_done() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use dggs_stream_core::run_profile::{last_report, RunProfile};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rgba.tif");
+    write_alpha_tiff(&path, &[2]);
+    let profile = RunProfile::announcing();
+    let mut config = MultiResolutionConfig::single(11);
+    config.profile = Some(profile.clone());
+    let mut scan = MultiBandStreamer::new(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &config,
+        Bands::All,
+    )
+    .unwrap();
+    assert_eq!(scan.fetch_next_batch(1).unwrap().len(), 1);
+    drop(scan);
+    let announced = last_report().expect("early drop must publish the announcing profile");
+    assert!(announced.windows > 0);
+    assert_eq!(announced.windows, profile.report().windows);
+    assert_eq!(announced.pixels_read, profile.report().pixels_read);
+}
