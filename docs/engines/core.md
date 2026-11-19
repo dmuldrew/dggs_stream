@@ -402,7 +402,7 @@ where it may go:
 | :--- | :--- | :--- |
 | `DGGS_STREAM_AUTH_TOKEN` | `Authorization: Bearer <token>` | Only hosts listed in `DGGS_STREAM_AUTH_HOSTS`, over `https://` (or to a loopback host). |
 | `DGGS_STREAM_AUTH_HOSTS` | — | Comma-separated hosts allowed to receive the token. An entry is an exact host (`data.example.com`) or, with a leading `.` or `*.`, a domain and its subdomains (`.example.com`). Unset or empty sends the token nowhere. |
-| `AWS_SESSION_TOKEN` | `x-amz-security-token` | Only S3 endpoints (`*.amazonaws.com`, `*.amazonaws.com.cn`, or the host of `AWS_ENDPOINT_URL` / `AWS_S3_ENDPOINT`), over `https://` (or to a loopback host). Ignored when `DGGS_STREAM_AUTH_TOKEN` is set. |
+| `AWS_SESSION_TOKEN` | `x-amz-security-token` | Only AWS S3 data endpoints or an explicitly configured S3-compatible host (`AWS_ENDPOINT_URL` / `AWS_S3_ENDPOINT`, including virtual-hosted buckets on its configured scheme and port), over `https://` (or to a loopback host). Ignored when `DGGS_STREAM_AUTH_TOKEN` is set. |
 | `AWS_REQUEST_PAYER=requester` | `x-amz-request-payer: requester` | Every request (not a credential). |
 
 Requests are not signed, so `s3://` paths work for public objects and presigned URLs

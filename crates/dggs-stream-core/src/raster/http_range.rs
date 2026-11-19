@@ -259,25 +259,78 @@ fn auth_host_allowed(host: &str, allowed: &str) -> bool {
     })
 }
 
-/// Whether `host` is an S3 endpoint: AWS itself, or the endpoint configured
-/// through `AWS_ENDPOINT_URL` / `AWS_S3_ENDPOINT` (including its
-/// virtual-hosted bucket subdomains).
-fn is_s3_host(host: &str, custom_endpoint: Option<&str>) -> bool {
-    if ["amazonaws.com", "amazonaws.com.cn"]
-        .iter()
-        .any(|domain| host_in_domain(host, domain))
-    {
+/// Match the service labels at the end of an AWS S3 data endpoint. Any
+/// preceding labels are the virtual-hosted bucket name.
+fn is_aws_s3_host(host: &str) -> bool {
+    let Some(prefix) = host
+        .strip_suffix(".amazonaws.com")
+        .or_else(|| host.strip_suffix(".amazonaws.com.cn"))
+    else {
+        return false;
+    };
+    let mut labels = prefix.rsplit('.');
+    let last = labels.next().unwrap_or_default();
+    if matches!(last, "s3" | "s3-accelerate") {
         return true;
     }
-    custom_endpoint
-        .map(str::trim)
-        .and_then(|endpoint| {
-            Url::parse(endpoint)
-                .or_else(|_| Url::parse(&format!("https://{endpoint}")))
-                .ok()
-        })
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .is_some_and(|endpoint_host| host_in_domain(host, &endpoint_host))
+    if last == "dualstack" {
+        return labels.next() == Some("s3-accelerate");
+    }
+    // A regional service ends in a region such as us-east-1 or us-gov-west-1.
+    let region = last.strip_prefix("s3-").unwrap_or(last);
+    let Some((country, rest)) = region.split_once('-') else {
+        return false;
+    };
+    let Some((area, number)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    if country.len() != 2
+        || !country.bytes().all(|b| b.is_ascii_lowercase())
+        || !area
+            .split('-')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase()))
+        || number.is_empty()
+        || !number.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    if region != last {
+        return true; // Legacy s3-REGION endpoint.
+    }
+    let service = match labels.next() {
+        Some("dualstack") => labels.next(),
+        service => service,
+    };
+    matches!(
+        service,
+        Some("s3" | "s3-fips" | "s3-accesspoint" | "s3-object-lambda" | "s3-outposts")
+    )
+}
+
+/// Whether a parsed URL host is an AWS S3 endpoint or belongs to the
+/// explicitly configured S3-compatible service.
+fn is_s3_endpoint(url: &Url, custom_endpoint: Option<&str>) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if is_aws_s3_host(host) && url.scheme() == "https" && url.port().is_none() {
+        return true;
+    }
+    let Some(endpoint) = custom_endpoint.map(str::trim) else {
+        return false;
+    };
+    let endpoint = if endpoint.contains("://") {
+        Url::parse(endpoint)
+    } else {
+        Url::parse(&format!("https://{endpoint}"))
+    };
+    endpoint.is_ok_and(|endpoint| {
+        endpoint.scheme() == url.scheme()
+            && endpoint.port_or_known_default() == url.port_or_known_default()
+            && endpoint
+                .host_str()
+                .is_some_and(|domain| host_in_domain(host, domain))
+    })
 }
 
 /// Default headers for requests to `url` (requester pays, auth tokens), with
@@ -325,7 +378,11 @@ fn default_headers_for(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Reque
         }
     } else if let Some(session_token) = var("AWS_SESSION_TOKEN") {
         let endpoint = var("AWS_ENDPOINT_URL").or_else(|| var("AWS_S3_ENDPOINT"));
-        if confidential && is_s3_host(host, endpoint.as_deref()) {
+        if confidential
+            && parsed
+                .as_ref()
+                .is_some_and(|url| is_s3_endpoint(url, endpoint.as_deref()))
+        {
             out.headers
                 .push(("x-amz-security-token".to_string(), session_token));
         }
@@ -1570,6 +1627,36 @@ mod tests {
             ("https://bucket.s3.eu-west-1.amazonaws.com/a.tif", true),
             ("https://bucket.s3.cn-north-1.amazonaws.com.cn/a.tif", true),
             ("http://bucket.s3.amazonaws.com/a.tif", false),
+            ("https://s3.dualstack.eu-west-1.amazonaws.com/a.tif", true),
+            ("https://s3.amazonaws.com/a.tif", true),
+            ("https://tiles-123456789012.s3-accesspoint.us-east-1.amazonaws.com/a.tif", true),
+            ("https://tiles-123456789012.s3-object-lambda.us-east-1.amazonaws.com/a.tif", true),
+            ("https://tiles-123456789012.op-0123456789abcdef0.s3-outposts.us-east-1.amazonaws.com/a.tif", true),
+            ("https://tiles.lambda.us-east-1.amazonaws.com/a.tif", false),
+            ("https://tiles.s3-control.us-east-1.amazonaws.com/a.tif", false),
+            ("https://bucket.s3-us-west-2.amazonaws.com/a.tif", true),
+            (
+                "https://bucket.s3-fips.us-gov-west-1.amazonaws.com/a.tif",
+                true,
+            ),
+            (
+                "https://bucket.s3-accelerate.dualstack.amazonaws.com/a.tif",
+                true,
+            ),
+            (
+                "https://bucket.s3-website-us-east-1.amazonaws.com/a.tif",
+                false,
+            ),
+            ("https://bucket.s3.amazonaws.com:8443/a.tif", false),
+            (
+                "https://api.execute-api.us-east-1.amazonaws.com/a.tif",
+                false,
+            ),
+            (
+                "https://s3.execute-api.us-east-1.amazonaws.com/a.tif",
+                false,
+            ),
+            ("https://s3.compute.amazonaws.com/a.tif", false),
             ("https://amazonaws.com.evil.test/a.tif", false),
             ("https://evil.test/a.tif", false),
         ] {
@@ -1579,6 +1666,8 @@ mod tests {
         // A configured endpoint counts, with path or virtual-hosted buckets.
         let minio = [session, ("AWS_ENDPOINT_URL", "http://localhost:9000/")];
         assert!(sent("http://localhost:9000/bucket/a.tif", &minio));
+        assert!(!sent("http://localhost:9001/bucket/a.tif", &minio));
+        assert!(!sent("https://localhost:9000/bucket/a.tif", &minio));
         assert!(!sent("https://evil.test/bucket/a.tif", &minio));
         let hosted = [session, ("AWS_S3_ENDPOINT", "storage.example.com")];
         assert!(sent("https://storage.example.com/bucket/a.tif", &hosted));
