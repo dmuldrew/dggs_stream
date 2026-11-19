@@ -24,6 +24,7 @@ jobs:
     outputs:
       code: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
       wheels: ${{ startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.code == 'true' || steps.filter.outputs.wheel_readme == 'true' }}
+      wheel_packaging: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name != 'pull_request' || steps.filter.outputs.wheel_packaging == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' }}
@@ -43,6 +44,10 @@ jobs:
               - '!LICENSE'
             wheel_readme:
               - 'crates/dggs-stream-python/README.md'
+            wheel_packaging:
+              - 'crates/dggs-stream-python/hatch_build.py'
+              - 'crates/dggs-stream-python/pyproject.toml'
+              - '.github/workflows/wheels.yml'
 
   lint:
     name: Format, Clippy & Docs
@@ -199,38 +204,60 @@ jobs:
           echo "LIB=$WIN_LIB_DIR;$LIB" >> $GITHUB_ENV
           echo "RUSTFLAGS=-L native=$WIN_LIB_DIR" >> $GITHUB_ENV
           echo "$(pwd)/target/duckdb_lib" >> $GITHUB_PATH
-          mkdir -p target/release/deps
+          mkdir -p target/release/deps target/ci-test/deps
           cp target/duckdb_lib/duckdb.dll target/release/deps/ || true
           cp target/duckdb_lib/duckdb.dll target/release/ || true
+          cp target/duckdb_lib/duckdb.dll target/ci-test/deps/ || true
+          cp target/duckdb_lib/duckdb.dll target/ci-test/ || true
           cp target/duckdb_lib/duckdb.dll . || true
 
       # Root (cross-engine/packaging), core and DuckDB integration binaries plus
-      # their unit tests; each crate links a single tests/it binary.
+      # their unit and doc tests. Uses `ci-test` (opt-level=2, no LTO, 16 CGU)
+      # and skips empty `src/bin/*` harnesses. On PRs, run the full Rust suite on
+      # Linux x86_64 only (other OSes still build, package, and run DuckDB CLI
+      # smoke tests); pushes to main and release tags run it on every native host.
+      # `osx_amd64` cross-compiles on the arm64 runner and would duplicate `osx_arm64`.
       - name: Run Tests
-        run: cargo test --locked --release --no-fail-fast -p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb
+        if: matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4')
+        shell: bash
+        run: |
+          cargo test --locked --profile ci-test --no-fail-fast \
+            -p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb --lib --tests
+          cargo test --locked --profile ci-test --doc \
+            -p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb
 
-      - name: Test hotspot harness ownership sampling
-        run: cargo test --locked --release -p dggs-stream-core --example profile_hotspots
-
-      - name: Test worker-scaling benchmark output equality
-        run: cargo test --locked --release -p dggs-stream-core --example worker_scaling
+      - name: Test hotspot and worker-scaling examples
+        if: matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4')
+        run: cargo test --locked --profile ci-test -p dggs-stream-core --example profile_hotspots --example worker_scaling
 
       - name: Build Dynamic Library & Binaries
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }} -p dggs_stream --lib --bin dggs-stream
 
       - name: Package DuckDB Extension (Uncompressed & Gzipped)
         shell: bash
         env:
           DUCKDB_EXTENSION_SIGNING_KEY: ${{ secrets.DUCKDB_EXTENSION_SIGNING_KEY }}
         run: |
-          cargo run --locked --release --bin package_extension -- \
-            --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
+          cargo build --locked --profile ci-test --bin package_extension
+          PACKAGER="target/ci-test/package_extension"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            PACKAGER="target/ci-test/package_extension.exe"
+          fi
+
+          # Preserve the v1.2.0-ABI cdylib before the v1.5.6-ABI build below reuses
+          # `target/<triple>/release/` (sharing cached dependency artifacts).
+          mkdir -p target/smoke-libs/v120
+          cp "target/${{ matrix.target }}/release/${{ matrix.lib_file }}" \
+            "target/smoke-libs/v120/${{ matrix.lib_file }}"
+
+          "$PACKAGER" \
+            --input "target/smoke-libs/v120/${{ matrix.lib_file }}" \
             --output target/${{ matrix.target }}/release/dggs_stream.duckdb_extension \
             --platform ${{ matrix.platform }} \
             --duckdb-version v1.2.0
 
-          cargo run --locked --release --bin package_extension -- \
-            --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
+          "$PACKAGER" \
+            --input "target/smoke-libs/v120/${{ matrix.lib_file }}" \
             --output target/${{ matrix.target }}/release/dggs_stream.duckdb_extension.gz \
             --platform ${{ matrix.platform }} \
             --duckdb-version v1.2.0 \
@@ -248,13 +275,13 @@ jobs:
           # On Linux x86_64, also package under the `linux_amd64` platform tag used by DuckDB v1.3+ and v2.0+
           if [[ "${{ matrix.platform }}" == "linux_amd64_gcc4" ]]; then
             mkdir -p dist/v1.2.0/linux_amd64
-            cargo run --locked --release --bin package_extension -- \
-              --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
+            "$PACKAGER" \
+              --input "target/smoke-libs/v120/${{ matrix.lib_file }}" \
               --output dist/v1.2.0/linux_amd64/dggs_stream.duckdb_extension \
               --platform linux_amd64 \
               --duckdb-version v1.2.0
-            cargo run --locked --release --bin package_extension -- \
-              --input target/${{ matrix.target }}/release/${{ matrix.lib_file }} \
+            "$PACKAGER" \
+              --input "target/smoke-libs/v120/${{ matrix.lib_file }}" \
               --output dist/v1.2.0/linux_amd64/dggs_stream.duckdb_extension.gz \
               --platform linux_amd64 \
               --duckdb-version v1.2.0 \
@@ -267,32 +294,38 @@ jobs:
           # (`INSTALL dggs_stream FROM <repo>`) needs a v2.0.0 tree. Its Linux x86_64 tag is linux_amd64.
           # The v2.0.0 tree ships a separate build against the v1.5.6 C extension API, enabling
           # DuckDB file-system access, COPY output, session options and scalar bind/init.
-          V2_PLATFORM="${{ matrix.platform }}"
-          if [[ "$V2_PLATFORM" == "linux_amd64_gcc4" ]]; then
-            V2_PLATFORM=linux_amd64
+          # On PRs, build and verify this second ABI on Linux x86_64 only; main/tags build all platforms.
+          if [[ "${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4" ]]; then
+            V2_PLATFORM="${{ matrix.platform }}"
+            if [[ "$V2_PLATFORM" == "linux_amd64_gcc4" ]]; then
+              V2_PLATFORM=linux_amd64
+            fi
+            mkdir -p "dist/v2.0.0/$V2_PLATFORM" target/smoke-libs/v156
+
+            cargo build --locked --release --target ${{ matrix.target }} \
+              -p dggs_stream --lib --features duckdb-api-v1_5_6
+
+            cp "target/${{ matrix.target }}/release/${{ matrix.lib_file }}" \
+              "target/smoke-libs/v156/${{ matrix.lib_file }}"
+
+            "$PACKAGER" \
+              --input "target/smoke-libs/v156/${{ matrix.lib_file }}" \
+              --output "dist/v2.0.0/$V2_PLATFORM/dggs_stream.duckdb_extension" \
+              --platform "$V2_PLATFORM" \
+              --duckdb-version v1.5.6
+
+            "$PACKAGER" \
+              --input "target/smoke-libs/v156/${{ matrix.lib_file }}" \
+              --output "dist/v2.0.0/$V2_PLATFORM/dggs_stream.duckdb_extension.gz" \
+              --platform "$V2_PLATFORM" \
+              --duckdb-version v1.5.6 \
+              --gzip
           fi
-          mkdir -p "dist/v2.0.0/$V2_PLATFORM"
-
-          CARGO_TARGET_DIR=target-v156 cargo build --locked --release --target ${{ matrix.target }} \
-            -p dggs_stream --lib --features duckdb-api-v1_5_6
-
-          cargo run --locked --release --bin package_extension -- \
-            --input target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-            --output "dist/v2.0.0/$V2_PLATFORM/dggs_stream.duckdb_extension" \
-            --platform "$V2_PLATFORM" \
-            --duckdb-version v1.5.6
-
-          cargo run --locked --release --bin package_extension -- \
-            --input target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }} \
-            --output "dist/v2.0.0/$V2_PLATFORM/dggs_stream.duckdb_extension.gz" \
-            --platform "$V2_PLATFORM" \
-            --duckdb-version v1.5.6 \
-            --gzip
 
           # Signed builds must verify before they are uploaded for release
           if [[ -n "${DUCKDB_EXTENSION_SIGNING_KEY:-}" ]]; then
             for ext in dist/v*/*/dggs_stream.duckdb_extension*; do
-              cargo run --locked --release --bin package_extension -- --verify "$ext"
+              "$PACKAGER" --verify "$ext"
             done
           fi
 
@@ -322,8 +355,8 @@ jobs:
           ${{ matrix.cli_prefix }} $DUCKDB_BIN -unsigned -bail -c "LOAD '$EXT_PATH'; SELECT h3_to_string(599686042433355775) AS cell_h3;"
           echo "Smoke test passed successfully on ${{ matrix.platform }}!"
 
-      # Runs real export SQL through the CLI downloaded above. Uses the host-built
-      # library so it matches the CLI's platform (osx_amd64 cross-compiles on arm64).
+      # Runs real export SQL through the CLI downloaded above against the release
+      # cdylib built for this matrix target (under Rosetta for osx_amd64).
       - name: Run DuckDB SQL Smoke Test
         if: matrix.cli_arch != ''
         shell: bash
@@ -332,9 +365,20 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             DUCKDB_BIN="$(cygpath -w "$(pwd)/duckdb.exe")"
           fi
+          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" && "$(uname -m)" == "arm64" ]]; then
+            printf '#!/bin/bash\nexec arch -x86_64 "%s" "$@"\n' "$DUCKDB_BIN" > duckdb-x86
+            chmod +x duckdb-x86
+            DUCKDB_BIN="$(pwd)/duckdb-x86"
+            export DUCKDB_PLATFORM=osx_amd64
+          fi
           export DUCKDB_BIN
-          cargo build --locked --release --lib
-          cargo test --locked --release -p dggs_stream --test it duckdb_sql_smoke -- --ignored
+          export DGGS_STREAM_LIBRARY="$(pwd)/target/smoke-libs/v120/${{ matrix.lib_file }}"
+          if [[ "${{ matrix.platform }}" != "osx_amd64" && ("${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4") ]]; then
+            SMOKE_PKGS=(-p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb)
+          else
+            SMOKE_PKGS=(-p dggs_stream)
+          fi
+          cargo test --locked --profile ci-test "${SMOKE_PKGS[@]}" --test it duckdb_sql_smoke -- --ignored
 
       - name: Run DuckDB 1.5.6 SQL Smoke Test
         if: matrix.cli_arch != ''
@@ -355,13 +399,25 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             DUCKDB_BIN="$(cygpath -w "$(pwd)/duckdb-1.5/duckdb.exe")"
           fi
+          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" && "$(uname -m)" == "arm64" ]]; then
+            printf '#!/bin/bash\nexec arch -x86_64 "%s" "$@"\n' "$DUCKDB_BIN" > duckdb-1.5/duckdb-x86
+            chmod +x duckdb-1.5/duckdb-x86
+            DUCKDB_BIN="$(pwd)/duckdb-1.5/duckdb-x86"
+            export DUCKDB_PLATFORM=osx_amd64
+          fi
           export DUCKDB_BIN
           export DUCKDB_VERSION=v1.2.0
+          export DGGS_STREAM_LIBRARY="$(pwd)/target/smoke-libs/v120/${{ matrix.lib_file }}"
           chmod +x "$DUCKDB_BIN" || true
-          cargo test --locked --release -p dggs_stream --test it duckdb_sql_smoke -- --ignored
+          if [[ "${{ matrix.platform }}" != "osx_amd64" && ("${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4") ]]; then
+            SMOKE_PKGS=(-p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb)
+          else
+            SMOKE_PKGS=(-p dggs_stream)
+          fi
+          cargo test --locked --profile ci-test "${SMOKE_PKGS[@]}" --test it duckdb_sql_smoke -- --ignored
 
       - name: Run DuckDB 2.0.0 SQL Smoke Test
-        if: matrix.cli_arch != ''
+        if: matrix.cli_arch != '' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4')
         shell: bash
         run: |
           mkdir -p duckdb-2.0
@@ -395,12 +451,17 @@ jobs:
             DUCKDB_PLATFORM=linux_amd64
           fi
           export DUCKDB_VERSION=v1.5.6
-          export DGGS_STREAM_LIBRARY="$(pwd)/target-v156/${{ matrix.target }}/release/${{ matrix.lib_file }}"
+          export DGGS_STREAM_LIBRARY="$(pwd)/target/smoke-libs/v156/${{ matrix.lib_file }}"
           chmod +x "$DUCKDB_BIN" || true
-          cargo test --locked --release -p dggs_stream --test it duckdb_sql_smoke -- --ignored
+          if [[ "${{ matrix.platform }}" != "osx_amd64" && ("${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4") ]]; then
+            SMOKE_PKGS=(-p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb)
+          else
+            SMOKE_PKGS=(-p dggs_stream)
+          fi
+          cargo test --locked --profile ci-test "${SMOKE_PKGS[@]}" --test it duckdb_sql_smoke -- --ignored
           # Signed install/load through CREATE EXTENSION REPOSITORY (no -unsigned), plus
           # rejection of unsigned and wrong-key extensions
-          cargo test --locked --release -p dggs_stream --test it duckdb_trusted_repository -- --ignored
+          cargo test --locked --profile ci-test "${SMOKE_PKGS[@]}" --test it duckdb_trusted_repository -- --ignored
 
       - name: Upload Extension Artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -431,14 +492,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
 
-      - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-community-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: community-build
 
       - name: make configure release
         run: make configure release
@@ -469,72 +526,73 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run tests
-        run: cargo test --locked --release --no-fail-fast -p dggs-stream-cli -p dggs-stream-python -p dggs-stream-pg
+        run: cargo test --locked --profile ci-test --no-fail-fast -p dggs-stream-cli -p dggs-stream-python -p dggs-stream-pg --lib --tests
 
       - name: Run pg-extension tests
-        run: cargo test --locked --release --no-fail-fast -p dggs-stream-pg --features pg-extension
+        run: cargo test --locked --profile ci-test --no-fail-fast -p dggs-stream-pg --features pg-extension --lib --tests
 
   # The Rust suites above drive the Python crate's C ABI. This runs the package itself,
   # `python/dggs_stream`, against real Polars and PyArrow, loading the in-tree package with
   # a freshly built cdylib (not an installed wheel; the wheel jobs smoke-test that).
-  # Dependency sets match the `python-polars` engine of manual-tests.yml: the declared
-  # minimums (pyproject: polars>=1.0, pyarrow>=14.0; pyarrow 14 needs numpy 1.x), the first
-  # Polars with register_io_source (1.4, so scan_raster pushdown runs), and latest.
+  # Builds the cdylib once and exercises all three dependency sets (declared minimums,
+  # first Polars with register_io_source, and latest) in isolated virtual environments.
   python-pytest:
-    name: Pytest (Polars & PyArrow, ${{ matrix.deps }} deps)
+    name: Pytest (Polars & PyArrow)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - deps: min
-            python: '3.11'
-            pip: polars==1.0.* pyarrow==14.* numpy<2
-          - deps: io-source-min
-            python: '3.11'
-            pip: polars==1.4.* pyarrow==14.* numpy<2
-          - deps: latest
-            python: '3.13'
-            pip: polars pyarrow
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
 
-      # One cache for the three dependency sets: they build the same library.
       - name: Rust Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: python-pytest
 
-      - name: Set up Python
+      - name: Build the Python cdylib
+        run: cargo build --locked --profile ci-test -p dggs-stream-python --lib
+
+      - name: Set up Python 3.11
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: ${{ matrix.python }}
+          python-version: '3.11'
 
-      - name: Install Polars and PyArrow (${{ matrix.deps }})
+      - name: Run pytest (min & io-source-min deps)
         env:
-          PIP_SPECS: ${{ matrix.pip }}
+          DGGS_STREAM_PYTHON_LIB: ${{ github.workspace }}/target/ci-test/libdggs_stream_python.so
         run: |
-          # Word-split the requirement list on purpose.
-          # shellcheck disable=SC2206
-          specs=($PIP_SPECS)
-          python -m pip install --upgrade pip
-          python -m pip install pytest h3 "${specs[@]}"
-          python -m pip list | grep -iE '^(polars|pyarrow|numpy|h3|pytest) '
+          run_suite() {
+            local name="$1"; shift
+            echo "::group::Pytest ($name deps)"
+            python -m venv ".venv-$name"
+            ".venv-$name/bin/python" -m pip install --upgrade pip
+            ".venv-$name/bin/python" -m pip install pytest h3 "$@"
+            ".venv-$name/bin/python" -m pip list | grep -iE '^(polars|pyarrow|numpy|h3|pytest) '
+            ".venv-$name/bin/python" -m pytest crates/dggs-stream-python/tests/pytest -ra -p no:cacheprovider
+            echo "::endgroup::"
+          }
+          run_suite min "polars==1.0.*" "pyarrow==14.*" "numpy<2"
+          run_suite io-source-min "polars==1.4.*" "pyarrow==14.*" "numpy<2"
 
-      - name: Build the Python cdylib
-        run: cargo build --locked --release -p dggs-stream-python --lib
+      - name: Set up Python 3.13
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
 
-      - name: Run pytest
+      - name: Run pytest (latest deps)
+        env:
+          DGGS_STREAM_PYTHON_LIB: ${{ github.workspace }}/target/ci-test/libdggs_stream_python.so
         run: |
-          export DGGS_STREAM_PYTHON_LIB="$PWD/target/release/libdggs_stream_python.so"
-          python -m pytest crates/dggs-stream-python/tests/pytest -ra -p no:cacheprovider
+          python -m venv .venv-latest
+          .venv-latest/bin/python -m pip install --upgrade pip
+          .venv-latest/bin/python -m pip install pytest h3 polars pyarrow
+          .venv-latest/bin/python -m pip list | grep -iE '^(polars|pyarrow|numpy|h3|pytest) '
+          .venv-latest/bin/python -m pytest crates/dggs-stream-python/tests/pytest -ra -p no:cacheprovider
 
   # dggs-stream-sedona is a standalone workspace (DataFusion pinned to SedonaDB's version, plus
   # its Python bindings), so the --workspace jobs above never see it. The `sedona-e2e` suite is left to manual runs:
@@ -598,22 +656,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Build the sedona image
-        run: docker build -f Dockerfile.sedona -t dggs_stream-sedona:ci .
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.sedona
+          load: true
+          tags: dggs_stream-sedona:ci
+          build-args: |
+            CARGO_PROFILE_RELEASE_LTO=off
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+          cache-from: type=gha,scope=sedona-spark
+          cache-to: type=gha,mode=max,scope=sedona-spark
 
-      - name: Run the Spark tests
-        run: |
-          docker run --rm -e SPARK_MASTER=local[2] dggs_stream-sedona:ci sh -c \
-            "pip3 install --no-cache-dir --break-system-packages pytest \
-             && python3 -m pytest -v -p no:cacheprovider /opt/dggs_stream/examples/tests"
-
-      # Filter pushdown in dggs_stream.spark needs Spark 4.1+, newer than the image's Spark 4.0:
-      # install PySpark 4.1 (with its own Spark jars) beside it for these tests only.
-      - name: Run the Spark 4.1 filter-pushdown tests
+      # Run both the image's Spark 4.0 demo suite and the Spark 4.1 filter-pushdown
+      # suite in a single container so pytest is installed once.
+      - name: Run the Spark 4.0 and 4.1 tests
         run: |
           docker run --rm -e SPARK_MASTER=local[2] -e PYTHONDONTWRITEBYTECODE=1 \
             -v "$PWD:/repo:ro" dggs_stream-sedona:ci sh -c \
             "pip3 install --no-cache-dir --break-system-packages pytest \
+             && python3 -m pytest -v -p no:cacheprovider /opt/dggs_stream/examples/tests \
              && pip3 install --no-cache-dir --break-system-packages --target /tmp/ps41 'pyspark==4.1.*' \
              && env -u SPARK_HOME PYTHONPATH=/tmp/ps41 \
                 python3 -m pytest -v -p no:cacheprovider /repo/crates/dggs-stream-python/tests/spark"
@@ -668,6 +734,9 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.wheels == 'true'
     uses: ./.github/workflows/wheels.yml
+    with:
+      skip_changes_check: true
+      all_platforms: ${{ needs.changes.outputs.wheel_packaging == 'true' }}
     permissions:
       contents: read
       pull-requests: read

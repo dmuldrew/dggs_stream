@@ -295,8 +295,14 @@ fn ensure_cdylib_built(pkg: &str, lib_stem: &str) -> PathBuf {
     // Cargo makes this a no-op when the library is already up to date.
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "-p", pkg, "--lib"]);
-    if dir.file_name().is_some_and(|n| n == "release") {
-        cmd.arg("--release");
+    match dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") | None => {}
+        Some("release") => {
+            cmd.arg("--release");
+        }
+        Some(profile) => {
+            cmd.args(["--profile", profile]);
+        }
     }
     // With `--target <triple>`, artifacts land in `target/<triple>/<profile>`.
     if let Some(triple) = dir
