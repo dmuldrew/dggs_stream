@@ -14,6 +14,7 @@ pub mod controller;
 pub mod coordinates;
 pub mod eviction_space;
 pub mod lifecycle;
+pub mod multiband;
 pub mod partial;
 pub mod partition;
 pub mod profile;

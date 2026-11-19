@@ -470,6 +470,8 @@ let paths = resolve_raster_sources("dem.tif")?;
 let reader = ContinuousBatchReader::open(&paths, &MultiResolutionConfig::new(vec![8]), None, 2048, None)?;
 ```
 
+For continuous statistics from several bands of one interleaved TIFF, `MultiBandStreamer` shares decoding and cell assignment and returns one accumulator per band. [Rust multi-band scans](docs/engines/core.md#multi-band-continuous-scans)
+
 Continuous readers build per-cell quantile sketches only when a configured quantile
 column is projected (or the full schema is requested). The schema is unchanged;
 `ContinuousBatchReader::tracks_quantiles()` reports the decision, and
