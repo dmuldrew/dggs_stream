@@ -13,9 +13,10 @@ use crate::raster::mosaic::MosaicReader;
 use crate::raster::prefetch::MosaicPrefetchItem;
 use crate::raster::RasterChunk;
 
-/// One worker window: (tile index, window bounds, borrowed samples, row stride, overlaps another tile).
+/// One worker window: (tile index, chunk index, window bounds, borrowed samples, row stride, overlaps another tile).
 pub(super) type WindowJob<'a> = (
     usize,
+    u32,
     RasterChunk,
     super::super::borrowed::BorrowedSamples<'a>,
     u32,
@@ -132,7 +133,7 @@ impl<'a> Iterator for WindowJobs<'a> {
                 }
             }
             self.remaining -= 1;
-            return Some((*tile, bounds, samples, width as u32, *overlap));
+            return Some((*tile, *index, bounds, samples, width as u32, *overlap));
         }
         None
     }

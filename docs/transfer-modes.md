@@ -47,7 +47,7 @@ Edges and NoData:
   when valid taps have zero total weight, including at the exact centre of a NoData pixel.
 - `bicubic` and `lanczos` fall back to `bilinear` when any of their taps is NoData, so NoData never
   leaks into a result.
-- Zero-alpha pixels count as NoData, as in the default mode.
+- Zero-alpha pixels and pixels marked invalid by an internal TIFF mask count as NoData, as in the default mode.
 
 ## `overlay`: area-weighted aggregation
 
@@ -74,7 +74,7 @@ Notes:
 - Cells whose diameter bound is above 500 km (the coarsest two or three resolutions of each grid)
   take whole pixels by centre: their edges bend too far from straight lines for exact clipping,
   and a single pixel is negligible next to such a cell.
-- Zero-alpha pixels count as NoData.
+- Zero-alpha pixels and pixels marked invalid by an internal TIFF mask count as NoData.
 
 ## Categorical rasters
 

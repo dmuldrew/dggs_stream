@@ -32,7 +32,7 @@ Modifiers:
 How they run:
 - **Bands of rows.** `interpolate` and `overlay` walk the raster in bands of rows. Each holds one
   band in memory, plus the cells still open across the band's edges.
-- **Pixels that are skipped.** Zero-alpha pixels are missing, as in the default mode. A
+- **Pixels that are skipped.** Zero-alpha pixels and pixels marked invalid by an internal TIFF mask are missing in every transfer mode. A
   `bbox` selects pixels by their centres, so cells larger than the box are kept.
 - **Very large cells.** In `overlay`, cells whose diameter bound is above 500 km take whole
   pixels by centre, because their edges are far from straight in pixel space. These are the
@@ -84,6 +84,12 @@ nested column type is `ArrowDataType::ValueHistogram` / `BinHistogram` with
 JSON Lines.
 
 ## NoData policy and rounding
+
+Scans read full-resolution, 1-bit TIFF transparency masks from image directories or
+SubIFDs. A zero bit excludes that pixel from every band, even when its stored value is
+valid. A set bit keeps the usual per-band NoData and alpha checks, so valid black pixels
+still contribute. Mask strips and tiles are decoded on demand for local and remote
+rasters. Supported mask compression methods are uncompressed, Deflate, LZW, and ZSTD.
 
 | Option | Values | Effect |
 | :--- | :--- | :--- |

@@ -71,7 +71,7 @@ fn large_tile_windows_are_lazy_and_cover_each_pixel_once() {
     assert_eq!(decoded_bytes, 4096 * 4096);
     let mut pixels = 0;
     let mut windows = 0;
-    while let Some((tile, chunk, samples, stride, overlap)) = jobs.next() {
+    while let Some((tile, _, chunk, samples, stride, overlap)) = jobs.next() {
         assert_eq!(tile, 0);
         assert_eq!(chunk.col_offset as usize - 7, pixels % 4096);
         assert_eq!(chunk.row_offset as usize - 11, pixels / 4096);
@@ -135,7 +135,7 @@ fn windows_combine_rows_and_preserve_interleaved_sample_offsets() {
     let jobs = WindowJobs::new(&items, &mosaic, 7, &mut decoded_bytes).unwrap();
     assert_eq!(jobs.len(), 4);
     let windows: Vec<_> = jobs
-        .map(|(_, chunk, samples, stride, _)| {
+        .map(|(_, _, chunk, samples, stride, _)| {
             let super::super::borrowed::BorrowedSamples::U8(samples) = samples else {
                 panic!("wrong sample type")
             };

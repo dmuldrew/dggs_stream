@@ -86,6 +86,16 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         if job_count == 0 {
             return Ok(());
         }
+        let mut masks = HashMap::new();
+        for item in items.iter().flatten() {
+            let (tile, index, bounds, _, _) = item;
+            let reader = &mosaic.tiles[*tile].reader;
+            if reader.has_internal_mask() && !reader.is_sparse_chunk(*index) {
+                if let Some(mask) = reader.read_mask(*bounds, &mut self.mask_cache)? {
+                    masks.insert((*tile, *index), mask);
+                }
+            }
+        }
         let mut free = std::mem::take(&mut self.worker_maps);
         let new_cells = std::mem::take(&mut self.new_cell_buffer);
         let key_chunks = std::mem::take(&mut self.key_chunk_buffer);
@@ -133,7 +143,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                 active.fetch_add(1, Ordering::Relaxed) + 1,
                 Ordering::Relaxed,
             );
-            let (tile_idx, chunk, samples, stride, overlap) = &job;
+            let (tile_idx, index, chunk, samples, stride, overlap) = &job;
             let tile = &mosaic.tiles[*tile_idx];
             let scope = super::super::profile::WorkerScope::new();
             // Telemetry is per window: one check here, clock reads only when asked for.
@@ -156,6 +166,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                 } else {
                     &[]
                 },
+                mask: masks.get(&(*tile_idx, *index)),
                 alpha_sample: tile.reader.metadata.alpha_sample,
                 emit_nodata: *emit_nodata,
                 histogram_bins: histogram_bins.as_deref(),

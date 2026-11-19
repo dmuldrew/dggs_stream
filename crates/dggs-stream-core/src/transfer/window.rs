@@ -24,6 +24,7 @@ pub struct RowWindow {
 /// two windows (or supplies an interpolation margin) is decoded once.
 #[derive(Default)]
 pub struct ChunkCache {
+    mask: crate::raster::geotiff::MaskChunkCache,
     chunks: HashMap<u32, Arc<Vec<f64>>>,
 }
 
@@ -31,6 +32,7 @@ impl ChunkCache {
     /// Forget every chunk (when moving to another tile).
     pub fn clear(&mut self) {
         self.chunks.clear();
+        self.mask = Default::default();
     }
 }
 
@@ -152,6 +154,16 @@ impl RowWindow {
                                     &mut out,
                                 )
                             });
+
+                            if let Some(mask) = tile.reader.read_mask(bounds, &mut cache.mask)? {
+                                for (i, value) in out.iter_mut().enumerate() {
+                                    let x = bounds.col_offset as usize + i % bounds.width as usize;
+                                    let y = bounds.row_offset as usize + i / bounds.width as usize;
+                                    if !mask.is_valid(x, y) {
+                                        *value = f64::NAN;
+                                    }
+                                }
+                            }
                         }
                         let decoded = Arc::new(out);
                         cache.chunks.insert(index, Arc::clone(&decoded));

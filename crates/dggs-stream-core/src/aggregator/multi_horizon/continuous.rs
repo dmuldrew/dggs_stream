@@ -234,6 +234,10 @@ impl<T: SimdSpanAccumulate> ScanlineEngine<T, ContinuousAccumulator> for Continu
         }
     }
 
+    fn masked_sample(&self) -> Option<Self::Sample> {
+        self.emit_nodata.then_some(f64::NAN)
+    }
+
     #[inline(always)]
     fn get_sample(&self, pixel: T) -> Option<f64> {
         let value = self.valid_sample(pixel);
