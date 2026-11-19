@@ -468,7 +468,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             Vec::new()
         };
         let mut slots: Vec<u64> = Vec::new();
-        let mut polygon = Vec::with_capacity(10);
+        let longitude_bounds = periodic_longitude_bounds(tile);
         let mut failures = 0;
         // Cells this large are assigned whole pixels by centre (see below).
         let coarse =
@@ -502,17 +502,26 @@ impl<A: TransferAccumulator> TransferStream<A> {
             let slot = slots.len() as u32;
             let before = overlaps.len();
             let end_row;
-            if !coarse && cell_polygon_in_pixels(self.grid, cell, tile, &mut polygon) {
-                end_row = polygon
-                    .iter()
-                    .fold(f64::NEG_INFINITY, |m, p| m.max(p.1))
-                    .ceil() as i64;
-                pixel_overlaps(&polygon, rows, width, |c, r, area| {
-                    if area > 1e-12 {
-                        let pixel = (r - rows.0) as usize * band_width + c as usize;
-                        overlaps.push((slot, pixel as u32, if weighted { area } else { 1.0 }));
+            let mut pieces = 0;
+            let mut last_row = f64::NEG_INFINITY;
+            if !coarse
+                && visit_cell_polygons(self.grid, cell, tile, longitude_bounds, |polygon| {
+                    pieces += 1;
+                    for &(_, row) in polygon {
+                        last_row = last_row.max(row);
                     }
-                });
+                    pixel_overlaps(polygon, rows, width, |c, r, area| {
+                        if area > 1e-12 {
+                            let pixel = (r - rows.0) as usize * band_width + c as usize;
+                            overlaps.push((slot, pixel as u32, if weighted { area } else { 1.0 }));
+                        }
+                    });
+                })
+            {
+                end_row = last_row.ceil() as i64;
+                if pieces > 1 {
+                    merge_seam_overlaps(&mut overlaps, before, weighted);
+                }
             } else if coarse || self.grid.interior_pole(cell).is_some() {
                 // A cell holding a pole has no polygon in a lon/lat raster, and the edges
                 // of a very large cell are far from straight in pixel space: such a cell
@@ -525,6 +534,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     }
                 }
             } else {
+                // A later longitude copy can fail after the first contributed.
+                overlaps.truncate(before);
                 failures += 1;
                 continue;
             }
@@ -903,57 +914,89 @@ fn to_pixel(tile: &TileDescriptor, lon: f64, lat: f64) -> Option<(f64, f64)> {
     Some(first)
 }
 
-/// Write the boundary of `cell` in the pixel coordinates of `tile` to `out`. `false`
-/// if the cell has no usable polygon there: a vertex could not be located, or the cell
-/// holds a pole of a lon/lat raster.
-fn cell_polygon_in_pixels(
+/// Two seam pieces can touch the same source pixel (e.g. a one-column
+/// global raster). Combine its weight before counting it or updating variance.
+fn merge_seam_overlaps(overlaps: &mut Vec<(u32, u32, f64)>, start: usize, weighted: bool) {
+    overlaps[start..].sort_unstable_by_key(|&(_, pixel, _)| pixel);
+    let mut end = start;
+    for i in start..overlaps.len() {
+        let entry = overlaps[i];
+        if end > start && overlaps[end - 1].1 == entry.1 {
+            if weighted {
+                overlaps[end - 1].2 += entry.2;
+            }
+        } else {
+            overlaps[end] = entry;
+            end += 1;
+        }
+    }
+    overlaps.truncate(end);
+}
+
+/// The continuous longitude extent of a tile whose longitude is affine in pixel space.
+fn periodic_longitude_bounds(tile: &TileDescriptor) -> Option<(f64, f64)> {
+    let meta = &tile.reader.metadata;
+    let gt = &meta.geotransform;
+    let dx = gt.a * f64::from(meta.width);
+    let dy = gt.b * f64::from(meta.height);
+    let west = gt.c0 + dx.min(0.0) + dy.min(0.0);
+    let east = gt.c0 + dx.max(0.0) + dy.max(0.0);
+    match tile.crs_transformer {
+        CrsTransformer::Wgs84Identity => Some((west, east)),
+        CrsTransformer::WebMercatorFast => {
+            use crate::crs::transformer::web_mercator_lon;
+            Some((web_mercator_lon(west), web_mercator_lon(east)))
+        }
+        _ => None,
+    }
+}
+
+/// Visit the cell polygon on each longitude branch touching the raster. A
+/// straddling cell uses the same accumulator for the pieces at its two edges.
+fn visit_cell_polygons(
     grid: GridKind,
     cell: u64,
     tile: &TileDescriptor,
-    out: &mut Vec<(f64, f64)>,
+    longitude_bounds: Option<(f64, f64)>,
+    mut visit: impl FnMut(&[(f64, f64)]),
 ) -> bool {
-    out.clear();
     let mut ring = [(0.0, 0.0); 10];
     let n = grid.boundary_lng_lat(cell, &mut ring);
-    if n < 3 {
+    if n < 3 || (longitude_bounds.is_some() && grid.interior_pole(cell).is_some()) {
         return false;
     }
-    let geographic = matches!(tile.crs_transformer, CrsTransformer::Wgs84Identity);
-    if geographic && grid.interior_pole(cell).is_some() {
-        return false;
-    }
-    let first_lon = ring[0].0;
-    for &(lon, lat) in &ring[..n] {
-        // In a lon/lat raster the ring must not jump at the antimeridian.
-        let lon = if geographic {
-            first_lon + ((lon - first_lon + 540.0).rem_euclid(360.0) - 180.0)
-        } else {
-            lon
-        };
-        match to_pixel_raw(tile, lon, lat) {
-            Some(point) => out.push(point),
-            None => return false,
+    let ring = &mut ring[..n];
+    let mut shifts = [0.0; 3];
+    let mut copies = 1;
+    if let Some((west, east)) = longitude_bounds {
+        let first = ring[0].0;
+        let mut left = first;
+        let mut right = first;
+        for (lon, _) in ring.iter_mut() {
+            *lon = first + ((*lon - first + 540.0).rem_euclid(360.0) - 180.0);
+            left = left.min(*lon);
+            right = right.max(*lon);
         }
-    }
-    if geographic {
-        // Bring the ring onto the raster's columns if it sits a whole turn away.
-        let width = f64::from(tile.reader.metadata.width);
-        let turn = (360.0 / tile.reader.metadata.geotransform.a).abs();
-        if turn.is_finite() && turn > 0.0 {
-            let centre = out.iter().map(|p| p.0).sum::<f64>() / out.len() as f64;
-            let shift = if centre < 0.0 && centre + turn < width + turn / 2.0 {
-                turn
-            } else if centre >= width && centre - turn > -turn / 2.0 {
-                -turn
-            } else {
-                0.0
-            };
-            if shift != 0.0 && (0.0..width).contains(&(centre + shift)) {
-                for point in out.iter_mut() {
-                    point.0 += shift;
-                }
+        // Anchor at the tile's longitude convention. On a single globe the
+        // ring and its immediate neighbours cover both possible seam pieces.
+        let centre_shift = (((west + east) * 0.5 - first) / 360.0).round() * 360.0;
+        copies = 0;
+        for shift in [centre_shift - 360.0, centre_shift, centre_shift + 360.0] {
+            if right + shift > west && left + shift < east {
+                shifts[copies] = shift;
+                copies += 1;
             }
         }
+    }
+    let mut pixels = [(0.0, 0.0); 10];
+    for &shift in &shifts[..copies] {
+        for (point, &(lon, lat)) in pixels.iter_mut().zip(ring.iter()) {
+            let Some(pixel) = to_pixel_raw(tile, lon + shift, lat) else {
+                return false;
+            };
+            *point = pixel;
+        }
+        visit(&pixels[..n]);
     }
     true
 }

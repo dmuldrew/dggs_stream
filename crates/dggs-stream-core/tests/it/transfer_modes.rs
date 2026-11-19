@@ -191,6 +191,79 @@ fn full_width_overlay_matches_a_regional_scan_inside_the_longitude_gap() {
 }
 
 #[test]
+fn overlay_counts_both_sides_of_each_global_longitude_seam() {
+    let grid = GridKind::H3;
+    let tile = |west: i32, width, epsg| {
+        let unit = if epsg == 3857 {
+            6_378_137.0 * 1_f64.to_radians()
+        } else {
+            1.0
+        };
+        TestGeoTiffBuilder::new(width, 4)
+            .epsg(epsg)
+            .origin(f64::from(west) * unit, 0.5 * unit)
+            .pixel_size(0.25 * unit)
+            .create_f32_tempfile(|c, _| {
+                if (west * 4 + c as i32).rem_euclid(720) < 360 {
+                    3.0
+                } else {
+                    11.0
+                }
+            })
+    };
+    for (west, epsg) in [(-180, 4326), (0, 4326), (-180, 3857), (0, 3857)] {
+        let (_global, full) = tile(west, 1440, epsg);
+        let (_region, region) = tile(west - 4, 32, epsg);
+        for (weighted, mass_preserve) in [(true, false), (true, true), (false, false)] {
+            let config = config(
+                grid,
+                4,
+                TransferMode::Overlay {
+                    weighted,
+                    mass_preserve,
+                },
+            );
+            let global = scan(&full, &config);
+            let mut crossing = 0;
+            for (id, reference) in scan(&region, &config) {
+                // Only cells straddling the seam receive both 3 and 11.
+                if reference.min == reference.max {
+                    continue;
+                }
+                crossing += 1;
+                let cell = &global[&id];
+                assert_eq!((cell.min, cell.max), (3.0, 11.0), "seam {west}, cell {id}");
+                assert!((cell.count - reference.count).abs() < 1e-8);
+                assert!((cell.sum - reference.sum).abs() < 1e-7);
+            }
+            assert!(crossing > 0);
+        }
+    }
+}
+
+#[test]
+fn seam_pieces_in_one_source_pixel_are_one_observation() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(1, 1)
+        .origin(-180.0, 0.125)
+        .pixel_size_xy(360.0, 0.25)
+        .create_f32_tempfile(|_, _| 7.0);
+    for weighted in [true, false] {
+        let mode = TransferMode::Overlay {
+            weighted,
+            mass_preserve: false,
+        };
+        let cells = scan(&path, &config(GridKind::H3, 4, mode));
+        assert!(!cells.is_empty());
+        for acc in cells.values() {
+            if !weighted {
+                assert_eq!(acc.count, 1.0);
+            }
+            assert_eq!(acc.sum_w2, acc.count * acc.count);
+        }
+    }
+}
+
+#[test]
 fn sampling_a_projected_raster_follows_its_crs() {
     // 30 m UTM zone 10N pixels; the field is linear in easting and northing.
     let field = |x: f64, y: f64| 0.01 * (x - 500_000.0) + 0.02 * (4_200_000.0 - y);

@@ -69,6 +69,8 @@ Notes:
 
 - A `bbox` selects pixels by their centres, as in the default mode, so cells reaching outside the
   box are kept with the pixels inside it.
+- On a full-width WGS84 geographic or Web Mercator raster, a cell crossing the longitude seam
+  receives pixel contributions from both edges, including when the raster uses 0–360° longitudes.
 - Cells whose diameter bound is above 500 km (the coarsest two or three resolutions of each grid)
   take whole pixels by centre: their edges bend too far from straight lines for exact clipping,
   and a single pixel is negligible next to such a cell.
