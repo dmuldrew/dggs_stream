@@ -623,3 +623,107 @@ fn interleaved_calibration_and_spectral_overflow_are_filtered() {
         }
     }
 }
+
+#[test]
+fn single_pass_band_statistics_match_independent_scans() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use dggs_stream_core::aggregator::output_policy::NodataPolicy;
+    use dggs_stream_core::aggregator::sampling::SamplingPattern;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calibrated-rgba.tif");
+    let xml = gdal_metadata(&[("scale", 2, 2.0), ("offset", 2, -10.0)]);
+    let tags = Tags {
+        extra_samples: Some(&[2]),
+        gdal_metadata: Some(&xml),
+        gdal_nodata: Some("250"),
+        ..Default::default()
+    };
+    let (w, h) = (24, 16);
+    let data: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            [
+                if i % w < 10 { 250 } else { (i % 41) as u8 },
+                19,
+                (i % 55) as u8,
+                if i % w > 17 { 0 } else { 255 },
+            ]
+        })
+        .collect();
+    write_tiff!(
+        colortype::RGB8,
+        &path,
+        w,
+        h,
+        (-122.45, 37.80),
+        &data[..],
+        &tags
+    );
+    let reader = GeoTiffStreamReader::open(&path).unwrap();
+    for bands in [&[][..], &[0], &[1, 1], &[5]] {
+        assert!(MultiBandStreamer::new(
+            reader.clone(),
+            &MultiResolutionConfig::default(),
+            Bands::Selected(bands)
+        )
+        .is_err());
+    }
+
+    for (selection, ids, policy) in [
+        (Bands::All, vec![1, 2, 3, 4], NodataPolicy::Omit),
+        (Bands::Selected(&[3, 1]), vec![3, 1], NodataPolicy::Emit),
+    ] {
+        let cfg = MultiResolutionConfig {
+            resolutions: vec![8, 10],
+            sampling: SamplingPattern::rgss(),
+            nodata_policy: policy,
+            quantiles: vec![QuantileTarget::Percentile(0.5, "p50".into())],
+            ..Default::default()
+        };
+        let mut stream = MultiBandStreamer::new(reader.clone(), &cfg, selection).unwrap();
+        let expected: Vec<_> = ids
+            .iter()
+            .map(|&band| {
+                run(
+                    &path,
+                    &MultiResolutionConfig {
+                        band,
+                        ..cfg.clone()
+                    },
+                )
+            })
+            .collect();
+        let mut keys: std::collections::HashSet<_> =
+            expected.iter().flat_map(|m| m.keys().copied()).collect();
+        loop {
+            let rows = stream.fetch_next_batch(7).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for r in rows {
+                let key = (r.resolution, r.cell_id);
+                assert!(keys.remove(&key));
+                assert_eq!(r.statistics.len(), ids.len());
+                for (actual, reference) in r.statistics.iter().zip(&expected) {
+                    let Some(want) = reference.get(&key) else {
+                        assert_eq!(actual.count, 0.0);
+                        continue;
+                    };
+                    for (a, b) in [
+                        (actual.count, want.count),
+                        (actual.sum, want.sum),
+                        (actual.sum_w2, want.sum_w2),
+                        (actual.m2, want.m2),
+                    ] {
+                        assert!((a - b).abs() < 1e-8);
+                    }
+                    assert_eq!((actual.min, actual.max), (want.min, want.max));
+                    if want.count > 0.0 {
+                        assert_eq!(actual.quantile(0.5), want.quantile(0.5));
+                    }
+                }
+            }
+        }
+        assert!(keys.is_empty());
+    }
+}

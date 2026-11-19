@@ -170,9 +170,9 @@ pub fn walk_direct<T, Acc, E, N>(
 /// Walk a window of `ctx.samples_per_pixel` interleaved values; `read` reduces
 /// one pixel's values (a band selection or spectral index) to a sample.
 #[inline(always)]
-pub fn walk_interleaved<T, Acc, E, R>(
+pub fn walk_interleaved<'a, T: 'a, Acc, E, R>(
     ctx: &WalkContext<'_>,
-    slice: &[T],
+    slice: &'a [T],
     read: R,
     engine: &E,
     maps: &mut [CellMap<Acc>],
@@ -180,7 +180,7 @@ pub fn walk_interleaved<T, Acc, E, R>(
     T: Copy,
     Acc: Clone,
     E: ScanlineEngine<T, Acc>,
-    R: Fn(&[T]) -> Option<E::Sample>,
+    R: Fn(&'a [T]) -> Option<E::Sample>,
 {
     walk(
         ctx,
@@ -238,9 +238,9 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn walk<T, Acc, E, N, R>(
+fn walk<'a, T: 'a, Acc, E, N, R>(
     ctx: &WalkContext<'_>,
-    slice: &[T],
+    slice: &'a [T],
     spp: usize,
     is_row_all_nodata: N,
     read: R,
@@ -252,7 +252,7 @@ fn walk<T, Acc, E, N, R>(
     Acc: Clone,
     E: ScanlineEngine<T, Acc>,
     N: Fn(&[T]) -> bool,
-    R: Fn(&[T]) -> Option<E::Sample>,
+    R: Fn(&'a [T]) -> Option<E::Sample>,
 {
     let owned_res: Vec<u8>;
     let res_u8s: &[u8] = if !ctx.resolution_u8s.is_empty() {
@@ -311,10 +311,10 @@ fn walk<T, Acc, E, N, R>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn walk_grid<T, Acc, E, N, R, B>(
+fn walk_grid<'a, T: 'a, Acc, E, N, R, B>(
     ctx: &WalkContext<'_>,
     res_u8s: &[u8],
-    slice: &[T],
+    slice: &'a [T],
     spp: usize,
     is_row_all_nodata: N,
     read: R,
@@ -326,7 +326,7 @@ fn walk_grid<T, Acc, E, N, R, B>(
     Acc: Clone,
     E: ScanlineEngine<T, Acc>,
     N: Fn(&[T]) -> bool,
-    R: Fn(&[T]) -> Option<E::Sample>,
+    R: Fn(&'a [T]) -> Option<E::Sample>,
     B: GridBackend,
 {
     let chunk = ctx.chunk;
