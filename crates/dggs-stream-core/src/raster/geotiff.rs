@@ -993,6 +993,13 @@ impl<'a> ChunkDecoder<'a> {
     }
 }
 
+// Per-thread instrumentation for tests of decoder lifetime; parallel scans and
+// unrelated tests cannot change the current thread's count.
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static DECODER_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl GeoTiffStreamReader {
     /// Expected decoded size of one full chunk. Without parsed chunk info the
     /// sample width is unknown, so assume the widest (8 bytes).
@@ -1288,6 +1295,8 @@ impl GeoTiffStreamReader {
     /// Create a persistent ChunkDecoder that reuses the TIFF decoder for multiple chunk reads.
     /// The decoder parses the IFD once and then seeks directly to tile data on each read_chunk call.
     pub fn open_decoder(&self) -> Result<ChunkDecoder<'_>> {
+        #[cfg(test)]
+        DECODER_OPENS.set(DECODER_OPENS.get() + 1);
         let remote_overlay = Arc::new(ReadOverlay::default());
         let inner = match &self.source {
             RasterSource::Local(mmap) => {
