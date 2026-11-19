@@ -112,6 +112,12 @@ fn continuous_table(
     .map_err(to_df_error)?
     .with_output_policy(args.output)
     .with_transfer(args.transfer);
+    if let Some(selector) = &args.bands {
+        if args.partition.is_some() || args.transfer != TransferMode::AssignCenters {
+            return plan_err!("{name}: bands requires unpartitioned center assignment");
+        }
+        provider = provider.with_bands(selector).map_err(to_df_error)?;
+    }
     if args.histogram.is_some() {
         return plan_err!("{name}: histogram options apply to the categorical function");
     }
@@ -127,6 +133,9 @@ fn categorical_table(
     exprs: &[Expr],
 ) -> Result<Arc<dyn TableProvider>> {
     let args = parse_args(name, default_grid, exprs)?;
+    if args.bands.is_some() {
+        return plan_err!("{name}: bands requires a continuous scan");
+    }
     let mut provider = CategoricalRasterTableProvider::try_new_with(
         &args.source,
         args.grid,
@@ -206,6 +215,7 @@ impl TableFunctionImpl for PlanPartitionsFunction {
 }
 
 struct Args {
+    bands: Option<String>,
     source: String,
     grid: GridKind,
     resolutions: ResolutionSpec,
@@ -310,6 +320,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         output: OutputPolicy::default(),
         transfer: TransferMode::AssignCenters,
         histogram: None,
+        bands: None,
     };
     let mut histogram = [None::<String>, None, None];
     let (mut transfer, mut interpolation) = (None::<String>, None::<String>);
@@ -326,6 +337,9 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                 }
             }
             e => match string_literal(e) {
+                Some(option) if option.starts_with("bands=") => {
+                    args.bands = Some(option[6..].to_owned());
+                }
                 // Partition specs are JSON objects; CRS strings never start with `{`.
                 Some(spec) if spec.trim_start().starts_with('{') && args.partition.is_none() => {
                     args.partition = Some(ScanPartition::from_json(spec).map_err(to_df_error)?)

@@ -13,3 +13,11 @@ query T
 SELECT h3_to_string(599686042433355775);
 ----
 85283473fffffff
+
+query III
+SELECT band_3_mean::INTEGER, band_1_count::INTEGER, (band_1_mean IS NULL)::INTEGER
+FROM raster_h3('crates/dggs-stream-core/tests/fixtures/multiband-rgb.tif', resolution := 12, bands := '3,1')
+ORDER BY band_3_mean;
+----
+8	1	0
+12	0	1

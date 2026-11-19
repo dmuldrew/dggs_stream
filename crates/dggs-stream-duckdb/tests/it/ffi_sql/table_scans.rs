@@ -184,6 +184,9 @@ fn test_continuous_quantile_pushdown_and_batched_columns() {
         // SAFETY: init installed a `RasterH3GlobalData` as `init_data`; it stays alive
         // until `init` is dropped below, after the guard is released.
         let global = unsafe { &*(init.init_data as *const RasterH3GlobalData) };
+        let RasterH3GlobalData::Single(global) = global else {
+            panic!("expected single band")
+        };
         let tracked = global.streamer.lock().unwrap().track_quantiles();
         drop(init);
         tracked

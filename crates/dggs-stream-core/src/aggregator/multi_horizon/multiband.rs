@@ -114,6 +114,10 @@ impl MultiBandStreamer {
         })
     }
 
+    pub fn transform_failures(&self) -> u64 {
+        self.inner.transform_failures()
+    }
+
     /// Read at most `max_rows` completed cells.
     pub fn fetch_next_batch(&mut self, max_rows: usize) -> Result<Vec<MultiBandRecord>> {
         self.inner.fetch_next_batch(max_rows)
