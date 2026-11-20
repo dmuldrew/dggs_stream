@@ -471,7 +471,7 @@ let paths = resolve_raster_sources("dem.tif")?;
 let reader = ContinuousBatchReader::open(&paths, &MultiResolutionConfig::new(vec![8]), None, 2048, None)?;
 ```
 
-For continuous statistics from several bands of one interleaved or band-separated TIFF, `MultiBandStreamer` shares decoding and cell assignment and returns one accumulator per band. [Rust multi-band scans](docs/engines/core.md#multi-band-continuous-scans)
+For continuous statistics from several bands of one interleaved or band-separated TIFF, `MultiBandStreamer` shares decoding and either center assignment or pixel–cell overlap calculations and returns one accumulator per band. [Rust multi-band scans](docs/engines/core.md#multi-band-continuous-scans)
 
 Select bands 3 and 1 with `--bands 3,1` in CLI IPC or JSONL output, `bands := '3,1'` in DuckDB, or `'bands=3,1'` in DataFusion and SedonaDB SQL. Each cell has columns such as `band_3_mean` and `band_1_count`. [DuckDB example](docs/engines/duckdb.md#multiple-bands-in-one-pass)
 

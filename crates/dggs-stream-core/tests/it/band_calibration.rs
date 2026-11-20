@@ -892,3 +892,105 @@ fn sparse_planar_band_has_no_observations_under_nodata_overrides() {
         assert!(drain(absent).is_empty());
     }
 }
+
+#[test]
+fn multiband_overlay_matches_masked_single_band_scans() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use dggs_stream_core::transfer::TransferMode;
+
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for layout in ["interleaved", "planar"] {
+        let path = fixtures.join(format!("multiband-12-{layout}.tif"));
+        for (weighted, mass_preserve, threshold) in [
+            (true, false, None),
+            (false, false, None),
+            (true, false, Some(0.5)),
+            (true, true, Some(1.0)),
+        ] {
+            let cfg = MultiResolutionConfig {
+                transfer: TransferMode::Overlay {
+                    weighted,
+                    mass_preserve,
+                },
+                valid_coverage_threshold: threshold,
+                quantiles: vec![QuantileTarget::Percentile(0.5, "p50".into())],
+                ..MultiResolutionConfig::single(11)
+            };
+            let single_profile = dggs_stream_core::run_profile::RunProfile::new();
+            let expected = [3, 1].map(|band| {
+                run(
+                    &path,
+                    &MultiResolutionConfig {
+                        profile: Some(single_profile.clone()),
+                        band,
+                        ..cfg.clone()
+                    },
+                )
+            });
+            let mut keys: std::collections::HashSet<_> =
+                expected.iter().flat_map(|m| m.keys().copied()).collect();
+            assert!(!keys.is_empty());
+            if threshold == Some(0.5) {
+                assert!(keys
+                    .iter()
+                    .any(|k| expected[0].contains_key(k) != expected[1].contains_key(k)));
+            }
+            let wide_profile = dggs_stream_core::run_profile::RunProfile::new();
+            let cfg = MultiResolutionConfig {
+                profile: Some(wide_profile.clone()),
+                ..cfg
+            };
+            let reader = GeoTiffStreamReader::open(&path).unwrap();
+            let mut scan = MultiBandStreamer::new(reader, &cfg, Bands::Selected(&[3, 1])).unwrap();
+            let mut totals = [0.0; 2];
+            loop {
+                let rows = scan.fetch_next_batch(13).unwrap();
+                if rows.is_empty() {
+                    break;
+                }
+                for row in rows {
+                    let key = (row.resolution, row.cell_id);
+                    assert!(keys.remove(&key));
+                    for (slot, stats) in row.statistics.iter().enumerate() {
+                        if let Some(want) = expected[slot].get(&key) {
+                            assert_eq!(
+                                (
+                                    stats.count,
+                                    stats.sum,
+                                    stats.min,
+                                    stats.max,
+                                    stats.quantile(0.5)
+                                ),
+                                (want.count, want.sum, want.min, want.max, want.quantile(0.5))
+                            );
+                            totals[slot] += stats.sum;
+                        } else {
+                            assert_eq!(stats.count, 0.0);
+                        }
+                    }
+                }
+            }
+            assert!(keys.is_empty());
+            let wide = wide_profile.report();
+            let separate = single_profile.report();
+            assert!(wide.chunks > 0);
+            assert_eq!(wide.chunks * 2, separate.chunks);
+            assert_eq!(wide.windows * 2, separate.windows);
+            if mass_preserve {
+                for (slot, band) in [3, 1].into_iter().enumerate() {
+                    let source: f64 = run(
+                        &path,
+                        &MultiResolutionConfig {
+                            band,
+                            ..MultiResolutionConfig::single(11)
+                        },
+                    )
+                    .values()
+                    .map(|a| a.sum)
+                    .sum();
+                    assert!((totals[slot] - source).abs() < source.abs() * 1e-10);
+                }
+            }
+        }
+    }
+}

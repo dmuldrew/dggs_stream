@@ -38,6 +38,23 @@ pub trait TransferAccumulator: Send + 'static {
     fn empty(track_quantiles: bool) -> Self;
     /// Add `value` with `weight`.
     fn add(&mut self, value: f64, weight: f64);
+    /// Initialize the selected bands of an overlay cell.
+    fn empty_bands(track_quantiles: bool, bands: usize) -> Self
+    where
+        Self: Sized,
+    {
+        debug_assert_eq!(bands, 1);
+        Self::empty(track_quantiles)
+    }
+    /// Add a contribution to one selected band.
+    fn add_band(&mut self, slot: usize, value: f64, weight: f64) {
+        debug_assert_eq!(slot, 0);
+        self.add(value, weight);
+    }
+    /// Discard bands below the required area. Keep the cell if any band qualifies.
+    fn retain_covered(&mut self, valid: &[f64], required: f64) -> bool {
+        valid[0] >= required
+    }
     /// Whether anything was added.
     fn has_samples(&self) -> bool;
     /// Whether the cell passes the configured output filters.
@@ -87,6 +104,41 @@ impl TransferAccumulator for ContinuousAccumulator {
         filters.min_count.is_none_or(|c| self.count >= c)
             && filters.min_mean.is_none_or(|m| mean >= m)
             && filters.max_mean.is_none_or(|m| mean <= m)
+    }
+}
+
+impl TransferAccumulator for Vec<ContinuousAccumulator> {
+    const CATEGORICAL: bool = false;
+    fn empty(track_quantiles: bool) -> Self {
+        Self::empty_bands(track_quantiles, 1)
+    }
+    fn empty_bands(track_quantiles: bool, bands: usize) -> Self {
+        (0..bands)
+            .map(|_| ContinuousAccumulator::empty(track_quantiles))
+            .collect()
+    }
+    fn add(&mut self, value: f64, weight: f64) {
+        self[0].add(value, weight);
+    }
+    fn add_band(&mut self, slot: usize, value: f64, weight: f64) {
+        self[slot].add(value, weight);
+    }
+    fn has_samples(&self) -> bool {
+        self.iter().any(TransferAccumulator::has_samples)
+    }
+    fn passes(&self, _: &Filters) -> bool {
+        true
+    } // Single-band row filters are rejected at bind time.
+    fn retain_covered(&mut self, valid: &[f64], required: f64) -> bool {
+        let mut keep = false;
+        for (stats, &area) in self.iter_mut().zip(valid) {
+            if area >= required {
+                keep = true;
+            } else {
+                stats.clear();
+            }
+        }
+        keep
     }
 }
 
@@ -143,7 +195,7 @@ struct Pending<A> {
 
 #[derive(Default)]
 struct BandCoverage {
-    valid_area: f64,
+    valid_area: Vec<f64>,
     covered_area: f64,
 }
 
@@ -158,6 +210,7 @@ pub struct TransferStream<A: TransferAccumulator> {
     grid: GridKind,
     mode: TransferMode,
     selection: BandSelection,
+    bands: Vec<usize>,
     emit_nodata: bool,
     bbox: Option<[f64; 4]>,
     track_quantiles: bool,
@@ -184,6 +237,14 @@ pub struct TransferStream<A: TransferAccumulator> {
 impl<A: TransferAccumulator> TransferStream<A> {
     /// A stream over `mosaic` for the non-default `config.transfer`.
     pub fn new(mosaic: Arc<MosaicReader>, config: &MultiResolutionConfig) -> Result<Self> {
+        Self::new_bands(mosaic, config, vec![config.band])
+    }
+
+    pub(crate) fn new_bands(
+        mosaic: Arc<MosaicReader>,
+        config: &MultiResolutionConfig,
+        bands: Vec<usize>,
+    ) -> Result<Self> {
         config.validate_coverage_threshold()?;
         let mode = config.transfer;
         let histogram_bins = config
@@ -227,7 +288,15 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let mut blocks = Vec::new();
         for &resolution in &config.resolutions {
             for (tile_idx, tile) in mosaic.tiles.iter().enumerate() {
-                plan_tile(grid, mode, resolution, tile_idx, tile, &mut blocks);
+                plan_tile(
+                    grid,
+                    mode,
+                    resolution,
+                    tile_idx,
+                    tile,
+                    bands.len(),
+                    &mut blocks,
+                );
             }
         }
         // Everything a later block can still emit lies south of this latitude.
@@ -243,6 +312,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             mosaic,
             grid,
             mode,
+            bands,
             selection: BandSelection {
                 band: config.band,
                 nodata: config.custom_nodata,
@@ -362,11 +432,14 @@ impl<A: TransferAccumulator> TransferStream<A> {
     fn load_window(&mut self, tile: &TileDescriptor, rows: Range<u32>) -> Result<RowWindow> {
         use crate::run_profile::{Counter, Phase, PhaseTimer};
         let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
-        let window = RowWindow::load(tile, self.selection, rows, &mut self.cache)?;
+        let before = self.cache.decoded_chunks;
+        let window =
+            RowWindow::load_bands(tile, &self.bands, self.selection, rows, &mut self.cache)?;
         if let (Some(profile), Some(timer)) = (&self.profile, timer) {
             timer.stop(profile, Phase::Decode);
+            profile.count(Counter::Chunks, self.cache.decoded_chunks - before);
             let pixels = u64::from(window.width()) * window.rows().len() as u64;
-            profile.count(Counter::DecodedBytes, pixels * 8);
+            profile.count(Counter::DecodedBytes, pixels * 8 * self.bands.len() as u64);
         }
         Ok(window)
     }
@@ -555,17 +628,23 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
             }
             pending.touched = true;
-            let sample = window.get(col, row);
-            if let Some(coverage) = coverage {
-                coverage.covered_area += area;
-                if sample.is_some() {
-                    coverage.valid_area += area;
-                }
+            let mut coverage = coverage;
+            if let Some(c) = coverage.as_mut() {
+                c.covered_area += area;
             }
-            if let Some(value) = sample.and_then(|v| {
-                Self::mapped(self.histogram_bins.as_deref(), self.remapper.as_deref(), v)
-            }) {
-                pending.acc.add(value, weight);
+            for slot in 0..self.bands.len() {
+                if let Some(sample) = window.band_value(slot, index) {
+                    if let Some(c) = coverage.as_mut() {
+                        c.valid_area[slot] += area;
+                    }
+                    if let Some(value) = Self::mapped(
+                        self.histogram_bins.as_deref(),
+                        self.remapper.as_deref(),
+                        sample,
+                    ) {
+                        pending.acc.add_band(slot, value, weight);
+                    }
+                }
             }
         };
         for cell in cells {
@@ -614,7 +693,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             let track_quantiles = self.track_quantiles;
             let grid = self.grid;
             let pending = self.pending.entry(cell).or_insert_with(|| Pending {
-                acc: A::empty(track_quantiles),
+                acc: A::empty_bands(track_quantiles, self.bands.len()),
                 touched: false,
                 end_row: None,
                 last_tile: if several_tiles {
@@ -632,10 +711,12 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
                 cell_ends.push((cell, overlaps.len()));
             } else {
-                let mut coverage = self
-                    .coverage_filter
-                    .as_mut()
-                    .map(|filter| filter.cells.entry(cell).or_default());
+                let mut coverage = self.coverage_filter.as_mut().map(|filter| {
+                    filter.cells.entry(cell).or_insert_with(|| BandCoverage {
+                        valid_area: vec![0.0; self.bands.len()],
+                        covered_area: 0.0,
+                    })
+                });
                 for (pixel, area) in overlaps.drain(..) {
                     contribute(
                         pending,
@@ -685,11 +766,14 @@ impl<A: TransferAccumulator> TransferStream<A> {
         // Deterministic output order within a band.
         done.sort_unstable();
         for cell in done {
-            if let Some(pending) = self.pending.remove(&cell) {
+            if let Some(mut pending) = self.pending.remove(&cell) {
                 let keep = pending.acc.has_samples() || (self.emit_nodata && pending.touched);
                 let valid = self.coverage_filter.as_mut().is_none_or(|filter| {
                     filter.cells.remove(&cell).is_some_and(|coverage| {
-                        coverage.valid_area >= filter.minimum * coverage.covered_area
+                        pending.acc.retain_covered(
+                            &coverage.valid_area,
+                            filter.minimum * coverage.covered_area,
+                        )
                     })
                 });
                 if keep && valid && pending.acc.passes(&self.filters) {
@@ -707,6 +791,7 @@ fn plan_tile(
     resolution: u8,
     tile_idx: usize,
     tile: &TileDescriptor,
+    band_count: usize,
     blocks: &mut Vec<Block>,
 ) {
     let (width, height) = (tile.reader.metadata.width, tile.reader.metadata.height);
@@ -723,7 +808,7 @@ fn plan_tile(
         TransferMode::Interpolate(method) => 2 * method.margin(),
         _ => 0,
     };
-    let window_rows = ((MAX_WINDOW_VALUES / width as usize) as u32)
+    let window_rows = ((MAX_WINDOW_VALUES / band_count / width as usize) as u32)
         .saturating_sub(margin)
         .max(1);
     // Whole chunk rows where the budgets allow, so chunks are not decoded twice.

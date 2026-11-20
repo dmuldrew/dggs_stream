@@ -53,7 +53,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--profile` | all | Print a runtime profile on stderr ([Scan Options](../scan-options.md#runtime-profile)) |
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
-| `--bands <list or all>` | `ipc`, `jsonl` | Select one-based bands of an interleaved or band-separated raster in one continuous center-assignment scan, e.g. `--bands 3,1 --columns h3_hex,band_3_mean,band_1_count`. |
+| `--bands <list or all>` | `ipc`, `jsonl` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,band_3_mean,band_1_count`. |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl` | Column projection, in the given order |
 | `--limit <N>` | `ipc`, `jsonl` | Maximum rows |
 | `--partition <SPEC\|@FILE>` | `ipc` | Scan one partition (see [Partitioned scans](#partitioned-scans)) |

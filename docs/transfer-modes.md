@@ -210,3 +210,5 @@ is disabled in both versions.
 | 1024 × 1024 | 6 | On | 81.9 → 65.5 ms | 51.9 → 51.9 MiB |
 | 128 × 128 | 9 | Off | 341.9 → 332.8 ms | 39.9 → 38.8 MiB |
 | 128 × 128 | 9 | On | 342.1 → 340.5 ms | 40.0 → 39.8 MiB |
+
+In a multi-band overlay, each pixel–cell intersection supplies the same geometric weight to every selected band with a valid observation. A coverage threshold applies to each band independently. A cell survives when any band passes. A band that falls below the threshold has zero count and a NULL mean. Mass-preserving overlay conserves the sum of valid pixel values independently for each band.

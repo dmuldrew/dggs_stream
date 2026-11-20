@@ -187,11 +187,12 @@ impl RasterTable for ContinuousTable {
                 || min_count.is_some()
                 || min_mean.is_some()
                 || max_mean.is_some()
-                || common.execution.valid_coverage_threshold.is_some()
-                || common.execution.transfer
-                    != dggs_stream_core::transfer::TransferMode::AssignCenters
+                || matches!(
+                    common.execution.transfer,
+                    dggs_stream_core::transfer::TransferMode::Interpolate(_)
+                )
             {
-                bind.set_error("bands requires center assignment and cannot be combined with band, formula, partition or single-band filters");
+                bind.set_error("bands requires center assignment or overlay and cannot be combined with band, formula, partition or single-band filters");
                 return None;
             }
             let bands = match resolve_bands(

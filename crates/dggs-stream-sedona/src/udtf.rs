@@ -38,7 +38,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::{TableFunctionArgs, TableFunctionImpl, TableProvider};
 use datafusion::common::{plan_err, ScalarValue};
 use datafusion::datasource::MemTable;
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 
 use crate::convert::to_df_error;
@@ -112,9 +112,14 @@ fn continuous_table(
     .map_err(to_df_error)?
     .with_output_policy(args.output)
     .with_transfer(args.transfer);
+    if let Some(threshold) = args.valid_coverage_threshold {
+        provider = provider
+            .with_valid_coverage_threshold(threshold)
+            .map_err(to_df_error)?;
+    }
     if let Some(selector) = &args.bands {
-        if args.partition.is_some() || args.transfer != TransferMode::AssignCenters {
-            return plan_err!("{name}: bands requires unpartitioned center assignment");
+        if args.partition.is_some() || matches!(args.transfer, TransferMode::Interpolate(_)) {
+            return plan_err!("{name}: bands requires unpartitioned center assignment or overlay");
         }
         provider = provider.with_bands(selector).map_err(to_df_error)?;
     }
@@ -145,6 +150,11 @@ fn categorical_table(
     .map_err(to_df_error)?
     .with_output_policy(args.output)
     .with_transfer(args.transfer);
+    if let Some(threshold) = args.valid_coverage_threshold {
+        provider = provider
+            .with_valid_coverage_threshold(threshold)
+            .map_err(to_df_error)?;
+    }
     if let Some(partition) = args.partition {
         provider = provider.with_partition(partition);
     }
@@ -216,6 +226,7 @@ impl TableFunctionImpl for PlanPartitionsFunction {
 
 struct Args {
     bands: Option<String>,
+    valid_coverage_threshold: Option<f64>,
     source: String,
     grid: GridKind,
     resolutions: ResolutionSpec,
@@ -259,6 +270,7 @@ fn transfer_option(text: &str) -> Option<(&str, &str)> {
         "interpolation",
         "overlay_weighted",
         "mass_preserve",
+        "valid_coverage_threshold",
     ]
     .contains(&key)
     .then_some((key, value.trim()))
@@ -321,6 +333,7 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
         transfer: TransferMode::AssignCenters,
         histogram: None,
         bands: None,
+        valid_coverage_threshold: None,
     };
     let mut histogram = [None::<String>, None, None];
     let (mut transfer, mut interpolation) = (None::<String>, None::<String>);
@@ -356,6 +369,13 @@ fn parse_args(name: &str, default_grid: GridKind, exprs: &[Expr]) -> Result<Args
                         "transfer" => transfer = Some(value.to_string()),
                         "interpolation" => interpolation = Some(value.to_string()),
                         "overlay_weighted" => overlay_weighted = Some(flag()?),
+                        "valid_coverage_threshold" => {
+                            args.valid_coverage_threshold = Some(value.parse().map_err(|_| {
+                                DataFusionError::Plan(format!(
+                                    "{name}: invalid valid_coverage_threshold {value}"
+                                ))
+                            })?);
+                        }
                         _ => mass_preserve = Some(flag()?),
                     }
                 }

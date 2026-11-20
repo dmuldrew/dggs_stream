@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-band overlay shares pixel–cell intersections across selected bands. Each band has its own valid coverage and statistics. Mass-preserving overlay conserves each band’s valid pixel sum.
+
 - Rust, CLI, DuckDB, and Python/Polars overlay scans support a minimum valid coverage fraction. Ordinary overlay now buffers overlaps one cell at a time to reduce peak memory when cells span many pixels.
 
 - CLI IPC and JSONL, DuckDB, and DataFusion/SedonaDB now expose multi-band continuous scans. Select bands in order or request all bands for one row per cell with band-prefixed statistics.

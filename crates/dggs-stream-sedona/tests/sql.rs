@@ -36,6 +36,22 @@ async fn wide_band_sql_projection_and_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn wide_band_overlay_shares_cell_weights() {
+    let ctx = context();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../dggs-stream-core/tests/fixtures/multiband-rgb.tif"
+    );
+    let sql = format!("SELECT SUM(band_3_sum), SUM(band_1_count) FROM h3_raster_continuous_aggregate('{path}',12,'bands=3,1','transfer=overlay','mass_preserve=true')");
+    let batches = collect(&ctx, &sql).await;
+    assert!((batches[0].column(0).as_primitive::<Float64Type>().value(0) - 20.0).abs() < 1e-9);
+    assert!((batches[0].column(1).as_primitive::<Float64Type>().value(0) - 1.0).abs() < 1e-9);
+    let sql = format!("SELECT band_3_mean FROM h3_raster_continuous_aggregate('{path}',12,'bands=3,1','transfer=overlay','valid_coverage_threshold=1') WHERE band_1_count=0");
+    let batches = collect(&ctx, &sql).await;
+    assert!(rows(&batches) > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_function_counts_and_projects() {
     let tif = gradient_tif(64, 64);
     let ctx = context();
