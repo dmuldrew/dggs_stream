@@ -941,6 +941,10 @@ fn multiband_overlay_matches_masked_single_band_scans() {
                 ..cfg
             };
             let reader = GeoTiffStreamReader::open(&path).unwrap();
+            // A planar scan reads both selected planes plus alpha. An interleaved
+            // scan reads one physical chunk containing all three samples.
+            let expected_chunks = u64::from(reader.chunk_layout.total_chunks)
+                * if layout == "planar" { 3 } else { 1 };
             let mut scan = MultiBandStreamer::new(reader, &cfg, Bands::Selected(&[3, 1])).unwrap();
             let mut totals = [0.0; 2];
             loop {
@@ -973,8 +977,7 @@ fn multiband_overlay_matches_masked_single_band_scans() {
             assert!(keys.is_empty());
             let wide = wide_profile.report();
             let separate = single_profile.report();
-            assert!(wide.chunks > 0);
-            assert_eq!(wide.chunks * 2, separate.chunks);
+            assert_eq!(wide.chunks, expected_chunks);
             assert_eq!(wide.windows * 2, separate.windows);
             if mass_preserve {
                 for (slot, band) in [3, 1].into_iter().enumerate() {

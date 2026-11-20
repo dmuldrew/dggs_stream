@@ -432,12 +432,16 @@ impl<A: TransferAccumulator> TransferStream<A> {
     fn load_window(&mut self, tile: &TileDescriptor, rows: Range<u32>) -> Result<RowWindow> {
         use crate::run_profile::{Counter, Phase, PhaseTimer};
         let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
-        let before = self.cache.decoded_chunks;
-        let window =
-            RowWindow::load_bands(tile, &self.bands, self.selection, rows, &mut self.cache)?;
+        let window = RowWindow::load_bands(
+            tile,
+            &self.bands,
+            self.selection,
+            rows,
+            &mut self.cache,
+            self.profile.as_deref(),
+        )?;
         if let (Some(profile), Some(timer)) = (&self.profile, timer) {
             timer.stop(profile, Phase::Decode);
-            profile.count(Counter::Chunks, self.cache.decoded_chunks - before);
             let pixels = u64::from(window.width()) * window.rows().len() as u64;
             profile.count(Counter::DecodedBytes, pixels * 8 * self.bands.len() as u64);
         }

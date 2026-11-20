@@ -24,7 +24,6 @@ pub struct RowWindow {
 /// two windows (or supplies an interpolation margin) is decoded once.
 #[derive(Default)]
 pub struct ChunkCache {
-    pub(super) decoded_chunks: u64,
     mask: crate::raster::geotiff::MaskChunkCache,
     chunks: HashMap<u32, Arc<Vec<f64>>>,
 }
@@ -100,7 +99,7 @@ impl RowWindow {
         rows: Range<u32>,
         cache: &mut ChunkCache,
     ) -> Result<Self> {
-        Self::load_bands(tile, &[selection.band], selection, rows, cache)
+        Self::load_bands(tile, &[selection.band], selection, rows, cache, None)
     }
 
     pub(super) fn load_bands(
@@ -109,6 +108,7 @@ impl RowWindow {
         selection: BandSelection,
         rows: Range<u32>,
         cache: &mut ChunkCache,
+        profile: Option<&crate::run_profile::RunProfile>,
     ) -> Result<Self> {
         debug_assert!(!bands.is_empty());
         let meta = &tile.reader.metadata;
@@ -173,7 +173,12 @@ impl RowWindow {
                                 slot @ None => slot.insert(tile.reader.open_decoder()?),
                             };
                             let (_, data) = decoder.read_chunk(index)?;
-                            cache.decoded_chunks += 1;
+                            if let Some(profile) = profile {
+                                profile.count(
+                                    crate::run_profile::Counter::Chunks,
+                                    tile.reader.physical_chunks_present(index),
+                                );
+                            }
                             let samples = BorrowedSamples::from(&data);
                             crate::dispatch_samples!(samples, nodata, |slice, nd| {
                                 for &(layout, scaling) in &layouts {
