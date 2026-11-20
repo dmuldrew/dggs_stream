@@ -6,6 +6,13 @@ name: Python Wheels
 
 on:
   workflow_call:
+    inputs:
+      skip_changes_check:
+        type: boolean
+        default: false
+      all_platforms:
+        type: boolean
+        default: true
   workflow_dispatch:
 
 concurrency:
@@ -15,9 +22,10 @@ concurrency:
 jobs:
   # Skips the build on pull requests and pushes that only touch documentation. Skipped
   # jobs count as passing, so this stays compatible with required status checks. Tag
-  # pushes and manual runs always build.
+  # pushes, manual runs, and callers that already ran paths-filter skip this job.
   changes:
     name: Detect code changes
+    if: ${{ !inputs.skip_changes_check }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,23 +56,16 @@ jobs:
   wheels:
     name: Wheels (${{ matrix.name }})
     needs: [changes]
-    if: needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && needs.changes.result != 'failure' && (inputs.skip_changes_check || needs.changes.outputs.code == 'true') }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: manylinux x86_64
-            os: ubuntu-24.04
-          - name: manylinux aarch64
-            os: ubuntu-24.04-arm
-          # macOS arm64 natively plus x86_64 cross-compiled (tested under Rosetta).
-          - name: macOS arm64 + x86_64
-            os: macos-latest
-          - name: Windows x86_64
-            os: windows-latest
+        # On normal PRs, validate the Linux x86_64 wheel only; main pushes, tags,
+        # manual runs, and PRs touching wheel packaging run all 4 platforms.
+        include: ${{ fromJSON((inputs.all_platforms || github.event_name != 'pull_request') && '[{"name":"manylinux x86_64","os":"ubuntu-24.04"},{"name":"manylinux aarch64","os":"ubuntu-24.04-arm"},{"name":"macOS arm64 + x86_64","os":"macos-latest"},{"name":"Windows x86_64","os":"windows-latest"}]' || '[{"name":"manylinux x86_64","os":"ubuntu-24.04"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -75,6 +76,12 @@ jobs:
         with:
           toolchain: '1.97.1'
           targets: ${{ runner.os == 'macOS' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
+
+      - name: Rust Cache
+        if: runner.os != 'Linux'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: wheels-${{ runner.os }}
 
       - name: Build and test wheels
         uses: pypa/cibuildwheel@f9b966cfadf4109556cadc5bb39ddb72d0ce664e # v4.3.5

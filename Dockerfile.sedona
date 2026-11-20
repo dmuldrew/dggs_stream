@@ -34,7 +34,11 @@ COPY src/ ./src/
 COPY tests/ ./tests/
 COPY examples/ ./examples/
 
-ENV DGGS_STREAM_WORKSPACE=/build
+ARG CARGO_PROFILE_RELEASE_LTO=thin
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV DGGS_STREAM_WORKSPACE=/build \
+    CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO} \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 # Drop Cargo's build directory in the same step: only the wheel is needed, and keeping
 # target/ would leave several GB in the build cache.
 RUN pip install --no-cache-dir "hatchling>=1.26" \

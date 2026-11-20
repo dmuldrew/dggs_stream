@@ -50,11 +50,15 @@ jobs:
       # The pg fmgr entry points and their tests/it suite build only with
       # `pg-extension`, which the other crates do not take, so run it apart and
       # merge both runs into one report.
+      # `--workspace` is required on `report` because the root package causes
+      # cargo-llvm-cov to ignore all member crates under `crates/` by default.
       - name: Collect coverage
         run: |
-          cargo llvm-cov --locked --no-report -p dggs-stream-core -p dggs-stream-cli -p dggs-stream-python --lib --test it
+          cargo llvm-cov --locked --no-report -p dggs-stream-core -p dggs-stream-cli -p dggs-stream-python -p dggs-stream-duckdb --lib --test it
           cargo llvm-cov --locked --no-report -p dggs-stream-pg --features pg-extension --lib --test it
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --workspace --lcov --output-path lcov.info
+          test -s lcov.info
+          cargo llvm-cov report --workspace --summary-only
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

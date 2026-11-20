@@ -18,9 +18,13 @@ use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
 use dggs_stream_core::aggregator::output_policy::{ContinuousStats, OutputPolicy};
 
+use dggs_stream_core::columnar::multiband::{resolve_bands, wide_schema, MultiBandBatchReader};
+use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
+
 /// User-data bound during table function query compilation
 pub struct RasterH3BindData {
     pub common: CommonRasterParams,
+    pub bands: Option<Vec<usize>>,
     pub spectral_formula: Option<SpectralFormula>,
     pub min_count: Option<f64>,
     pub min_mean: Option<f64>,
@@ -31,7 +35,12 @@ pub struct RasterH3BindData {
 }
 
 /// Global scan state holding the streaming multi-core horizon aggregator and concurrent batch queue
-pub struct RasterH3GlobalData {
+pub enum RasterH3GlobalData {
+    Single(Box<SingleBandGlobal>),
+    Wide(Box<Mutex<MultiBandBatchReader>>),
+}
+
+pub struct SingleBandGlobal {
     pub grid: GridKind,
     pub streamer: Mutex<MultiScanHorizonStreamer>,
     pub record_queue: ConcurrentRecordQueue<ScanRow<MultiContinuousRecord>>,
@@ -103,6 +112,7 @@ impl RasterTable for ContinuousTable {
     unsafe fn register_named_parameters(tf: duckdb_table_function) {
         // SAFETY: `tf` is a live, unregistered table function (caller contract).
         unsafe {
+            add_named_parameter(tf, "bands", DuckDBType::Varchar);
             add_named_parameter(tf, "chunk_size", DuckDBType::BigInt);
             add_named_parameter(tf, "formula", DuckDBType::Varchar);
             add_named_parameter(tf, "nir_band", DuckDBType::BigInt);
@@ -170,28 +180,72 @@ impl RasterTable for ContinuousTable {
             return None;
         }
 
-        bind.add_result_column(common.grid.index_column_name(), DuckDBType::UBigInt);
-        bind.add_result_column(common.grid.hex_column_name(), DuckDBType::Varchar);
-        bind.add_result_column("mean", DuckDBType::Double);
-        bind.add_result_column("stddev", DuckDBType::Double);
-        bind.add_result_column("count", DuckDBType::Double);
-        bind.add_result_column("min", DuckDBType::Double);
-        bind.add_result_column("max", DuckDBType::Double);
-        bind.add_result_column("sum", DuckDBType::Double);
-        bind.add_result_column("resolution", DuckDBType::UTinyInt);
-        bind.add_result_column("wkb", DuckDBType::Blob);
-        if common.emit_geom {
-            // SAFETY: `bind` wraps the live bind info (caller contract).
-            unsafe { add_geom_column(bind) };
-        }
-        for target in &quantiles {
-            bind.add_result_column(target.column_name(), DuckDBType::Double);
-        }
-        if partition.is_some() {
-            bind.add_result_column(PARTIAL_STATE_COLUMN, DuckDBType::Blob);
-        }
+        let bands = if let Some(selector) = bind.get_named_string("bands") {
+            if bind.get_named_int("band").is_some()
+                || bind.get_named_string("formula").is_some()
+                || partition.is_some()
+                || min_count.is_some()
+                || min_mean.is_some()
+                || max_mean.is_some()
+                || common.execution.transfer
+                    != dggs_stream_core::transfer::TransferMode::AssignCenters
+            {
+                bind.set_error("bands requires center assignment and cannot be combined with band, formula, partition or single-band filters");
+                return None;
+            }
+            let bands = match resolve_bands(
+                &common.resolved_paths,
+                &selector,
+                common.remote_source_factory.as_ref(),
+            ) {
+                Ok(bands) => bands,
+                Err(e) => {
+                    bind.set_error(&e.to_string());
+                    return None;
+                }
+            };
+            for field in wide_schema(common.grid, &bands, &quantiles).fields {
+                let ty = match field.data_type {
+                    ArrowDataType::UInt64 => DuckDBType::UBigInt,
+                    ArrowDataType::UInt8 => DuckDBType::UTinyInt,
+                    ArrowDataType::Utf8 => DuckDBType::Varchar,
+                    ArrowDataType::Binary => DuckDBType::Blob,
+                    ArrowDataType::Float64 => DuckDBType::Double,
+                    _ => unreachable!("continuous schema"),
+                };
+                bind.add_result_column(&field.name, ty);
+            }
+            if common.emit_geom {
+                // SAFETY: the bind callback owns the live bind info.
+                unsafe { add_geom_column(bind) };
+            }
+            Some(bands)
+        } else {
+            bind.add_result_column(common.grid.index_column_name(), DuckDBType::UBigInt);
+            bind.add_result_column(common.grid.hex_column_name(), DuckDBType::Varchar);
+            bind.add_result_column("mean", DuckDBType::Double);
+            bind.add_result_column("stddev", DuckDBType::Double);
+            bind.add_result_column("count", DuckDBType::Double);
+            bind.add_result_column("min", DuckDBType::Double);
+            bind.add_result_column("max", DuckDBType::Double);
+            bind.add_result_column("sum", DuckDBType::Double);
+            bind.add_result_column("resolution", DuckDBType::UTinyInt);
+            bind.add_result_column("wkb", DuckDBType::Blob);
+            if common.emit_geom {
+                // SAFETY: `bind` wraps the live bind info (caller contract).
+                unsafe { add_geom_column(bind) };
+            }
+            for target in &quantiles {
+                bind.add_result_column(target.column_name(), DuckDBType::Double);
+            }
+            if partition.is_some() {
+                bind.add_result_column(PARTIAL_STATE_COLUMN, DuckDBType::Blob);
+            }
 
+            None
+        };
         Some(RasterH3BindData {
+            bands,
             common,
             spectral_formula,
             min_count,
@@ -217,6 +271,33 @@ impl RasterTable for ContinuousTable {
         config.min_count = bind.min_count;
         config.min_mean = bind.min_mean;
         config.max_mean = bind.max_mean;
+        if let Some(bands) = &bind.bands {
+            config.quantiles = bind.quantiles.clone();
+            let [tile] = mosaic.tiles.as_slice() else {
+                return Err("bands requires one input raster".into());
+            };
+            let mut projection = projected_columns;
+            if bind.common.emit_geom {
+                let geom = wide_schema(config.grid, bands, &config.quantiles)
+                    .fields
+                    .len();
+                for col in &mut projection {
+                    if *col == geom {
+                        *col = 3;
+                    }
+                } // geom uses WKB bytes.
+            }
+            let reader = MultiBandBatchReader::open(
+                tile.reader.clone(),
+                &config,
+                bands,
+                Some(&projection),
+                get_vector_size(),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(RasterH3GlobalData::Wide(Box::new(Mutex::new(reader))));
+        }
         // Build per-cell sketches only if the query selects a quantile column;
         // DuckDB includes filter columns in the projection, so WHERE clauses on
         // quantiles still get them.
@@ -234,7 +315,7 @@ impl RasterTable for ContinuousTable {
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)
             .map_err(|e| format!("Failed to initialize multi-streamer: {}", e))?;
 
-        Ok(RasterH3GlobalData {
+        Ok(RasterH3GlobalData::Single(Box::new(SingleBandGlobal {
             policy,
             grid: bind.common.grid,
             streamer: Mutex::new(streamer),
@@ -243,7 +324,7 @@ impl RasterTable for ContinuousTable {
             quantiles: bind.quantiles.clone(),
             emit_geom: bind.common.emit_geom,
             partial_state_column: bind.partition.as_ref().map(|_| q_end_col),
-        })
+        })))
     }
 
     unsafe fn scan(global: &RasterH3GlobalData, ctx: &mut ScanContext<'_>) {
@@ -252,6 +333,13 @@ impl RasterTable for ContinuousTable {
         // arm writes values of exactly the physical type that column was declared with
         // at bind time (see the column map).
         unsafe {
+            let global = match global {
+                RasterH3GlobalData::Wide(reader) => {
+                    scan_wide(reader, ctx);
+                    return;
+                }
+                RasterH3GlobalData::Single(single) => single,
+            };
             let proj_cols = &global.projected_columns;
             let Some((batch, mut writer)) = ctx.next_batch(
                 &global.record_queue,
@@ -371,6 +459,60 @@ impl RasterTable for ContinuousTable {
 
             writer.set_size(batch_len);
         }
+    }
+}
+
+/// Write a projected wide batch to the matching bound DuckDB vectors.
+///
+/// # Safety
+/// The callback owns the live output chunk with the schema declared at bind.
+unsafe fn scan_wide(reader: &Mutex<MultiBandBatchReader>, ctx: &ScanContext<'_>) {
+    // SAFETY: types and order follow the bound projection and the reader caps rows at DuckDB's vector size.
+    unsafe {
+        let batch = match reader.lock().unwrap_or_else(|e| e.into_inner()).next() {
+            None => {
+                duckdb_data_chunk_set_size(ctx.output, 0);
+                return;
+            }
+            Some(Err(e)) => {
+                ctx.fail(&e.to_string());
+                return;
+            }
+            Some(Ok(batch)) => batch,
+        };
+        let mut writer = crate::functions::ChunkWriter::new(ctx.output);
+        for (i, col) in batch.columns.into_iter().enumerate() {
+            match col {
+                ColumnArray::Float64 { values, validity } => {
+                    writer.fill_column(i, batch.num_rows, values);
+                    if let Some(valid) = validity {
+                        for (r, ok) in valid.into_iter().enumerate() {
+                            if !ok {
+                                writer.set_null(i, r);
+                            }
+                        }
+                    }
+                }
+                ColumnArray::UInt64 { values, .. } => writer.fill_column(i, batch.num_rows, values),
+                ColumnArray::UInt8 { values, .. } => writer.fill_column(i, batch.num_rows, values),
+                ColumnArray::Utf8 { values, .. } => {
+                    for (r, s) in values.iter().enumerate() {
+                        writer.set_string(i, r, s);
+                    }
+                }
+                ColumnArray::Binary { values, .. } => {
+                    for (r, b) in values.iter().enumerate() {
+                        if b.is_empty() {
+                            writer.set_null(i, r);
+                        } else {
+                            writer.set_string_bytes(i, r, b);
+                        }
+                    }
+                }
+                _ => unreachable!("continuous schema"),
+            }
+        }
+        writer.set_size(batch.num_rows);
     }
 }
 

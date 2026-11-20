@@ -50,6 +50,7 @@ fn print_help() {
           --emit-nodata-value <NUM>  Value of an all-NoData cell's statistics under\n                                     \
                                      `--nodata-policy emit` (default: null)\n  \
           --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
+          --bands <LIST|all>         Wide continuous IPC/JSONL statistics, e.g. --bands 3,1\n  \
           --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
                                      each pixel into the cell holding its centre),\n                                     \
                                      interpolate (each cell takes the value interpolated\n                                     \
@@ -99,7 +100,15 @@ fn reject_partition(opts: &dggs_stream_cli::CliStreamOptions, subcmd: &str) -> R
     Ok(())
 }
 
-fn reject_histogram(opts: &dggs_stream_cli::CliStreamOptions, subcmd: &str) -> Result<()> {
+fn reject_stream_only_options(
+    opts: &dggs_stream_cli::CliStreamOptions,
+    subcmd: &str,
+) -> Result<()> {
+    if opts.bands.is_some() {
+        return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(
+            format!("--bands supports ipc and jsonl, not {subcmd}"),
+        ));
+    }
     if opts.histogram.is_some() {
         return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(format!(
             "{subcmd} does not take --histogram: its files have no histogram column; use `ipc` or `jsonl`"
@@ -142,7 +151,7 @@ fn main() {
             .and_then(|(opts, out)| with_output(out, |mut w| merge_partition_files(&opts, &mut w))),
         "parquet" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
             reject_partition(&opts, "parquet")?;
-            reject_histogram(&opts, "parquet")?;
+            reject_stream_only_options(&opts, "parquet")?;
             let out_path = out.ok_or_else(|| {
                 dggs_stream_core::error::DggsStreamError::InvalidParameter(
                     "Missing -o / --output path for parquet export".into(),
@@ -153,7 +162,7 @@ fn main() {
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
             reject_partition(&opts, "pmtiles")?;
-            reject_histogram(&opts, "pmtiles")?;
+            reject_stream_only_options(&opts, "pmtiles")?;
             let out_path = out.ok_or_else(|| {
                 dggs_stream_core::error::DggsStreamError::InvalidParameter(
                     "Missing -o / --output path for pmtiles export".into(),

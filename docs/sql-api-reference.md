@@ -42,6 +42,7 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `decode_budget_mb` | `BIGINT` | `256` | Memory for decoded chunks held at once (decoding, queued, being aggregated, idle for reuse), in MiB. Decoding waits for room; a single chunk larger than the budget is decoded only when no other is held. |
 | `compaction_budget_mb` | `BIGINT` | `None` | Opt-in limit on pending `compact` sibling groups, in MiB. Past it, the groups nearest completion are emitted as individual children. Samples and totals are unchanged, but which groups compact can vary between runs. Unset keeps compaction deterministic and its memory unbounded. |
 | `strict_transforms` | `BOOLEAN` | `false` | Fail the query when a valid sample point cannot be transformed to WGS84 (wrong or out-of-domain CRS) instead of skipping it. See [transform-failure diagnostics](engines/core.md#transform-failure-diagnostics). |
+| `bands` | `VARCHAR` | omitted | Ordered band numbers (e.g. '3,1') or 'all' for wide continuous statistics on one interleaved raster with center assignment. |
 | `formula` | `VARCHAR` | `None` | Spectral index formula: `'ndvi'`, `'ndwi'`, `'nbr'`, `'evi'`. Requires multi-band raster. |
 | `nir_band`, `red_band`, `green_band`, `blue_band`, `swir_band` | `BIGINT` | `auto` | 1-indexed band assignments for spectral index formulas. |
 | `min_count` | `DOUBLE` | `None` | Minimum weighted pixel count threshold — cells below this are excluded from output. |
@@ -113,6 +114,15 @@ has positive area as MVT 2.1 requires, a cell crossing the antimeridian is drawn
 tile's side of the seam (and on both sides in the z0 world tile), and the two pole cells are
 polar caps closed along the map's top or bottom edge. Cells lying wholly beyond Web
 Mercator's ±85.05° limit flatten onto that edge.
+
+### Single-pass multi-band output
+
+```sql
+SELECT h3_index, band_3_mean, band_1_count
+FROM raster_h3('imagery.tif', resolution := 8, bands := '3,1');
+```
+
+The grid index, hex ID, resolution and WKB appear once per cell. Each selected band adds mean, stddev, count, min, max, sum and any requested quantiles in selection order. Under the default NoData policy a cell appears when at least one selected band has data. A band with no valid samples has zero count and sum, with NULL mean, extrema and standard deviation. Use SQL predicates on the prefixed columns to filter individual bands.
 
 ### Band calibration and validity
 

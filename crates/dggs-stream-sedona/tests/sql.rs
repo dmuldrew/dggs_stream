@@ -21,6 +21,21 @@ fn context() -> SessionContext {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn wide_band_sql_projection_and_filter() {
+    let ctx = context();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../dggs-stream-core/tests/fixtures/multiband-rgb.tif"
+    );
+    let sql=format!("SELECT band_3_mean,band_1_count FROM h3_raster_continuous_aggregate('{path}',12,'bands=all') WHERE band_1_mean IS NULL");
+    let batches = collect(&ctx, &sql).await;
+    assert_eq!(rows(&batches), 1);
+    let batch = batches.iter().find(|b| b.num_rows() > 0).unwrap();
+    assert_eq!(batch.column(0).as_primitive::<Float64Type>().value(0), 12.0);
+    assert_eq!(batch.column(1).as_primitive::<Float64Type>().value(0), 0.0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_function_counts_and_projects() {
     let tif = gradient_tif(64, 64);
     let ctx = context();

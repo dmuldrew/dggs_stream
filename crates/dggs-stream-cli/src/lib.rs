@@ -53,6 +53,7 @@ pub enum StreamOutputFormat {
 #[derive(Debug, Clone)]
 pub struct CliStreamOptions {
     pub input_path: String,
+    pub bands: Option<String>,
     pub grid: GridKind,
     pub resolutions: Vec<u8>,
     pub categorical: bool,
@@ -89,6 +90,7 @@ impl Default for CliStreamOptions {
     fn default() -> Self {
         Self {
             input_path: String::new(),
+            bands: None,
             grid: GridKind::H3,
             resolutions: vec![8],
             categorical: false,
@@ -195,6 +197,43 @@ fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<us
             ));
         }
         config.set_histogram(spec.clone())?;
+    }
+
+    if let Some(selector) = &opts.bands {
+        use dggs_stream_core::columnar::multiband::{
+            parse_bands, wide_schema, MultiBandBatchReader,
+        };
+        if opts.categorical || opts.partition.is_some() || opts.histogram.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "--bands requires an unpartitioned continuous scan".into(),
+            ));
+        }
+        let [path] = paths.as_slice() else {
+            return Err(DggsStreamError::InvalidParameter(
+                "--bands requires one raster".into(),
+            ));
+        };
+        let raster = dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open(path)?;
+        let bands = parse_bands(selector, raster.metadata.samples_per_pixel)?;
+        let projection = resolve_projection_indices(
+            &wide_schema(opts.grid, &bands, &config.quantiles),
+            &opts.columns,
+        )?;
+        let mut reader = MultiBandBatchReader::open(
+            raster,
+            &config,
+            &bands,
+            projection.as_deref(),
+            opts.batch_size,
+            opts.limit,
+        )?;
+        let schema = reader.schema();
+        let rows = match opts.output_format {
+            StreamOutputFormat::Ipc => write_ipc_stream(writer, &schema, &mut reader),
+            StreamOutputFormat::Jsonl => write_jsonl_stream(writer, &mut reader),
+        }?;
+        warn_transform_failures(reader.transform_failures());
+        return Ok(rows);
     }
     if let Some(partition) = &opts.partition {
         config.partition = Some(partition.clone());
@@ -1299,6 +1338,7 @@ pub fn parse_stream_args(
             "--histogram" => histogram[0] = Some(value()?.to_string()),
             "--histogram-weight" => histogram[1] = Some(value()?.to_string()),
             "--histogram-normalize" => histogram[2] = Some(value()?.to_string()),
+            "--bands" => opts.bands = Some(value()?.to_string()),
             "--profile" => opts.profile = Some(RunProfile::new()),
             "--nodata-policy" => {
                 let v = value()?;
@@ -1562,6 +1602,44 @@ mod tests {
         let data = vec![val; (width * height) as usize];
         img.write_data(&data).unwrap();
         tmp
+    }
+
+    #[test]
+    fn wide_bands_preserve_projection_order_and_independent_nodata() {
+        let input = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../dggs-stream-core/tests/fixtures/multiband-rgb.tif"
+        );
+        let args = [
+            input,
+            "-r",
+            "12",
+            "--bands",
+            "3,1",
+            "--columns",
+            "band_1_mean,band_3_mean,band_1_count",
+        ]
+        .map(str::to_owned);
+        let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Ipc).unwrap();
+        let mut bytes = Vec::new();
+        assert_eq!(stream_raster_to_writer(&opts, &mut bytes).unwrap(), 2);
+        let (schema, _) = read_ipc_stream(&mut bytes.as_slice()).unwrap();
+        assert_eq!(schema.fields[0].name, "band_1_mean");
+        assert!(schema.fields[0].nullable);
+        let mut json = Vec::new();
+        let mut opts = opts;
+        opts.output_format = StreamOutputFormat::Jsonl;
+        stream_raster_to_writer(&opts, &mut json).unwrap();
+        let mut rows: Vec<serde_json::Value> = std::str::from_utf8(&json)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        rows.sort_by_key(|v| v["band_3_mean"].as_f64().unwrap() as u8);
+        assert_eq!(rows[0]["band_1_mean"], 2.0);
+        assert_eq!(rows[1]["band_3_mean"], 12.0);
+        assert!(rows[1]["band_1_mean"].is_null());
+        assert_eq!(rows[1]["band_1_count"], 0.0);
     }
 
     #[test]

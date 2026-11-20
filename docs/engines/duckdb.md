@@ -198,6 +198,17 @@ FROM h3_raster_continuous_aggregate(
 ORDER BY weighted_pixel_count DESC;
 ```
 
+### Multiple bands in one pass
+
+Use one-based band numbers to aggregate several bands of an interleaved TIFF with center assignment. The output follows the requested band order. Use `bands := 'all'` to request every band.
+
+```sql
+SELECT h3_hex, band_3_mean, band_1_count
+FROM raster_h3('imagery.tif', resolution := 8, bands := '3,1');
+```
+
+With the default NoData policy, a cell appears if any selected band has a valid sample. A band with no valid samples in that cell has a count and sum of zero and a NULL mean.
+
 ### Multiple resolutions and quantiles in one pass
 
 ```sql
