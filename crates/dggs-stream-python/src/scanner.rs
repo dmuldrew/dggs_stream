@@ -4,12 +4,14 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream_core::columnar::multiband::{wide_schema, MultiBandBatchReader};
 use dggs_stream_core::columnar::{
     partitioned_output_schema, ArrowArrayStream, ArrowSchema, CategoricalBatchReader,
     CategoricalFormat, ColumnArray, ColumnSchema, ContinuousBatchReader, PartitionedBatchReader,
     RecordBatch, PARTIAL_STATE_COLUMN,
 };
 use dggs_stream_core::error::{DggsStreamError, Result};
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
 use dggs_stream_core::raster::mosaic::resolve_raster_sources;
 
 use crate::config::PyScanConfig;
@@ -38,6 +40,9 @@ impl PyRasterScanner {
 
     fn base_schema(&self) -> ColumnSchema {
         let grid = self.config.grid;
+        if let Some(bands) = &self.config.bands {
+            return wide_schema(grid, bands, &self.config.quantiles);
+        }
         let schema = if !self.config.categorical {
             ColumnSchema::continuous_for(grid, &self.config.quantiles)
         } else {
@@ -52,6 +57,11 @@ impl PyRasterScanner {
     }
 
     pub(crate) fn resolve_projection(&self) -> Result<Option<Vec<usize>>> {
+        if self.config.bands.is_some() && self.config.partition.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "bands cannot be combined with partitions".into(),
+            ));
+        }
         let Some(cols) = &self.config.columns else {
             return Ok(None);
         };
@@ -147,6 +157,22 @@ impl PyRasterScanner {
         mr_cfg.transform_failure_counter = self.config.transform_failure_counter.clone();
 
         let projection = self.resolve_projection()?;
+        if let Some(bands) = &self.config.bands {
+            let [path] = paths.as_slice() else {
+                return Err(DggsStreamError::InvalidParameter(
+                    "bands requires one input raster".into(),
+                ));
+            };
+            let reader = MultiBandBatchReader::open(
+                GeoTiffStreamReader::open(path)?,
+                &mr_cfg,
+                bands,
+                projection.as_deref(),
+                self.config.batch_size,
+                self.config.limit,
+            )?;
+            return Ok((reader.schema(), Box::new(reader)));
+        }
         if let Some(partition) = &self.config.partition {
             self.check_partitionable()?;
             mr_cfg.partition = Some(partition.clone());
