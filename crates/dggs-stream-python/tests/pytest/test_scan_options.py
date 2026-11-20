@@ -295,7 +295,7 @@ def test_multiband_matches_single_band_scans(dggs_stream, layout):
     options = {"bands": selection, "quantiles": "p50"}
     lazy = dggs_stream.scan_raster(path, 12, **options)
     def collect(scan):
-        return scan.collect() if isinstance(scan, pl.LazyFrame) else frame(scan)
+        return scan.collect() if isinstance(scan, pl.LazyFrame) else scan.to_polars()
 
     rows = collect(lazy)
     if isinstance(lazy, pl.LazyFrame):
