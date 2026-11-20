@@ -854,3 +854,41 @@ fn twelve_band_layouts_match_independent_calibrated_scans() {
         assert!(keys.is_empty());
     }
 }
+
+#[test]
+fn sparse_planar_band_has_no_observations_under_nodata_overrides() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use std::sync::Arc;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    crate::codecs::write_planar_geotiff(file.path(), 32, 32, 4);
+    let mut reader = GeoTiffStreamReader::open(file.path()).unwrap();
+    // In this one-strip-per-plane fixture band 1 is unallocated and band 3 stores 90.
+    let info = Arc::make_mut(reader.chunk_info.as_mut().unwrap());
+    Arc::make_mut(&mut info.chunk_offsets)[0] = 0;
+    Arc::make_mut(&mut info.chunk_bytes)[0] = 0;
+    for (stored, override_value) in [(None, None), (Some(250.), Some(249.))] {
+        reader.metadata.nodata = stored;
+        let cfg = MultiResolutionConfig {
+            custom_nodata: override_value,
+            ..MultiResolutionConfig::single(8)
+        };
+        let mut scan =
+            MultiBandStreamer::new(reader.clone(), &cfg, Bands::Selected(&[3, 1])).unwrap();
+        let mut count = 0.;
+        loop {
+            let rows = scan.fetch_next_batch(100).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                assert_eq!(row.statistics[0].mean(), 90.);
+                count += row.statistics[0].count;
+                assert_eq!(row.statistics[1].count, 0.);
+            }
+        }
+        assert_eq!(count, 1024.);
+        let absent = MultiScanHorizonStreamer::new(reader.clone(), &cfg).unwrap();
+        assert!(drain(absent).is_empty());
+    }
+}

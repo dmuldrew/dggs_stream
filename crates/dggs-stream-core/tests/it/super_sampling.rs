@@ -693,6 +693,7 @@ fn fused_samples_match_reference_statistics_histograms_and_quantiles() {
                     owner: None,
                     band_scaling: &[],
                     mask: None,
+                    band_presence: None,
                     alpha_sample: None,
                     emit_nodata: false,
                     histogram_bins: None,

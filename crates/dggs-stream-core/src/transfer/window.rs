@@ -137,7 +137,10 @@ impl RowWindow {
                         let mut out =
                             Vec::with_capacity(bounds.width as usize * bounds.height as usize);
                         // A chunk the file does not store holds no samples.
-                        if tile.reader.is_sparse_chunk(index) {
+                        if !tile.reader.band_chunk_present(index, band_index)
+                            || alpha_index
+                                .is_some_and(|a| !tile.reader.band_chunk_present(index, a))
+                        {
                             out.resize(bounds.width as usize * bounds.height as usize, f64::NAN);
                         } else {
                             let decoder = match &mut decoder {

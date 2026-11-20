@@ -286,6 +286,9 @@ struct BandEngine<'a, T> {
 
 impl<T: SimdSpanAccumulate> BandEngine<'_, T> {
     fn value(&self, pixel: &[T], band: usize) -> Option<f64> {
+        if !self.ctx.band_present(band - 1) {
+            return None;
+        }
         let sample = pixel[band - 1];
         sample
             .is_valid(self.nodata)

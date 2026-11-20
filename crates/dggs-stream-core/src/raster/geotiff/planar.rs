@@ -29,21 +29,29 @@ impl GeoTiffStreamReader {
         (1..=bands.len()).collect()
     }
 
+    pub(crate) fn band_chunk_present(&self, index: u32, slot: usize) -> bool {
+        let physical = self
+            .metadata
+            .planes
+            .as_ref()
+            .map_or(index as usize, |planes| {
+                usize::from(planes[slot]) * self.chunk_layout.total_chunks as usize + index as usize
+            });
+        self.chunk_info.as_ref().is_none_or(|info| {
+            info.chunk_offsets.get(physical) != Some(&0)
+                && info.chunk_bytes.get(physical) != Some(&0)
+        })
+    }
+
     pub(crate) fn physical_chunks_present(&self, index: u32) -> u64 {
-        let present = |index: usize| {
-            self.chunk_info.as_ref().is_none_or(|info| {
-                info.chunk_offsets.get(index) != Some(&0) && info.chunk_bytes.get(index) != Some(&0)
-            })
-        };
-        match &self.metadata.planes {
-            None => u64::from(present(index as usize)),
-            Some(planes) => planes
-                .iter()
-                .filter(|&&p| {
-                    present((u32::from(p) * self.chunk_layout.total_chunks + index) as usize)
-                })
-                .count() as u64,
-        }
+        let slots = self
+            .metadata
+            .planes
+            .as_ref()
+            .map_or(1, |planes| planes.len());
+        (0..slots)
+            .filter(|&slot| self.band_chunk_present(index, slot))
+            .count() as u64
     }
 }
 

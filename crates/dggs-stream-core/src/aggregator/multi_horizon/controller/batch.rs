@@ -86,10 +86,18 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         if job_count == 0 {
             return Ok(());
         }
+        let mut band_presence = HashMap::new();
         let mut masks = HashMap::new();
         for item in items.iter().flatten() {
             let (tile, index, bounds, _, _) = item;
             let reader = &mosaic.tiles[*tile].reader;
+            let slots = usize::from(reader.metadata.samples_per_pixel);
+            if reader.is_planar() && reader.physical_chunks_present(*index) < slots as u64 {
+                let present: Vec<_> = (0..slots)
+                    .map(|slot| reader.band_chunk_present(*index, slot))
+                    .collect();
+                band_presence.insert((*tile, *index), present);
+            }
             if reader.has_internal_mask() && !reader.is_sparse_chunk(*index) {
                 if let Some(mask) = reader.read_mask(*bounds, &mut self.mask_cache)? {
                     masks.insert((*tile, *index), mask);
@@ -167,6 +175,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
                     &[]
                 },
                 mask: masks.get(&(*tile_idx, *index)),
+                band_presence: band_presence.get(&(*tile_idx, *index)).map(Vec::as_slice),
                 alpha_sample: tile.reader.metadata.alpha_sample,
                 emit_nodata: *emit_nodata,
                 histogram_bins: histogram_bins.as_deref(),
