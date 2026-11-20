@@ -24,7 +24,7 @@ jobs:
     outputs:
       code: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
       wheels: ${{ startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.code == 'true' || steps.filter.outputs.wheel_readme == 'true' }}
-      wheel_packaging: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name != 'pull_request' || steps.filter.outputs.wheel_packaging == 'true' }}
+      wheel_packaging: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name != 'pull_request' || steps.wheel_filter.outputs.wheel_packaging == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' }}
@@ -44,6 +44,14 @@ jobs:
               - '!LICENSE'
             wheel_readme:
               - 'crates/dggs-stream-python/README.md'
+
+      # Separate step: the `every` quantifier above requires a file to match all
+      # patterns in a filter, so a list of alternative paths can never match there.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: wheel_filter
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          filters: |
             wheel_packaging:
               - 'crates/dggs-stream-python/hatch_build.py'
               - 'crates/dggs-stream-python/pyproject.toml'
@@ -171,6 +179,9 @@ jobs:
       contents: read
     env:
       LIB_NAME: ${{ matrix.lib_file }}
+      # Full Rust suite: every native host on main/tags, Linux x86_64 only on PRs.
+      # `osx_amd64` cross-compiles on the arm64 runner and would duplicate `osx_arm64`.
+      FULL_SUITE: ${{ matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4') }}
       # SHA-256 of DuckDB v1.2.0's libduckdb-windows-amd64.zip
       LIBDUCKDB_WINDOWS_SHA256: 6327f8443ff8744a6753819e1ca874a82f1944a603d6dbc3bc564dada39b6337
     steps:
@@ -215,10 +226,9 @@ jobs:
       # their unit and doc tests. Uses `ci-test` (opt-level=2, no LTO, 16 CGU)
       # and skips empty `src/bin/*` harnesses. On PRs, run the full Rust suite on
       # Linux x86_64 only (other OSes still build, package, and run DuckDB CLI
-      # smoke tests); pushes to main and release tags run it on every native host.
-      # `osx_amd64` cross-compiles on the arm64 runner and would duplicate `osx_arm64`.
+      # smoke tests); see FULL_SUITE in the job env.
       - name: Run Tests
-        if: matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4')
+        if: env.FULL_SUITE == 'true'
         shell: bash
         run: |
           cargo test --locked --profile ci-test --no-fail-fast \
@@ -227,7 +237,7 @@ jobs:
             -p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb
 
       - name: Test hotspot and worker-scaling examples
-        if: matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4')
+        if: env.FULL_SUITE == 'true'
         run: cargo test --locked --profile ci-test -p dggs-stream-core --example profile_hotspots --example worker_scaling
 
       - name: Build Dynamic Library & Binaries
@@ -373,7 +383,7 @@ jobs:
           fi
           export DUCKDB_BIN
           export DGGS_STREAM_LIBRARY="$(pwd)/target/smoke-libs/v120/${{ matrix.lib_file }}"
-          if [[ "${{ matrix.platform }}" != "osx_amd64" && ("${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4") ]]; then
+          if [[ "$FULL_SUITE" == "true" ]]; then
             SMOKE_PKGS=(-p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb)
           else
             SMOKE_PKGS=(-p dggs_stream)
@@ -409,7 +419,7 @@ jobs:
           export DUCKDB_VERSION=v1.2.0
           export DGGS_STREAM_LIBRARY="$(pwd)/target/smoke-libs/v120/${{ matrix.lib_file }}"
           chmod +x "$DUCKDB_BIN" || true
-          if [[ "${{ matrix.platform }}" != "osx_amd64" && ("${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4") ]]; then
+          if [[ "$FULL_SUITE" == "true" ]]; then
             SMOKE_PKGS=(-p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb)
           else
             SMOKE_PKGS=(-p dggs_stream)
@@ -453,7 +463,7 @@ jobs:
           export DUCKDB_VERSION=v1.5.6
           export DGGS_STREAM_LIBRARY="$(pwd)/target/smoke-libs/v156/${{ matrix.lib_file }}"
           chmod +x "$DUCKDB_BIN" || true
-          if [[ "${{ matrix.platform }}" != "osx_amd64" && ("${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4") ]]; then
+          if [[ "$FULL_SUITE" == "true" ]]; then
             SMOKE_PKGS=(-p dggs_stream -p dggs-stream-core -p dggs-stream-duckdb)
           else
             SMOKE_PKGS=(-p dggs_stream)
