@@ -288,3 +288,47 @@ fn spill_runs_leave_no_files_in_the_spill_directory() {
     drop(stream);
     assert_eq!(entries(), 0);
 }
+
+#[test]
+fn corrupt_chunk_errors_are_latched_for_overlay_scans() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use dggs_stream_core::transfer::TransferMode;
+
+    let file = corrupt_payload();
+    let config = MultiResolutionConfig {
+        transfer: TransferMode::Overlay {
+            weighted: true,
+            mass_preserve: false,
+        },
+        ..MultiResolutionConfig::single(8)
+    };
+    // A failed block is already passed: a retry must not resume after it.
+    let mut single =
+        MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(file.path()).unwrap(), &config)
+            .unwrap();
+    let failed = (0..1024).any(|_| match single.fetch_next_batch(2048) {
+        Ok(batch) => {
+            assert!(!batch.is_empty(), "corruption must not become EOF");
+            false
+        }
+        Err(_) => true,
+    });
+    assert!(failed, "corrupt strip must eventually fail");
+    assert!(single.fetch_next_batch(2048).is_err());
+
+    let mut wide = MultiBandStreamer::new(
+        GeoTiffStreamReader::open(file.path()).unwrap(),
+        &config,
+        Bands::All,
+    )
+    .unwrap();
+    let failed = (0..1024).any(|_| match wide.fetch_next_batch(2048) {
+        Ok(rows) => {
+            assert!(!rows.is_empty(), "corruption must not become EOF");
+            false
+        }
+        Err(_) => true,
+    });
+    assert!(failed, "corrupt strip must eventually fail");
+    assert!(wide.fetch_next_batch(2048).is_err());
+}

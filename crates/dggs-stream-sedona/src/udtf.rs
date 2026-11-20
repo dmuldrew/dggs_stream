@@ -150,16 +150,17 @@ fn categorical_table(
     .map_err(to_df_error)?
     .with_output_policy(args.output)
     .with_transfer(args.transfer);
+    if let Some(partition) = args.partition {
+        provider = provider.with_partition(partition);
+    }
+    // An area histogram switches the transfer to overlay, which the threshold requires.
+    if let Some(histogram) = args.histogram {
+        provider = provider.with_histogram(histogram).map_err(to_df_error)?;
+    }
     if let Some(threshold) = args.valid_coverage_threshold {
         provider = provider
             .with_valid_coverage_threshold(threshold)
             .map_err(to_df_error)?;
-    }
-    if let Some(partition) = args.partition {
-        provider = provider.with_partition(partition);
-    }
-    if let Some(histogram) = args.histogram {
-        provider = provider.with_histogram(histogram).map_err(to_df_error)?;
     }
     Ok(Arc::new(RasterTable::categorical(provider)))
 }

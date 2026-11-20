@@ -228,6 +228,8 @@ pub struct TransferStream<A: TransferAccumulator> {
     pending: HashMap<u64, Pending<A>>,
     output: VecDeque<(u8, u64, A)>,
     transform_failures: u64,
+    /// Set when a block fails, so later reads cannot mistake the failed scan for EOF.
+    failure: Option<String>,
     failure_counter: Option<Arc<AtomicU64>>,
     strict_transforms: bool,
     /// Runtime telemetry, updated once per block.
@@ -352,6 +354,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             pending: HashMap::new(),
             output: VecDeque::new(),
             transform_failures: 0,
+            failure: None,
             failure_counter: config.transform_failure_counter.clone(),
             strict_transforms: config.strict_transforms,
             profile: config.profile.clone(),
@@ -380,10 +383,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
     /// Process blocks until at least `min_rows` finished cells wait to be drained, or
     /// every block is processed.
     pub fn advance_until_completed(&mut self, min_rows: usize) -> Result<()> {
+        self.check_failed()?;
         while self.output.len() < min_rows && self.next_block < self.blocks.len() {
-            let block = self.blocks[self.next_block].clone();
-            self.next_block += 1;
-            self.process(&block)?;
+            self.process_next()?;
         }
         Ok(())
     }
@@ -394,6 +396,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         max_rows: usize,
         mut consumer: impl FnMut(usize, u8, u64, A),
     ) -> Result<usize> {
+        self.check_failed()?;
         let mut drained = 0;
         while drained < max_rows {
             if let Some((resolution, cell, acc)) = self.output.pop_front() {
@@ -404,11 +407,28 @@ impl<A: TransferAccumulator> TransferStream<A> {
             if self.next_block >= self.blocks.len() {
                 break;
             }
-            let block = self.blocks[self.next_block].clone();
-            self.next_block += 1;
-            self.process(&block)?;
+            self.process_next()?;
         }
         Ok(drained)
+    }
+
+    fn check_failed(&self) -> Result<()> {
+        match &self.failure {
+            Some(reason) => Err(DggsStreamError::StreamFailed(reason.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Process the next block. A failure is latched: the block is already passed, so
+    /// resuming would silently drop its contribution.
+    fn process_next(&mut self) -> Result<()> {
+        let block = self.blocks[self.next_block].clone();
+        self.next_block += 1;
+        let result = self.process(&block);
+        if let Err(e) = &result {
+            self.failure = Some(e.to_string());
+        }
+        result
     }
 
     fn record_failures(&mut self, failures: u64) -> Result<()> {

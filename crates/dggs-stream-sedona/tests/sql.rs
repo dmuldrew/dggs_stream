@@ -52,6 +52,17 @@ async fn wide_band_overlay_shares_cell_weights() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn area_histogram_accepts_coverage_threshold_without_explicit_overlay() {
+    // `histogram_weight=area` selects overlay, which `valid_coverage_threshold` needs.
+    let tif = gradient_tif(48, 48);
+    let ctx = context();
+    let src = source(&tif);
+    let sql = format!("SELECT COUNT(*) FROM h3_raster_categorical_aggregate('{src}', 8, 'histogram=4:0:48', 'histogram_weight=area', 'valid_coverage_threshold=0.5')");
+    let batches = collect(&ctx, &sql).await;
+    assert!(batches[0].column(0).as_primitive::<Int64Type>().value(0) > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_function_counts_and_projects() {
     let tif = gradient_tif(64, 64);
     let ctx = context();

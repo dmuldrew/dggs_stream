@@ -979,6 +979,11 @@ fn multiband_overlay_matches_masked_single_band_scans() {
             let separate = single_profile.report();
             assert_eq!(wide.chunks, expected_chunks);
             assert_eq!(wide.windows * 2, separate.windows);
+            assert!(wide.cells > 0);
+            assert!(
+                wide.samples_indexed > 0,
+                "overlay scans count indexed samples"
+            );
             if mass_preserve {
                 for (slot, band) in [3, 1].into_iter().enumerate() {
                     let source: f64 = run(

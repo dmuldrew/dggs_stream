@@ -63,14 +63,14 @@ pub struct MultiBandRecord {
 /// ```
 pub struct MultiBandStreamer {
     inner: Scan,
+    profile: Option<Arc<crate::run_profile::RunProfile>>,
+    /// Indexed samples are counted at this resolution only, as in single-band scans.
+    first_resolution: Option<u8>,
 }
 
 enum Scan {
     Centers(Box<MultiHorizonStreamer<Kernel>>),
-    Overlay {
-        stream: Box<TransferStream<Vec<ContinuousAccumulator>>>,
-        profile: Option<Arc<crate::run_profile::RunProfile>>,
-    },
+    Overlay(Box<TransferStream<Vec<ContinuousAccumulator>>>),
 }
 
 impl MultiBandStreamer {
@@ -124,33 +124,35 @@ impl MultiBandStreamer {
             )?;
             let stream = TransferStream::new_bands(Arc::new(mosaic), config, bands)?;
             return Ok(Self {
-                inner: Scan::Overlay {
-                    stream: Box::new(stream),
-                    profile: config.profile.clone(),
-                },
+                inner: Scan::Overlay(Box::new(stream)),
+                profile: config.profile.clone(),
+                first_resolution: config.resolutions.first().copied(),
             });
         }
         let kernel = Kernel {
             bands,
             quantiles: config.track_quantiles(),
         };
+        let streamer = MultiHorizonStreamer::new(reader, config, kernel)?;
         Ok(Self {
-            inner: Scan::Centers(Box::new(MultiHorizonStreamer::new(reader, config, kernel)?)),
+            profile: streamer.run_profile().cloned(),
+            first_resolution: streamer.resolution_u8s().first().copied(),
+            inner: Scan::Centers(Box::new(streamer)),
         })
     }
 
     pub fn transform_failures(&self) -> u64 {
         match &self.inner {
             Scan::Centers(s) => s.transform_failures(),
-            Scan::Overlay { stream, .. } => stream.transform_failures(),
+            Scan::Overlay(stream) => stream.transform_failures(),
         }
     }
 
     /// Read at most `max_rows` completed cells.
     pub fn fetch_next_batch(&mut self, max_rows: usize) -> Result<Vec<MultiBandRecord>> {
-        match &mut self.inner {
-            Scan::Centers(s) => s.fetch_next_batch(max_rows),
-            Scan::Overlay { stream, profile } => {
+        let rows = match &mut self.inner {
+            Scan::Centers(s) => s.fetch_next_batch(max_rows)?,
+            Scan::Overlay(stream) => {
                 let mut rows = Vec::new();
                 stream.drain_into(max_rows, |_, resolution, cell_id, statistics| {
                     rows.push(MultiBandRecord {
@@ -159,25 +161,30 @@ impl MultiBandStreamer {
                         statistics,
                     })
                 })?;
-                if let Some(p) = profile {
-                    p.count(crate::run_profile::Counter::Cells, rows.len() as u64);
-                }
-                Ok(rows)
+                rows
             }
+        };
+        if let Some(profile) = &self.profile {
+            use crate::run_profile::Counter;
+            // Bands share pixels: count each cell's samples once, by its fullest band.
+            let samples: f64 = rows
+                .iter()
+                .filter(|r| Some(r.resolution) == self.first_resolution)
+                .map(|r| r.statistics.iter().map(|s| s.count).fold(0.0, f64::max))
+                .sum();
+            profile.count(Counter::Cells, rows.len() as u64);
+            profile.count(Counter::SamplesIndexed, samples.round() as u64);
         }
+        Ok(rows)
     }
 }
 
 impl Drop for MultiBandStreamer {
     fn drop(&mut self) {
-        let profile = match &mut self.inner {
-            Scan::Centers(s) => {
-                s.publish_profile();
-                s.run_profile()
-            }
-            Scan::Overlay { profile, .. } => profile.as_ref(),
-        };
-        if let Some(profile) = profile {
+        if let Scan::Centers(s) = &mut self.inner {
+            s.publish_profile();
+        }
+        if let Some(profile) = &self.profile {
             profile.stream_finished();
         }
     }
