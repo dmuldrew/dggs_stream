@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use dggs_stream_core::aggregator::multi_horizon::{
@@ -76,6 +76,8 @@ pub struct CliStreamOptions {
     /// `--transfer`, `--interpolation`, `--overlay-weighted` and `--mass-preserve`: how
     /// pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
+    /// Minimum valid fraction of selected raster overlap.
+    pub valid_coverage_threshold: Option<f64>,
     /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
     /// per-cell histogram (see [`dggs_stream_core::histogram`]). Implies `--categorical`.
     pub histogram: Option<HistogramSpec>,
@@ -104,6 +106,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            valid_coverage_threshold: None,
             histogram: None,
             profile: None,
         }
@@ -158,6 +161,23 @@ fn warn_transform_failures(failures: u64) {
     }
 }
 
+impl CliStreamOptions {
+    /// Shared scan settings for streamed and file outputs.
+    pub fn scan_config(&self) -> MultiResolutionConfig {
+        let mut config = MultiResolutionConfig::new(self.resolutions.clone()).with_grid(self.grid);
+        config.custom_crs = self.source_crs.clone();
+        config.custom_nodata = self.nodata;
+        config.apply_scale_offset = self.apply_scale_offset;
+        config.bbox = self.bbox;
+        config.overlap_rule = OverlapRule::Cutline;
+        apply_output_policy(&mut config, &self.output);
+        config.transfer = self.transfer;
+        config.profile = self.profile.clone();
+        config.valid_coverage_threshold = self.valid_coverage_threshold;
+        config
+    }
+}
+
 /// Stream a GeoTIFF/COG aggregation directly to `writer` in binary IPC or JSONL format.
 /// Returns the total number of rows emitted.
 pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
@@ -169,14 +189,7 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
 
 fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
     let paths = resolve_raster_sources(&opts.input_path)?;
-    let mut config = MultiResolutionConfig::new(opts.resolutions.clone()).with_grid(opts.grid);
-    config.custom_crs = opts.source_crs.clone();
-    config.custom_nodata = opts.nodata;
-    config.apply_scale_offset = opts.apply_scale_offset;
-    config.bbox = opts.bbox;
-    config.overlap_rule = OverlapRule::Cutline;
-    apply_output_policy(&mut config, &opts.output);
-    config.transfer = opts.transfer;
+    let mut config = opts.scan_config();
     if let Some(spec) = &opts.histogram {
         if opts.partition.is_some() {
             return Err(DggsStreamError::InvalidParameter(
@@ -185,7 +198,6 @@ fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<us
         }
         config.set_histogram(spec.clone())?;
     }
-    config.profile = opts.profile.clone();
 
     if let Some(selector) = &opts.bands {
         use dggs_stream_core::columnar::multiband::{
@@ -954,24 +966,40 @@ pub fn export_raster_to_parquet_with_transfer(
     transfer: TransferMode,
     profile: Option<Arc<RunProfile>>,
 ) -> Result<usize> {
-    let paths = resolve_raster_sources(input_path)?;
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.custom_crs = source_crs.clone();
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
     config.transfer = transfer;
-    let report_profile = profile.clone();
     config.profile = profile;
     apply_output_policy(&mut config, policy);
-    let failures = Arc::new(AtomicU64::new(0));
-    config.transform_failure_counter = Some(Arc::clone(&failures));
+    export_raster_to_parquet_with_config(input_path, output_path, categorical, geoparquet, config)
+}
 
-    let mosaic = Arc::new(MosaicReader::open(
+/// Export a raster using the supplied scan configuration.
+pub fn export_raster_to_parquet_with_config(
+    input_path: &str,
+    output_path: &Path,
+    categorical: bool,
+    geoparquet: bool,
+    mut config: MultiResolutionConfig,
+) -> Result<usize> {
+    let report_profile = config.profile.clone();
+    let paths = resolve_raster_sources(input_path)?;
+    let failures = Arc::clone(
+        config
+            .transform_failure_counter
+            .get_or_insert_with(Default::default),
+    );
+    let before = failures.load(Ordering::Relaxed);
+
+    let mosaic = Arc::new(MosaicReader::open_with_remote_source_factory(
         &paths,
-        bbox,
-        source_crs.as_deref(),
-        OverlapRule::Cutline,
+        config.bbox,
+        config.custom_crs.as_deref(),
+        config.overlap_rule,
+        config.remote_source_factory.as_ref(),
     )?);
 
     let pq_cfg = ParquetExportConfig {
@@ -988,7 +1016,7 @@ pub fn export_raster_to_parquet_with_transfer(
         ParquetWriter::write_categorical_streamer_to_parquet(streamer, output_path, pq_cfg)
     }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
-    warn_transform_failures(failures.load(Ordering::Relaxed));
+    warn_transform_failures(failures.load(Ordering::Relaxed).saturating_sub(before));
     print_profile(&report_profile);
     Ok(rows)
 }
@@ -1094,15 +1122,29 @@ pub fn export_raster_to_pmtiles_with_transfer(
 ) -> Result<usize> {
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.transfer = transfer;
-    let report_profile = profile.clone();
     config.profile = profile;
     config.custom_crs = source_crs;
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
     apply_output_policy(&mut config, policy);
-    let failures = Arc::new(AtomicU64::new(0));
-    config.transform_failure_counter = Some(Arc::clone(&failures));
+    export_raster_to_pmtiles_with_config(input_path, output_path, categorical, config)
+}
+
+/// Export a raster using the supplied scan configuration.
+pub fn export_raster_to_pmtiles_with_config(
+    input_path: &str,
+    output_path: &Path,
+    categorical: bool,
+    mut config: MultiResolutionConfig,
+) -> Result<usize> {
+    let report_profile = config.profile.clone();
+    let failures = Arc::clone(
+        config
+            .transform_failure_counter
+            .get_or_insert_with(Default::default),
+    );
+    let before = failures.load(Ordering::Relaxed);
 
     let tiles = if !categorical {
         PmtilesTiler::process_raster_source_to_pmtiles(input_path, output_path, config)
@@ -1110,7 +1152,7 @@ pub fn export_raster_to_pmtiles_with_transfer(
         PmtilesTiler::process_categorical_source_to_pmtiles(input_path, output_path, config)
     }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
-    warn_transform_failures(failures.load(Ordering::Relaxed));
+    warn_transform_failures(failures.load(Ordering::Relaxed).saturating_sub(before));
     print_profile(&report_profile);
     Ok(tiles)
 }
@@ -1293,6 +1335,13 @@ pub fn parse_stream_args(
                     "false" | "0" | "no" => false,
                     _ => return Err(invalid(flag, v, "true or false")),
                 });
+            }
+            "--valid-coverage-threshold" => {
+                let v = value()?;
+                opts.valid_coverage_threshold = Some(
+                    v.parse()
+                        .map_err(|_| invalid(flag, v, "a fraction in [0, 1]"))?,
+                );
             }
             "--mass-preserve" => mass_preserve = Some(true),
             "--histogram" => histogram[0] = Some(value()?.to_string()),
@@ -1542,26 +1591,118 @@ mod tests {
     use tiff::encoder::TiffEncoder;
 
     fn write_test_tif(width: u32, height: u32, val: f32) -> NamedTempFile {
+        write_test_tif_at(width, height, val, -122.45, 37.80, 0.001)
+    }
+
+    fn write_test_tif_at(
+        width: u32,
+        height: u32,
+        val: f32,
+        west: f64,
+        north: f64,
+        pixel: f64,
+    ) -> NamedTempFile {
         let tmp = NamedTempFile::new().unwrap();
         let file = File::create(tmp.path()).unwrap();
         let mut encoder = TiffEncoder::new(file).unwrap();
         let mut img = encoder.new_image::<Gray32Float>(width, height).unwrap();
-        // PixelScale tag (33550) and ModelTiepoint tag (33922) for WGS84 around (-122.4, 37.75)
         img.encoder()
-            .write_tag(
-                tiff::tags::Tag::Unknown(33550),
-                &[0.001f64, 0.001f64, 0.0f64][..],
-            )
+            .write_tag(tiff::tags::Tag::Unknown(33550), &[pixel, pixel, 0.0][..])
             .unwrap();
         img.encoder()
             .write_tag(
                 tiff::tags::Tag::Unknown(33922),
-                &[0.0f64, 0.0f64, 0.0f64, -122.45f64, 37.80f64, 0.0f64][..],
+                &[0.0f64, 0.0f64, 0.0f64, west, north, 0.0f64][..],
             )
             .unwrap();
         let data = vec![val; (width * height) as usize];
         img.write_data(&data).unwrap();
         tmp
+    }
+
+    #[test]
+    fn parquet_export_honors_remote_factory_and_overlap_rule() {
+        use dggs_stream_core::raster::http_range::{
+            ProbeResult, RemoteHttpSource, RemoteSourceFactory, RemoteTransport,
+        };
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        use parquet::record::RowAccessor;
+
+        struct Bytes(Vec<u8>);
+        impl RemoteTransport for Bytes {
+            fn probe(&self, _: usize) -> Result<ProbeResult> {
+                Ok(ProbeResult::Complete {
+                    data: self.0.clone(),
+                    total_size: self.0.len() as u64,
+                })
+            }
+            fn fetch_range(&self, start: u64, end: u64, _: Option<u64>) -> Result<Vec<u8>> {
+                Ok(self.0[start as usize..=end as usize].to_vec())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_test_tif(16, 16, 10.0);
+        let second = write_test_tif(16, 16, 20.0);
+        let first_bytes = std::fs::read(first.path()).unwrap();
+        let second_bytes = std::fs::read(second.path()).unwrap();
+        let first_url = "https://fixture.invalid/first.tif";
+        let second_url = "https://fixture.invalid/second.tif";
+        let factory = RemoteSourceFactory::new(move |path| {
+            let bytes = match path {
+                p if p == first_url => &first_bytes,
+                p if p == second_url => &second_bytes,
+                other => panic!("unexpected fixture URL {other}"),
+            };
+            Ok(Arc::new(RemoteHttpSource::from_transport(
+                path.to_owned(),
+                Box::new(Bytes(bytes.clone())),
+            )?))
+        });
+        let sources = format!("{first_url},{second_url}");
+        let out = dir.path().join("mosaic.parquet");
+        for (rule, expected_sum) in [(OverlapRule::First, 2560.0), (OverlapRule::Average, 7680.0)] {
+            let mut cfg = MultiResolutionConfig::single(7);
+            cfg.custom_crs = Some("EPSG:4326".into());
+            cfg.remote_source_factory = Some(factory.clone());
+            cfg.overlap_rule = rule;
+            export_raster_to_parquet_with_config(&sources, &out, false, false, cfg).unwrap();
+            let reader = SerializedFileReader::new(File::open(&out).unwrap()).unwrap();
+            let schema = reader.metadata().file_metadata().schema_descr();
+            let sum_col = schema
+                .columns()
+                .iter()
+                .position(|c| c.name() == "sum_value")
+                .unwrap();
+            let sum: f64 = reader
+                .get_row_iter(None)
+                .unwrap()
+                .map(|row| row.unwrap().get_double(sum_col).unwrap())
+                .sum();
+            assert_eq!(sum, expected_sum, "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn configured_exports_increment_the_callers_transform_failure_counter() {
+        let tif = write_test_tif_at(10, 20, 3.0, 0.0, 95.0, 1.0);
+        let input = tif.path().to_str().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let failures = Arc::new(std::sync::atomic::AtomicU64::new(7));
+        let mut cfg = MultiResolutionConfig::single(3);
+        cfg.custom_crs = Some("EPSG:4326".into());
+        cfg.transform_failure_counter = Some(Arc::clone(&failures));
+        export_raster_to_parquet_with_config(
+            input,
+            &dir.path().join("out.parquet"),
+            false,
+            false,
+            cfg.clone(),
+        )
+        .unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 57);
+        export_raster_to_pmtiles_with_config(input, &dir.path().join("out.pmtiles"), false, cfg)
+            .unwrap();
+        assert_eq!(failures.load(Ordering::Relaxed), 107);
     }
 
     #[test]

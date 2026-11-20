@@ -345,6 +345,7 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
 - **Fine cells and partial pixels.** For cells finer than the pixels, `transfer=interpolate`
   interpolates a value at each cell's centre; for exact area weighting, `transfer=overlay`
   splits each pixel across the cells it overlaps. Both stream the raster in bands of rows.
+  Rust and CLI overlay scans can filter cells by the fraction of their selected overlap with valid data.
   See [Scan Options](docs/scan-options.md).
 
 See [Core Engineering Architecture](#core-engineering-architecture) for how each step is

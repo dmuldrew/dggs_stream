@@ -338,6 +338,8 @@ pub struct MultiResolutionConfig {
     /// single-pass horizon kernel), interpolation at cell centres, or an area-weighted
     /// overlay. See [`crate::transfer`].
     pub transfer: crate::transfer::TransferMode,
+    /// Minimum fraction of selected overlap with valid band data. Overlay only.
+    pub valid_coverage_threshold: Option<f64>,
     /// A per-cell histogram of a categorical scan: its classes (pixel values or bins),
     /// the weight of a pixel and the scaling of the result. Set it with
     /// [`Self::set_histogram`], which also picks the transfer mode area weights need.
@@ -389,6 +391,7 @@ impl MultiResolutionConfig {
             decimals: None,
             profile: None,
             transfer: crate::transfer::TransferMode::AssignCenters,
+            valid_coverage_threshold: None,
             histogram: None,
             partition: None,
         }
@@ -443,7 +446,22 @@ impl MultiResolutionConfig {
         Ok(())
     }
 
+    pub(crate) fn validate_coverage_threshold(&self) -> Result<()> {
+        if let Some(t) = self.valid_coverage_threshold {
+            if !(0.0..=1.0).contains(&t)
+                || !matches!(self.transfer, crate::transfer::TransferMode::Overlay { .. })
+            {
+                return Err(DggsStreamError::InvalidParameter(
+                    "valid_coverage_threshold requires overlay and a finite fraction in [0, 1]"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.validate_coverage_threshold()?;
         if let Some(spec) = &self.histogram {
             spec.validate()?;
             if spec.transfer_mode(self.transfer)? != self.transfer {

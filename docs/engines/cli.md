@@ -45,6 +45,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--transfer <assign_centers\|interpolate\|overlay>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)) |
 | `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer interpolate` | Interpolation (default `bilinear`) |
 | `--overlay-weighted <true\|false>` | `--transfer overlay` | `false` counts every touched pixel once |
+| `--valid-coverage-threshold <0..1>` | `--transfer overlay` | Minimum valid fraction of selected overlap, measured by area even for unweighted statistics. Mass-preserving scans are exempt. |
 | `--mass-preserve` | `--transfer overlay` | Normalise each pixel's weights so `sum` adds up to the raster's total |
 | `--histogram <values\|N:min:max\|e0,e1,...>` | `ipc`, `jsonl` | Structured per-cell histogram (implies `-c`) |
 | `--histogram-weight <count\|area>` | with `--histogram` | `area` weights by overlap and runs `--transfer overlay` |

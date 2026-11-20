@@ -168,3 +168,41 @@ directly (`TransferMode::Interpolate(Interpolation::Bilinear)`, `TransferMode::O
 [`transfer/mod.rs`](../crates/dggs-stream-core/src/transfer/mod.rs).
 
 **PostgreSQL**: not available yet.
+
+### Valid coverage (Rust and CLI)
+
+Set `MultiResolutionConfig::valid_coverage_threshold` or pass
+`--valid-coverage-threshold 0.75 --transfer overlay` to keep cells with valid
+band data across at least 75% of their selected raster overlap. Coverage uses
+pixel-space overlap fractions even with `--overlay-weighted false`. Pixels
+outside the bbox or owned by a different mosaic tile are excluded from both
+areas. NoData and masked pixels contribute only to the denominator. Category
+remapping and histogram bin selection happen after band validity is determined.
+
+The filter applies when a cell is complete. A positive threshold drops
+all-NoData cells even under `--nodata-policy emit`. Zero disables the filter.
+Mass-preserving scans accept the threshold and retain every contribution.
+
+### Reproducing the overlay benchmark
+
+Build the CLI with `cargo build --release -p dggs-stream-cli`. With GDAL's
+`gdal_create` on PATH, run the following from the repository root on macOS or
+Linux. The baseline argument takes a separately saved release binary.
+
+```sh
+python3 scripts/benchmark_overlay.py --baseline-cli /path/to/baseline-cli --runs 9
+```
+
+On arm64 macOS, the following medians compare revision `63f69cf` with per-cell
+overlap buffering. Each run scanned a local, tiled, Deflate-compressed Float32
+raster covering the same one-degree square and wrote IPC to the null device.
+The runner warms both binaries, alternates their order, and measures wall time
+and peak resident memory in a fresh process for each scan. The coverage filter
+is disabled in both versions.
+
+| Raster size | H3 resolution | Mass preservation | Time, baseline → updated | Peak RSS, baseline → updated |
+| --- | --- | --- | --- | --- |
+| 1024 × 1024 | 6 | Off | 75.3 → 59.6 ms | 44.1 → 25.0 MiB |
+| 1024 × 1024 | 6 | On | 81.9 → 65.5 ms | 51.9 → 51.9 MiB |
+| 128 × 128 | 9 | Off | 341.9 → 332.8 ms | 39.9 → 38.8 MiB |
+| 128 × 128 | 9 | On | 342.1 → 340.5 ms | 40.0 → 39.8 MiB |
