@@ -122,6 +122,8 @@ impl RowWindow {
         } else {
             crate::raster::metadata::BandScaling::IDENTITY
         };
+        // Open lazily so cached and sparse chunks need no TIFF decoder.
+        let mut decoder = None;
         for chunk_row in chunk_rows {
             for chunk_col in 0..layout.chunks_across {
                 let index = chunk_row * layout.chunks_across + chunk_col;
@@ -138,7 +140,11 @@ impl RowWindow {
                         if tile.reader.is_sparse_chunk(index) {
                             out.resize(bounds.width as usize * bounds.height as usize, f64::NAN);
                         } else {
-                            let (_, data) = tile.reader.read_chunk(index)?;
+                            let decoder = match &mut decoder {
+                                Some(decoder) => decoder,
+                                slot @ None => slot.insert(tile.reader.open_decoder()?),
+                            };
+                            let (_, data) = decoder.read_chunk(index)?;
                             let samples = BorrowedSamples::from(&data);
                             crate::dispatch_samples!(samples, nodata, |slice, nd| {
                                 convert(
@@ -229,5 +235,62 @@ fn convert<T: SimdSpanAccumulate>(
                 .filter(|v| v.is_finite());
             out.push(value.unwrap_or(f64::NAN));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raster::geotiff::{GeoTiffStreamReader, DECODER_OPENS};
+    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::tags::Tag;
+
+    #[test]
+    fn sparse_and_cached_strips_skip_decoder_setup_and_misses_share_it() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = TiffEncoder::new(file.as_file()).unwrap();
+        let mut image = encoder.new_image::<colortype::Gray8>(2, 4).unwrap();
+        image.rows_per_strip(1).unwrap();
+        image
+            .encoder()
+            .write_tag(Tag::ModelPixelScaleTag, &[0.01f64, 0.01, 0.0][..])
+            .unwrap();
+        image
+            .encoder()
+            .write_tag(
+                Tag::ModelTiepointTag,
+                &[0.0f64, 0.0, 0.0, -122.0, 38.0, 0.0][..],
+            )
+            .unwrap();
+        image.write_data(&[0, 0, 11, 12, 21, 22, 0, 0]).unwrap();
+        let mut reader = GeoTiffStreamReader::open(file.path()).unwrap();
+        let info = Arc::make_mut(reader.chunk_info.as_mut().unwrap());
+        for i in [0, 3] {
+            Arc::make_mut(&mut info.chunk_offsets)[i] = 0;
+            Arc::make_mut(&mut info.chunk_bytes)[i] = 0;
+        }
+        let tile = TileDescriptor::new(0, reader, Some("EPSG:4326")).unwrap();
+        let band = BandSelection {
+            band: 1,
+            nodata: None,
+            apply_scale_offset: false,
+        };
+        let mut cache = ChunkCache::default();
+        let before = DECODER_OPENS.get();
+        let first = RowWindow::load(&tile, band, 0..1, &mut cache).unwrap();
+        assert_eq!(first.get(0, 0), None);
+        assert_eq!(DECODER_OPENS.get(), before);
+        let mixed = RowWindow::load(&tile, band, 0..3, &mut cache).unwrap();
+        assert_eq!(
+            (mixed.get(0, 0), mixed.get(0, 1), mixed.get(1, 2)),
+            (None, Some(11.0), Some(22.0))
+        );
+        assert_eq!(DECODER_OPENS.get(), before + 1);
+        let reused = RowWindow::load(&tile, band, 1..4, &mut cache).unwrap();
+        assert_eq!(
+            (reused.get(1, 1), reused.get(0, 2), reused.get(0, 3)),
+            (Some(12.0), Some(21.0), None)
+        );
+        assert_eq!(DECODER_OPENS.get(), before + 1);
     }
 }

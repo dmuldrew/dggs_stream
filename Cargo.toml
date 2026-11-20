@@ -127,3 +127,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "unwind"
+
+# Fast optimized profile for CI test suites: keeps runtime close to release for
+# raster/geodesic integration tests while avoiding ThinLTO and single-CGU
+# serialization across test harnesses.
+[profile.ci-test]
+inherits = "release"
+opt-level = 2
+lto = "off"
+codegen-units = 16
