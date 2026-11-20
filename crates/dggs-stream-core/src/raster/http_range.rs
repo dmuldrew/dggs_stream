@@ -1292,6 +1292,17 @@ impl RemoteHttpSource {
             .fetch_range(start, end, Some(self.total_size))
     }
 
+    /// Whether a direct chunk read can already be served by one cached block.
+    pub(crate) fn has_cached_chunk(&self, offset: u64, length: u64) -> bool {
+        let size = self.cache.block_size() as u64;
+        let within = offset % size;
+        self.cache
+            .get_block(offset / size)
+            .ok()
+            .flatten()
+            .is_some_and(|b| length <= (b.len() as u64).saturating_sub(within))
+    }
+
     /// Read bytes starting at `offset` directly into `out`, using the block cache for small reads.
     /// Eliminates intermediate buffer allocations.
     ///

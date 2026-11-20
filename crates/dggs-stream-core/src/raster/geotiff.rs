@@ -448,16 +448,30 @@ impl<'a> ChunkDecoder<'a> {
         provided_bytes: Option<&[u8]>,
         target_buffer: Option<DecodingResult>,
     ) -> Result<(RasterChunk, DecodingResult)> {
+        self.read_worker_chunk(chunk_index, provided_bytes, target_buffer, None)
+    }
+
+    pub(crate) fn read_worker_chunk(
+        &mut self,
+        index: u32,
+        payload: Option<&[u8]>,
+        buffer: Option<DecodingResult>,
+        queue: Option<(
+            &crate::raster::remote_prefetch::RemoteChunkPrefetchQueue,
+            usize,
+        )>,
+    ) -> Result<(RasterChunk, DecodingResult)> {
         if let Some(planes) = self.planes.clone() {
-            if provided_bytes.is_some() {
+            if payload.is_some() {
                 return Err(DggsStreamError::InvalidParameter(
                     "a planar spatial chunk requires a separate payload for each selected plane"
                         .into(),
                 ));
             }
-            return self.read_planar_chunk(chunk_index, &planes, target_buffer);
+            self.read_planar_chunk(index, &planes, buffer, queue)
+        } else {
+            self.read_physical_chunk(index, payload, buffer)
         }
-        self.read_physical_chunk(chunk_index, provided_bytes, target_buffer)
     }
 
     fn read_physical_chunk(
