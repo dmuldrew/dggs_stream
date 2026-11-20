@@ -75,6 +75,8 @@ pub struct CliStreamOptions {
     /// `--transfer`, `--interpolation`, `--overlay-weighted` and `--mass-preserve`: how
     /// pixels map onto cells (default: each pixel into the cell holding its centre).
     pub transfer: TransferMode,
+    /// Minimum valid fraction of selected raster overlap.
+    pub valid_coverage_threshold: Option<f64>,
     /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
     /// per-cell histogram (see [`dggs_stream_core::histogram`]). Implies `--categorical`.
     pub histogram: Option<HistogramSpec>,
@@ -102,6 +104,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            valid_coverage_threshold: None,
             histogram: None,
             profile: None,
         }
@@ -156,6 +159,23 @@ fn warn_transform_failures(failures: u64) {
     }
 }
 
+impl CliStreamOptions {
+    /// Shared scan settings for streamed and file outputs.
+    pub fn scan_config(&self) -> MultiResolutionConfig {
+        let mut config = MultiResolutionConfig::new(self.resolutions.clone()).with_grid(self.grid);
+        config.custom_crs = self.source_crs.clone();
+        config.custom_nodata = self.nodata;
+        config.apply_scale_offset = self.apply_scale_offset;
+        config.bbox = self.bbox;
+        config.overlap_rule = OverlapRule::Cutline;
+        apply_output_policy(&mut config, &self.output);
+        config.transfer = self.transfer;
+        config.profile = self.profile.clone();
+        config.valid_coverage_threshold = self.valid_coverage_threshold;
+        config
+    }
+}
+
 /// Stream a GeoTIFF/COG aggregation directly to `writer` in binary IPC or JSONL format.
 /// Returns the total number of rows emitted.
 pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
@@ -167,14 +187,7 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
 
 fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
     let paths = resolve_raster_sources(&opts.input_path)?;
-    let mut config = MultiResolutionConfig::new(opts.resolutions.clone()).with_grid(opts.grid);
-    config.custom_crs = opts.source_crs.clone();
-    config.custom_nodata = opts.nodata;
-    config.apply_scale_offset = opts.apply_scale_offset;
-    config.bbox = opts.bbox;
-    config.overlap_rule = OverlapRule::Cutline;
-    apply_output_policy(&mut config, &opts.output);
-    config.transfer = opts.transfer;
+    let mut config = opts.scan_config();
     if let Some(spec) = &opts.histogram {
         if opts.partition.is_some() {
             return Err(DggsStreamError::InvalidParameter(
@@ -183,8 +196,6 @@ fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<us
         }
         config.set_histogram(spec.clone())?;
     }
-    config.profile = opts.profile.clone();
-
     if let Some(partition) = &opts.partition {
         config.partition = Some(partition.clone());
         return stream_partition(opts, &paths, &config, writer);
@@ -916,23 +927,34 @@ pub fn export_raster_to_parquet_with_transfer(
     transfer: TransferMode,
     profile: Option<Arc<RunProfile>>,
 ) -> Result<usize> {
-    let paths = resolve_raster_sources(input_path)?;
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.custom_crs = source_crs.clone();
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
     config.transfer = transfer;
-    let report_profile = profile.clone();
     config.profile = profile;
     apply_output_policy(&mut config, policy);
+    export_raster_to_parquet_with_config(input_path, output_path, categorical, geoparquet, config)
+}
+
+/// Export a raster using the supplied scan configuration.
+pub fn export_raster_to_parquet_with_config(
+    input_path: &str,
+    output_path: &Path,
+    categorical: bool,
+    geoparquet: bool,
+    mut config: MultiResolutionConfig,
+) -> Result<usize> {
+    let report_profile = config.profile.clone();
+    let paths = resolve_raster_sources(input_path)?;
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
     let mosaic = Arc::new(MosaicReader::open(
         &paths,
-        bbox,
-        source_crs.as_deref(),
+        config.bbox,
+        config.custom_crs.as_deref(),
         OverlapRule::Cutline,
     )?);
 
@@ -1056,13 +1078,23 @@ pub fn export_raster_to_pmtiles_with_transfer(
 ) -> Result<usize> {
     let mut config = MultiResolutionConfig::new(resolutions).with_grid(grid);
     config.transfer = transfer;
-    let report_profile = profile.clone();
     config.profile = profile;
     config.custom_crs = source_crs;
     config.custom_nodata = nodata;
     config.apply_scale_offset = apply_scale_offset;
     config.bbox = bbox;
     apply_output_policy(&mut config, policy);
+    export_raster_to_pmtiles_with_config(input_path, output_path, categorical, config)
+}
+
+/// Export a raster using the supplied scan configuration.
+pub fn export_raster_to_pmtiles_with_config(
+    input_path: &str,
+    output_path: &Path,
+    categorical: bool,
+    mut config: MultiResolutionConfig,
+) -> Result<usize> {
+    let report_profile = config.profile.clone();
     let failures = Arc::new(AtomicU64::new(0));
     config.transform_failure_counter = Some(Arc::clone(&failures));
 
@@ -1255,6 +1287,13 @@ pub fn parse_stream_args(
                     "false" | "0" | "no" => false,
                     _ => return Err(invalid(flag, v, "true or false")),
                 });
+            }
+            "--valid-coverage-threshold" => {
+                let v = value()?;
+                opts.valid_coverage_threshold = Some(
+                    v.parse()
+                        .map_err(|_| invalid(flag, v, "a fraction in [0, 1]"))?,
+                );
             }
             "--mass-preserve" => mass_preserve = Some(true),
             "--histogram" => histogram[0] = Some(value()?.to_string()),

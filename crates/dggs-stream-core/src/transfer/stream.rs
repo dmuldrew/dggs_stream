@@ -141,6 +141,17 @@ struct Pending<A> {
     last_tile: usize,
 }
 
+#[derive(Default)]
+struct BandCoverage {
+    valid_area: f64,
+    covered_area: f64,
+}
+
+struct CoverageFilter {
+    minimum: f64,
+    cells: HashMap<u64, BandCoverage>,
+}
+
 /// Streams `(resolution, cell, accumulator)` for the `interpolate` and `overlay` modes.
 pub struct TransferStream<A: TransferAccumulator> {
     mosaic: Arc<MosaicReader>,
@@ -151,6 +162,7 @@ pub struct TransferStream<A: TransferAccumulator> {
     bbox: Option<[f64; 4]>,
     track_quantiles: bool,
     filters: Filters,
+    coverage_filter: Option<CoverageFilter>,
     remapper: Option<Arc<CategoryRemapper>>,
     /// Bins of a binned histogram scan: a value's class is the index of its bin.
     histogram_bins: Option<Arc<crate::histogram::HistogramBins>>,
@@ -172,6 +184,7 @@ pub struct TransferStream<A: TransferAccumulator> {
 impl<A: TransferAccumulator> TransferStream<A> {
     /// A stream over `mosaic` for the non-default `config.transfer`.
     pub fn new(mosaic: Arc<MosaicReader>, config: &MultiResolutionConfig) -> Result<Self> {
+        config.validate_coverage_threshold()?;
         let mode = config.transfer;
         let histogram_bins = config
             .histogram
@@ -240,6 +253,19 @@ impl<A: TransferAccumulator> TransferStream<A> {
             emit_nodata: config.nodata_policy == NodataPolicy::Emit,
             bbox: config.bbox,
             track_quantiles: config.track_quantiles(),
+            coverage_filter: match mode {
+                TransferMode::Overlay {
+                    mass_preserve: false,
+                    ..
+                } => config
+                    .valid_coverage_threshold
+                    .filter(|&t| t > 0.0)
+                    .map(|minimum| CoverageFilter {
+                        minimum,
+                        cells: HashMap::new(),
+                    }),
+                _ => None,
+            },
             filters: Filters {
                 min_count: config.min_count,
                 min_mean: config.min_mean,
@@ -382,11 +408,15 @@ impl<A: TransferAccumulator> TransferStream<A> {
     }
 
     /// The class a value stands for after remapping, or the value itself.
-    fn mapped(&self, value: f64) -> Option<f64> {
-        if let Some(bins) = &self.histogram_bins {
+    fn mapped(
+        bins: Option<&crate::histogram::HistogramBins>,
+        remapper: Option<&CategoryRemapper>,
+        value: f64,
+    ) -> Option<f64> {
+        if let Some(bins) = bins {
             return bins.bin_of(value).map(|bin| bin as f64);
         }
-        match &self.remapper {
+        match remapper {
             Some(remapper) if A::CATEGORICAL => {
                 remapper.remap(value.round() as i64).map(|c| c as f64)
             }
@@ -432,8 +462,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 continue;
             }
             let mut acc = A::empty(self.track_quantiles);
-            if let Some(value) = interpolate(&window, method, col, row).and_then(|v| self.mapped(v))
-            {
+            if let Some(value) = interpolate(&window, method, col, row).and_then(|v| {
+                Self::mapped(self.histogram_bins.as_deref(), self.remapper.as_deref(), v)
+            }) {
                 acc.add(value, 1.0);
             }
             if (acc.has_samples() || self.emit_nodata) && acc.passes(&self.filters) {
@@ -460,14 +491,14 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let several_tiles = mosaic.tiles.len() > 1;
         let gt = &tile.reader.metadata.geotransform;
 
-        // `(cell slot, pixel in band, weight)` of every overlap, and each pixel's total.
-        let mut overlaps: Vec<(u32, u32, f64)> = Vec::new();
+        // Ordinary overlay reuses this buffer per cell. Conservation needs a second pass.
+        let mut overlaps: Vec<(u32, f64)> = Vec::new();
         let mut totals = if mass_preserve {
             vec![0.0f64; band_width * block.rows.len()]
         } else {
             Vec::new()
         };
-        let mut slots: Vec<u64> = Vec::new();
+        let mut cell_ends = Vec::new();
         let longitude_bounds = periodic_longitude_bounds(tile);
         let mut failures = 0;
         // Cells this large are assigned whole pixels by centre (see below).
@@ -498,8 +529,46 @@ impl<A: TransferAccumulator> TransferStream<A> {
         } else {
             cells
         };
+        let mut selected = (self.bbox.is_some() || several_tiles)
+            .then(|| vec![None; band_width * block.rows.len()]);
+        let mut contribute = |pending: &mut Pending<A>,
+                              coverage: Option<&mut BandCoverage>,
+                              pixel: u32,
+                              area: f64,
+                              weight: f64| {
+            let index = pixel as usize;
+            let col = (index % band_width) as i64;
+            let row = rows.0 + (index / band_width) as i64;
+            if let Some(cache) = &mut selected {
+                let inside = cache[index].get_or_insert_with(|| {
+                    let (x, y) = gt.pixel_to_coord(col as f64 + 0.5, row as f64 + 0.5);
+                    tile.crs_transformer
+                        .transform_point(x, y)
+                        .is_ok_and(|(lon, lat)| {
+                            is_point_in_bbox(wrap_lon_180(lon), lat, self.bbox)
+                                && (!several_tiles
+                                    || mosaic.is_point_owned_by(block.tile, lon, lat))
+                        })
+                });
+                if !*inside {
+                    return;
+                }
+            }
+            pending.touched = true;
+            let sample = window.get(col, row);
+            if let Some(coverage) = coverage {
+                coverage.covered_area += area;
+                if sample.is_some() {
+                    coverage.valid_area += area;
+                }
+            }
+            if let Some(value) = sample.and_then(|v| {
+                Self::mapped(self.histogram_bins.as_deref(), self.remapper.as_deref(), v)
+            }) {
+                pending.acc.add(value, weight);
+            }
+        };
         for cell in cells {
-            let slot = slots.len() as u32;
             let before = overlaps.len();
             let end_row;
             let mut pieces = 0;
@@ -513,14 +582,14 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     pixel_overlaps(polygon, rows, width, |c, r, area| {
                         if area > 1e-12 {
                             let pixel = (r - rows.0) as usize * band_width + c as usize;
-                            overlaps.push((slot, pixel as u32, if weighted { area } else { 1.0 }));
+                            overlaps.push((pixel as u32, area));
                         }
                     });
                 })
             {
                 end_row = last_row.ceil() as i64;
                 if pieces > 1 {
-                    merge_seam_overlaps(&mut overlaps, before, weighted);
+                    merge_seam_overlaps(&mut overlaps, before);
                 }
             } else if coarse || self.grid.interior_pole(cell).is_some() {
                 // A cell holding a pole has no polygon in a lon/lat raster, and the edges
@@ -530,7 +599,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 let owners = pixel_cells.get_or_insert_with(&owners_of_block);
                 for (pixel, owner) in owners.iter().enumerate() {
                     if *owner == Some(cell) {
-                        overlaps.push((slot, pixel as u32, 1.0));
+                        overlaps.push((pixel as u32, 1.0));
                     }
                 }
             } else {
@@ -542,7 +611,6 @@ impl<A: TransferAccumulator> TransferStream<A> {
             if overlaps.len() == before && !self.pending.contains_key(&cell) {
                 continue;
             }
-            slots.push(cell);
             let track_quantiles = self.track_quantiles;
             let grid = self.grid;
             let pending = self.pending.entry(cell).or_insert_with(|| Pending {
@@ -558,58 +626,37 @@ impl<A: TransferAccumulator> TransferStream<A> {
             if block.tile == pending.last_tile {
                 pending.end_row = Some(end_row);
             }
-        }
-
-        // A bbox selects pixels by their centres, as the centre kernel does; a cell
-        // larger than the box still takes the pixels inside it.
-        if self.bbox.is_some() {
-            let bbox = self.bbox;
-            let mut inside = vec![None::<bool>; band_width * block.rows.len()];
-            overlaps.retain(|&(_, pixel, _)| {
-                *inside[pixel as usize].get_or_insert_with(|| {
-                    let (c, r) = (pixel as usize % band_width, pixel as usize / band_width);
-                    let (x, y) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + rows.0 as f64 + 0.5);
-                    tile.crs_transformer
-                        .transform_point(x, y)
-                        .is_ok_and(|(lon, lat)| is_point_in_bbox(wrap_lon_180(lon), lat, bbox))
-                })
-            });
-        }
-        // In a mosaic a pixel counts only in the tile that owns it.
-        if several_tiles {
-            overlaps.retain(|&(_, pixel, _)| {
-                let (c, r) = (pixel as usize % band_width, pixel as usize / band_width);
-                let (x, y) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + rows.0 as f64 + 0.5);
-                tile.crs_transformer
-                    .transform_point(x, y)
-                    .is_ok_and(|(lon, lat)| mosaic.is_point_owned_by(block.tile, lon, lat))
-            });
-        }
-        if mass_preserve {
-            for &(_, pixel, weight) in &overlaps {
-                totals[pixel as usize] += weight;
+            if mass_preserve {
+                for &(pixel, area) in &overlaps[before..] {
+                    totals[pixel as usize] += area;
+                }
+                cell_ends.push((cell, overlaps.len()));
+            } else {
+                let mut coverage = self
+                    .coverage_filter
+                    .as_mut()
+                    .map(|filter| filter.cells.entry(cell).or_default());
+                for (pixel, area) in overlaps.drain(..) {
+                    contribute(
+                        pending,
+                        coverage.as_deref_mut(),
+                        pixel,
+                        area,
+                        if weighted { area } else { 1.0 },
+                    );
+                }
             }
         }
-        for (slot, pixel, weight) in overlaps {
-            let (c, r) = (pixel as usize % band_width, pixel as usize / band_width);
-            let value = window
-                .get(c as i64, r as i64 + rows.0)
-                .and_then(|v| self.mapped(v));
-            let Some(pending) = self.pending.get_mut(&slots[slot as usize]) else {
-                continue;
-            };
-            // Only pixels that passed the bbox and ownership filters above make a cell
-            // `touched`, so `emit` lists no cell outside the selection.
-            pending.touched = true;
-            let Some(value) = value else {
-                continue;
-            };
-            let weight = if mass_preserve {
-                weight / totals[pixel as usize]
-            } else {
-                weight
-            };
-            pending.acc.add(value, weight);
+        let mut start = 0;
+        for (cell, end) in cell_ends {
+            let pending = self
+                .pending
+                .get_mut(&cell)
+                .expect("cell remains pending until block completion");
+            for &(pixel, area) in &overlaps[start..end] {
+                contribute(pending, None, pixel, area, area / totals[pixel as usize]);
+            }
+            start = end;
         }
         self.record_failures(failures)
     }
@@ -640,7 +687,12 @@ impl<A: TransferAccumulator> TransferStream<A> {
         for cell in done {
             if let Some(pending) = self.pending.remove(&cell) {
                 let keep = pending.acc.has_samples() || (self.emit_nodata && pending.touched);
-                if keep && pending.acc.passes(&self.filters) {
+                let valid = self.coverage_filter.as_mut().is_none_or(|filter| {
+                    filter.cells.remove(&cell).is_some_and(|coverage| {
+                        coverage.valid_area >= filter.minimum * coverage.covered_area
+                    })
+                });
+                if keep && valid && pending.acc.passes(&self.filters) {
                     self.output.push_back((block.resolution, cell, pending.acc));
                 }
             }
@@ -919,15 +971,13 @@ fn to_pixel(tile: &TileDescriptor, lon: f64, lat: f64) -> Option<(f64, f64)> {
 
 /// Two seam pieces can touch the same source pixel (e.g. a one-column
 /// global raster). Combine its weight before counting it or updating variance.
-fn merge_seam_overlaps(overlaps: &mut Vec<(u32, u32, f64)>, start: usize, weighted: bool) {
-    overlaps[start..].sort_unstable_by_key(|&(_, pixel, _)| pixel);
+fn merge_seam_overlaps(overlaps: &mut Vec<(u32, f64)>, start: usize) {
+    overlaps[start..].sort_unstable_by_key(|&(pixel, _)| pixel);
     let mut end = start;
     for i in start..overlaps.len() {
         let entry = overlaps[i];
-        if end > start && overlaps[end - 1].1 == entry.1 {
-            if weighted {
-                overlaps[end - 1].2 += entry.2;
-            }
+        if end > start && overlaps[end - 1].0 == entry.0 {
+            overlaps[end - 1].1 += entry.1;
         } else {
             overlaps[end] = entry;
             end += 1;

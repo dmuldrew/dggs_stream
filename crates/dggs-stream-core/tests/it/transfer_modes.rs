@@ -878,3 +878,55 @@ fn striped_subifd_mask_combines_with_alpha() {
     assert_eq!(cells.values().map(|a| a.count).sum::<f64>(), 2.0);
     assert_eq!(cells.values().map(|a| a.sum).sum::<f64>(), 26.0);
 }
+
+#[test]
+fn valid_coverage_uses_selected_area_even_for_unweighted_statistics() {
+    // With all samples valid, the weighted mean of this binary indicator is
+    // an independent reference for the valid fraction after zeros become NoData.
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|x, y| f32::from((x + y) % 3 != 0));
+    let mut cfg = config(
+        GridKind::H3,
+        matched(GridKind::H3, 0),
+        TransferMode::OVERLAY,
+    );
+    cfg.bbox = Some([ORIGIN.0, ORIGIN.1 - 0.02, ORIGIN.0 + 0.02, ORIGIN.1]);
+    let reference = scan(&path, &cfg);
+    cfg.custom_nodata = Some(0.0);
+    cfg.nodata_policy = dggs_stream_core::aggregator::NodataPolicy::Emit;
+    for weighted in [false, true] {
+        cfg.transfer = TransferMode::Overlay {
+            weighted,
+            mass_preserve: false,
+        };
+        for t in [0.0, 0.6, 1.0] {
+            cfg.valid_coverage_threshold = Some(t);
+            let got = scan(&path, &cfg);
+            let expected: Vec<_> = reference
+                .iter()
+                .filter(|(_, a)| a.sum >= t * a.count)
+                .map(|(&id, _)| id)
+                .collect();
+            assert!(got.keys().copied().eq(expected.iter().copied()));
+            if t > 0.0 {
+                assert!(!got.is_empty() && got.len() < reference.len());
+            }
+        }
+    }
+    cfg.transfer = TransferMode::Overlay {
+        weighted: true,
+        mass_preserve: true,
+    };
+    let exempt = scan(&path, &cfg);
+    cfg.valid_coverage_threshold = None;
+    assert_eq!(exempt, scan(&path, &cfg));
+    for t in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+        cfg.valid_coverage_threshold = Some(t);
+        assert!(cfg.validate().is_err());
+    }
+    cfg.valid_coverage_threshold = Some(0.5);
+    cfg.transfer = TransferMode::AssignCenters;
+    assert!(cfg.validate().is_err());
+}

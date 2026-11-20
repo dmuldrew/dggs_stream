@@ -8,7 +8,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use dggs_stream_cli::{
-    export_raster_to_parquet_with_transfer, export_raster_to_pmtiles_with_transfer,
+    export_raster_to_parquet_with_config, export_raster_to_pmtiles_with_config,
     merge_partition_files, parse_merge_args, parse_parquet_to_pmtiles_args, parse_plan_args,
     parse_stream_args, plan_raster_partitions, stream_raster_to_writer,
     transcode_parquet_to_pmtiles, write_plan, StreamOutputFormat,
@@ -57,6 +57,7 @@ fn print_help() {
                                      overlay (each cell aggregates the pixels it\n                                     \
                                      overlaps, weighted by overlap area)\n  \
           --interpolation <M>        nearest, bilinear (default), bicubic or lanczos\n  \
+          --valid-coverage-threshold <F>  Overlay: minimum valid overlap fraction (0..1)\n  \
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
           --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \
                                      conserved exactly\n  \
@@ -147,20 +148,7 @@ fn main() {
                     "Missing -o / --output path for parquet export".into(),
                 )
             })?;
-            export_raster_to_parquet_with_transfer(
-                opts.grid,
-                &opts.input_path,
-                Path::new(&out_path),
-                opts.resolutions,
-                opts.categorical,
-                opts.source_crs,
-                opts.nodata,
-                opts.bbox,
-                true,
-                opts.apply_scale_offset,
-                &opts.output,
-                opts.transfer,
-                opts.profile.clone(),
+            export_raster_to_parquet_with_config(&opts.input_path, Path::new(&out_path), opts.categorical, true, opts.scan_config()
             )
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
@@ -171,19 +159,7 @@ fn main() {
                     "Missing -o / --output path for pmtiles export".into(),
                 )
             })?;
-            export_raster_to_pmtiles_with_transfer(
-                opts.grid,
-                &opts.input_path,
-                Path::new(&out_path),
-                opts.resolutions,
-                opts.categorical,
-                opts.source_crs,
-                opts.nodata,
-                opts.bbox,
-                opts.apply_scale_offset,
-                &opts.output,
-                opts.transfer,
-                opts.profile.clone(),
+            export_raster_to_pmtiles_with_config(&opts.input_path, Path::new(&out_path), opts.categorical, opts.scan_config()
             )
         }),
         "parquet-to-pmtiles" => parse_parquet_to_pmtiles_args(rest).and_then(|args| {
