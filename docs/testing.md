@@ -463,11 +463,14 @@ and `streaming_failures::` integration suites under ThreadSanitizer
 (`RUSTFLAGS=-Zsanitizer=thread cargo +nightly test -Zbuild-std --locked -p dggs-stream-core
 --test it -- threading:: chunks_and_prefetch:: streaming_failures::`, with `--target` for
 cross builds). The [coverage workflow](../.github/workflows/coverage.yml) measures
-`--lib --test it` across the core, cli, python and pg crates with
+`--lib --test it` across the core, cli, python, duckdb and pg crates with
 `cargo llvm-cov` and uploads `lcov.info` to Codecov (informational statuses); run it
-locally as `DGGS_STREAM_PG_MAJOR=16 cargo llvm-cov --locked --lcov --output-path lcov.info
--p dggs-stream-core -p dggs-stream-cli -p dggs-stream-python
--p dggs-stream-pg --lib --test it`. The standalone `dggs-stream-sedona` workspace (including its `scan`
+locally as `cargo llvm-cov --locked --no-report -p dggs-stream-core -p dggs-stream-cli
+-p dggs-stream-python -p dggs-stream-duckdb --lib --test it`, then
+`DGGS_STREAM_PG_MAJOR=16 cargo llvm-cov --locked --no-report -p dggs-stream-pg
+--features pg-extension --lib --test it`, followed by
+`cargo llvm-cov report --workspace --lcov --output-path lcov.info`. The standalone
+`dggs-stream-sedona` workspace (including its `scan`
 layer) is not in the coverage report.
 
 Fuzz crash artifacts are retained on CI failure. Minimize a reproducer
