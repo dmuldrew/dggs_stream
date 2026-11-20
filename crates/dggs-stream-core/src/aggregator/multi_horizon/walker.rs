@@ -109,6 +109,8 @@ pub struct WalkContext<'a> {
     pub band_scaling: &'a [BandScaling],
     /// Internal TIFF validity bits for this data chunk.
     pub mask: Option<&'a crate::raster::geotiff::MaskWindow>,
+    /// Stored sample slots in a partially sparse planar chunk.
+    pub band_presence: Option<&'a [bool]>,
     /// Zero-based interleaved alpha sample; pixels with zero alpha are skipped.
     pub alpha_sample: Option<u16>,
     /// `NodataPolicy::Emit`: NoData pixels are walked too, so the cells they fall in
@@ -120,6 +122,12 @@ pub struct WalkContext<'a> {
 }
 
 impl WalkContext<'_> {
+    /// Whether the zero-based sample slot has a stored plane for this chunk.
+    #[inline]
+    pub fn band_present(&self, slot: usize) -> bool {
+        self.band_presence.is_none_or(|present| present[slot])
+    }
+
     /// Calibration for the 1-based `band`, or identity when uncalibrated.
     #[inline]
     pub fn scaling(&self, band: usize) -> BandScaling {
@@ -134,8 +142,7 @@ impl WalkContext<'_> {
 #[inline(always)]
 pub fn is_transparent<T: Copy + Default + PartialEq>(ctx: &WalkContext<'_>, px: &[T]) -> bool {
     ctx.alpha_sample
-        .and_then(|a| px.get(a as usize))
-        .is_some_and(|&alpha| alpha == T::default())
+        .is_some_and(|a| !ctx.band_present(a as usize) || px.get(a as usize) == Some(&T::default()))
 }
 
 /// Walk a single-band window. Center sampling batches contiguous pixels
@@ -229,6 +236,7 @@ pub fn scanline_walk<T, Acc, E, FNoData>(
         owner: None,
         band_scaling: &[],
         mask: None,
+        band_presence: None,
         alpha_sample: None,
         emit_nodata: false,
         histogram_bins: None,
@@ -900,6 +908,7 @@ pub(crate) fn for_each_kernel_test_context(mut f: impl FnMut(&str, &WalkContext<
                 owner: None,
                 band_scaling: &[],
                 mask: None,
+                band_presence: None,
                 alpha_sample: None,
                 emit_nodata: false,
                 histogram_bins: None,
@@ -993,6 +1002,7 @@ mod tests {
                 owner: None,
                 band_scaling: &[],
                 mask: None,
+                band_presence: None,
                 alpha_sample: None,
                 emit_nodata: false,
                 histogram_bins: None,
@@ -1084,6 +1094,7 @@ mod tests {
             owner: None,
             band_scaling: &[],
             mask: None,
+            band_presence: None,
             alpha_sample: None,
             emit_nodata: false,
             histogram_bins: None,
@@ -1134,6 +1145,7 @@ mod tests {
                     owner: None,
                     band_scaling: &[],
                     mask: None,
+                    band_presence: None,
                     alpha_sample: None,
                     emit_nodata: false,
                     histogram_bins: None,
@@ -1196,6 +1208,7 @@ mod tests {
                     owner: None,
                     band_scaling: &[],
                     mask: None,
+                    band_presence: None,
                     alpha_sample: None,
                     emit_nodata: false,
                     histogram_bins: None,

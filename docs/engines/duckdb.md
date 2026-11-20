@@ -200,7 +200,7 @@ ORDER BY weighted_pixel_count DESC;
 
 ### Multiple bands in one pass
 
-Use one-based band numbers to aggregate several bands of an interleaved TIFF with center assignment. The output follows the requested band order. Use `bands := 'all'` to request every band.
+Use one-based band numbers to aggregate several bands of an interleaved or band-separated TIFF with center assignment. The output follows the requested band order. Use `bands := 'all'` to request every band.
 
 ```sql
 SELECT h3_hex, band_3_mean, band_1_count

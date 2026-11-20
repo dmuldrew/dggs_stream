@@ -176,7 +176,7 @@ fn process_categorical_slice_into_maps_impl<T: CategoricalUniformity + Default>(
             ctx,
             slice,
             |px| {
-                if is_transparent(ctx, px) {
+                if !ctx.band_present(b) || is_transparent(ctx, px) {
                     // Under `emit` a pixel without a class still marks its cell.
                     emit.then_some(NODATA_CLASS)
                 } else {

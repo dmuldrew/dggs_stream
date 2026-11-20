@@ -278,6 +278,9 @@ fn pixel_value<T: SimdSpanAccumulate + Default>(
     }
     let get = |b: usize| {
         let b = b.saturating_sub(1).min(px.len() - 1);
+        if !ctx.band_present(b) {
+            return None;
+        }
         let v = px[b];
         v.is_valid(nodata)
             .then(|| ctx.scaling(b + 1).apply(v.to_f64_val()))

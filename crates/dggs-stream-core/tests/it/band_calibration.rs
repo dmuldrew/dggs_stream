@@ -799,3 +799,96 @@ fn dropping_multiband_scan_announces_work_done() {
     assert_eq!(announced.windows, profile.report().windows);
     assert_eq!(announced.pixels_read, profile.report().pixels_read);
 }
+
+#[test]
+fn twelve_band_layouts_match_independent_calibrated_scans() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let chunky = fixtures.join("multiband-12-interleaved.tif");
+    let cfg = MultiResolutionConfig::single(12);
+    let expected = [3, 1].map(|band| {
+        run(
+            &chunky,
+            &MultiResolutionConfig {
+                band,
+                ..cfg.clone()
+            },
+        )
+    });
+    // Distinct NoData regions in bands 3 and 1; the first seven columns have zero alpha.
+    for (reference, count) in expected.iter().zip([84 * 103, 85 * 103]) {
+        assert_eq!(
+            reference.values().map(|a| a.count).sum::<f64>(),
+            f64::from(count)
+        );
+    }
+    for layout in ["interleaved", "planar"] {
+        let path = fixtures.join(format!("multiband-12-{layout}.tif"));
+        let reader = GeoTiffStreamReader::open(&path).unwrap();
+        assert_eq!(reader.metadata.alpha_sample, Some(11));
+        assert_eq!(reader.metadata.band_scaling(3).scale, 0.5);
+        assert_eq!(reader.metadata.band_scaling(1).offset, -10.0);
+        let mut scan = MultiBandStreamer::new(reader, &cfg, Bands::Selected(&[3, 1])).unwrap();
+        let mut keys: std::collections::HashSet<_> =
+            expected.iter().flat_map(|m| m.keys().copied()).collect();
+        loop {
+            let rows = scan.fetch_next_batch(64).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                let key = (row.resolution, row.cell_id);
+                assert!(keys.remove(&key));
+                for (stat, reference) in row.statistics.iter().zip(&expected) {
+                    if let Some(want) = reference.get(&key) {
+                        assert_eq!(
+                            (stat.sum, stat.count, stat.min, stat.max),
+                            (want.sum, want.count, want.min, want.max)
+                        );
+                    } else {
+                        assert_eq!(stat.count, 0.0);
+                    }
+                }
+            }
+        }
+        assert!(keys.is_empty());
+    }
+}
+
+#[test]
+fn sparse_planar_band_has_no_observations_under_nodata_overrides() {
+    use dggs_stream_core::aggregator::multi_horizon::multiband::{Bands, MultiBandStreamer};
+    use std::sync::Arc;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    crate::codecs::write_planar_geotiff(file.path(), 32, 32, 4);
+    let mut reader = GeoTiffStreamReader::open(file.path()).unwrap();
+    // In this one-strip-per-plane fixture band 1 is unallocated and band 3 stores 90.
+    let info = Arc::make_mut(reader.chunk_info.as_mut().unwrap());
+    Arc::make_mut(&mut info.chunk_offsets)[0] = 0;
+    Arc::make_mut(&mut info.chunk_bytes)[0] = 0;
+    for (stored, override_value) in [(None, None), (Some(250.), Some(249.))] {
+        reader.metadata.nodata = stored;
+        let cfg = MultiResolutionConfig {
+            custom_nodata: override_value,
+            ..MultiResolutionConfig::single(8)
+        };
+        let mut scan =
+            MultiBandStreamer::new(reader.clone(), &cfg, Bands::Selected(&[3, 1])).unwrap();
+        let mut count = 0.;
+        loop {
+            let rows = scan.fetch_next_batch(100).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                assert_eq!(row.statistics[0].mean(), 90.);
+                count += row.statistics[0].count;
+                assert_eq!(row.statistics[1].count, 0.);
+            }
+        }
+        assert_eq!(count, 1024.);
+        let absent = MultiScanHorizonStreamer::new(reader.clone(), &cfg).unwrap();
+        assert!(drain(absent).is_empty());
+    }
+}

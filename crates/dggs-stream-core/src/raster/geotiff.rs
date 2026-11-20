@@ -5,6 +5,7 @@
 //! It supports both local files (via memory mapping) and remote cloud storage (via HTTP range requests).
 
 mod mask;
+mod planar;
 use mask::InternalMask;
 pub(crate) use mask::MaskChunkCache;
 pub use mask::MaskWindow;
@@ -61,6 +62,8 @@ pub struct GeoTiffMetadata {
     /// is zero is transparent and has no observation.
     pub alpha_sample: Option<u16>,
     internal_mask: Option<Arc<InternalMask>>,
+    // Physical zero-based planes in the order exposed to the aggregation kernels.
+    planes: Option<Arc<[u16]>>,
 }
 
 impl GeoTiffMetadata {
@@ -378,6 +381,7 @@ pub struct ChunkDecoder<'a> {
     width: u32,
     height: u32,
     samples_per_pixel: u16,
+    planes: Option<Arc<[u16]>>,
     pub nodata: Option<f64>,
     chunk_info: Option<Arc<TiffChunkInfo>>,
     source: DecoderSource<'a>,
@@ -442,11 +446,31 @@ impl<'a> ChunkDecoder<'a> {
         &mut self,
         chunk_index: u32,
         provided_bytes: Option<&[u8]>,
+        target_buffer: Option<DecodingResult>,
+    ) -> Result<(RasterChunk, DecodingResult)> {
+        if let Some(planes) = self.planes.clone() {
+            if provided_bytes.is_some() {
+                return Err(DggsStreamError::InvalidParameter(
+                    "a planar spatial chunk requires a separate payload for each selected plane"
+                        .into(),
+                ));
+            }
+            return self.read_planar_chunk(chunk_index, &planes, target_buffer);
+        }
+        self.read_physical_chunk(chunk_index, provided_bytes, target_buffer)
+    }
+
+    fn read_physical_chunk(
+        &mut self,
+        chunk_index: u32,
+        provided_bytes: Option<&[u8]>,
         mut target_buffer: Option<DecodingResult>,
     ) -> Result<(RasterChunk, DecodingResult)> {
-        let chunk_bounds = self
-            .chunk_layout
-            .get_chunk_bounds(chunk_index, self.width, self.height);
+        let chunk_bounds = self.chunk_layout.get_chunk_bounds(
+            self.spatial_index(chunk_index),
+            self.width,
+            self.height,
+        );
 
         // Check for sparse / unallocated chunk (e.g. in Cloud-Optimized GeoTIFFs where ocean/empty tiles have offset 0 or bytes 0)
         let is_sparse = if let Some(bytes) = provided_bytes {
@@ -815,9 +839,11 @@ impl<'a> ChunkDecoder<'a> {
             .ok_or_else(|| unsupported("no chunk info"))?;
 
         let (chunk_w, chunk_h) = info.chunk_dimensions;
-        let bounds = self
-            .chunk_layout
-            .get_chunk_bounds(chunk_index, self.width, self.height);
+        let bounds = self.chunk_layout.get_chunk_bounds(
+            self.spatial_index(chunk_index),
+            self.width,
+            self.height,
+        );
         let data_w = bounds.width as usize;
         let data_h = bounds.height as usize;
         let spp = (self.samples_per_pixel.max(1)) as usize;
@@ -1028,18 +1054,18 @@ impl GeoTiffStreamReader {
             .chunk_info
             .as_ref()
             .map_or(8, |info| (info.bits_per_sample as usize).div_ceil(8).max(1));
+        let bands = usize::from(self.metadata.samples_per_pixel.max(1));
+        // A planar worker holds one decoded plane alongside the interleaved result.
+        let buffers = bands + usize::from(self.is_planar() && bands > 1);
         (self.chunk_layout.chunk_width as usize)
             .saturating_mul(self.chunk_layout.chunk_height as usize)
-            .saturating_mul(self.metadata.samples_per_pixel.max(1) as usize)
+            .saturating_mul(buffers)
             .saturating_mul(bytes_per_sample)
     }
 
     /// Unallocated TIFF chunks contain no observations, regardless of nodata overrides.
     pub fn is_sparse_chunk(&self, chunk_index: u32) -> bool {
-        self.chunk_info.as_ref().is_some_and(|info| {
-            let index = chunk_index as usize;
-            info.chunk_offsets.get(index) == Some(&0) || info.chunk_bytes.get(index) == Some(&0)
-        })
+        self.physical_chunks_present(chunk_index) == 0
     }
 
     /// Backward-compatible accessor for memory-mapped buffer if the source is local
@@ -1085,16 +1111,15 @@ impl GeoTiffStreamReader {
             .or_else(|_| decoder.get_tag_u32(Tag::Unknown(277)))
             .map(|v| v as u16)
             .unwrap_or(1);
-        // PlanarConfiguration=Planar stores each band in its own strips/tiles,
-        // so the offset/bytecount arrays hold samples_per_pixel × more entries
-        // than this layout's chunk indexing models. Reject it rather than
-        // silently decode the wrong samples.
-        let planar_config = decoder.get_tag_u32(Tag::PlanarConfiguration).unwrap_or(1);
-        if planar_config != 1 && samples_per_pixel > 1 {
-            return Err(DggsStreamError::InvalidMetadata(format!(
-                "unsupported PlanarConfiguration {planar_config} for a {samples_per_pixel}-band raster: only chunky (interleaved) layouts are supported"
-            )));
-        }
+        let planes = match decoder.get_tag_u32(Tag::PlanarConfiguration).unwrap_or(1) {
+            1 => None,
+            2 => Some((0..samples_per_pixel).collect::<Arc<[_]>>()),
+            n => {
+                return Err(DggsStreamError::InvalidMetadata(format!(
+                    "unknown PlanarConfiguration {n}"
+                )))
+            }
+        };
         let band_scaling = extract_band_scaling(decoder, samples_per_pixel)?;
         let alpha_sample = extract_alpha_sample(decoder, samples_per_pixel);
 
@@ -1130,6 +1155,7 @@ impl GeoTiffStreamReader {
             samples_per_pixel,
             band_scaling,
             alpha_sample,
+            planes,
             internal_mask: InternalMask::find(decoder, width, height)?,
         };
 
@@ -1218,9 +1244,16 @@ impl GeoTiffStreamReader {
                 // A short array would make every chunk past its end silently
                 // read as sparse (nodata fill) instead of surfacing the
                 // malformation.
-                if offs.len() < total_chunks as usize {
+                let physical_chunks = total_chunks
+                    .checked_mul(metadata.planes.as_ref().map_or(1, |p| p.len() as u32))
+                    .ok_or_else(|| {
+                        DggsStreamError::InvalidMetadata(
+                            "TIFF plane chunk count exceeds u32".into(),
+                        )
+                    })?;
+                if offs.len() < physical_chunks as usize {
                     return Err(DggsStreamError::InvalidMetadata(format!(
-                        "TIFF offset/byte-count arrays hold {} entries but the image grid declares {total_chunks} chunks",
+                        "TIFF offset/byte-count arrays hold {} entries but the image grid declares {physical_chunks} chunks",
                         offs.len()
                     )));
                 }
@@ -1236,6 +1269,11 @@ impl GeoTiffStreamReader {
                     byte_order,
                     photometric,
                 }))
+            }
+            _ if metadata.planes.is_some() => {
+                return Err(DggsStreamError::InvalidMetadata(
+                    "planar TIFF requires matching chunk offset and byte-count tables".into(),
+                ))
             }
             _ => None,
         };
@@ -1381,7 +1419,12 @@ impl GeoTiffStreamReader {
             chunk_layout: self.chunk_layout,
             width: self.metadata.width,
             height: self.metadata.height,
-            samples_per_pixel: self.metadata.samples_per_pixel,
+            planes: self.metadata.planes.clone(),
+            samples_per_pixel: if self.is_planar() {
+                1
+            } else {
+                self.metadata.samples_per_pixel
+            },
             nodata: self.metadata.nodata,
             chunk_info: self.chunk_info.clone(),
             source,
