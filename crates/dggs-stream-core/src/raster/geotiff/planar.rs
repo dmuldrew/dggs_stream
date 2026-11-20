@@ -6,6 +6,14 @@ impl GeoTiffStreamReader {
         self.metadata.planes.is_some()
     }
 
+    pub(crate) fn physical_chunks(&self, index: u32) -> impl Iterator<Item = u32> + '_ {
+        self.metadata.planes.iter().flat_map(move |planes| {
+            planes
+                .iter()
+                .map(move |&p| u32::from(p) * self.chunk_layout.total_chunks + index)
+        })
+    }
+
     /// Compact the physical planes for a validated band selection. The kernel
     /// sees selected bands first, with an extra transparency sample if needed.
     pub(crate) fn project_bands(&mut self, bands: Vec<usize>) -> Vec<usize> {
@@ -69,6 +77,10 @@ impl ChunkDecoder<'_> {
         index: u32,
         planes: &[u16],
         mut output: Option<DecodingResult>,
+        queue: Option<(
+            &crate::raster::remote_prefetch::RemoteChunkPrefetchQueue,
+            usize,
+        )>,
     ) -> Result<(RasterChunk, DecodingResult)> {
         if index >= self.chunk_layout.total_chunks || planes.is_empty() {
             return Err(DggsStreamError::InvalidMetadata(
@@ -80,7 +92,15 @@ impl ChunkDecoder<'_> {
             .get_chunk_bounds(index, self.width, self.height);
         for (slot, &plane) in planes.iter().enumerate() {
             let physical = u32::from(plane) * self.chunk_layout.total_chunks + index;
-            let (_, data) = self.read_physical_chunk(physical, None, None)?;
+            // Release each response slice before requesting the next plane so
+            // a scan can progress with room for a single response.
+            let (_, data) = {
+                let payload = match queue {
+                    Some((queue, tile)) => queue.get_chunk_payload(tile, physical)?,
+                    None => None,
+                };
+                self.read_physical_chunk(physical, payload.as_deref(), None)?
+            };
             if planes.len() == 1 {
                 return Ok((bounds, data));
             }

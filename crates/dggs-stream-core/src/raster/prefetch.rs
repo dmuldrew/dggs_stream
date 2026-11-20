@@ -652,16 +652,18 @@ impl PrefetchedChunkReader {
                         let recycled_buf = worker_buffer_pool.pop();
                         let prefetched_bytes = worker_remote_queue
                             .as_ref()
+                            .filter(|_| !worker_reader.is_planar())
                             .map(|q| q.get_chunk_payload(0, chunk_idx))
                             .transpose()
                             .map(Option::flatten);
 
                         let item = prefetched_bytes
                             .and_then(|payload| {
-                                decoder.read_chunk_with_payload(
+                                decoder.read_worker_chunk(
                                     chunk_idx,
                                     payload.as_deref(),
                                     recycled_buf,
+                                    worker_remote_queue.as_deref().map(|q| (q, 0)),
                                 )
                             })
                             .map(|(bounds, data)| (chunk_idx, bounds, data));
@@ -928,6 +930,7 @@ impl PrefetchedMosaicReader {
                             .map(|_| crate::run_profile::PhaseTimer::start());
                         let prefetched_bytes = worker_remote_queue
                             .as_ref()
+                            .filter(|_| !reader.is_planar())
                             .map(|q| q.get_chunk_payload(tile_idx, chunk_idx))
                             .transpose()
                             .map(Option::flatten);
@@ -943,10 +946,11 @@ impl PrefetchedMosaicReader {
 
                         let item = prefetched_bytes
                             .and_then(|payload| {
-                                decoder.read_chunk_with_payload(
+                                decoder.read_worker_chunk(
                                     chunk_idx,
                                     payload.as_deref(),
                                     recycled_buf,
+                                    worker_remote_queue.as_deref().map(|q| (q, tile_idx)),
                                 )
                             })
                             .map(|(bounds, data)| (tile_idx, chunk_idx, bounds, data, has_overlap));

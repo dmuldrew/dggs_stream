@@ -287,6 +287,42 @@ pub struct RemoteChunkPrefetchQueue {
     _worker_handles: Vec<JoinHandle<()>>,
 }
 
+// Planar chunks use physical TIFF indices as queue keys. Group only adjacent
+// selected payloads, so coalescing cannot bridge an unselected data plane.
+fn planar_ranges(
+    reader: &GeoTiffStreamReader,
+    tile: usize,
+    indices: impl Iterator<Item = u32>,
+    max_bytes: u64,
+) -> Vec<CoalescedRange> {
+    let (Some(source), Some(info)) = (reader.remote_source(), reader.chunk_info.as_ref()) else {
+        return Vec::new();
+    };
+    let mut locations = Vec::new();
+    for index in indices.filter(|&index| index < reader.chunk_layout.total_chunks) {
+        for physical in reader.physical_chunks(index) {
+            let offset = info.chunk_offsets[physical as usize];
+            let length = info.chunk_bytes[physical as usize];
+            if offset != 0
+                && length != 0
+                && offset
+                    .checked_add(length)
+                    .is_some_and(|end| end <= source.total_size)
+                && !source.has_cached_chunk(offset, length)
+            {
+                locations.push(ChunkLocation {
+                    tile_idx: tile,
+                    chunk_idx: physical,
+                    offset,
+                    length,
+                });
+            }
+        }
+    }
+    locations.sort_unstable_by_key(|chunk| chunk.offset);
+    coalesce_chunk_ranges(&locations, 0, max_bytes)
+}
+
 impl RemoteChunkPrefetchQueue {
     /// Spawn background prefetch queue for a single remote GeoTIFF reader.
     ///
@@ -303,12 +339,22 @@ impl RemoteChunkPrefetchQueue {
         // Servers that ignore Range headers hand us the whole file at probe
         // time; reads are served from memory, so prefetch buys nothing and
         // its range requests would fail.
-        if remote_source.is_complete_file() || reader.is_planar() {
+        if remote_source.is_complete_file() {
             return None;
         }
         let info = reader.chunk_info.as_ref()?;
         let cfg = config.unwrap_or_default();
 
+        if reader.is_planar() {
+            let ranges = planar_ranges(
+                reader,
+                0,
+                chunk_indices.iter().copied(),
+                cfg.max_range_bytes,
+            );
+            return (!ranges.is_empty())
+                .then(|| Self::spawn_internal(vec![Some(remote_source.clone())], ranges, cfg));
+        }
         let mut locations = Vec::with_capacity(chunk_indices.len());
         for &chunk_idx in chunk_indices {
             let idx = chunk_idx as usize;
@@ -351,9 +397,7 @@ impl RemoteChunkPrefetchQueue {
             match tile.reader.remote_source() {
                 // Whole file is already in memory; reads serve from the cache,
                 // so skip it like a local tile.
-                Some(src) if src.is_complete_file() || tile.reader.is_planar() => {
-                    sources.push(None)
-                }
+                Some(src) if src.is_complete_file() => sources.push(None),
                 Some(src) => {
                     has_remote = true;
                     sources.push(Some(Arc::clone(src)));
@@ -369,6 +413,7 @@ impl RemoteChunkPrefetchQueue {
         let cfg = config.unwrap_or_default();
         let mut locations = Vec::with_capacity(mosaic.chunk_refs.len());
 
+        let mut planar_indices = vec![Vec::new(); mosaic.tiles.len()];
         for chunk_ref in &mosaic.chunk_refs {
             let tile_idx = chunk_ref.tile_idx;
             if sources[tile_idx].is_none() {
@@ -376,6 +421,10 @@ impl RemoteChunkPrefetchQueue {
             }
 
             let reader = &mosaic.tiles[tile_idx].reader;
+            if reader.is_planar() {
+                planar_indices[tile_idx].push(chunk_ref.chunk_idx);
+                continue;
+            }
             if let Some(ref info) = reader.chunk_info {
                 let idx = chunk_ref.chunk_idx as usize;
                 if let (Some(&offset), Some(&length)) =
@@ -391,11 +440,18 @@ impl RemoteChunkPrefetchQueue {
             }
         }
 
-        if locations.is_empty() {
-            return None;
+        let mut coalesced =
+            coalesce_chunk_ranges(&locations, cfg.max_gap_bytes, cfg.max_range_bytes);
+        for (tile, indices) in planar_indices.into_iter().enumerate() {
+            if !indices.is_empty() {
+                coalesced.extend(planar_ranges(
+                    &mosaic.tiles[tile].reader,
+                    tile,
+                    indices.into_iter(),
+                    cfg.max_range_bytes,
+                ));
+            }
         }
-
-        let coalesced = coalesce_chunk_ranges(&locations, cfg.max_gap_bytes, cfg.max_range_bytes);
         if coalesced.is_empty() {
             return None;
         }
