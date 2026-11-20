@@ -1236,6 +1236,23 @@ fn test_cross_engine_consistency_with_the_cli() {
             ],
         ),
         (
+            "overlay, partly missing cells",
+            "auto-1",
+            &[
+                "--transfer",
+                "overlay",
+                "--nodata",
+                "20",
+                "--valid-coverage-threshold",
+                "0.95",
+            ],
+            vec![
+                ("transfer", text("overlay")),
+                ("nodata", MockVal::Double(20.0)),
+                ("valid_coverage_threshold", MockVal::Double(0.95)),
+            ],
+        ),
+        (
             "overlay, mass preserving",
             "auto-1",
             &["--transfer", "overlay", "--mass-preserve"],

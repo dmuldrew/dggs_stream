@@ -60,6 +60,7 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `interpolation` | `VARCHAR` | `'bilinear'` | With `transfer := 'interpolate'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
 | `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
 | `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `valid_coverage_threshold` | `DOUBLE` | unset | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
 
 On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can also come from [session options](#session-options-duckdb-20-build); an argument passed here takes precedence.
@@ -194,6 +195,7 @@ On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can a
 | `interpolation` | `VARCHAR` | `'bilinear'` | With `transfer := 'interpolate'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
 | `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
 | `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `valid_coverage_threshold` | `DOUBLE` | unset | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `profile` | `BOOLEAN` | `false` | Print a runtime profile of the scan on stderr ([Scan Options](scan-options.md#runtime-profile)). |
 | `histogram` | `VARCHAR` | `None` | Per-cell histogram: `'values'`, `'N:min:max'` (N equal bins) or `'e0,e1,...'` (bin edges). The `histogram` column then holds it as JSON: `{"class": weight}` or `[[lower, upper, weight], ...]`. |
 | `histogram_weight` | `VARCHAR` | `'count'` | `'count'` or `'area'` (overlapped area in pixels; runs the weighted `overlay` transfer). |

@@ -494,6 +494,7 @@ impl BindHelper {
         let mut execution = ExecutionParams {
             output,
             transfer,
+            valid_coverage_threshold: self.get_named_double("valid_coverage_threshold"),
             profile: self.get_named_bool("profile").unwrap_or(false),
             aggregation_workers: positive(&["workers", "threads"]).ok()?,
             decode_workers: positive(&["decode_workers"]).ok()?,
@@ -626,6 +627,8 @@ pub struct ExecutionParams {
     /// `transfer`, `interpolation`, `overlay_weighted` and `mass_preserve`: how pixels
     /// map onto cells.
     pub transfer: TransferMode,
+    /// Minimum valid fraction of the selected raster overlap.
+    pub valid_coverage_threshold: Option<f64>,
     /// `profile`: print where the scan's time went on stderr when it ends, and keep the
     /// report as `dggs_stream_core::run_profile::last_report()`.
     pub profile: bool,
@@ -667,6 +670,7 @@ impl ExecutionParams {
         config.emit_nodata_value = self.output.nodata_value;
         config.decimals = self.output.decimals;
         config.transfer = self.transfer;
+        config.valid_coverage_threshold = self.valid_coverage_threshold;
         if self.profile {
             config.profile = Some(dggs_stream_core::run_profile::RunProfile::announcing());
         }

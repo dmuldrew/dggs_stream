@@ -551,6 +551,7 @@ _SCAN_OPTIONS = (
     "interpolation",
     "overlay_weighted",
     "mass_preserve",
+    "valid_coverage_threshold",
     "histogram",
     "histogram_weight",
     "histogram_normalize",
@@ -577,6 +578,7 @@ _STR_OPTIONS = (
 )
 _BOOL_OPTIONS = ("overlay_weighted", "mass_preserve")
 _FLOAT_OPTIONS = (
+    "valid_coverage_threshold",
     "min_count",
     "min_mean",
     "max_mean",
@@ -804,6 +806,7 @@ class RasterArrowStream:
         interpolation: Optional[str] = None,
         overlay_weighted: Optional[bool] = None,
         mass_preserve: Optional[bool] = None,
+        valid_coverage_threshold: Optional[float] = None,
         histogram: Optional[Union[str, Sequence[float]]] = None,
         histogram_weight: Optional[str] = None,
         histogram_normalize: Optional[str] = None,
@@ -1112,6 +1115,7 @@ def scan_raster(
     interpolation: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
+    valid_coverage_threshold: Optional[float] = None,
     histogram: Optional[Union[str, Sequence[float]]] = None,
     histogram_weight: Optional[str] = None,
     histogram_normalize: Optional[str] = None,
@@ -1180,6 +1184,8 @@ def scan_raster(
       `sum` column adds up to the raster's total. Categorical scans take `"overlay"`
       and `"interpolate"` with `interpolation="nearest"`. Not combinable with `sampling`,
       `spectral_formula` or partitions.
+    - `valid_coverage_threshold`: minimum valid fraction (0 to 1) of the selected
+      raster overlap. Mass-preserving overlay retains all contributions.
 
     `histogram` asks for a structured per-cell histogram and makes the scan categorical:
     the wide format's `histogram` column is then a list of structs instead of JSON text.
@@ -2008,6 +2014,7 @@ def raster_to_parquet(
     interpolation: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
+    valid_coverage_threshold: Optional[float] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a Parquet
     file (GeoParquet with a `wkb` geometry column by default). Returns the cells written.
@@ -2024,6 +2031,7 @@ def raster_to_parquet(
         interpolation=interpolation,
         overlay_weighted=overlay_weighted,
         mass_preserve=mass_preserve,
+        valid_coverage_threshold=valid_coverage_threshold,
     )
     args = (
         str(input_path).encode("utf-8"),
@@ -2051,6 +2059,7 @@ def raster_to_pmtiles(
     interpolation: Optional[str] = None,
     overlay_weighted: Optional[bool] = None,
     mass_preserve: Optional[bool] = None,
+    valid_coverage_threshold: Optional[float] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a PMTiles v3
     vector archive. Returns the cells written. `nodata_policy`, `emit_nodata_value` and
@@ -2063,6 +2072,7 @@ def raster_to_pmtiles(
         interpolation=interpolation,
         overlay_weighted=overlay_weighted,
         mass_preserve=mass_preserve,
+        valid_coverage_threshold=valid_coverage_threshold,
     )
     args = (
         str(input_path).encode("utf-8"),

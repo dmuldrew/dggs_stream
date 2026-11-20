@@ -101,6 +101,7 @@ struct PyExportOptions {
     interpolation: Option<String>,
     overlay_weighted: Option<bool>,
     mass_preserve: Option<bool>,
+    valid_coverage_threshold: Option<f64>,
 }
 
 impl PyExportOptions {
@@ -126,6 +127,7 @@ impl PyExportOptions {
         config.nodata_policy = policy.nodata;
         config.emit_nodata_value = policy.nodata_value;
         config.decimals = policy.decimals;
+        config.valid_coverage_threshold = self.valid_coverage_threshold;
         config.transfer = dggs_stream_core::transfer::TransferMode::from_options(
             self.transfer.as_deref(),
             self.interpolation.as_deref(),

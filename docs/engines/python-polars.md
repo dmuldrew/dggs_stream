@@ -83,6 +83,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"` or `"overlay"` ([Scan Options](../scan-options.md#transfer-modes)) |
 | `interpolation` | `str` | `None` (`"bilinear"`) | With `"interpolate"`: `nearest`, `bilinear`, `bicubic`, `lanczos` |
 | `overlay_weighted`, `mass_preserve` | `bool` | `None` | With `"overlay"`: count touched pixels once / keep the raster's total in `sum` |
+| `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `histogram` | `str \| Sequence[float]` | `None` | Categorical only: `"values"`, `"4:0:100"` or bin edges `[0, 10, 50]`; the `histogram` column becomes `List(Struct)` |
 | `histogram_weight`, `histogram_normalize` | `str` | `None` | `"count"` / `"area"`; `"none"` / `"fraction"` / `"density"` |
 
@@ -172,7 +173,7 @@ values; for whole columns use the Arrow stream or a Polars expression such as
 | `parquet_to_pmtiles(parquet, output, *, cell_column=None, grid=None, h3_column=None)` | PMTiles v3 archive from any cell-indexed Parquet file; the grid comes from `grid` or the column's name (`s2_index`, ...) | Number of cell features written |
 
 The raster exporters also take `nodata_policy`, `emit_nodata_value`, `decimals`, `transfer`,
-`interpolation`, `overlay_weighted` and `mass_preserve`. Histograms are not available in the
+`interpolation`, `overlay_weighted`, `mass_preserve` and `valid_coverage_threshold`. Histograms are not available in the
 exports.
 
 Errors raise `RuntimeError` with the engine's message.

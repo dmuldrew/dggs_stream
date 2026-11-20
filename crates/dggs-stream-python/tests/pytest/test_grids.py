@@ -8,6 +8,7 @@ import gzip
 import json
 import struct
 from collections import defaultdict
+from pathlib import Path
 
 import pytest
 
@@ -663,11 +664,24 @@ def test_transfer_categorical(dggs_stream, classes_tif, grid):
     assert overlay["total_count"].sum() == pytest.approx(48 * 48, rel=1e-6)
 
 
+def test_overlay_valid_coverage_threshold(dggs_stream, tmp_path):
+    path = Path(__file__).resolve().parents[3] / "dggs-stream-core/tests/fixtures/internal-mask.tif"
+    opts = dict(transfer="overlay", valid_coverage_threshold=0.5)
+    expected = dggs_stream.scan_raster(path, 10, **opts).collect().sort("h3_index")
+    assert expected.height == 137
+    assert dggs_stream.scan_raster(path, 10, transfer="overlay").collect().height == 201
+    out = tmp_path / "filtered.parquet"
+    assert dggs_stream.raster_to_parquet(path, out, 10, **opts) == expected.height
+    assert pl.read_parquet(out).sort("h3_index")["h3_index"].to_list() == expected["h3_index"].to_list()
+
+
 def test_transfer_option_errors(dggs_stream, gradient_tif):
     def scan(**kw):
         return pa.table(dggs_stream.RasterArrowStream(gradient_tif, 9, **kw))
 
     for kw, needle in [
+        (dict(valid_coverage_threshold=0.5), "valid_coverage_threshold"),
+        (dict(transfer="overlay", valid_coverage_threshold=1.1), "valid_coverage_threshold"),
         (dict(transfer="smear"), "transfer"),
         (dict(interpolation="bilinear"), "interpolation"),
         (dict(transfer="overlay", interpolation="bilinear"), "interpolation"),

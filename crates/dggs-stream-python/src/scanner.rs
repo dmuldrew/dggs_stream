@@ -138,6 +138,7 @@ impl PyRasterScanner {
         mr_cfg.spectral_formula = self.config.spectral_formula;
         mr_cfg.remapper = self.config.remapper.clone();
         mr_cfg.transfer = self.config.transfer;
+        mr_cfg.valid_coverage_threshold = self.config.valid_coverage_threshold;
         if let Some(spec) = &self.config.histogram {
             mr_cfg.set_histogram(spec.clone())?;
         }

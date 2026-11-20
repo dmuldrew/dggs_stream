@@ -94,6 +94,7 @@ pub unsafe fn register_common_raster_named_parameters(func: duckdb_table_functio
         add_named_parameter(func, "interpolation", DuckDBType::Varchar);
         add_named_parameter(func, "overlay_weighted", DuckDBType::Boolean);
         add_named_parameter(func, "mass_preserve", DuckDBType::Boolean);
+        add_named_parameter(func, "valid_coverage_threshold", DuckDBType::Double);
         // Runtime telemetry of the scan, reported on stderr when it ends.
         add_named_parameter(func, "profile", DuckDBType::Boolean);
     }
