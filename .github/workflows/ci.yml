@@ -6,6 +6,8 @@ on:
     tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+    # `labeled` lets the `run-full-ci` label start a full cross-OS run on a PR.
+    types: [ opened, synchronize, reopened, labeled ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,7 +26,7 @@ jobs:
     outputs:
       code: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
       wheels: ${{ startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.code == 'true' || steps.filter.outputs.wheel_readme == 'true' }}
-      wheel_packaging: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name != 'pull_request' || steps.wheel_filter.outputs.wheel_packaging == 'true' }}
+      wheel_packaging: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-full-ci') || steps.wheel_filter.outputs.wheel_packaging == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'workflow_dispatch' }}
@@ -52,9 +54,12 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         with:
           filters: |
+            # Wheel build config plus the Rust code and dependencies the wheel ships
+            # (Python bindings and the bundled dggs-stream-cli executable).
             wheel_packaging:
-              - 'crates/dggs-stream-python/hatch_build.py'
-              - 'crates/dggs-stream-python/pyproject.toml'
+              - 'crates/dggs-stream-python/**'
+              - 'crates/dggs-stream-cli/src/**'
+              - 'Cargo.lock'
               - '.github/workflows/wheels.yml'
 
   lint:
@@ -179,9 +184,12 @@ jobs:
       contents: read
     env:
       LIB_NAME: ${{ matrix.lib_file }}
-      # Full Rust suite: every native host on main/tags, Linux x86_64 only on PRs.
-      # `osx_amd64` cross-compiles on the arm64 runner and would duplicate `osx_arm64`.
-      FULL_SUITE: ${{ matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4') }}
+      # Every platform runs everything on main/tags and on PRs labeled `run-full-ci`;
+      # other PRs run the full Rust suite and the v1.5.6/2.0.0 ABI on Linux x86_64 only.
+      FULL_ABI: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-full-ci') || matrix.platform == 'linux_amd64_gcc4' }}
+      # Full Rust suite. `osx_amd64` cross-compiles on the arm64 runner and would
+      # duplicate `osx_arm64`, so it never runs the host suite.
+      FULL_SUITE: ${{ matrix.platform != 'osx_amd64' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-full-ci') || matrix.platform == 'linux_amd64_gcc4') }}
       # SHA-256 of DuckDB v1.2.0's libduckdb-windows-amd64.zip
       LIBDUCKDB_WINDOWS_SHA256: 6327f8443ff8744a6753819e1ca874a82f1944a603d6dbc3bc564dada39b6337
     steps:
@@ -304,8 +312,8 @@ jobs:
           # (`INSTALL dggs_stream FROM <repo>`) needs a v2.0.0 tree. Its Linux x86_64 tag is linux_amd64.
           # The v2.0.0 tree ships a separate build against the v1.5.6 C extension API, enabling
           # DuckDB file-system access, COPY output, session options and scalar bind/init.
-          # On PRs, build and verify this second ABI on Linux x86_64 only; main/tags build all platforms.
-          if [[ "${{ github.event_name }}" != "pull_request" || "${{ matrix.platform }}" == "linux_amd64_gcc4" ]]; then
+          # On PRs, build and verify this second ABI on Linux x86_64 only (see FULL_ABI).
+          if [[ "$FULL_ABI" == "true" ]]; then
             V2_PLATFORM="${{ matrix.platform }}"
             if [[ "$V2_PLATFORM" == "linux_amd64_gcc4" ]]; then
               V2_PLATFORM=linux_amd64
@@ -427,7 +435,7 @@ jobs:
           cargo test --locked --profile ci-test "${SMOKE_PKGS[@]}" --test it duckdb_sql_smoke -- --ignored
 
       - name: Run DuckDB 2.0.0 SQL Smoke Test
-        if: matrix.cli_arch != '' && (github.event_name != 'pull_request' || matrix.platform == 'linux_amd64_gcc4')
+        if: matrix.cli_arch != '' && env.FULL_ABI == 'true'
         shell: bash
         run: |
           mkdir -p duckdb-2.0
