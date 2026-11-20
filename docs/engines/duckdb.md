@@ -250,6 +250,10 @@ SELECT h3_index, sum AS population
 FROM h3_raster_continuous_aggregate('population.tif', resolution := 7,
                                     transfer := 'overlay', mass_preserve := true);
 
+-- Keep cells with valid values across at least half of their selected raster overlap
+SELECT h3_index, mean FROM raster_h3('elevation.tif', resolution := 10,
+    transfer := 'overlay', valid_coverage_threshold := 0.5);
+
 -- A binned histogram per cell (the histogram column holds it as JSON text)
 SELECT h3_index, histogram
 FROM h3_raster_categorical_aggregate('elevation.tif', resolution := 8,

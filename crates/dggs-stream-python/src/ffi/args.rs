@@ -211,6 +211,7 @@ pub(crate) struct PyScanOptions {
     pub(crate) interpolation: Option<String>,
     pub(crate) overlay_weighted: Option<bool>,
     pub(crate) mass_preserve: Option<bool>,
+    pub(crate) valid_coverage_threshold: Option<f64>,
     /// `values`, `N:min:max` or comma-separated bin edges.
     histogram: Option<String>,
     /// `count` (default) or `area`.
@@ -335,6 +336,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         cfg.remapper = Some(CategoryRemapper::parse(spec)?.into_arc());
     }
     cfg.min_count = opts.min_count;
+    cfg.valid_coverage_threshold = opts.valid_coverage_threshold;
     cfg.transfer = TransferMode::from_options(
         opts.transfer.as_deref(),
         opts.interpolation.as_deref(),

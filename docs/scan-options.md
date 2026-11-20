@@ -149,6 +149,7 @@ The code is in [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs)
 | grid | `--grid` | per-grid functions, or `grid :=` | `grid=` | per-grid functions, a grid-name argument, `with_grid` | per-grid functions |
 | automatic resolution | `-r auto[±N]` | `resolutions := 'auto'` | `resolutions="auto"`, `auto_resolution()` | `'auto'` | `{grid}_auto_resolution()` |
 | transfer mode | `--transfer`, `--interpolation`, `--overlay-weighted`, `--mass-preserve` | `transfer :=`, `interpolation :=`, `overlay_weighted :=`, `mass_preserve :=` | `transfer=`, `interpolation=`, `overlay_weighted=`, `mass_preserve=` | `'transfer=overlay'`-style arguments, `with_transfer` | — |
+| minimum valid overlay fraction | `--valid-coverage-threshold` | `valid_coverage_threshold :=` | `valid_coverage_threshold=` | — | — |
 | histogram | `--histogram`, `--histogram-weight`, `--histogram-normalize` (`ipc`, `jsonl`; implies `-c`) | `histogram :=`, `histogram_weight :=`, `histogram_normalize :=` | `histogram=`, `histogram_weight=`, `histogram_normalize=` | `'histogram=...'` arguments, `with_histogram` | — |
 | NoData policy and rounding | `--nodata-policy`, `--emit-nodata-value`, `--decimals` | `nodata_policy :=`, `emit_nodata_value :=`, `decimals :=` | `nodata_policy=`, `emit_nodata_value=`, `decimals=` | `'nodata_policy=emit'`-style arguments, `with_output_policy` | `nodata_policy`, `emit_nodata_value`, `decimals` arguments |
 | runtime profile | `--profile` | `profile := true` | `profile_raster()` | `with_profile` | — |

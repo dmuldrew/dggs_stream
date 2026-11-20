@@ -80,6 +80,7 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `interpolation` | `str \| None` | `"bilinear"` | With `"interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
 | `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
 | `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `histogram` | `str \| Sequence[float] \| None` | `None` | Categorical only: `"values"`, `"N:min:max"` or bin edges. The `histogram` column becomes `List(Struct({class, weight}))` or `List(Struct({lower, upper, weight}))`. |
 | `histogram_weight` | `str \| None` | `"count"` | `"count"` or `"area"` (runs the weighted overlay). |
 | `histogram_normalize` | `str \| None` | `"none"` | `"none"`, `"fraction"`, `"density"` (bins only). |

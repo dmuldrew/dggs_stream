@@ -39,3 +39,9 @@ WHERE wide.h3_index IS NULL OR ref.h3_index IS NULL
    OR band_3_mean IS DISTINCT FROM mean3 OR band_1_mean IS DISTINCT FROM mean1;
 ----
 0
+
+query II
+SELECT count(*), (SELECT count(*) FROM raster_h3('crates/dggs-stream-core/tests/fixtures/internal-mask.tif', resolution := 10, transfer := 'overlay', valid_coverage_threshold := 0.5))
+FROM raster_h3('crates/dggs-stream-core/tests/fixtures/internal-mask.tif', resolution := 10, transfer := 'overlay');
+----
+201	137

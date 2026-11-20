@@ -187,6 +187,7 @@ impl RasterTable for ContinuousTable {
                 || min_count.is_some()
                 || min_mean.is_some()
                 || max_mean.is_some()
+                || common.execution.valid_coverage_threshold.is_some()
                 || common.execution.transfer
                     != dggs_stream_core::transfer::TransferMode::AssignCenters
             {

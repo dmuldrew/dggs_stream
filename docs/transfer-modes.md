@@ -169,7 +169,7 @@ directly (`TransferMode::Interpolate(Interpolation::Bilinear)`, `TransferMode::O
 
 **PostgreSQL**: not available yet.
 
-### Valid coverage (Rust and CLI)
+### Valid coverage (Rust, CLI, DuckDB, and Python/Polars)
 
 Set `MultiResolutionConfig::valid_coverage_threshold` or pass
 `--valid-coverage-threshold 0.75 --transfer overlay` to keep cells with valid
@@ -178,6 +178,10 @@ pixel-space overlap fractions even with `--overlay-weighted false`. Pixels
 outside the bbox or owned by a different mosaic tile are excluded from both
 areas. NoData and masked pixels contribute only to the denominator. Category
 remapping and histogram bin selection happen after band validity is determined.
+
+DuckDB accepts `transfer := 'overlay', valid_coverage_threshold := 0.75`. In Python use
+`scan_raster(path, transfer="overlay", valid_coverage_threshold=0.75)`. Both adapters also
+accept the option on raster-to-Parquet and raster-to-PMTiles exports.
 
 The filter applies when a cell is complete. A positive threshold drops
 all-NoData cells even under `--nodata-policy emit`. Zero disables the filter.
