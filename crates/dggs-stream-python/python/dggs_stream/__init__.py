@@ -530,6 +530,7 @@ def _encode_columns(columns: Optional[Sequence[str]]) -> Optional[bytes]:
 _SCAN_OPTIONS = (
     "grid",
     "band",
+    "bands",
     "sampling",
     "overlap_rule",
     "spectral_formula",
@@ -683,6 +684,14 @@ def _encode_scan_options(options: Mapping[str, Any]) -> Optional[bytes]:
             name = _normalize_grid(value)
             if name != "h3":
                 opts[key] = name
+        elif key == "bands":
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+                raise TypeError("bands must be a sequence of integers")
+            if any(isinstance(b, bool) or not isinstance(b, int) for b in value):
+                raise TypeError("bands must be a sequence of integers")
+            if not value or min(value) < 1 or len(set(value)) != len(value):
+                raise ValueError("bands must contain distinct positive band numbers")
+            opts[key] = list(value)
         elif key == "histogram":
             opts[key] = _encode_histogram(value)
         elif key in _INT_OPTIONS:
@@ -785,6 +794,7 @@ class RasterArrowStream:
         partition: Optional[str] = None,
         grid: Optional[str] = None,
         band: Optional[int] = None,
+        bands: Optional[Sequence[int]] = None,
         sampling: Optional[str] = None,
         overlap_rule: Optional[str] = None,
         spectral_formula: Optional[str] = None,
@@ -1094,6 +1104,7 @@ def scan_raster(
     strict_transforms: bool = False,
     grid: Optional[str] = None,
     band: Optional[int] = None,
+    bands: Optional[Sequence[int]] = None,
     sampling: Optional[str] = None,
     overlap_rule: Optional[str] = None,
     spectral_formula: Optional[str] = None,
@@ -1147,6 +1158,8 @@ def scan_raster(
     Further options, matching the DuckDB table functions' named parameters:
 
     - `band`: 1-indexed band to aggregate (default 1).
+    - `bands`: select ordered bands from one raster, e.g. `[3, 1]` for
+      `band_3_mean` and `band_1_mean` in a continuous center-assignment scan.
     - `sampling`: sub-pixel sampling pattern, one of `center` (default), `5point`,
       `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`.
     - `overlap_rule`: how overlapping mosaic tiles are resolved: `cutline` (default),
@@ -1290,6 +1303,16 @@ def scan_raster(
         if not categorical and quantiles is not None:
             for name in _quantile_columns(quantiles):
                 pl_schema[name] = pl.Float64
+
+        if bands is not None:
+            # Validate options and projections before advertising a lazy schema.
+            stream.__arrow_c_schema__()
+            # Snapshot the selection for later execution of the lazy source.
+            extra["bands"] = tuple(bands)
+            shared = (index_col, hex_col, "resolution", "wkb")
+            stats = {k: v for k, v in pl_schema.items() if k not in shared}
+            pl_schema = {k: pl_schema[k] for k in shared}
+            pl_schema.update({f"band_{b}_{k}": v for b in bands for k, v in stats.items()})
 
         if columns:
             pl_schema = {k: pl_schema[k] for k in columns if k in pl_schema}

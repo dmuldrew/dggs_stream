@@ -39,6 +39,8 @@ pub struct PyScanConfig {
     pub partition: Option<ScanPartition>,
     /// 1-indexed raster band to aggregate.
     pub band: usize,
+    /// Ordered one-based bands for wide continuous output.
+    pub bands: Option<Vec<usize>>,
     /// Sub-pixel sampling pattern (default: one sample at each pixel centre).
     pub sampling: SamplingPattern,
     /// How overlapping mosaic tiles are resolved (default `Cutline`).
@@ -105,6 +107,7 @@ impl Default for PyScanConfig {
             transform_failure_counter: None,
             partition: None,
             band: 1,
+            bands: None,
             sampling: SamplingPattern::default(),
             overlap_rule: OverlapRule::Cutline,
             min_majority_fraction: None,

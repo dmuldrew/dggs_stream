@@ -188,6 +188,7 @@ pub(crate) struct PyScanOptions {
     /// `h3` (default), `a5`, `s2` or `healpix`.
     pub(crate) grid: Option<String>,
     band: Option<i64>,
+    pub(crate) bands: Option<Vec<usize>>,
     sampling: Option<String>,
     pub(crate) overlap_rule: Option<String>,
     min_majority_fraction: Option<f64>,
@@ -416,6 +417,25 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
             })?;
             cfg.spectral_formula = Some(formula);
         }
+    }
+    if let Some(bands) = opts.bands {
+        if cfg.categorical
+            || opts.band.is_some()
+            || cfg.spectral_formula.is_some()
+            || cfg.transfer != TransferMode::AssignCenters
+            || cfg.min_count.is_some()
+            || cfg.min_mean.is_some()
+            || cfg.max_mean.is_some()
+        {
+            return Err(DggsStreamError::InvalidParameter("bands requires a continuous center scan without band, spectral_formula or single-band filters".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if bands.is_empty() || bands.iter().any(|&b| b == 0 || !seen.insert(b)) {
+            return Err(DggsStreamError::InvalidParameter(
+                "bands must contain distinct positive band numbers".into(),
+            ));
+        }
+        cfg.bands = Some(bands);
     }
     Ok(())
 }

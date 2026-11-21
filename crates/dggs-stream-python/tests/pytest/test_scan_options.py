@@ -283,3 +283,65 @@ def test_parquet_to_pmtiles_missing_column(dggs_stream, gradient_tif, tmp_path):
     dggs_stream.raster_to_parquet(gradient_tif, parquet, RES)
     with pytest.raises(RuntimeError, match="Cell column 'nope' not found"):
         dggs_stream.parquet_to_pmtiles(parquet, tmp_path / "x.pmtiles", h3_column="nope")
+
+
+@pytest.mark.parametrize("layout", ["interleaved", "planar"])
+def test_multiband_matches_single_band_scans(dggs_stream, layout):
+    import pyarrow as pa
+
+    fixtures = Path(__file__).resolve().parents[3] / "dggs-stream-core/tests/fixtures"
+    path = fixtures / f"multiband-12-{layout}.tif"
+    selection = [3, 1]
+    options = {"bands": selection, "quantiles": "p50"}
+    lazy = dggs_stream.scan_raster(path, 12, **options)
+    def collect(scan):
+        return scan.collect() if isinstance(scan, pl.LazyFrame) else scan.to_polars()
+
+    rows = collect(lazy)
+    if isinstance(lazy, pl.LazyFrame):
+        schema = lazy.collect_schema() if hasattr(lazy, "collect_schema") else lazy.schema
+        assert schema == rows.schema
+    arrow = dggs_stream.RasterArrowStream(path, 12, **options)
+    assert pa.schema(arrow).equals(pa.table(arrow).schema)
+    metrics = ["mean", "stddev", "count", "min", "max", "sum", "p50"]
+    assert rows.columns == ["h3_index", "h3_hex", "resolution", "wkb"] + [
+        f"band_{band}_{metric}" for band in selection for metric in metrics
+    ]
+    observed_cells = set()
+    for band in selection:
+        single = collect(dggs_stream.scan_raster(path, 12, band=band, quantiles="p50"))
+        reference = {r["h3_index"]: r for r in single.iter_rows(named=True)}
+        observed_cells.update(reference)
+        for row in rows.iter_rows(named=True):
+            expected = reference.get(row["h3_index"])
+            for metric in metrics:
+                value = row[f"band_{band}_{metric}"]
+                want = expected[metric] if expected else (0.0 if metric in ("count", "sum") else None)
+                if want is None:
+                    assert value is None
+                else:
+                    assert value == pytest.approx(want)
+    assert observed_cells == set(rows["h3_index"])
+    projection = ["band_1_mean", "band_3_count"]
+    subset = collect(dggs_stream.scan_raster(path, 12, columns=projection, limit=3, **options))
+    assert subset.columns == projection
+    assert subset.shape == (3, 2)
+    if isinstance(lazy, pl.LazyFrame):
+        pushed = lazy.select(projection).limit(3).collect()
+        assert pushed.columns == projection
+        assert pushed.shape == (3, 2)
+
+
+@pytest.mark.parametrize("bands", [[], [3, 3], [0], [True], "3,1"])
+def test_invalid_multiband_selection(dggs_stream, two_band_tif, bands):
+    with pytest.raises((ValueError, TypeError), match="bands"):
+        dggs_stream.scan_raster(two_band_tif, bands=bands)
+
+
+def test_multiband_rejects_conflicting_or_missing_band(dggs_stream, two_band_tif):
+    import pyarrow as pa
+
+    with pytest.raises(RuntimeError, match="bands"):
+        pa.schema(dggs_stream.RasterArrowStream(two_band_tif, bands=[1, 2], band=1))
+    with pytest.raises(RuntimeError, match="band"):
+        dggs_stream.RasterArrowStream(two_band_tif, bands=[3]).__arrow_c_stream__()

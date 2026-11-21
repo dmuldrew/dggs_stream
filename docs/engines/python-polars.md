@@ -70,6 +70,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `limit` | `int` | `None` | Maximum rows |
 | `strict_transforms` | `bool` | `False` | Raise when a valid sample cannot be transformed to WGS84 instead of skipping it with a `RuntimeWarning` |
 | `band` | `int` | `None` (1) | 1-indexed band to aggregate |
+| `bands` | sequence of integers | `None` | Ordered one-based bands from one interleaved or band-separated TIFF. Continuous center-assignment scans share the grid columns and return statistics per band. |
 | `sampling` | `str` | `None` (`"center"`) | Sub-pixel sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point` |
 | `overlap_rule` | `str` | `None` (`"cutline"`) | Mosaic overlaps: `cutline`, `first` or `average` |
 | `min_majority_fraction` | `float` | `None` | Categorical only: drop cells whose majority class covers less than this fraction |
@@ -309,6 +310,10 @@ lf = dggs_stream.scan_raster("tile_west.tif,tile_east.tif", 8, categorical=True)
 ```python
 # Band 2 of a multi-band raster
 lf = dggs_stream.scan_raster("sentinel2.tif", 9, band=2)
+
+# Read bands 3 and 1 in one pass. Missing samples and scaling are evaluated per band.
+lf = dggs_stream.scan_raster("sentinel2.tif", 9, bands=[3, 1])
+lf.select("h3_index", "band_3_mean", "band_1_mean").collect()
 
 # NDVI per pixel from bands 8 (NIR) and 4 (red), then aggregated per cell
 ndvi = dggs_stream.scan_raster(
