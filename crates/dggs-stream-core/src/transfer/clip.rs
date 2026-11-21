@@ -59,15 +59,45 @@ fn clip_half_plane(
     }
 }
 
+/// Whole columns inside a four-sided slab spanning the full pixel row. The left
+/// and right edges are linear, so their most restrictive x values occur at
+/// the ends. More complex slabs (including disconnected concave slices) and
+/// partial-height rows go through the ordinary column clipper.
+fn interior_columns(slab: &[(f64, f64)], row: i64) -> std::ops::Range<i64> {
+    let &[a, b, c, d] = slab else { return 0..0 };
+    let (a, b, c, d) = if a.1 == b.1 {
+        (a, b, c, d)
+    } else {
+        (b, c, d, a)
+    };
+    let bottom = row as f64;
+    let top = (row + 1) as f64;
+    if a.1 != b.1 || c.1 != d.1 || !((a.1 == bottom && c.1 == top) || (c.1 == bottom && a.1 == top))
+    {
+        return 0..0;
+    }
+    let left = a.0.min(b.0).max(c.0.min(d.0));
+    let right = a.0.max(b.0).min(c.0.max(d.0));
+    left.ceil() as i64..right.floor() as i64
+}
+
 /// For a polygon in pixel coordinates (pixel `(c, r)` is the unit square
 /// `[c, c + 1] x [r, r + 1]`), call `visit(c, r, area)` for every pixel with
 /// `rows.0 <= r < rows.1` and `0 <= c < width` that the polygon overlaps, with the
 /// overlapped area (`0 < area <= 1`). The polygon may be convex or concave, in either
 /// orientation; it must not self-intersect.
 ///
-/// The polygon is cut into row slabs, and each slab into unit columns, so the cost is
-/// proportional to the pixels its bounding box covers.
+/// The polygon is cut into row slabs. Boundary columns are clipped individually.
 pub fn pixel_overlaps(
+    polygon: &[(f64, f64)],
+    rows: (i64, i64),
+    width: i64,
+    visit: impl FnMut(i64, i64, f64),
+) {
+    visit_overlaps::<true>(polygon, rows, width, visit);
+}
+
+fn visit_overlaps<const SKIP_INTERIOR: bool>(
     polygon: &[(f64, f64)],
     rows: (i64, i64),
     width: i64,
@@ -101,7 +131,16 @@ pub fn pixel_overlaps(
         }
         let first_col = (min_x.floor() as i64).max(0);
         let last_col = (max_x.ceil() as i64).min(width);
+        let interior = if SKIP_INTERIOR && last_col.saturating_sub(first_col) >= 4 {
+            interior_columns(&slab, r)
+        } else {
+            0..0
+        };
         for c in first_col..last_col {
+            if interior.contains(&c) {
+                visit(c, r, 1.0);
+                continue;
+            }
             clip_half_plane(&slab, &mut right, true, c as f64, true);
             clip_half_plane(&right, &mut cell, true, (c + 1) as f64, false);
             let area = polygon_area(&cell);
@@ -120,6 +159,36 @@ mod tests {
         let mut out = Vec::new();
         pixel_overlaps(polygon, rows, width, |c, r, a| out.push((c, r, a)));
         out
+    }
+
+    #[test]
+    fn interior_weights_match_individual_column_clips() {
+        let shapes = [
+            vec![(-4.25, 1.25), (24.5, 2.25), (20.0, 11.5), (-1.0, 9.5)],
+            // A U has two disconnected spans in the same row.
+            vec![
+                (0., 0.),
+                (20., 0.),
+                (20., 12.),
+                (14., 12.),
+                (14., 3.75),
+                (6., 3.75),
+                (6., 12.),
+                (0., 12.),
+            ],
+            vec![(-1.5, 2.1), (20.5, 2.2), (20.5, 2.3)],
+            vec![(2., 2.), (22., 2.), (22., 8.), (2., 8.)],
+        ];
+        for mut shape in shapes {
+            for _ in 0..2 {
+                for rows in [(0, 15), (3, 7)] {
+                    let mut reference = Vec::new();
+                    visit_overlaps::<false>(&shape, rows, 18, |c, r, a| reference.push((c, r, a)));
+                    assert_eq!(overlaps(&shape, rows, 18), reference);
+                }
+                shape.reverse();
+            }
+        }
     }
 
     #[test]

@@ -214,3 +214,15 @@ is disabled in both versions.
 | 1024 × 1024 | 6 | On | 81.9 → 65.5 ms | 51.9 → 51.9 MiB |
 | 128 × 128 | 9 | Off | 341.9 → 332.8 ms | 39.9 → 38.8 MiB |
 | 128 × 128 | 9 | On | 342.1 → 340.5 ms | 40.0 → 39.8 MiB |
+
+The same benchmark measured the interior-pixel shortcut against revision
+`0dd44e8`. Each value below is the median of nine warm-cache release runs on
+arm64 macOS. At H3 resolution 6, a cell contains many whole pixels. At
+resolution 9 on the smaller raster, cells are mostly smaller than one pixel.
+
+| Raster size | H3 resolution | Mass preservation | Time, baseline → updated | Peak RSS, baseline → updated |
+| --- | --- | --- | --- | --- |
+| 1024 × 1024 | 6 | Off | 57.9 → 32.4 ms | 25.4 → 25.2 MiB |
+| 1024 × 1024 | 6 | On | 63.6 → 37.8 ms | 51.9 → 52.2 MiB |
+| 128 × 128 | 9 | Off | 322.8 → 322.8 ms | 38.8 → 38.9 MiB |
+| 128 × 128 | 9 | On | 327.2 → 326.5 ms | 39.5 → 39.6 MiB |

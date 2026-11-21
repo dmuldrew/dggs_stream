@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Overlay skips polygon clipping for pixels wholly inside a full-height trapezoidal row slice. Boundary pixels retain their fractional weights.
+
 - Rust PMTiles feature properties now take `cell_id` in place of `h3_index` on the `Continuous` and `Categorical` variants of `FeatureProperties`. Encoded tiles retain grid-specific index and hex keys.
 
 - Rust cell hashing helpers `H3BuildHasher`, `H3Hasher`, and `mix_h3` are now `CellIdBuildHasher`, `CellIdHasher`, and `mix_cell_id`. Hash values and shard assignment are preserved.
