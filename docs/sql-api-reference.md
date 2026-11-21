@@ -270,8 +270,8 @@ SELECT * FROM h3_raster_to_parquet(
 | `scale_offset` | `BOOLEAN` | `true` | Calibrate continuous values with GDAL band `SCALE`/`OFFSET`; ignored for categorical exports. |
 | `categorical` | `BOOLEAN` | `false` | Whether to aggregate categorical raster classes instead of continuous stats. |
 | `compact` | `BOOLEAN` | `false` with `bands`, otherwise `true` | With `bands`, setting this to true omits the grid hex string. |
-| `compression` | `VARCHAR` | `'snappy'` | Parquet compression codec: `'snappy'`, `'zstd'`, `'gzip'`, `'lz4'`, `'brotli'`, `'none'`. |
-| `row_group_size` | `BIGINT` | `131072` | Target rows per Parquet row group. |
+| `compression` | `VARCHAR` | `'snappy'` | Parquet compression codec: `'snappy'`, `'zstd'`, `'gzip'`, `'lz4'` (raw LZ4 framing), `'brotli'`, `'none'`. |
+| `row_group_size` | `BIGINT` | `131072` | Target rows per Parquet row group. With `bands`, wide selections write smaller groups so buffered values stay near 64 MiB. |
 | `min_lon`, `min_lat`, `max_lon`, `max_lat` | `DOUBLE` | `None` | Spatial bounding box for chunk pruning. |
 | `bbox` | `VARCHAR` | `None` | Bounding box as a single string: `'min_lon,min_lat,max_lon,max_lat'`. |
 | `h3_cell` | `BIGINT` | `None` | Single H3 cell predicate pushdown filter. |

@@ -15,6 +15,36 @@ use crate::columnar::multiband::MultiBandBatchReader;
 use crate::columnar::{ArrowDataType, ColumnArray};
 use crate::encoding::extend_wkb_bounds;
 
+/// Approximate bytes of buffered column values allowed before a row group is
+/// written, so wide band selections do not hold `row_group_size` rows of
+/// hundreds of statistics columns in memory.
+pub const MULTIBAND_ROW_GROUP_BUDGET_BYTES: usize = 64 << 20;
+
+/// Rough in-memory size of one buffered value of `data_type`.
+fn buffered_bytes(data_type: &ArrowDataType, nullable: bool) -> usize {
+    match data_type {
+        ArrowDataType::Float64 => 8 + 2 * usize::from(nullable),
+        ArrowDataType::UInt64 => 8,
+        ArrowDataType::UInt8 => 4,
+        // `ByteArray` handle plus a hex string or a WKB polygon.
+        ArrowDataType::Utf8 => 64,
+        _ => 160,
+    }
+}
+
+/// Rows per row group: `row_group_size`, lowered so buffered values stay within
+/// [`MULTIBAND_ROW_GROUP_BUDGET_BYTES`].
+fn group_rows(schema: &crate::columnar::ColumnSchema, row_group_size: usize) -> usize {
+    let row_bytes: usize = schema
+        .fields
+        .iter()
+        .map(|f| buffered_bytes(&f.data_type, f.nullable))
+        .sum();
+    row_group_size
+        .min(MULTIBAND_ROW_GROUP_BUDGET_BYTES / row_bytes.max(1))
+        .max(1)
+}
+
 /// Values of one column buffered until the next row group is written.
 enum ColumnBuffer {
     Int64(Vec<i64>),
@@ -125,7 +155,8 @@ impl ColumnBuffer {
 
 /// Write the scan to `path`, coalescing bounded scan batches into row groups of
 /// at least `row_group_size` rows (the last may be smaller); pass
-/// [`ParquetExportConfig::row_group_size`] for the default. Publish the file only
+/// [`ParquetExportConfig::row_group_size`] for the default. Wide schemas flush
+/// earlier, once buffered values reach [`MULTIBAND_ROW_GROUP_BUDGET_BYTES`]. Publish the file only
 /// after its footer, geometry bounds and logical column orders have been finalized.
 pub fn write_multiband_parquet(
     reader: &mut MultiBandBatchReader,
@@ -212,6 +243,7 @@ pub fn write_multiband_parquet_with_config(
         f64::NEG_INFINITY,
         f64::NEG_INFINITY,
     ];
+    let group_rows = group_rows(&schema, row_group_size);
     let (mut rows, mut pending) = (0, 0);
     for batch in reader {
         let batch = batch?;
@@ -220,7 +252,7 @@ pub fn write_multiband_parquet_with_config(
         }
         rows += batch.num_rows;
         pending += batch.num_rows;
-        if pending >= row_group_size.max(1) {
+        if pending >= group_rows {
             flush(&mut writer, &mut buffers)?;
             pending = 0;
         }
@@ -244,4 +276,29 @@ pub fn write_multiband_parquet_with_config(
     )?;
     temp.persist(path)?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::columnar::multiband::wide_schema;
+    use crate::GridKind;
+
+    #[test]
+    fn wide_selections_shrink_row_groups_to_the_memory_budget() {
+        let few = wide_schema(GridKind::H3, &[3, 1], &[]);
+        assert_eq!(group_rows(&few, 131_072), 131_072);
+        assert_eq!(group_rows(&few, 8), 8);
+
+        let bands: Vec<usize> = (1..=224).collect();
+        let many = wide_schema(GridKind::H3, &bands, &[]);
+        let rows = group_rows(&many, 131_072);
+        assert!(rows < 131_072 / 8, "{rows}");
+        let row_bytes: usize = many
+            .fields
+            .iter()
+            .map(|f| buffered_bytes(&f.data_type, f.nullable))
+            .sum();
+        assert!(rows * row_bytes <= MULTIBAND_ROW_GROUP_BUDGET_BYTES);
+    }
 }

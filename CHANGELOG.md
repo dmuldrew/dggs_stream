@@ -88,6 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- DuckDB direct Parquet exports write `compression := 'lz4'` as raw LZ4, which DuckDB can read back, and honour `compression := 'brotli'` instead of falling back to Snappy.
+
 - Interpolate and overlay scans latch a failed block, so a retry after an error is rejected instead of resuming with that block's contribution missing. Multi-band scans record cells and indexed samples in run profiles. DataFusion area histograms accept `valid_coverage_threshold` without an explicit `transfer=overlay`.
 - Parquet-to-PMTiles exports accept 32-bit grid indexes, including unsigned HEALPix indexes. PMTiles table exports report cells skipped by the per-zoom tile cap in archive metadata.
 - **Security:** credential headers no longer follow HTTP redirects to hosts they are not scoped to. The HTTP client strips only `Authorization` and `Cookie` when it follows a redirect, so an `AWS_SESSION_TOKEN` sent to an S3 endpoint as `x-amz-security-token` was forwarded to whatever host the endpoint redirected to, even over plain `http://` (ureq 2 behaved the same). Redirects are now followed by raster_h3 itself (still at most 5), and each hop gets only the credentials its own URL is entitled to under the `RASTER_H3_AUTH_HOSTS` / S3-endpoint / https-or-loopback rules; `Range`, `Accept-Encoding` and the pinned `If-Match` carry over. A side effect: a listed host reached through a redirect now receives `RASTER_H3_AUTH_TOKEN`, which the client used to strip on every redirect. Too many redirects, a redirect without a usable `Location`, and a redirect to a non-http(s) URL now fail at once with a specific message instead of being retried as transport errors.
