@@ -420,6 +420,127 @@ fn overlay_is_area_weighted_and_conserves_mass() {
     }
 }
 
+/// Area of `polygon` inside the unit pixel `(c, r)`, clipped against its four
+/// edges independently of the library's row/column slicing.
+fn reference_pixel_area(polygon: &[(f64, f64)], c: i64, r: i64) -> f64 {
+    let (x0, x1, y0, y1) = (c as f64, (c + 1) as f64, r as f64, (r + 1) as f64);
+    let edges: [&dyn Fn((f64, f64)) -> f64; 4] =
+        [&|p| p.0 - x0, &|p| x1 - p.0, &|p| p.1 - y0, &|p| y1 - p.1];
+    let mut ring = polygon.to_vec();
+    for inside in edges {
+        let mut out = Vec::with_capacity(ring.len() + 2);
+        for (i, &p) in ring.iter().enumerate() {
+            let q = ring[(i + 1) % ring.len()];
+            let (dp, dq) = (inside(p), inside(q));
+            if dp >= 0.0 {
+                out.push(p);
+            }
+            if (dp >= 0.0) != (dq >= 0.0) {
+                let t = dp / (dp - dq);
+                out.push((p.0 + t * (q.0 - p.0), p.1 + t * (q.1 - p.1)));
+            }
+        }
+        ring = out;
+        if ring.is_empty() {
+            return 0.0;
+        }
+    }
+    dggs_stream_core::transfer::polygon_area(&ring).abs()
+}
+
+#[test]
+fn overlay_pixel_weights_of_cells_spanning_many_pixels() {
+    use dggs_stream_core::transfer::{pixel_overlaps, polygon_area};
+    // Hexagons and trapezoids wide enough for whole interior pixels, some rotated
+    // or clipped by the raster edge, plus a concave notch with two spans per row.
+    let hexagon = |cx: f64, cy: f64, rad: f64, turn: f64| -> Vec<(f64, f64)> {
+        (0..6)
+            .map(|k| {
+                let a = turn + std::f64::consts::FRAC_PI_3 * f64::from(k);
+                (cx + rad * a.cos(), cy + rad * a.sin())
+            })
+            .collect()
+    };
+    let shapes = [
+        hexagon(12.3, 9.7, 8.4, 0.0),
+        hexagon(12.3, 9.7, 8.4, 0.37),
+        hexagon(2.0, 20.5, 9.1, 0.11),
+        vec![(-3.5, 0.5), (30.25, 0.5), (26.0, 17.0), (1.75, 17.0)],
+        vec![
+            (1.0, 1.0),
+            (22.0, 1.0),
+            (22.0, 15.0),
+            (15.0, 15.0),
+            (15.0, 5.5),
+            (8.0, 5.5),
+            (8.0, 15.0),
+            (1.0, 15.0),
+        ],
+    ];
+    let (width, rows) = (24, (0, 26));
+    let mut whole = 0;
+    for shape in &shapes {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0.0;
+        pixel_overlaps(shape, rows, width, |c, r, a| {
+            assert!(seen.insert((c, r)), "pixel ({c}, {r}) visited twice");
+            assert!(a > 0.0 && a <= 1.0, "({c}, {r}): {a}");
+            let expected = reference_pixel_area(shape, c, r);
+            assert!(
+                (a - expected).abs() < 1e-12,
+                "({c}, {r}): {a} vs {expected}"
+            );
+            whole += usize::from(a == 1.0);
+            total += a;
+        });
+        // Every pixel the polygon overlaps by more than a sliver is visited.
+        let mut inside = 0.0;
+        for r in rows.0..rows.1 {
+            for c in 0..width {
+                let expected = reference_pixel_area(shape, c, r);
+                inside += expected;
+                if expected > 1e-12 {
+                    assert!(seen.contains(&(c, r)), "missed ({c}, {r}): {expected}");
+                }
+            }
+        }
+        assert!((total - inside).abs() < 1e-9, "{total} vs {inside}");
+        assert!(total <= polygon_area(shape).abs() + 1e-9);
+    }
+    assert!(whole > 500, "interior pixels: {whole}");
+
+    // End to end, cells many pixels across still tile the raster exactly.
+    let value = |c: u32, r: u32| ((c * 7 + r * 13) % 23 + 1) as f32;
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(value);
+    let total: f64 = (0..H)
+        .flat_map(|r| (0..W).map(move |c| f64::from(value(c, r))))
+        .sum();
+    let pixels = f64::from(W * H);
+    for grid in GridKind::ALL {
+        let res = matched(grid, -3);
+        for mass_preserve in [false, true] {
+            let mode = TransferMode::Overlay {
+                weighted: true,
+                mass_preserve,
+            };
+            let cells = scan(&path, &config(grid, res, mode));
+            let area: f64 = cells.values().map(|a| a.count).sum();
+            let mass: f64 = cells.values().map(|a| a.sum).sum();
+            assert!(
+                (area / pixels - 1.0).abs() < 1e-6,
+                "{grid} res {res}: {area}"
+            );
+            assert!(
+                (mass / total - 1.0).abs() < 1e-6,
+                "{grid} res {res}: {mass}"
+            );
+        }
+    }
+}
+
 #[test]
 fn overlay_of_a_constant_is_that_constant_and_skips_nodata() {
     let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
