@@ -15,6 +15,11 @@ use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use dggs_stream_core::columnar::multiband::{
+    open_band_selection, wide_schema, MultiBandBatchReader,
+};
+use dggs_stream_core::raster::mosaic::resolve_raster_sources;
+use dggs_stream_core::transfer::TransferMode;
 use parquet::basic::Compression;
 
 use crate::aggregator::multi_horizon::MultiResolutionConfig;
@@ -37,6 +42,10 @@ pub struct ParquetBindData {
     pub grid: GridKind,
     pub resolutions: Vec<u8>,
     pub band: usize,
+    /// Ordered band selector for a wide export. The raster is reopened and the
+    /// selector resolved again at execution, so a reused prepared plan reads the
+    /// file currently at `file_path`.
+    bands: Option<String>,
     pub source_crs: Option<String>,
     pub custom_nodata: Option<f64>,
     pub scale_offset: bool,
@@ -140,7 +149,7 @@ unsafe fn parquet_bind_for<const GRID: u8>(info: duckdb_bind_info) {
             let custom_nodata = bind.get_named_double("nodata");
             let scale_offset = bind.parse_scale_offset();
             let is_categorical = bind.get_named_bool("categorical").unwrap_or(false);
-            let compact = bind.get_named_bool("compact").unwrap_or(true);
+
             let geoparquet = bind
                 .get_named_bool("geoparquet")
                 .or_else(|| bind.get_named_bool("geom"))
@@ -152,13 +161,39 @@ unsafe fn parquet_bind_for<const GRID: u8>(info: duckdb_bind_info) {
             let remote_source_factory =
                 crate::functions::config::raster_source_factory_for_bind(info);
 
+            let bands = if let Some(selector) = bind.get_named_string("bands") {
+                if bind.get_named_int("band").is_some()
+                    || is_categorical
+                    || matches!(execution.transfer, TransferMode::Interpolate(_))
+                {
+                    bind.set_error("bands requires a continuous center or overlay scan and cannot be combined with band");
+                    return;
+                }
+                // Validate the selector now; the scan reopens the raster.
+                let input = resolve_raster_sources(&file_path).and_then(|paths| {
+                    open_band_selection(&paths, &selector, remote_source_factory.as_ref())
+                });
+                match input {
+                    Ok(_) => Some(selector),
+                    Err(e) => {
+                        bind.set_error(&e.to_string());
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let compact = bind.get_named_bool("compact").unwrap_or(bands.is_none());
+
             let mut compression = Compression::SNAPPY;
             if let Some(s) = bind.get_named_string("compression") {
                 match s.to_lowercase().as_str() {
                     "snappy" => compression = Compression::SNAPPY,
                     "zstd" => compression = Compression::ZSTD(Default::default()),
                     "gzip" | "flate" => compression = Compression::GZIP(Default::default()),
-                    "lz4" => compression = Compression::LZ4,
+                    // LZ4_RAW: the legacy Hadoop-framed LZ4 codec is unreadable in DuckDB 1.2.
+                    "lz4" | "lz4_raw" => compression = Compression::LZ4_RAW,
+                    "brotli" => compression = Compression::BROTLI(Default::default()),
                     "uncompressed" | "none" => compression = Compression::UNCOMPRESSED,
                     _ => {}
                 }
@@ -188,6 +223,7 @@ unsafe fn parquet_bind_for<const GRID: u8>(info: duckdb_bind_info) {
                 grid,
                 resolutions,
                 band,
+                bands,
                 source_crs,
                 custom_nodata,
                 scale_offset,
@@ -282,12 +318,47 @@ pub unsafe extern "C" fn parquet_scan(info: duckdb_function_info, output: duckdb
             };
 
             let start = Instant::now();
-            let result = ParquetWriter::process_raster_source_to_parquet(
-                &bind_data.file_path,
-                &bind_data.output_parquet,
-                config,
-                parquet_config,
-            );
+            let result = if let Some(selector) = &bind_data.bands {
+                resolve_raster_sources(&bind_data.file_path)
+                    .and_then(|paths| {
+                        open_band_selection(&paths, selector, config.remote_source_factory.as_ref())
+                    })
+                    .map_err(Into::into)
+                    .and_then(|(raster, bands)| {
+                        let projection = bind_data.compact.then(|| {
+                            wide_schema(config.grid, &bands, &config.quantiles)
+                                .fields
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, f)| f.name != config.grid.hex_column_name())
+                                .map(|(i, _)| i)
+                                .collect::<Vec<_>>()
+                        });
+                        MultiBandBatchReader::open(
+                            raster,
+                            &config,
+                            &bands,
+                            projection.as_deref(),
+                            bind_data.row_group_size.min(2048),
+                            None,
+                        )
+                        .map_err(Into::into)
+                        .and_then(|mut reader| {
+                            dggs_stream_core::parquet::write_multiband_parquet_with_config(
+                                &mut reader,
+                                std::path::Path::new(&bind_data.output_parquet),
+                                &parquet_config,
+                            )
+                        })
+                    })
+            } else {
+                ParquetWriter::process_raster_source_to_parquet(
+                    &bind_data.file_path,
+                    &bind_data.output_parquet,
+                    config,
+                    parquet_config,
+                )
+            };
             let elapsed = start.elapsed();
             let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
 
@@ -360,6 +431,7 @@ pub unsafe fn register_parquet_table_function(con: duckdb_connection) -> Result<
 
             // Named parameters:
             register_common_raster_named_parameters(tf);
+            add_named_parameter(tf, "bands", DuckDBType::Varchar);
             add_named_parameter(tf, "categorical", DuckDBType::Boolean);
             add_named_parameter(tf, "compression", DuckDBType::Varchar);
             add_named_parameter(tf, "row_group_size", DuckDBType::BigInt);

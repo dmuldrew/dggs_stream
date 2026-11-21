@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The DuckDB direct Parquet exporters for H3, A5, S2 and HEALPix accept `bands` for wide continuous output.
+
 - Python and CLI Parquet exporters can stream selected raster bands into a single GeoParquet file with the multi-band scan schema and per-band nulls.
 
 - Multi-band overlay shares pixel–cell intersections across selected bands. Each band has its own valid coverage and statistics. Mass-preserving overlay conserves each band’s valid pixel sum.
@@ -87,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The free functions `pmtiles::tiler::evict_and_write_tiles` and `pmtiles::tiler::flush_all_tiles`, which had no callers; use the `TilePyramidAccumulator` methods `evict_and_write_tiles` and `flush_all` instead.
 
 ### Fixed
+
+- DuckDB direct Parquet exports write `compression := 'lz4'` as raw LZ4, which DuckDB can read back, and honour `compression := 'brotli'` instead of falling back to Snappy.
 
 - Interpolate and overlay scans latch a failed block, so a retry after an error is rejected instead of resuming with that block's contribution missing. Multi-band scans record cells and indexed samples in run profiles. DataFusion area histograms accept `valid_coverage_threshold` without an explicit `transfer=overlay`.
 - Parquet-to-PMTiles exports accept 32-bit grid indexes, including unsigned HEALPix indexes. PMTiles table exports report cells skipped by the per-zoom tile cap in archive metadata.

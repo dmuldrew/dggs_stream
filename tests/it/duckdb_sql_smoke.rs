@@ -783,3 +783,81 @@ fn invalid_sampling_is_a_bind_error_in_all_raster_entry_points() {
     assert!(!duckdb.path("invalid.parquet").exists());
     assert!(!duckdb.path("invalid.pmtiles").exists());
 }
+
+#[test]
+#[ignore = "requires DuckDB CLI and a built extension"]
+fn real_sql_multiband_parquet_all_grids() {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let db = DuckDbHarness::new();
+    let fixtures =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/dggs-stream-core/tests/fixtures");
+    for layout in ["planar", "interleaved"] {
+        let src = quoted(&fixtures.join(format!("multiband-12-{layout}.tif")));
+        for (grid, res) in [("h3", 10), ("a5", 16), ("s2", 16), ("healpix", 15)] {
+            let path = db.path(&format!("{layout}-{grid}.parquet"));
+            let out = quoted(&path);
+            let opts = format!("bands := '3,1', resolution := {res}, workers := 1");
+            let status = db.query(&format!("SELECT status FROM {grid}_raster_to_parquet({src}, {out}, {opts}, geoparquet := true, compression := 'zstd', row_group_size := 8)"));
+            assert_eq!(status, "SUCCESS");
+            let file = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let metadata = file.metadata();
+            assert!(metadata.num_row_groups() > 1);
+            let group = metadata.row_group(0);
+            assert_eq!(group.num_rows(), 8);
+            assert!(matches!(
+                group.column(0).compression(),
+                parquet::basic::Compression::ZSTD(_)
+            ));
+            let geo = metadata
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap()
+                .iter()
+                .find(|kv| kv.key == "geo")
+                .unwrap();
+            let geo: serde_json::Value = serde_json::from_str(geo.value.as_ref().unwrap()).unwrap();
+            assert_eq!(geo["primary_column"], "wkb");
+            assert_eq!(geo["columns"]["wkb"]["crs"]["id"]["code"], "CRS84");
+            let diff = db.query(&format!(
+                "SET enable_geoparquet_conversion = false;
+                 WITH expected AS (SELECT * FROM raster_{grid}({src}, {opts}, geom := false)),
+                 actual AS (SELECT * FROM read_parquet({out}))
+                 SELECT (SELECT count(*) FROM (FROM expected EXCEPT ALL FROM actual)) +
+                        (SELECT count(*) FROM (FROM actual EXCEPT ALL FROM expected))"
+            ));
+            assert_eq!(diff, "0", "{layout} {grid}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires DuckDB CLI and a built extension"]
+fn real_sql_multiband_parquet_selectors() {
+    let db = DuckDbHarness::new();
+    let src = quoted(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/dggs-stream-core/tests/fixtures/multiband-12-planar.tif"),
+    );
+    let path = db.path("all.parquet");
+    let out = quoted(&path);
+    for invalid in [
+        "bands := '3,3'",
+        "bands := '13'",
+        "bands := '3,1', band := 1",
+        "bands := 'all', categorical := true",
+    ] {
+        let sql = format!(
+            "LOAD {}; SELECT * FROM s2_raster_to_parquet({src}, {out}, {invalid})",
+            quoted(&db.extension)
+        );
+        assert!(try_query_cli(&db.cli, &sql).is_err());
+        assert!(!path.exists());
+    }
+    assert_eq!(db.query(&format!("SELECT status FROM h3_raster_to_parquet({src}, {out}, grid := 's2', bands := 'all', compact := true, resolution := 16)")), "SUCCESS");
+    let names = db.query(&format!(
+        "SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet({out}))"
+    ));
+    assert!(names.lines().any(|n| n == "s2_index"));
+    assert!(names.lines().any(|n| n == "band_12_mean"));
+    assert!(!names.lines().any(|n| n == "s2_hex"));
+}
