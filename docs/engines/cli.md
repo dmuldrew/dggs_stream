@@ -53,9 +53,9 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--profile` | all | Print a runtime profile on stderr ([Scan Options](../scan-options.md#runtime-profile)) |
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
-| `--bands <list or all>` | `ipc`, `jsonl` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,band_3_mean,band_1_count`. |
-| `--columns <c1,c2,…>` | `ipc`, `jsonl` | Column projection, in the given order |
-| `--limit <N>` | `ipc`, `jsonl` | Maximum rows |
+| `--bands <list or all>` | `ipc`, `jsonl`, `parquet` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,wkb,band_3_mean,band_1_count`. |
+| `--columns <c1,c2,…>` | `ipc`, `jsonl`, multi-band `parquet` | Column projection, in the given order. Include `wkb` when projecting GeoParquet. |
+| `--limit <N>` | `ipc`, `jsonl`, multi-band `parquet` | Maximum rows |
 | `--partition <SPEC\|@FILE>` | `ipc` | Scan one partition (see [Partitioned scans](#partitioned-scans)) |
 | `--partition-index <K>` | `ipc` | Line `K` of the plan file given as `--partition @FILE` |
 | `-o, --output <PATH\|->` | all | Output file; `-` or omitted means stdout (required for `parquet`, `pmtiles` and `parquet-to-pmtiles`, which cannot write to stdout) |

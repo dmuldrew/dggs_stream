@@ -2029,6 +2029,7 @@ def raster_to_parquet(
     categorical: bool = False,
     crs: Optional[str] = None,
     geoparquet: bool = True,
+    bands: Optional[Sequence[int]] = None,
     grid: Optional[str] = None,
     nodata_policy: Optional[str] = None,
     emit_nodata_value: Optional[float] = None,
@@ -2040,13 +2041,16 @@ def raster_to_parquet(
     valid_coverage_threshold: Optional[float] = None,
 ) -> int:
     """Aggregate a raster onto `grid` (H3 by default) and write the cells to a Parquet
-    file (GeoParquet with a `wkb` geometry column by default). Returns the cells written.
+    file (GeoParquet by default). Returns the number of cells written.
 
     `nodata_policy`, `emit_nodata_value`, `decimals` and the `transfer` options are as
-    in `scan_raster`. The file's statistics columns are not nullable, so under `nodata_policy="emit"` a
+    in `scan_raster`. With `bands`, the output uses the scan schema, including nullable
+    band-prefixed statistics and the binary `wkb` column. For single-band exports the
+    file's statistics columns are required, so under `nodata_policy="emit"` a
     statistic without a value is NaN, and a categorical export needs an integer
     `emit_nodata_value`."""
     output = dict(
+        bands=bands,
         nodata_policy=nodata_policy,
         emit_nodata_value=emit_nodata_value,
         decimals=decimals,

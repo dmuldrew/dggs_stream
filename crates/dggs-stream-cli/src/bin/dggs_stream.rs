@@ -8,10 +8,9 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use dggs_stream_cli::{
-    export_raster_to_parquet_with_config, export_raster_to_pmtiles_with_config,
-    merge_partition_files, parse_merge_args, parse_parquet_to_pmtiles_args, parse_plan_args,
-    parse_stream_args, plan_raster_partitions, stream_raster_to_writer,
-    transcode_parquet_to_pmtiles, write_plan, StreamOutputFormat,
+    export_parquet, export_raster_to_pmtiles_with_config, merge_partition_files, parse_merge_args,
+    parse_parquet_to_pmtiles_args, parse_plan_args, parse_stream_args, plan_raster_partitions,
+    stream_raster_to_writer, transcode_parquet_to_pmtiles, write_plan, StreamOutputFormat,
 };
 use dggs_stream_core::error::Result;
 
@@ -50,7 +49,7 @@ fn print_help() {
           --emit-nodata-value <NUM>  Value of an all-NoData cell's statistics under\n                                     \
                                      `--nodata-policy emit` (default: null)\n  \
           --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
-          --bands <LIST|all>         Wide continuous IPC/JSONL statistics, e.g. --bands 3,1\n  \
+          --bands <LIST|all>         Wide continuous IPC/JSONL/Parquet statistics, e.g. --bands 3,1\n  \
           --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
                                      each pixel into the cell holding its centre),\n                                     \
                                      interpolate (each cell takes the value interpolated\n                                     \
@@ -104,9 +103,9 @@ fn reject_stream_only_options(
     opts: &dggs_stream_cli::CliStreamOptions,
     subcmd: &str,
 ) -> Result<()> {
-    if opts.bands.is_some() {
+    if opts.bands.is_some() && subcmd != "parquet" {
         return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(
-            format!("--bands supports ipc and jsonl, not {subcmd}"),
+            format!("--bands supports ipc, jsonl and parquet, not {subcmd}"),
         ));
     }
     if opts.histogram.is_some() {
@@ -157,8 +156,7 @@ fn main() {
                     "Missing -o / --output path for parquet export".into(),
                 )
             })?;
-            export_raster_to_parquet_with_config(&opts.input_path, Path::new(&out_path), opts.categorical, true, opts.scan_config()
-            )
+            export_parquet(&opts, Path::new(&out_path))
         }),
         "pmtiles" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
             reject_partition(&opts, "pmtiles")?;

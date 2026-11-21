@@ -550,3 +550,56 @@ fn parquet_to_pmtiles_bad_invocations() {
         "a failed transcode must not leave an archive"
     );
 }
+
+#[test]
+fn multiband_parquet_decodes_selected_tiles_and_alpha() {
+    let dir = tempfile::tempdir().unwrap();
+    for (layout, chunks) in [("planar", 12), ("interleaved", 4)] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../dggs-stream-core/tests/fixtures/multiband-12-{layout}.tif"
+        ));
+        let out = dir.path().join("cells.parquet");
+        let result = run_ok(&[
+            "parquet",
+            s(&path),
+            "-r",
+            "12",
+            "--bands",
+            "3,1",
+            "--profile",
+            "-o",
+            s(&out),
+        ]);
+        let profile = String::from_utf8(result.stderr).unwrap();
+        assert!(profile.contains(&format!("chunks {chunks} (")), "{profile}");
+        let reader = SerializedFileReader::new(File::open(out).unwrap()).unwrap();
+        assert!(reader.metadata().file_metadata().num_rows() > 0);
+        let columns = reader.metadata().file_metadata().schema_descr().columns();
+        assert_eq!(columns[4].name(), "band_3_mean");
+        assert_eq!(columns[10].name(), "band_1_mean");
+    }
+}
+
+#[test]
+fn multiband_parquet_refuses_repeated_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dggs-stream-core/tests/fixtures/multiband-12-planar.tif");
+    let out = dir.path().join("cells.parquet");
+    run_err(
+        &[
+            "parquet",
+            s(&path),
+            "-r",
+            "12",
+            "--bands",
+            "3,1",
+            "--columns",
+            "wkb,band_3_mean,BAND_3_MEAN",
+            "-o",
+            s(&out),
+        ],
+        "duplicate Parquet column 'band_3_mean'",
+    );
+    assert!(!out.exists());
+}

@@ -169,7 +169,7 @@ values; for whole columns use the Arrow stream or a Polars expression such as
 
 | Function | Arguments | Returns |
 | :--- | :--- | :--- |
-| `raster_to_parquet(input, output, resolutions=8, *, categorical=False, crs=None, geoparquet=True, grid=None, ...)` | Parquet or GeoParquet 1.1 | Number of cells written |
+| `raster_to_parquet(input, output, resolutions=8, *, categorical=False, crs=None, geoparquet=True, bands=None, grid=None, ...)` | Parquet or GeoParquet 1.1 | Number of cells written |
 | `raster_to_pmtiles(input, output, resolutions=8, *, categorical=False, crs=None, grid=None, ...)` | PMTiles v3 archive | Count reported by the tiler |
 | `parquet_to_pmtiles(parquet, output, *, cell_column=None, grid=None, h3_column=None)` | PMTiles v3 archive from any cell-indexed Parquet file; the grid comes from `grid` or the column's name (`s2_index`, ...) | Number of cell features written |
 
@@ -282,6 +282,9 @@ for a full two-year raster × protected-area join in Polars on the A5 grid.
 ```python
 # Streaming exporter: WKB geometry + GeoParquet 1.1 metadata
 dggs_stream.raster_to_parquet("elevation.tif", "elevation_h3.parquet", 8)
+
+# Preserve the multi-band scan schema, including null statistics and WKB geometry.
+dggs_stream.raster_to_parquet("imagery.tif", "bands.parquet", 12, bands=[3, 1])
 
 # Or write a projected frame with Polars itself
 (dggs_stream.scan_raster("elevation.tif", 8, columns=["h3_index", "mean", "count"])

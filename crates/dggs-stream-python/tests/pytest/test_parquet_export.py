@@ -30,3 +30,36 @@ def test_native_polars_reads_exporter_output(
 
     lazy = pl.scan_parquet(out).select(pl.len()).collect().item()
     assert lazy == written
+
+
+@pytest.mark.parametrize("layout", ["interleaved", "planar"])
+@pytest.mark.parametrize("geo", [True, False])
+def test_multiband_export_matches_scan(dggs_stream, tmp_path, layout, geo):
+    import json
+    from pathlib import Path
+
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    fixtures = Path(__file__).resolve().parents[3] / "dggs-stream-core/tests/fixtures"
+    path = fixtures / f"multiband-12-{layout}.tif"
+    out = tmp_path / "subdir" / "cells.parquet"
+    written = dggs_stream.raster_to_parquet(path, out, 12, bands=[3, 1], geoparquet=geo)
+    expected = pa.table(dggs_stream.RasterArrowStream(path, 12, bands=[3, 1])).sort_by("h3_index")
+    actual = pq.read_table(out).sort_by("h3_index")
+    assert written == len(expected) > 2048
+    # 2,048-row scan batches coalesce into one bounded row group.
+    assert pq.ParquetFile(out).num_row_groups == 1
+    assert actual.schema.equals(expected.schema)
+    assert actual.equals(expected)
+    assert actual["band_1_mean"].null_count > 0
+    assert pl.read_parquet(out).height == written
+    metadata = actual.schema.metadata or {}
+    assert (b"geo" in metadata) == geo
+    if geo:
+        spec = json.loads(metadata[b"geo"])
+        assert spec["primary_column"] == "wkb"
+        geometry = spec["columns"]["wkb"]
+        assert geometry["encoding"] == "WKB"
+        assert geometry["crs"]["id"] == {"authority": "OGC", "code": "CRS84"}
+        west, south, east, north = geometry["bbox"]
+        assert west < east and south < north
