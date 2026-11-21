@@ -3,7 +3,9 @@
 pub mod column_order;
 pub mod geoparquet_metadata;
 mod multiband;
-pub use multiband::write_multiband_parquet;
+pub use multiband::{
+    write_multiband_parquet, write_multiband_parquet_with_config, MULTIBAND_ROW_GROUP_BUDGET_BYTES,
+};
 pub mod pipeline;
 pub mod writer;
 

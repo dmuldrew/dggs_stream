@@ -473,7 +473,7 @@ let reader = ContinuousBatchReader::open(&paths, &MultiResolutionConfig::new(vec
 
 For continuous statistics from several bands of one interleaved or band-separated TIFF, `MultiBandStreamer` shares decoding and either center assignment or pixel–cell overlap calculations and returns one accumulator per band. [Rust multi-band scans](docs/engines/core.md#multi-band-continuous-scans)
 
-Select bands 3 and 1 with `--bands 3,1` in CLI IPC, JSONL, or Parquet output, `bands := '3,1'` in DuckDB, `'bands=3,1'` in DataFusion and SedonaDB SQL, or `scan_raster(..., bands=[3, 1])` in Python and Polars. Python also streams these columns to GeoParquet with `raster_to_parquet(src, dst, 12, bands=[3, 1])`. Each cell has columns such as `band_3_mean` and `band_1_count`. [DuckDB example](docs/engines/duckdb.md#multiple-bands-in-one-pass)
+Select bands 3 and 1 with `--bands 3,1` in CLI IPC, JSONL, or Parquet output, `bands := '3,1'` in DuckDB, `'bands=3,1'` in DataFusion and SedonaDB SQL, or `scan_raster(..., bands=[3, 1])` in Python and Polars. DuckDB exports them with `bands` and `geoparquet := true` on each grid’s direct Parquet exporter. Python also streams these columns to GeoParquet with `raster_to_parquet(src, dst, 12, bands=[3, 1])`. Each cell has columns such as `band_3_mean` and `band_1_count`. [DuckDB example](docs/engines/duckdb.md#multiple-bands-in-one-pass)
 
 Continuous readers build per-cell quantile sketches only when a configured quantile
 column is projected (or the full schema is requested). The schema is unchanged;
