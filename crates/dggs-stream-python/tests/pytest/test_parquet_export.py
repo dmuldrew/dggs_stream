@@ -47,7 +47,8 @@ def test_multiband_export_matches_scan(dggs_stream, tmp_path, layout, geo):
     expected = pa.table(dggs_stream.RasterArrowStream(path, 12, bands=[3, 1])).sort_by("h3_index")
     actual = pq.read_table(out).sort_by("h3_index")
     assert written == len(expected) > 2048
-    assert pq.ParquetFile(out).num_row_groups > 1
+    # 2,048-row scan batches coalesce into one bounded row group.
+    assert pq.ParquetFile(out).num_row_groups == 1
     assert actual.schema.equals(expected.schema)
     assert actual.equals(expected)
     assert actual["band_1_mean"].null_count > 0

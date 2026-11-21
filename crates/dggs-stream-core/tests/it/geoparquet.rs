@@ -834,3 +834,83 @@ fn parquet_writer_preserves_each_grids_index_schema_and_cell_id() {
         }
     }
 }
+
+fn open_multiband_fixture(
+    projection: Option<&[usize]>,
+) -> dggs_stream_core::columnar::multiband::MultiBandBatchReader {
+    use dggs_stream_core::columnar::multiband::MultiBandBatchReader;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/multiband-12-interleaved.tif");
+    let raster = GeoTiffStreamReader::open(&path).unwrap();
+    MultiBandBatchReader::open(
+        raster,
+        &MultiResolutionConfig::single(12),
+        &[3, 1],
+        projection,
+        64,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn multiband_parquet_coalesces_batches_and_keeps_scan_schema() {
+    use dggs_stream_core::parquet::write_multiband_parquet;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("wide.parquet");
+    let mut reader = open_multiband_fixture(None);
+    let names: Vec<String> = reader
+        .schema()
+        .fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    let rows = write_multiband_parquet(&mut reader, &out, true, 1000).unwrap();
+    // 64-row scan batches coalesce until a group holds at least 1,000 rows.
+    assert!(rows > 3000, "{rows}");
+
+    let file = SerializedFileReader::new(File::open(&out).unwrap()).unwrap();
+    let meta = file.metadata();
+    assert_eq!(meta.file_metadata().num_rows() as usize, rows);
+    let groups: Vec<i64> = meta.row_groups().iter().map(|g| g.num_rows()).collect();
+    assert_eq!(groups.len(), rows.div_ceil(1024), "{groups:?}");
+    assert!(
+        groups[..groups.len() - 1].iter().all(|&n| n == 1024),
+        "{groups:?}"
+    );
+    let written: Vec<&str> = meta
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .map(|c| c.name())
+        .collect();
+    assert_eq!(written, names);
+    let geo = meta
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kv| kv.iter().find(|k| k.key == "geo"))
+        .and_then(|k| k.value.clone())
+        .expect("geo metadata");
+    let geo: serde_json::Value = serde_json::from_str(&geo).unwrap();
+    assert_eq!(geo["primary_column"], "wkb");
+    let bbox = geo["columns"]["wkb"]["bbox"].as_array().unwrap();
+    assert!(bbox[0].as_f64().unwrap() < bbox[2].as_f64().unwrap());
+}
+
+#[test]
+fn multiband_parquet_refuses_duplicate_columns_without_publishing() {
+    use dggs_stream_core::parquet::write_multiband_parquet;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("dup.parquet");
+    let probe = open_multiband_fixture(None);
+    let schema = probe.schema();
+    let wkb = schema.index_of("wkb").unwrap();
+    let mean = schema.index_of("band_3_mean").unwrap();
+    drop(probe);
+    let mut reader = open_multiband_fixture(Some(&[wkb, mean, mean]));
+    let err = write_multiband_parquet(&mut reader, &out, true, 1000).unwrap_err();
+    assert!(err.to_string().contains("duplicate"), "{err}");
+    assert!(!out.exists());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}

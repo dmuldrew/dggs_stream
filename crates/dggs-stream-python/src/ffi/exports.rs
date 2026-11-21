@@ -236,6 +236,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
                     &mut reader,
                     Path::new(&out_str),
                     geoparquet != 0,
+                    ParquetExportConfig::default().row_group_size,
                 )
                 .map_err(|e| DggsStreamError::StreamFailed(e.to_string()));
             }

@@ -15,18 +15,138 @@ use crate::columnar::multiband::MultiBandBatchReader;
 use crate::columnar::{ArrowDataType, ColumnArray};
 use crate::encoding::extend_wkb_bounds;
 
-/// Write one row group per bounded scan batch. Publish the file only after its
-/// footer, geometry bounds and logical column orders have been finalized.
+/// Values of one column buffered until the next row group is written.
+enum ColumnBuffer {
+    Int64(Vec<i64>),
+    Int32(Vec<i32>),
+    Bytes(Vec<ByteArray>),
+    Double {
+        values: Vec<f64>,
+        levels: Option<Vec<i16>>,
+    },
+}
+
+impl ColumnBuffer {
+    fn new(data_type: &ArrowDataType, nullable: bool) -> Option<Self> {
+        Some(match data_type {
+            ArrowDataType::UInt64 => Self::Int64(Vec::new()),
+            ArrowDataType::UInt8 => Self::Int32(Vec::new()),
+            ArrowDataType::Utf8 | ArrowDataType::Binary => Self::Bytes(Vec::new()),
+            ArrowDataType::Float64 => Self::Double {
+                values: Vec::new(),
+                levels: nullable.then(Vec::new),
+            },
+            _ => return None,
+        })
+    }
+
+    fn append(
+        &mut self,
+        array: ColumnArray,
+        geo: bool,
+        bounds: &mut [f64; 4],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match (self, array) {
+            (Self::Int64(out), ColumnArray::UInt64 { values, .. }) => {
+                out.extend(values.into_iter().map(|v| v as i64));
+            }
+            (Self::Int32(out), ColumnArray::UInt8 { values, .. }) => {
+                out.extend(values.into_iter().map(i32::from));
+            }
+            (Self::Bytes(out), ColumnArray::Utf8 { values, .. }) => {
+                out.extend(values.into_iter().map(|s| ByteArray::from(s.into_bytes())));
+            }
+            (Self::Bytes(out), ColumnArray::Binary { values, .. }) => {
+                if geo {
+                    for wkb in &values {
+                        extend_wkb_bounds(wkb, bounds);
+                    }
+                }
+                out.extend(values.into_iter().map(ByteArray::from));
+            }
+            (
+                Self::Double {
+                    values: out,
+                    levels,
+                },
+                ColumnArray::Float64 { values, validity },
+            ) => match (levels, validity) {
+                (Some(levels), Some(valid)) => {
+                    out.extend(
+                        values
+                            .into_iter()
+                            .zip(&valid)
+                            .filter(|(_, v)| **v)
+                            .map(|(x, _)| x),
+                    );
+                    levels.extend(valid.into_iter().map(i16::from));
+                }
+                (Some(levels), None) => {
+                    levels.extend(std::iter::repeat_n(1, values.len()));
+                    out.extend(values);
+                }
+                (None, _) => out.extend(values),
+            },
+            _ => return Err("unexpected column in multi-band scan".into()),
+        }
+        Ok(())
+    }
+
+    fn write(
+        &mut self,
+        col: &mut parquet::file::writer::SerializedColumnWriter<'_>,
+    ) -> parquet::errors::Result<()> {
+        match self {
+            Self::Int64(values) => {
+                col.typed::<Int64Type>().write_batch(values, None, None)?;
+                values.clear();
+            }
+            Self::Int32(values) => {
+                col.typed::<Int32Type>().write_batch(values, None, None)?;
+                values.clear();
+            }
+            Self::Bytes(values) => {
+                col.typed::<ByteArrayType>()
+                    .write_batch(values, None, None)?;
+                values.clear();
+            }
+            Self::Double { values, levels } => {
+                col.typed::<DoubleType>()
+                    .write_batch(values, levels.as_deref(), None)?;
+                values.clear();
+                if let Some(levels) = levels {
+                    levels.clear();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Write the scan to `path`, coalescing bounded scan batches into row groups of
+/// at least `row_group_size` rows (the last may be smaller); pass
+/// [`ParquetExportConfig::row_group_size`] for the default. Publish the file only
+/// after its footer, geometry bounds and logical column orders have been finalized.
 pub fn write_multiband_parquet(
     reader: &mut MultiBandBatchReader,
     path: &Path,
     geo: bool,
+    row_group_size: usize,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let schema = reader.schema();
     if geo && schema.index_of("wkb").is_none() {
         return Err("multi-band GeoParquet requires the wkb column".into());
     }
+    for (i, f) in schema.fields.iter().enumerate() {
+        if schema.fields[..i]
+            .iter()
+            .any(|g| g.name.eq_ignore_ascii_case(&f.name))
+        {
+            return Err(format!("duplicate Parquet column '{}'", f.name).into());
+        }
+    }
     let mut message = String::from("message cells {");
+    let mut buffers = Vec::with_capacity(schema.fields.len());
     for f in &schema.fields {
         let (physical, annotation) = match f.data_type {
             ArrowDataType::UInt64 => ("INT64", " (UINT_64)"),
@@ -38,6 +158,7 @@ pub fn write_multiband_parquet(
         };
         let repetition = if f.nullable { "OPTIONAL" } else { "REQUIRED" };
         message.push_str(&format!(" {repetition} {physical} {}{annotation};", f.name));
+        buffers.push(ColumnBuffer::new(&f.data_type, f.nullable).ok_or("unexpected field")?);
     }
     message.push('}');
     let parent = path
@@ -54,69 +175,39 @@ pub fn write_multiband_parquet(
         Arc::new(parse_message_type(&message)?),
         Arc::new(props),
     )?;
+    let flush = |writer: &mut SerializedFileWriter<std::fs::File>,
+                 buffers: &mut [ColumnBuffer]|
+     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut group = writer.next_row_group()?;
+        for buffer in buffers {
+            let mut col = group.next_column()?.ok_or("missing Parquet column")?;
+            buffer.write(&mut col)?;
+            col.close()?;
+        }
+        group.close()?;
+        Ok(())
+    };
     let mut bounds = [
         f64::INFINITY,
         f64::INFINITY,
         f64::NEG_INFINITY,
         f64::NEG_INFINITY,
     ];
-    let mut rows = 0;
+    let (mut rows, mut pending) = (0, 0);
     for batch in reader {
         let batch = batch?;
-        let mut group = writer.next_row_group()?;
-        for (field, array) in schema.fields.iter().zip(batch.columns) {
-            let mut col = group.next_column()?.ok_or("missing Parquet column")?;
-            match array {
-                ColumnArray::UInt64 { values, .. } => {
-                    let values: Vec<_> = values.into_iter().map(|v| v as i64).collect();
-                    col.typed::<Int64Type>().write_batch(&values, None, None)?;
-                }
-                ColumnArray::UInt8 { values, .. } => {
-                    let values: Vec<_> = values.into_iter().map(i32::from).collect();
-                    col.typed::<Int32Type>().write_batch(&values, None, None)?;
-                }
-                ColumnArray::Utf8 { values, .. } => {
-                    let values: Vec<_> = values
-                        .into_iter()
-                        .map(|s| ByteArray::from(s.into_bytes()))
-                        .collect();
-                    col.typed::<ByteArrayType>()
-                        .write_batch(&values, None, None)?;
-                }
-                ColumnArray::Binary { values, .. } => {
-                    if geo {
-                        for wkb in &values {
-                            extend_wkb_bounds(wkb, &mut bounds);
-                        }
-                    }
-                    let values: Vec<_> = values.into_iter().map(ByteArray::from).collect();
-                    col.typed::<ByteArrayType>()
-                        .write_batch(&values, None, None)?;
-                }
-                ColumnArray::Float64 {
-                    mut values,
-                    validity,
-                } => {
-                    let levels = if field.nullable {
-                        Some(if let Some(valid) = validity {
-                            let mut bits = valid.iter();
-                            values.retain(|_| *bits.next().expect("one validity flag per row"));
-                            valid.into_iter().map(i16::from).collect()
-                        } else {
-                            vec![1; values.len()]
-                        })
-                    } else {
-                        None
-                    };
-                    col.typed::<DoubleType>()
-                        .write_batch(&values, levels.as_deref(), None)?;
-                }
-                _ => return Err("unexpected column in multi-band scan".into()),
-            }
-            col.close()?;
+        for (buffer, array) in buffers.iter_mut().zip(batch.columns) {
+            buffer.append(array, geo, &mut bounds)?;
         }
-        group.close()?;
         rows += batch.num_rows;
+        pending += batch.num_rows;
+        if pending >= row_group_size.max(1) {
+            flush(&mut writer, &mut buffers)?;
+            pending = 0;
+        }
+    }
+    if pending > 0 {
+        flush(&mut writer, &mut buffers)?;
     }
     if geo {
         if !bounds[0].is_finite() {

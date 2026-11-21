@@ -579,3 +579,27 @@ fn multiband_parquet_decodes_selected_tiles_and_alpha() {
         assert_eq!(columns[10].name(), "band_1_mean");
     }
 }
+
+#[test]
+fn multiband_parquet_refuses_repeated_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dggs-stream-core/tests/fixtures/multiband-12-planar.tif");
+    let out = dir.path().join("cells.parquet");
+    run_err(
+        &[
+            "parquet",
+            s(&path),
+            "-r",
+            "12",
+            "--bands",
+            "3,1",
+            "--columns",
+            "wkb,band_3_mean,BAND_3_MEAN",
+            "-o",
+            s(&out),
+        ],
+        "duplicate Parquet column 'band_3_mean'",
+    );
+    assert!(!out.exists());
+}

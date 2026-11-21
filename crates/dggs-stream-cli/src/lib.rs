@@ -234,8 +234,13 @@ pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
     };
     let paths = resolve_raster_sources(&opts.input_path)?;
     let mut reader = open_multiband(opts, selector, &paths, &config)?;
-    let rows = dggs_stream_core::parquet::write_multiband_parquet(&mut reader, path, true)
-        .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
+    let rows = dggs_stream_core::parquet::write_multiband_parquet(
+        &mut reader,
+        path,
+        true,
+        ParquetExportConfig::default().row_group_size,
+    )
+    .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(reader.transform_failures());
     drop(reader);
     print_profile(&opts.profile);
