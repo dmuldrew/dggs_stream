@@ -313,6 +313,21 @@ SELECT * FROM h3_raster_to_parquet(
 );
 ```
 
+All four direct exporters accept the same ordered band selector as the continuous scan.
+For example, to export bands 3 and 1 to S2 cells:
+
+```sql
+SELECT status, total_hexagons
+FROM s2_raster_to_parquet(
+    'imagery.tif', 'imagery_s2.parquet',
+    resolution := 16, bands := '3,1', geoparquet := true
+);
+```
+
+Use `h3_raster_to_parquet`, `a5_raster_to_parquet`, or `healpix_raster_to_parquet` for the other grids.
+Wide files contain shared grid columns and one set of statistics per band, in selection order.
+The primary GeoParquet geometry is `wkb`.
+
 ### Remote COG & S3 streaming
 
 ```sql

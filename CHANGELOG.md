@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The DuckDB direct Parquet exporters for H3, A5, S2 and HEALPix accept `bands` for wide continuous output.
+
 - Python and CLI Parquet exporters can stream selected raster bands into a single GeoParquet file with the multi-band scan schema and per-band nulls.
 
 - Multi-band overlay shares pixel–cell intersections across selected bands. Each band has its own valid coverage and statistics. Mass-preserving overlay conserves each band’s valid pixel sum.

@@ -133,6 +133,25 @@ pub fn write_multiband_parquet(
     geo: bool,
     row_group_size: usize,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    write_multiband_parquet_with_config(
+        reader,
+        path,
+        &ParquetExportConfig {
+            geoparquet: geo,
+            row_group_size,
+            ..Default::default()
+        },
+    )
+}
+
+/// Write a projected wide scan with the requested codec, row-group size and GeoParquet metadata.
+pub fn write_multiband_parquet_with_config(
+    reader: &mut MultiBandBatchReader,
+    path: &Path,
+    config: &ParquetExportConfig,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let geo = config.geoparquet;
+    let row_group_size = config.row_group_size;
     let schema = reader.schema();
     if geo && schema.index_of("wkb").is_none() {
         return Err("multi-band GeoParquet requires the wkb column".into());
@@ -168,7 +187,7 @@ pub fn write_multiband_parquet(
     std::fs::create_dir_all(parent)?;
     let temp = tempfile::NamedTempFile::new_in(parent)?;
     let props = WriterProperties::builder()
-        .set_compression(ParquetExportConfig::default().compression)
+        .set_compression(config.compression)
         .build();
     let mut writer = SerializedFileWriter::new(
         temp.reopen()?,

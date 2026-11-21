@@ -264,13 +264,14 @@ SELECT * FROM h3_raster_to_parquet(
 | :--- | :--- | :--- | :--- |
 | `resolution` | `BIGINT` | `8` | Target H3 grid resolution level (0 to 15). |
 | `sampling` | `VARCHAR` | `'center'` | Sub-pixel super-sampling preset. |
+| `bands` | `VARCHAR` | omitted | Select distinct one-based bands in order (for example `'3,1'`) or `'all'` from one raster. Available on the H3, A5, S2 and HEALPix exporters for continuous center or overlay scans. |
 | `band` | `BIGINT` | `1` | 1-indexed band to extract and aggregate. |
 | `nodata` | `DOUBLE` | `None` (auto) | Custom NoData sentinel value. |
 | `scale_offset` | `BOOLEAN` | `true` | Calibrate continuous values with GDAL band `SCALE`/`OFFSET`; ignored for categorical exports. |
 | `categorical` | `BOOLEAN` | `false` | Whether to aggregate categorical raster classes instead of continuous stats. |
-| `compact` | `BOOLEAN` | `false` | Compact output format (fewer columns). |
+| `compact` | `BOOLEAN` | `false` with `bands`, otherwise `true` | With `bands`, setting this to true omits the grid hex string. |
 | `compression` | `VARCHAR` | `'snappy'` | Parquet compression codec: `'snappy'`, `'zstd'`, `'gzip'`, `'lz4'`, `'brotli'`, `'none'`. |
-| `row_group_size` | `BIGINT` | `122880` | Maximum rows per Parquet row group. |
+| `row_group_size` | `BIGINT` | `131072` | Target rows per Parquet row group. |
 | `min_lon`, `min_lat`, `max_lon`, `max_lat` | `DOUBLE` | `None` | Spatial bounding box for chunk pruning. |
 | `bbox` | `VARCHAR` | `None` | Bounding box as a single string: `'min_lon,min_lat,max_lon,max_lat'`. |
 | `h3_cell` | `BIGINT` | `None` | Single H3 cell predicate pushdown filter. |

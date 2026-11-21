@@ -19,13 +19,23 @@ pub fn resolve_bands(
     selector: &str,
     factory: Option<&RemoteSourceFactory>,
 ) -> Result<Vec<usize>> {
+    open_band_selection(paths, selector, factory).map(|(_, bands)| bands)
+}
+
+/// Open a single raster and resolve a selector against the same reader used for scanning.
+pub fn open_band_selection(
+    paths: &[PathBuf],
+    selector: &str,
+    factory: Option<&RemoteSourceFactory>,
+) -> Result<(GeoTiffStreamReader, Vec<usize>)> {
     let [path] = paths else {
         return Err(DggsStreamError::InvalidParameter(
             "bands requires one input raster".into(),
         ));
     };
     let reader = GeoTiffStreamReader::open_with_remote_source_factory(path, factory)?;
-    parse_bands(selector, reader.metadata.samples_per_pixel)
+    let bands = parse_bands(selector, reader.metadata.samples_per_pixel)?;
+    Ok((reader, bands))
 }
 
 /// Resolve an ordered selector when the input is already open.
