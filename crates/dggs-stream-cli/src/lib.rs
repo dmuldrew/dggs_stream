@@ -187,6 +187,61 @@ pub fn stream_raster_to_writer<W: Write>(opts: &CliStreamOptions, writer: &mut W
     rows
 }
 
+fn open_multiband(
+    opts: &CliStreamOptions,
+    selector: &str,
+    paths: &[PathBuf],
+    config: &MultiResolutionConfig,
+) -> Result<dggs_stream_core::columnar::multiband::MultiBandBatchReader> {
+    use dggs_stream_core::columnar::multiband::{parse_bands, wide_schema, MultiBandBatchReader};
+    if opts.categorical || opts.partition.is_some() || opts.histogram.is_some() {
+        return Err(DggsStreamError::InvalidParameter(
+            "--bands requires an unpartitioned continuous scan".into(),
+        ));
+    }
+    let [path] = paths else {
+        return Err(DggsStreamError::InvalidParameter(
+            "--bands requires one raster".into(),
+        ));
+    };
+    let raster = dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open(path)?;
+    let bands = parse_bands(selector, raster.metadata.samples_per_pixel)?;
+    let projection = resolve_projection_indices(
+        &wide_schema(opts.grid, &bands, &config.quantiles),
+        &opts.columns,
+    )?;
+    MultiBandBatchReader::open(
+        raster,
+        config,
+        &bands,
+        projection.as_deref(),
+        opts.batch_size,
+        opts.limit,
+    )
+}
+
+/// Export from the CLI scan options, preserving wide column order for selected bands.
+pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
+    let config = opts.scan_config();
+    let Some(selector) = &opts.bands else {
+        return export_raster_to_parquet_with_config(
+            &opts.input_path,
+            path,
+            opts.categorical,
+            true,
+            config,
+        );
+    };
+    let paths = resolve_raster_sources(&opts.input_path)?;
+    let mut reader = open_multiband(opts, selector, &paths, &config)?;
+    let rows = dggs_stream_core::parquet::write_multiband_parquet(&mut reader, path, true)
+        .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
+    warn_transform_failures(reader.transform_failures());
+    drop(reader);
+    print_profile(&opts.profile);
+    Ok(rows)
+}
+
 fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
     let paths = resolve_raster_sources(&opts.input_path)?;
     let mut config = opts.scan_config();
@@ -200,33 +255,7 @@ fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<us
     }
 
     if let Some(selector) = &opts.bands {
-        use dggs_stream_core::columnar::multiband::{
-            parse_bands, wide_schema, MultiBandBatchReader,
-        };
-        if opts.categorical || opts.partition.is_some() || opts.histogram.is_some() {
-            return Err(DggsStreamError::InvalidParameter(
-                "--bands requires an unpartitioned continuous scan".into(),
-            ));
-        }
-        let [path] = paths.as_slice() else {
-            return Err(DggsStreamError::InvalidParameter(
-                "--bands requires one raster".into(),
-            ));
-        };
-        let raster = dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open(path)?;
-        let bands = parse_bands(selector, raster.metadata.samples_per_pixel)?;
-        let projection = resolve_projection_indices(
-            &wide_schema(opts.grid, &bands, &config.quantiles),
-            &opts.columns,
-        )?;
-        let mut reader = MultiBandBatchReader::open(
-            raster,
-            &config,
-            &bands,
-            projection.as_deref(),
-            opts.batch_size,
-            opts.limit,
-        )?;
+        let mut reader = open_multiband(opts, selector, &paths, &config)?;
         let schema = reader.schema();
         let rows = match opts.output_format {
             StreamOutputFormat::Ipc => write_ipc_stream(writer, &schema, &mut reader),

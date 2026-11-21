@@ -90,6 +90,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_with_stats(
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PyExportOptions {
+    bands: Option<Vec<usize>>,
     /// `h3` (default), `a5`, `s2` or `healpix`.
     grid: Option<String>,
     /// `omit` (default) or `emit`.
@@ -216,6 +217,28 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
             config.custom_crs = crs_opt.clone();
             config.transform_failure_counter = Some(Arc::clone(&failures));
 
+            if let Some(bands) = &opts.bands {
+                if categorical != 0 {
+                    return Err(DggsStreamError::InvalidParameter(
+                        "bands requires a continuous scan".into(),
+                    ));
+                }
+                let [path] = paths.as_slice() else {
+                    return Err(DggsStreamError::InvalidParameter(
+                        "bands requires one raster".into(),
+                    ));
+                };
+                let raster = dggs_stream_core::raster::geotiff::GeoTiffStreamReader::open(path)?;
+                let mut reader = dggs_stream_core::columnar::multiband::MultiBandBatchReader::open(
+                    raster, &config, bands, None, 2048, None,
+                )?;
+                return dggs_stream_core::parquet::write_multiband_parquet(
+                    &mut reader,
+                    Path::new(&out_str),
+                    geoparquet != 0,
+                )
+                .map_err(|e| DggsStreamError::StreamFailed(e.to_string()));
+            }
             let mosaic = Arc::new(MosaicReader::open(
                 &paths,
                 None,
@@ -348,6 +371,11 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
             let out_str = opt_cstr(output_path)
                 .ok_or_else(|| DggsStreamError::InvalidParameter("Missing output_path".into()))?;
             let opts = PyExportOptions::parse(opt_cstr(options).as_deref())?;
+            if opts.bands.is_some() {
+                return Err(DggsStreamError::InvalidParameter(
+                    "bands is unsupported for PMTiles".into(),
+                ));
+            }
             let grid = opts.grid()?;
             let crs_opt = opt_cstr(crs);
             let res_vec = parse_c_resolutions(grid, resolutions)?.resolve_paths(

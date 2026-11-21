@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Python and CLI Parquet exporters can stream selected raster bands into a single GeoParquet file with the multi-band scan schema and per-band nulls.
+
 - Multi-band overlay shares pixel–cell intersections across selected bands. Each band has its own valid coverage and statistics. Mass-preserving overlay conserves each band’s valid pixel sum.
 
 - Rust, CLI, DuckDB, and Python/Polars overlay scans support a minimum valid coverage fraction. Ordinary overlay now buffers overlaps one cell at a time to reduce peak memory when cells span many pixels.
