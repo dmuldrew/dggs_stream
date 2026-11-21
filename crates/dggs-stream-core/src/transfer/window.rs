@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::raster::mosaic::TileDescriptor;
 use crate::raster::RasterChunk;
 
-/// One band's values over a contiguous range of rows and the raster's full width.
+/// Selected bands’ values in separate planes over a contiguous range of rows and the raster's full width.
 /// NoData (and any non-finite value) is NaN.
 pub struct RowWindow {
     width: u32,
@@ -99,11 +99,24 @@ impl RowWindow {
         rows: Range<u32>,
         cache: &mut ChunkCache,
     ) -> Result<Self> {
+        Self::load_bands(tile, &[selection.band], selection, rows, cache, None)
+    }
+
+    pub(super) fn load_bands(
+        tile: &TileDescriptor,
+        bands: &[usize],
+        selection: BandSelection,
+        rows: Range<u32>,
+        cache: &mut ChunkCache,
+        profile: Option<&crate::run_profile::RunProfile>,
+    ) -> Result<Self> {
+        debug_assert!(!bands.is_empty());
         let meta = &tile.reader.metadata;
         let (width, height) = (meta.width, meta.height);
         let rows = rows.start.min(height)..rows.end.min(height);
         let layout = tile.reader.chunk_layout;
-        let mut values = vec![f64::NAN; rows.len() * width as usize];
+        let plane_len = rows.len() * width as usize;
+        let mut values = vec![f64::NAN; plane_len * bands.len()];
         if rows.is_empty() || width == 0 {
             return Ok(Self::from_values(width, height, rows.start, values));
         }
@@ -113,15 +126,28 @@ impl RowWindow {
             .retain(|index, _| chunk_rows.contains(&(index / layout.chunks_across)));
         let nodata = selection.nodata.or(meta.nodata);
         let spp = usize::from(meta.samples_per_pixel.max(1));
-        let band_index = selection.band.saturating_sub(1).min(spp - 1);
+
         // A pixel whose alpha sample is zero is transparent: missing, as in the centre
         // kernel (`walker::is_transparent`).
         let alpha_index = meta.alpha_sample.map(usize::from).filter(|&a| a < spp);
-        let scaling = if selection.apply_scale_offset {
-            meta.band_scaling(selection.band)
-        } else {
-            crate::raster::metadata::BandScaling::IDENTITY
-        };
+        let layouts: Vec<_> = bands
+            .iter()
+            .map(|&band| {
+                let scaling = if selection.apply_scale_offset {
+                    meta.band_scaling(band)
+                } else {
+                    crate::raster::metadata::BandScaling::IDENTITY
+                };
+                (
+                    Layout {
+                        spp,
+                        band_index: band.saturating_sub(1).min(spp - 1),
+                        alpha_index,
+                    },
+                    scaling,
+                )
+            })
+            .collect();
         // Open lazily so cached and sparse chunks need no TIFF decoder.
         let mut decoder = None;
         for chunk_row in chunk_rows {
@@ -134,42 +160,43 @@ impl RowWindow {
                 let decoded = match cache.chunks.get(&index) {
                     Some(decoded) => Arc::clone(decoded),
                     None => {
-                        let mut out =
-                            Vec::with_capacity(bounds.width as usize * bounds.height as usize);
-                        // A chunk the file does not store holds no samples.
-                        if !tile.reader.band_chunk_present(index, band_index)
-                            || alpha_index
-                                .is_some_and(|a| !tile.reader.band_chunk_present(index, a))
+                        let chunk_len = bounds.width as usize * bounds.height as usize;
+                        let mut out = Vec::with_capacity(chunk_len * bands.len());
+                        let present = |slot| tile.reader.band_chunk_present(index, slot);
+                        if alpha_index.is_some_and(|a| !present(a))
+                            || !layouts.iter().any(|(layout, _)| present(layout.band_index))
                         {
-                            out.resize(bounds.width as usize * bounds.height as usize, f64::NAN);
+                            out.resize(chunk_len * bands.len(), f64::NAN);
                         } else {
                             let decoder = match &mut decoder {
                                 Some(decoder) => decoder,
                                 slot @ None => slot.insert(tile.reader.open_decoder()?),
                             };
                             let (_, data) = decoder.read_chunk(index)?;
+                            if let Some(profile) = profile {
+                                profile.count(
+                                    crate::run_profile::Counter::Chunks,
+                                    tile.reader.physical_chunks_present(index),
+                                );
+                            }
                             let samples = BorrowedSamples::from(&data);
                             crate::dispatch_samples!(samples, nodata, |slice, nd| {
-                                convert(
-                                    slice,
-                                    nd,
-                                    &bounds,
-                                    Layout {
-                                        spp,
-                                        band_index,
-                                        alpha_index,
-                                    },
-                                    scaling,
-                                    &mut out,
-                                )
+                                for &(layout, scaling) in &layouts {
+                                    if present(layout.band_index) {
+                                        convert(slice, nd, &bounds, layout, scaling, &mut out);
+                                    } else {
+                                        out.resize(out.len() + chunk_len, f64::NAN);
+                                    }
+                                }
                             });
-
                             if let Some(mask) = tile.reader.read_mask(bounds, &mut cache.mask)? {
-                                for (i, value) in out.iter_mut().enumerate() {
+                                for i in 0..chunk_len {
                                     let x = bounds.col_offset as usize + i % bounds.width as usize;
                                     let y = bounds.row_offset as usize + i / bounds.width as usize;
                                     if !mask.is_valid(x, y) {
-                                        *value = f64::NAN;
+                                        for plane in out.chunks_exact_mut(chunk_len) {
+                                            plane[i] = f64::NAN;
+                                        }
                                     }
                                 }
                             }
@@ -181,16 +208,34 @@ impl RowWindow {
                 };
                 let top = bounds.row_offset.max(rows.start);
                 let bottom = (bounds.row_offset + bounds.height).min(rows.end);
-                for row in top..bottom {
-                    let src = (row - bounds.row_offset) as usize * bounds.width as usize;
-                    let dst =
-                        (row - rows.start) as usize * width as usize + bounds.col_offset as usize;
-                    values[dst..dst + bounds.width as usize]
-                        .copy_from_slice(&decoded[src..src + bounds.width as usize]);
+                let chunk_len = bounds.width as usize * bounds.height as usize;
+                for (src_plane, dst_plane) in decoded
+                    .chunks_exact(chunk_len)
+                    .zip(values.chunks_exact_mut(plane_len))
+                {
+                    for row in top..bottom {
+                        let src = (row - bounds.row_offset) as usize * bounds.width as usize;
+                        let dst = (row - rows.start) as usize * width as usize
+                            + bounds.col_offset as usize;
+                        dst_plane[dst..dst + bounds.width as usize]
+                            .copy_from_slice(&src_plane[src..src + bounds.width as usize]);
+                    }
                 }
             }
         }
-        Ok(Self::from_values(width, height, rows.start, values))
+        Ok(Self {
+            width,
+            raster_height: height,
+            first_row: rows.start,
+            rows: rows.len() as u32,
+            values,
+        })
+    }
+
+    /// Value of a known in-window pixel in the selected band slot.
+    pub(super) fn band_value(&self, slot: usize, pixel: usize) -> Option<f64> {
+        let value = self.values[slot * self.rows as usize * self.width as usize + pixel];
+        value.is_finite().then_some(value)
     }
 }
 

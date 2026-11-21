@@ -1,6 +1,7 @@
 //! Single-pass continuous statistics for selected TIFF bands.
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 
 use tiff::decoder::DecodingResult;
 
@@ -16,7 +17,7 @@ use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::aggregator::simd::SimdSpanAccumulate;
 use crate::error::{DggsStreamError, Result};
 use crate::raster::geotiff::GeoTiffStreamReader;
-use crate::transfer::TransferMode;
+use crate::transfer::{TransferMode, TransferStream};
 
 /// Band numbers are one-based. Records retain the requested order.
 pub enum Bands<'a> {
@@ -36,7 +37,7 @@ pub struct MultiBandRecord {
     pub statistics: Vec<ContinuousAccumulator>,
 }
 
-/// A center-assignment scan that shares TIFF decoding, projection and grid
+/// A center-assignment or overlay scan that shares TIFF decoding, projection and grid
 /// indexing across the selected bands. Each band's NoData and calibration are
 /// evaluated independently. Alpha transparency applies to the whole pixel.
 ///
@@ -61,11 +62,19 @@ pub struct MultiBandRecord {
 /// # }
 /// ```
 pub struct MultiBandStreamer {
-    inner: MultiHorizonStreamer<Kernel>,
+    inner: Scan,
+    profile: Option<Arc<crate::run_profile::RunProfile>>,
+    /// Indexed samples are counted at this resolution only, as in single-band scans.
+    first_resolution: Option<u8>,
+}
+
+enum Scan {
+    Centers(Box<MultiHorizonStreamer<Kernel>>),
+    Overlay(Box<TransferStream<Vec<ContinuousAccumulator>>>),
 }
 
 impl MultiBandStreamer {
-    /// Open a continuous center-assignment scan over one interleaved or band-separated raster.
+    /// Open a continuous center-assignment or overlay scan over one interleaved or band-separated raster.
     /// Returns an error for an empty, duplicate or out-of-range band selection.
     pub fn new(
         mut reader: GeoTiffStreamReader,
@@ -87,14 +96,14 @@ impl MultiBandStreamer {
                 "expected distinct band numbers in 1..={spp}"
             )));
         }
-        if config.transfer != TransferMode::AssignCenters
+        if matches!(config.transfer, TransferMode::Interpolate(_))
             || config.band != 1
             || config.spectral_formula.is_some()
             || config.partition.is_some()
             || config.histogram.is_some()
             || config.remapper.is_some()
         {
-            return Err(DggsStreamError::InvalidParameter("multi-band scans require continuous center assignment without a single-band selector, formula, histogram, remapping or partition".into()));
+            return Err(DggsStreamError::InvalidParameter("multi-band scans require continuous center assignment or overlay without a single-band selector, formula, histogram, remapping or partition".into()));
         }
         if config.min_mean.is_some()
             || config.max_mean.is_some()
@@ -106,29 +115,76 @@ impl MultiBandStreamer {
             ));
         }
         let bands = reader.project_bands(bands);
+        if matches!(config.transfer, TransferMode::Overlay { .. }) {
+            config.validate()?;
+            let mosaic = crate::raster::mosaic::MosaicReader::from_single_reader(
+                reader,
+                config.bbox,
+                config.custom_crs.as_deref(),
+            )?;
+            let stream = TransferStream::new_bands(Arc::new(mosaic), config, bands)?;
+            return Ok(Self {
+                inner: Scan::Overlay(Box::new(stream)),
+                profile: config.profile.clone(),
+                first_resolution: config.resolutions.first().copied(),
+            });
+        }
         let kernel = Kernel {
             bands,
             quantiles: config.track_quantiles(),
         };
+        let streamer = MultiHorizonStreamer::new(reader, config, kernel)?;
         Ok(Self {
-            inner: MultiHorizonStreamer::new(reader, config, kernel)?,
+            profile: streamer.run_profile().cloned(),
+            first_resolution: streamer.resolution_u8s().first().copied(),
+            inner: Scan::Centers(Box::new(streamer)),
         })
     }
 
     pub fn transform_failures(&self) -> u64 {
-        self.inner.transform_failures()
+        match &self.inner {
+            Scan::Centers(s) => s.transform_failures(),
+            Scan::Overlay(stream) => stream.transform_failures(),
+        }
     }
 
     /// Read at most `max_rows` completed cells.
     pub fn fetch_next_batch(&mut self, max_rows: usize) -> Result<Vec<MultiBandRecord>> {
-        self.inner.fetch_next_batch(max_rows)
+        let rows = match &mut self.inner {
+            Scan::Centers(s) => s.fetch_next_batch(max_rows)?,
+            Scan::Overlay(stream) => {
+                let mut rows = Vec::new();
+                stream.drain_into(max_rows, |_, resolution, cell_id, statistics| {
+                    rows.push(MultiBandRecord {
+                        resolution,
+                        cell_id,
+                        statistics,
+                    })
+                })?;
+                rows
+            }
+        };
+        if let Some(profile) = &self.profile {
+            use crate::run_profile::Counter;
+            // Bands share pixels: count each cell's samples once, by its fullest band.
+            let samples: f64 = rows
+                .iter()
+                .filter(|r| Some(r.resolution) == self.first_resolution)
+                .map(|r| r.statistics.iter().map(|s| s.count).fold(0.0, f64::max))
+                .sum();
+            profile.count(Counter::Cells, rows.len() as u64);
+            profile.count(Counter::SamplesIndexed, samples.round() as u64);
+        }
+        Ok(rows)
     }
 }
 
 impl Drop for MultiBandStreamer {
     fn drop(&mut self) {
-        self.inner.publish_profile();
-        if let Some(profile) = self.inner.run_profile() {
+        if let Scan::Centers(s) = &mut self.inner {
+            s.publish_profile();
+        }
+        if let Some(profile) = &self.profile {
             profile.stream_finished();
         }
     }

@@ -169,7 +169,7 @@ directly (`TransferMode::Interpolate(Interpolation::Bilinear)`, `TransferMode::O
 
 **PostgreSQL**: not available yet.
 
-### Valid coverage (Rust, CLI, DuckDB, and Python/Polars)
+### Valid coverage
 
 Set `MultiResolutionConfig::valid_coverage_threshold` or pass
 `--valid-coverage-threshold 0.75 --transfer overlay` to keep cells with valid
@@ -183,9 +183,13 @@ DuckDB accepts `transfer := 'overlay', valid_coverage_threshold := 0.75`. In Pyt
 `scan_raster(path, transfer="overlay", valid_coverage_threshold=0.75)`. Both adapters also
 accept the option on raster-to-Parquet and raster-to-PMTiles exports.
 
+DataFusion and SedonaDB SQL accept `'transfer=overlay', 'valid_coverage_threshold=0.75'`.
+
 The filter applies when a cell is complete. A positive threshold drops
 all-NoData cells even under `--nodata-policy emit`. Zero disables the filter.
 Mass-preserving scans accept the threshold and retain every contribution.
+
+In a multi-band overlay, each pixel–cell intersection supplies the same geometric weight to every selected band with a valid observation. A coverage threshold applies to each band independently. A cell survives when any band passes. A band that falls below the threshold has zero count and uses the configured NoData output for its mean (NULL by default). Mass-preserving overlay conserves the sum of valid pixel values independently for each band.
 
 ### Reproducing the overlay benchmark
 

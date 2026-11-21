@@ -659,6 +659,13 @@ impl ContinuousRasterTableProvider {
         self
     }
 
+    /// Require this fraction of valid overlapping area for each band's statistics.
+    pub fn with_valid_coverage_threshold(mut self, threshold: f64) -> Result<Self> {
+        self.config.valid_coverage_threshold = Some(threshold);
+        self.config.validate()?;
+        Ok(self)
+    }
+
     /// Collect runtime telemetry of every scan of this table into `profile` (see
     /// `dggs_stream_core::run_profile`); read `profile.report()` after a query.
     pub fn with_profile(mut self, profile: Arc<dggs_stream_core::run_profile::RunProfile>) -> Self {
@@ -1017,6 +1024,13 @@ impl CategoricalRasterTableProvider {
     pub fn with_transfer(mut self, transfer: TransferMode) -> Self {
         self.config.transfer = transfer;
         self
+    }
+
+    /// Require this fraction of valid overlapping area for each band's statistics.
+    pub fn with_valid_coverage_threshold(mut self, threshold: f64) -> Result<Self> {
+        self.config.valid_coverage_threshold = Some(threshold);
+        self.config.validate()?;
+        Ok(self)
     }
 
     /// Collect runtime telemetry of every scan of this table into `profile` (see
