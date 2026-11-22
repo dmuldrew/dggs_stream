@@ -1,6 +1,4 @@
 //! Accumulator state for opt-in ground-area-weighted continuous statistics.
-//!
-//! This state is not yet connected to the raster walker or output adapters.
 
 use std::io::{self, Read, Write};
 
@@ -57,9 +55,28 @@ impl AreaAccumulator {
         self.pixel_count
     }
 
+    /// Retained ground area in square metres.
+    pub fn retained_area_m2(&self) -> f64 {
+        self.area_stats.count
+    }
+
+    /// Integral of pixel value over retained area, in value times square metres.
+    pub fn area_weighted_sum(&self) -> f64 {
+        self.area_stats.sum
+    }
+
     /// Area-weighted statistics; `count` is retained area in square metres.
     pub fn area_stats(&self) -> &ContinuousAccumulator {
         &self.area_stats
+    }
+
+    /// Whether every statistic is finite. A merge of individually valid states
+    /// can overflow; such a state must not be emitted.
+    pub fn is_finite(&self) -> bool {
+        let s = &self.area_stats;
+        [self.pixel_count, s.count, s.sum, s.m2, s.sum_w2]
+            .iter()
+            .all(|v| v.is_finite())
     }
 
     /// Merge a disjoint contribution state into this state.

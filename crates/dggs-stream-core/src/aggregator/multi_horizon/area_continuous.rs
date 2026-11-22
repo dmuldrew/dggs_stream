@@ -1,6 +1,6 @@
 //! Continuous, ground-area-weighted window aggregation.
 //!
-//! This is a window-level kernel; it is not yet connected to the streaming API.
+//! See [`scan_ground_area`] for the streaming entry point.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,9 +13,13 @@ use crate::error::{DggsStreamError, Result};
 use crate::raster::ground_area::wgs84_pixel_area;
 use crate::raster::metadata::BandScaling;
 
+use super::borrowed::BorrowedSamples;
+use super::{HorizonStreamKernel, MultiHorizonStreamer, MultiResolutionConfig};
+use crate::raster::geotiff::GeoTiffStreamReader;
+
 use super::walker::{is_slice_all_native_nodata, walk_direct, ScanlineEngine, WalkContext};
 
-/// A window's per-resolution area-weighted H3 maps.
+/// A window's per-resolution area-weighted cell maps.
 pub type AreaWindowMaps = Vec<HashMap<u64, AreaAccumulator, CellIdBuildHasher>>;
 
 struct AreaEngine<'a, T> {
@@ -100,6 +104,28 @@ pub fn aggregate_wgs84_area_window<T: SimdSpanAccumulate>(
     nodata: Option<T>,
     source_epsg: u32,
 ) -> Result<AreaWindowMaps> {
+    let mut maps: AreaWindowMaps = (0..resolution_count(ctx))
+        .map(|_| HashMap::default())
+        .collect();
+    aggregate_into(ctx, values, nodata, source_epsg, &mut maps)?;
+    Ok(maps)
+}
+
+fn resolution_count(ctx: &WalkContext<'_>) -> usize {
+    if ctx.resolution_u8s.is_empty() {
+        ctx.resolutions.len()
+    } else {
+        ctx.resolution_u8s.len()
+    }
+}
+
+fn aggregate_into<T: SimdSpanAccumulate>(
+    ctx: &WalkContext<'_>,
+    values: &[T],
+    nodata: Option<T>,
+    source_epsg: u32,
+    maps: &mut [HashMap<u64, AreaAccumulator, CellIdBuildHasher>],
+) -> Result<()> {
     if source_epsg != 4326 || !matches!(ctx.crs, CrsTransformer::Wgs84Identity) {
         return Err(DggsStreamError::InvalidParameter(
             "area weighting requires EPSG:4326".into(),
@@ -134,7 +160,7 @@ pub fn aggregate_wgs84_area_window<T: SimdSpanAccumulate>(
     }
     let width = ctx.chunk.width as usize;
     let height = ctx.chunk.height as usize;
-    if width == 0 || height == 0 || ctx.resolutions.is_empty() {
+    if width == 0 || height == 0 || maps.is_empty() {
         return Err(DggsStreamError::InvalidParameter(
             "area window must be non-empty".into(),
         ));
@@ -172,20 +198,188 @@ pub fn aggregate_wgs84_area_window<T: SimdSpanAccumulate>(
         scaling: ctx.scaling(1),
         error: RefCell::new(None),
     };
-    let mut maps: AreaWindowMaps = (0..ctx.resolutions.len())
-        .map(|_| HashMap::default())
-        .collect();
     walk_direct(
         ctx,
         values,
         |s| is_slice_all_native_nodata(s, nodata),
         &engine,
-        &mut maps,
+        maps,
     );
     if let Some(error) = engine.error.into_inner() {
         return Err(error);
     }
-    Ok(maps)
+    Ok(())
+}
+
+/// One completed cell. The accumulator retains both pixel count and area in m².
+#[derive(Debug)]
+pub struct GroundAreaRecord {
+    pub resolution: u8,
+    pub cell_id: u64,
+    pub accumulator: AreaAccumulator,
+}
+
+/// Continuous center-assignment kernel created by [`scan_ground_area`].
+pub struct GroundAreaKernel {
+    min_count: Option<f64>,
+    min_mean: Option<f64>,
+    max_mean: Option<f64>,
+    error: std::sync::Mutex<Option<DggsStreamError>>,
+}
+
+impl HorizonStreamKernel for GroundAreaKernel {
+    type Accumulator = AreaAccumulator;
+    type Record = GroundAreaRecord;
+
+    fn new_parent_accumulator(&self) -> AreaAccumulator {
+        AreaAccumulator::default()
+    }
+
+    fn passes_filter(&self, acc: &AreaAccumulator) -> bool {
+        // Check before the filters, which would silently drop a non-finite mean.
+        if !self.check_finite(acc) {
+            return false;
+        }
+        self.min_count.is_none_or(|n| acc.pixel_count() >= n)
+            && self.min_mean.is_none_or(|n| acc.area_stats().mean() >= n)
+            && self.max_mean.is_none_or(|n| acc.area_stats().mean() <= n)
+    }
+
+    fn buffer_record(
+        &self,
+        resolution: u8,
+        key: u64,
+        acc: AreaAccumulator,
+        output: &mut crate::aggregator::multi_horizon::lifecycle::OutputBuffer<GroundAreaRecord>,
+    ) {
+        // Compacted parents are merged after `passes_filter` saw their children.
+        if !self.check_finite(&acc) {
+            return;
+        }
+        let bytes = size_of::<GroundAreaRecord>()
+            + crate::aggregator::multi_horizon::sharded_map::AccumulatorMerge::heap_bytes(&acc);
+        output.push_sized(self.make_record(resolution, key, acc), bytes);
+    }
+
+    fn make_record(
+        &self,
+        resolution: u8,
+        cell_id: u64,
+        accumulator: AreaAccumulator,
+    ) -> GroundAreaRecord {
+        GroundAreaRecord {
+            resolution,
+            cell_id,
+            accumulator,
+        }
+    }
+
+    fn process_chunk(
+        &self,
+        ctx: &WalkContext<'_>,
+        data: &mut tiff::decoder::DecodingResult,
+        nodata: Option<f64>,
+        maps: &mut [HashMap<u64, AreaAccumulator, CellIdBuildHasher>],
+    ) -> bool {
+        self.process_window(ctx, BorrowedSamples::from(&*data), nodata, maps)
+    }
+
+    fn process_window(
+        &self,
+        ctx: &WalkContext<'_>,
+        data: BorrowedSamples<'_>,
+        nodata: Option<f64>,
+        maps: &mut [HashMap<u64, AreaAccumulator, CellIdBuildHasher>],
+    ) -> bool {
+        let result = crate::dispatch_samples!(data, nodata, |values, nd| aggregate_into(
+            ctx, values, nd, 4326, maps
+        ));
+        if let Err(err) = result {
+            self.error.lock().unwrap().get_or_insert(err);
+            return false;
+        }
+        maps.iter().any(|map| !map.is_empty())
+    }
+
+    fn finish_batch(&mut self) -> Result<()> {
+        match self.error.get_mut().unwrap().take() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+}
+
+impl GroundAreaKernel {
+    /// Record an error for a cell whose merged statistics overflowed. Each
+    /// window checks its own contributions; merges across windows, spill runs
+    /// and compaction are checked here, when the cell is emitted.
+    fn check_finite(&self, acc: &AreaAccumulator) -> bool {
+        if acc.is_finite() {
+            return true;
+        }
+        self.error.lock().unwrap().get_or_insert_with(|| {
+            DggsStreamError::InvalidParameter(
+                "overflowing area-weighted statistics after merging cell contributions".into(),
+            )
+        });
+        false
+    }
+}
+
+/// Stream continuous statistics weighted by the ellipsoidal area of each valid
+/// source pixel. Supports center assignment on one north-up EPSG:4326 band.
+/// Partitioned scans are rejected: there is no merger for their boundary cells.
+pub fn scan_ground_area(
+    reader: GeoTiffStreamReader,
+    config: &MultiResolutionConfig,
+) -> Result<MultiHorizonStreamer<GroundAreaKernel>> {
+    config.validate()?;
+    let metadata = &reader.metadata;
+    // Read an override exactly as the CRS resolver will. Require code 4326
+    // itself, since the resolver maps NAD83 to the same identity transform.
+    let wgs84 = match config.custom_crs.as_deref() {
+        Some(crs) => crate::crs::transformer::parse_epsg_code(crs) == Some(4326),
+        None => metadata.epsg == Some(4326),
+    };
+    if config.partition.is_some() {
+        return Err(DggsStreamError::InvalidParameter(
+            "ground-area scans do not support partitioned scans".into(),
+        ));
+    }
+    if !wgs84
+        || metadata.samples_per_pixel != 1
+        || metadata.alpha_sample.is_some()
+        || config.band != 1
+    {
+        return Err(DggsStreamError::InvalidParameter(
+            "ground-area scans require a single-band EPSG:4326 raster".into(),
+        ));
+    }
+    wgs84_pixel_area(&metadata.geotransform, 0, 0)?;
+    wgs84_pixel_area(
+        &metadata.geotransform,
+        metadata.width.saturating_sub(1) as usize,
+        metadata.height.saturating_sub(1) as usize,
+    )?;
+    if !matches!(config.sampling.points.as_slice(), [p] if p.dx == 0.5 && p.dy == 0.5 && p.weight == 1.0)
+        || config.transfer != crate::transfer::TransferMode::AssignCenters
+        || config.track_quantiles()
+        || config.histogram.is_some()
+        || config.spectral_formula.is_some()
+        || config.nodata_policy != crate::aggregator::output_policy::NodataPolicy::Omit
+    {
+        return Err(DggsStreamError::InvalidParameter("ground-area scans require center assignment and omitted NoData, with no spectral formula, quantiles or histogram".into()));
+    }
+    MultiHorizonStreamer::new(
+        reader,
+        config,
+        GroundAreaKernel {
+            min_count: config.min_count,
+            min_mean: config.min_mean,
+            max_mean: config.max_mean,
+            error: Default::default(),
+        },
+    )
 }
 
 #[cfg(test)]

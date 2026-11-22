@@ -387,12 +387,19 @@ pub fn extract_crs<R: Read + Seek>(decoder: &mut Decoder<R>) -> (Option<u32>, Op
             .copied()
             .filter(|&v| v > 0 && v != USER_DEFINED)
     };
+    // GTModelTypeGeoKey distinguishes geographic coordinates from the base
+    // geodetic CRS of projected or geocentric coordinates.
+    let model = code(1024);
+    if model == Some(3) {
+        return (None, None);
+    }
     if let Some(epsg) = code(KEY_PROJECTED_CRS) {
         return (Some(epsg as u32), None);
     }
     let geo_epsg = code(KEY_GEODETIC_CRS).map(u32::from);
-    let is_projected =
-        short_keys.contains_key(&KEY_PROJECTED_CRS) || short_keys.contains_key(&KEY_PROJ_METHOD);
+    let is_projected = model == Some(1)
+        || short_keys.contains_key(&KEY_PROJECTED_CRS)
+        || short_keys.contains_key(&KEY_PROJ_METHOD);
 
     if is_projected {
         let doubles = decoder
@@ -917,6 +924,14 @@ mod tests {
             image.write_data(&[0.0f32]).unwrap();
         }
         Decoder::new(Cursor::new(buffer)).unwrap()
+    }
+
+    #[test]
+    fn base_geographic_code_requires_geographic_model() {
+        for (model, expected) in [(1, None), (2, Some(4326)), (3, None)] {
+            let mut dec = decoder_with_geokeys(&[(1024, model), (2048, 4326)], &[]);
+            assert_eq!(extract_crs(&mut dec), (expected, None));
+        }
     }
 
     #[test]

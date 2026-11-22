@@ -14,7 +14,7 @@ Each panel shows every cell at the indicated level. Cell counts give a common re
 
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
-Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
+Default scans use pixel contributions. The Rust core also offers [ground-area-weighted center scans](docs/engines/core.md#ground-area-weighted-center-scans) for north-up WGS84 rasters. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
 > **Formerly raster_h3.** See the [changelog](CHANGELOG.md#unreleased) for the new names and migration details.
 
