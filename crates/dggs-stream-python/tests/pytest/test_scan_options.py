@@ -345,3 +345,40 @@ def test_multiband_rejects_conflicting_or_missing_band(dggs_stream, two_band_tif
         pa.schema(dggs_stream.RasterArrowStream(two_band_tif, bands=[1, 2], band=1))
     with pytest.raises(RuntimeError, match="band"):
         dggs_stream.RasterArrowStream(two_band_tif, bands=[3]).__arrow_c_stream__()
+
+
+def test_scan_budgets_spill_with_equivalent_results(dggs_stream, tmp_path):
+    from polars.testing import assert_frame_equal
+
+    path = tmp_path / "spill.tif"
+    write_geotiff(path, 256, 64, lambda c, r: (c + r) % 17, pixel=0.001, rows_per_strip=16)
+    budgets = {"aggregation_budget_mb": 1, "decode_budget_mb": 1}
+    expected = sort(dggs_stream.read_raster(path, 10))
+    lazy = dggs_stream.scan_raster(path, 10, **budgets)
+    actual = lazy.collect() if isinstance(lazy, pl.LazyFrame) else lazy.to_polars()
+    assert_frame_equal(sort(actual), expected)
+    baseline = dggs_stream.profile_raster(path, 10)["profile"]
+    constrained = dggs_stream.profile_raster(path, 10, **budgets)["profile"]
+    assert baseline["spill_runs"] == 0
+    assert constrained["spill_runs"] > 0
+
+
+@pytest.mark.parametrize("option", ["aggregation_budget_mb", "decode_budget_mb"])
+def test_scan_budget_validation(dggs_stream, gradient_tif, option):
+    for value in (True, 1.5, "1"):
+        with pytest.raises(TypeError, match=option):
+            dggs_stream.RasterArrowStream(gradient_tif, **{option: value})
+    for value in (0, -1, 2**62):
+        with pytest.raises(RuntimeError, match=option):
+            dggs_stream.RasterArrowStream(gradient_tif, **{option: value}).to_dict()
+    with pytest.raises(RuntimeError, match="require transfer=assign_centers"):
+        dggs_stream.RasterArrowStream(gradient_tif, transfer="overlay", **{option: 1}).to_dict()
+
+
+def test_decode_budget_limits_prefetched_strips(dggs_stream, tmp_path):
+    path = tmp_path / "decode.tif"
+    # Each Float32 strip occupies exactly one MiB after decoding.
+    write_geotiff(path, 1024, 768, lambda c, r: 1.0, rows_per_strip=256)
+    report = dggs_stream.profile_raster(path, 4, decode_budget_mb=1)
+    assert report["rows"] > 0
+    assert report["profile"]["peak_decoded_bytes"] == 1024 * 1024

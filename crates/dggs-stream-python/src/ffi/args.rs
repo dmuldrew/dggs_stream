@@ -187,6 +187,8 @@ pub(crate) unsafe fn build_py_scan_config(
 pub(crate) struct PyScanOptions {
     /// `h3` (default), `a5`, `s2` or `healpix`.
     pub(crate) grid: Option<String>,
+    aggregation_budget_mb: Option<i64>,
+    decode_budget_mb: Option<i64>,
     band: Option<i64>,
     pub(crate) bands: Option<Vec<usize>>,
     sampling: Option<String>,
@@ -279,6 +281,18 @@ pub(crate) fn parse_quantiles(spec: &str) -> Result<Vec<QuantileTarget>> {
     QuantileTarget::parse_list(spec)
 }
 
+fn budget_bytes(name: &str, mb: i64) -> Result<usize> {
+    usize::try_from(mb)
+        .ok()
+        .filter(|&n| n > 0)
+        .and_then(|n| n.checked_mul(1024 * 1024))
+        .ok_or_else(|| {
+            DggsStreamError::InvalidParameter(format!(
+                "{name} must be a positive whole MiB value that fits in bytes, got {mb}"
+            ))
+        })
+}
+
 /// A 1-indexed band number option, or `default` when unset.
 fn band_option(name: &str, value: Option<i64>, default: usize) -> Result<usize> {
     match value {
@@ -300,6 +314,14 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
     let opts: PyScanOptions = serde_json::from_str(json)
         .map_err(|e| DggsStreamError::InvalidParameter(format!("Invalid scan options: {e}")))?;
 
+    cfg.aggregation_budget_bytes = opts
+        .aggregation_budget_mb
+        .map(|mb| budget_bytes("aggregation_budget_mb", mb))
+        .transpose()?;
+    cfg.decode_budget_bytes = opts
+        .decode_budget_mb
+        .map(|mb| budget_bytes("decode_budget_mb", mb))
+        .transpose()?;
     cfg.band = band_option("band", opts.band, 1)?;
     if let Some(name) = &opts.sampling {
         cfg.sampling = SamplingPattern::parse(name)?;
