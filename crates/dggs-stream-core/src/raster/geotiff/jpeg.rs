@@ -32,6 +32,15 @@ pub(super) fn to_rgb(samples: &mut DecodingResult) -> Result<()> {
 
 // Explicit nonstandard coefficients or black/white levels require a different transform.
 pub(super) fn validate_color_tags<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<()> {
+    let positioning = decoder
+        .find_tag_unsigned::<u16>(Tag::ChromaPositioning)?
+        .unwrap_or(1);
+    let subsampling = decoder.find_tag_unsigned_vec::<u16>(Tag::ChromaSubsampling)?;
+    if positioning != 1 && !(positioning == 2 && subsampling.as_deref() == Some(&[1, 1])) {
+        return Err(DggsStreamError::InvalidMetadata(
+            "unsupported JPEG/YCbCr chroma positioning for subsampled data".into(),
+        ));
+    }
     for (tag, expected, scale) in [
         (Tag::Unknown(529), &[299u32, 587, 114][..], 1000u64),
         (Tag::Unknown(532), &[0, 255, 128, 255, 128, 255][..], 1),
@@ -43,7 +52,15 @@ pub(super) fn validate_color_tags<R: Read + Seek>(decoder: &mut Decoder<R>) -> R
             Value::List(values) if values.len() == expected.len() => {
                 values.iter().zip(expected).all(|(v, &e)| match v {
                     Value::Rational(n, d) => {
-                        *d != 0 && u64::from(*n) * scale == u64::from(e) * u64::from(*d)
+                        // libtiff writes coefficients through single-precision floats.
+                        if *d == 0 {
+                            return false;
+                        }
+                        if tag == Tag::Unknown(529) {
+                            (f64::from(*n) / f64::from(*d)) as f32 == e as f32 / scale as f32
+                        } else {
+                            u64::from(*n) * scale == u64::from(e) * u64::from(*d)
+                        }
                     }
                     _ => false,
                 })

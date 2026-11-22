@@ -171,3 +171,35 @@ fn jpeg_ycbcr_rejects_nonstandard_reference_levels() {
         "{err}"
     );
 }
+
+#[test]
+fn jpeg_chroma_edge_matches_gdal_and_checks_color_tags() {
+    let path = fixture("jpeg-chroma-edge.tif");
+    let reader = GeoTiffStreamReader::open(&path).unwrap();
+    let (_, DecodingResult::U8(rgb)) = reader.read_chunk(0).unwrap() else {
+        panic!("expected RGB bytes")
+    };
+    // GDAL decodes two transition pixels across the red/green edge, within one tile.
+    let row: Vec<u8> = (0..32)
+        .flat_map(|x| match x {
+            0..15 => [215, 40, 55],
+            15 => [161, 65, 69],
+            16 => [99, 156, 141],
+            _ => [46, 180, 155],
+        })
+        .collect();
+    assert_eq!(rgb, row.repeat(16));
+    for tag in [529, 531] {
+        let mut bytes = std::fs::read(&path).unwrap();
+        let entry = ifd_entry(&mut bytes, tag);
+        if tag == 531 {
+            entry[8..10].copy_from_slice(&2u16.to_le_bytes());
+        } else {
+            let offset = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+            bytes[offset..offset + 4].fill(0);
+        }
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), bytes).unwrap();
+        assert!(GeoTiffStreamReader::open(tmp.path()).is_err(), "tag {tag}");
+    }
+}
