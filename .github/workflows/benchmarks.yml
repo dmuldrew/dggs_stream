@@ -49,6 +49,13 @@ jobs:
         with:
           toolchain: '1.97.1'
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # A fresh Criterion directory per comparison, so no baseline restored with
+      # `target/` (or left by another run) is compared against.
+      - name: Prepare Criterion directory
+        run: |
+          echo "CRITERION_HOME=$RUNNER_TEMP/criterion" >> "$GITHUB_ENV"
+          rm -rf "$RUNNER_TEMP/criterion"
+          mkdir -p "$RUNNER_TEMP/criterion"
       - name: Benchmark base
         continue-on-error: true
         env:
@@ -59,19 +66,20 @@ jobs:
       - name: Benchmark PR
         run: |
           git checkout --detach "$GITHUB_SHA"
-          mkdir -p target/criterion
-          touch target/criterion/.head-start
+          touch "$CRITERION_HOME/.head-start"
           cargo bench --locked -p dggs-stream-core --bench streaming -- --baseline-lenient base
       - name: Summarize
         if: always()
+        # `shell: bash` adds pipefail, so a failing summary is not hidden by `tee`.
+        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          python3 scripts/criterion_summary.py target/criterion --baseline base --since target/criterion/.head-start --noise-threshold 0.05 --base-ref "$BASE_SHA" --head-ref "$GITHUB_SHA" | tee criterion-summary.md >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/criterion_summary.py "$CRITERION_HOME" --baseline base --since "$CRITERION_HOME/.head-start" --noise-threshold 0.05 --base-ref "$BASE_SHA" --head-ref "$GITHUB_SHA" | tee criterion-summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: criterion-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
           path: |
-            target/criterion/
+            ${{ runner.temp }}/criterion/
             criterion-summary.md

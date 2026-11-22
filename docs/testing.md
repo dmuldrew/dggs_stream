@@ -407,14 +407,16 @@ See the [engine deep dives](engines/README.md).
 | [`core/super_sampling.rs`](../crates/dggs-stream-core/tests/it/super_sampling.rs) | `benchmark_supersampling` (ignored): manual release throughput comparison. |
 | [`core/horizon_streaming.rs`](../crates/dggs-stream-core/tests/it/horizon_streaming.rs) | `test_parallel_chunk_aggregation_hawaii_dataset`, `test_parallel_categorical_aggregation_hawaii_dataset` (ignored, need data). |
 
-Run `cargo bench --locked -p dggs-stream-core --bench streaming`. PRs touching `crates/dggs-stream-core/**`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/benchmarks.yml`, or `scripts/criterion_summary.py` run a base-vs-PR comparison of `streaming` and publish a job summary plus `target/criterion/` and `criterion-summary.md` artifacts; results are informational and never gate merges. To compare a local change on the same machine, save a baseline on the base commit, mark the head run start, compare leniently, and summarize:
+Run `cargo bench --locked -p dggs-stream-core --bench streaming`. PRs touching `crates/dggs-stream-core/**`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/benchmarks.yml`, or `scripts/criterion_summary.py` run a base-vs-PR comparison of `streaming` and publish a job summary plus Criterion-results and `criterion-summary.md` artifacts; results are informational and never gate merges. To compare a local change on the same machine, use a fresh `CRITERION_HOME` for each base/head pair (so no earlier comparison's baseline is reused), save a baseline on the base commit, mark the head run start, compare leniently, and summarize:
 
 ```bash
-cargo bench --locked -p dggs-stream-core --bench streaming -- --save-baseline base
+criterion_dir=$(mktemp -d)
+CRITERION_HOME="$criterion_dir" cargo bench --locked -p dggs-stream-core --bench streaming -- --save-baseline base
 # check out your branch
-mkdir -p target/criterion && touch target/criterion/.head-start
-cargo bench --locked -p dggs-stream-core --bench streaming -- --baseline-lenient base
-python3 scripts/criterion_summary.py target/criterion --since target/criterion/.head-start
+marker="$criterion_dir/.head-start"
+touch "$marker"
+CRITERION_HOME="$criterion_dir" cargo bench --locked -p dggs-stream-core --bench streaming -- --baseline-lenient base
+python3 scripts/criterion_summary.py "$criterion_dir" --since "$marker"
 ```
 
 Scheduled/manual benchmark runs preserve Criterion results as workflow artifacts; shared-runner timings are informational, not release gates.

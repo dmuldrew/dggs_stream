@@ -23,6 +23,8 @@ class BenchmarkRow:
     change_point: Optional[float]
     change_lower: Optional[float]
     change_upper: Optional[float]
+    # Criterion's recorded confidence level for the change interval (e.g. 0.95).
+    confidence_level: Optional[float] = None
 
     @property
     def sort_key(self) -> tuple[int, float, str]:
@@ -103,7 +105,9 @@ def _read_mean_point(estimates_path: Path) -> Optional[float]:
     return None
 
 
-def _read_mean_change(estimates_path: Path) -> Optional[tuple[float, float, float]]:
+def _read_mean_change(
+    estimates_path: Path,
+) -> Optional[tuple[float, float, float, Optional[float]]]:
     data = _load_json(estimates_path)
     if data is None:
         return None
@@ -121,7 +125,14 @@ def _read_mean_change(estimates_path: Path) -> Optional[tuple[float, float, floa
         isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
         for v in coords
     ):
-        return float(point), float(lower), float(upper)
+        level = ci.get("confidence_level")
+        if not (
+            isinstance(level, (int, float))
+            and not isinstance(level, bool)
+            and 0.0 < float(level) < 1.0
+        ):
+            level = None
+        return float(point), float(lower), float(upper), (None if level is None else float(level))
     return None
 
 
@@ -192,7 +203,7 @@ def collect_rows(
             change_stats = _read_mean_change(change_estimates) if fresh_change else None
             base_mean = _read_mean_point(base_estimates) if has_base else None
             if change_stats is not None and base_mean is not None and head_mean is not None:
-                point, lower, upper = change_stats
+                point, lower, upper, level = change_stats
                 if lower > noise_threshold:
                     status = "slower"
                 elif upper < -noise_threshold:
@@ -208,6 +219,7 @@ def collect_rows(
                         change_point=point,
                         change_lower=lower,
                         change_upper=upper,
+                        confidence_level=level,
                     )
                 )
             else:
@@ -279,12 +291,18 @@ def render_markdown(
     )
     lines.append("")
     threshold_pct = f"{noise_threshold * 100.0:g}%"
+    # Label intervals with the level Criterion recorded (`--confidence-level`);
+    # fall back to a generic label when it is missing or differs between rows.
+    levels = {r.confidence_level for r in rows if r.change_lower is not None}
+    ci_label = "CI"
+    if len(levels) == 1 and None not in levels:
+        ci_label = f"{next(iter(levels)) * 100.0:g}% CI"
     lines.append(
         "> Shared runners are noisy; these timings are informational only and never fail the build "
-        f"(noise threshold: ±{threshold_pct} on the 95% CI of the mean change)."
+        f"(noise threshold: ±{threshold_pct} on the {ci_label} of the mean change)."
     )
     lines.append("")
-    lines.append("| Benchmark | Base mean | PR mean | Change (mean) | 95% CI | Result |")
+    lines.append(f"| Benchmark | Base mean | PR mean | Change (mean) | {ci_label} | Result |")
     lines.append("| :--- | ---: | ---: | ---: | ---: | :--- |")
 
     labels = {

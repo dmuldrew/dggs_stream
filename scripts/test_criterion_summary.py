@@ -41,14 +41,19 @@ def _write_estimates(bench_dir: Path, subdir: str, mean_ns: float, mtime: float)
 
 
 def _write_change(
-    bench_dir: Path, point: float, lower: float, upper: float, mtime: float
+    bench_dir: Path,
+    point: float,
+    lower: float,
+    upper: float,
+    mtime: float,
+    confidence_level: float = 0.95,
 ) -> None:
     payload = {
         "mean": {
             "point_estimate": point,
             "standard_error": 0.01,
             "confidence_interval": {
-                "confidence_level": 0.95,
+                "confidence_level": confidence_level,
                 "lower_bound": lower,
                 "upper_bound": upper,
             },
@@ -202,6 +207,24 @@ class CriterionSummaryTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("0 slower, 0 faster, 0 within noise, 0 new, 1 not run", out)
             self.assertIn("| `group/only_base` | 2.50 µs | — | — | — | ⏭️ not run |", out)
+
+    def test_interval_label_follows_recorded_confidence_level(self):
+        for level, label in [(0.99, "99% CI"), (0.9, "90% CI")]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                marker = root / ".head-start"
+                marker.write_text("")
+                start = marker.stat().st_mtime
+                bench = root / "group" / "bench"
+                _write_benchmark_meta(bench, "new", "group/bench", start + 10)
+                _write_estimates(bench, "base", 1000.0, start - 10)
+                _write_estimates(bench, "new", 1010.0, start + 10)
+                _write_change(bench, 0.01, -0.02, 0.04, start + 11, confidence_level=level)
+                code, out = self._run_main([str(root), "--since", str(marker)])
+                self.assertEqual(code, 0)
+                self.assertIn(f"| Change (mean) | {label} | Result |", out)
+                self.assertIn(f"on the {label} of the mean change", out)
+                self.assertNotIn("95%", out)
 
     def test_formatting(self):
         cases = [
