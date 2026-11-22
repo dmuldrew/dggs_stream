@@ -231,6 +231,7 @@ A failure after a valid header must reach the consumer as an error, never as a s
 
 | Suite | What it checks |
 | :--- | :--- |
+| [JPEG/YCbCr](../crates/dggs-stream-core/tests/it/remote_cog/jpeg.rs) | Every decoded RGB byte and the per-cell statistics for single and reordered bands are checked against GDAL's lossless RGB copy of the compressed fixture. A restricted HTTP scan verifies the header probe and the exact selected tile range. |
 | [`core/codecs.rs`](../crates/dggs-stream-core/tests/it/codecs.rs) (15) | `libdeflater` output is bit-identical to the `tiff` decoder for striped u8/f32, tiled f32 with padding, floating-point and horizontal predictors; buffer recycling and auto-resizing; corrupted streams; a short-filling deflate tile is rejected and falls back to the file instead of keeping stale samples; cropped edge tiles in both streaming paths; whole, right-clipped, bottom-clipped and corner tiles all decode on the accelerated path; a corrupt or unreadable stored tile fails with the accelerated decoder's or the read's own error; a tile that inflates past its declared layout is still read by the generic decoder. |
 | [`core/codecs.rs`](../crates/dggs-stream-core/tests/it/codecs.rs) (9) | Fast LZW parity with the `tiff` decoder on synthetic tiled data with predictors and edge padding; corrupted and truncated streams; buffer resizing. Four parity/recycling tests use the Hawaii datasets and are ignored by default. |
 | [`core/conus_pipeline.rs`](../crates/dggs-stream-core/tests/it/conus_pipeline.rs) | `test_tiff_magic_validation_edge_cases`. |

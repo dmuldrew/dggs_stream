@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Standard 8-bit JPEG/YCbCr GeoTIFF scans now report RGB band values. Earlier versions exposed the JPEG luminance and chroma components as three bands.
+
 - DuckDB direct Parquet exports write `compression := 'lz4'` as raw LZ4, which DuckDB can read back, and honour `compression := 'brotli'` instead of falling back to Snappy.
 
 - Interpolate and overlay scans latch a failed block, so a retry after an error is rejected instead of resuming with that block's contribution missing. Multi-band scans record cells and indexed samples in run profiles. DataFusion area histograms accept `valid_coverage_threshold` without an explicit `transfer=overlay`.
