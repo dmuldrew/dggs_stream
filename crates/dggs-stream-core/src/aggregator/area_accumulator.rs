@@ -70,6 +70,15 @@ impl AreaAccumulator {
         &self.area_stats
     }
 
+    /// Whether every statistic is finite. A merge of individually valid states
+    /// can overflow; such a state must not be emitted.
+    pub fn is_finite(&self) -> bool {
+        let s = &self.area_stats;
+        [self.pixel_count, s.count, s.sum, s.m2, s.sum_w2]
+            .iter()
+            .all(|v| v.is_finite())
+    }
+
     /// Merge a disjoint contribution state into this state.
     pub fn merge(&mut self, other: &Self) {
         self.pixel_count += other.pixel_count;

@@ -69,7 +69,8 @@ pub trait HorizonStreamKernel: Send + Sync + 'static {
         output.push_sized(self.make_record(resolution, key, acc), bytes);
     }
 
-    /// Return an error encountered by a worker before publishing this batch.
+    /// Return an error a worker or the emission of a cell recorded. Called after
+    /// each batch and after each advance, before any record is drained.
     fn finish_batch(&mut self) -> Result<()> {
         Ok(())
     }

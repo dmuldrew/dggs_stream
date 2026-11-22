@@ -236,9 +236,29 @@ impl HorizonStreamKernel for GroundAreaKernel {
     }
 
     fn passes_filter(&self, acc: &AreaAccumulator) -> bool {
+        // Check before the filters, which would silently drop a non-finite mean.
+        if !self.check_finite(acc) {
+            return false;
+        }
         self.min_count.is_none_or(|n| acc.pixel_count() >= n)
             && self.min_mean.is_none_or(|n| acc.area_stats().mean() >= n)
             && self.max_mean.is_none_or(|n| acc.area_stats().mean() <= n)
+    }
+
+    fn buffer_record(
+        &self,
+        resolution: u8,
+        key: u64,
+        acc: AreaAccumulator,
+        output: &mut crate::aggregator::multi_horizon::lifecycle::OutputBuffer<GroundAreaRecord>,
+    ) {
+        // Compacted parents are merged after `passes_filter` saw their children.
+        if !self.check_finite(&acc) {
+            return;
+        }
+        let bytes = size_of::<GroundAreaRecord>()
+            + crate::aggregator::multi_horizon::sharded_map::AccumulatorMerge::heap_bytes(&acc);
+        output.push_sized(self.make_record(resolution, key, acc), bytes);
     }
 
     fn make_record(
@@ -289,18 +309,43 @@ impl HorizonStreamKernel for GroundAreaKernel {
     }
 }
 
+impl GroundAreaKernel {
+    /// Record an error for a cell whose merged statistics overflowed. Each
+    /// window checks its own contributions; merges across windows, spill runs
+    /// and compaction are checked here, when the cell is emitted.
+    fn check_finite(&self, acc: &AreaAccumulator) -> bool {
+        if acc.is_finite() {
+            return true;
+        }
+        self.error.lock().unwrap().get_or_insert_with(|| {
+            DggsStreamError::InvalidParameter(
+                "overflowing area-weighted statistics after merging cell contributions".into(),
+            )
+        });
+        false
+    }
+}
+
 /// Stream continuous statistics weighted by the ellipsoidal area of each valid
 /// source pixel. Supports center assignment on one north-up EPSG:4326 band.
+/// Partitioned scans are rejected: there is no merger for their boundary cells.
 pub fn scan_ground_area(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,
 ) -> Result<MultiHorizonStreamer<GroundAreaKernel>> {
     config.validate()?;
     let metadata = &reader.metadata;
+    // Read an override exactly as the CRS resolver will. Require code 4326
+    // itself, since the resolver maps NAD83 to the same identity transform.
     let wgs84 = match config.custom_crs.as_deref() {
-        Some(crs) => crs.trim().eq_ignore_ascii_case("EPSG:4326") || crs.trim() == "4326",
+        Some(crs) => crate::crs::transformer::parse_epsg_code(crs) == Some(4326),
         None => metadata.epsg == Some(4326),
     };
+    if config.partition.is_some() {
+        return Err(DggsStreamError::InvalidParameter(
+            "ground-area scans do not support partitioned scans".into(),
+        ));
+    }
     if !wgs84
         || metadata.samples_per_pixel != 1
         || metadata.alpha_sample.is_some()

@@ -10,6 +10,10 @@ const WGS84_A: f64 = 6_378_137.0;
 const WGS84_F: f64 = 1.0 / 298.257_223_563;
 const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F);
 
+/// Latitude overshoot past a pole, in degrees, treated as rounding error in a
+/// pixel edge computed from the geotransform (about 0.1 mm on the ground).
+const POLE_TOLERANCE_DEG: f64 = 1e-9;
+
 fn invalid(message: &str) -> DggsStreamError {
     DggsStreamError::InvalidParameter(format!("invalid WGS84 footprint: {message}"))
 }
@@ -84,11 +88,24 @@ pub fn wgs84_pixel_area(gt: &GeoTransform, col: usize, row: usize) -> Result<f64
         ));
     }
     let west_unwrapped = gt.c0 + col as f64 * gt.a;
+    // Both edges come straight from their row indices, so the error of one
+    // edge is not carried into the next.
     let north = gt.f0 + row as f64 * gt.e;
-    let south = north + gt.e;
+    let south = gt.f0 + (row as f64 + 1.0) * gt.e;
     if !west_unwrapped.is_finite() || !north.is_finite() || !south.is_finite() {
         return Err(invalid("pixel coordinates are not finite"));
     }
+    // A raster that nominally ends at a pole can overshoot it by rounding.
+    let snap = |lat: f64| {
+        if (90.0..=90.0 + POLE_TOLERANCE_DEG).contains(&lat) {
+            90.0
+        } else if (-90.0 - POLE_TOLERANCE_DEG..=-90.0).contains(&lat) {
+            -90.0
+        } else {
+            lat
+        }
+    };
+    let (north, south) = (snap(north), snap(south));
     if gt.a == 360.0 {
         return wgs84_rectangle_area(-180.0, south, 180.0, north);
     }
@@ -105,6 +122,32 @@ pub fn wgs84_pixel_area(gt: &GeoTransform, col: usize, row: usize) -> Result<f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_edges_tolerate_rounding_at_the_poles_only() {
+        // 0.05° rows from 90°N: accumulating one step at a time from row 3599
+        // gives a southern edge of -90.00000000000001.
+        let global = GeoTransform::from_gdal_array([-180.0, 0.05, 0.0, 90.0, 0.0, -0.05]);
+        assert!(wgs84_pixel_area(&global, 7199, 3599).unwrap() > 0.0);
+        assert!(wgs84_pixel_area(&global, 0, 0).unwrap() > 0.0);
+        // Non-binary steps whose last edge rounds just past the South Pole.
+        for (step, rows) in [(0.15, 2usize), (0.01, 2), (0.03, 7)] {
+            let north = -90.0 + rows as f64 * step;
+            let gt = GeoTransform::from_gdal_array([0.0, step, 0.0, north, 0.0, -step]);
+            let area = wgs84_pixel_area(&gt, 0, rows - 1).unwrap();
+            let edge = north + (rows - 1) as f64 * -step;
+            let expected = wgs84_rectangle_area(0.0, -90.0, step, edge).unwrap();
+            assert!(
+                (area - expected).abs() <= expected * 1e-9,
+                "{step}: {area} vs {expected}"
+            );
+        }
+        // A footprint materially beyond a pole is still rejected.
+        let past_south = GeoTransform::from_gdal_array([0.0, 0.1, 0.0, -89.95, 0.0, -0.1]);
+        assert!(wgs84_pixel_area(&past_south, 0, 0).is_err());
+        let past_north = GeoTransform::from_gdal_array([0.0, 0.1, 0.0, 90.05, 0.0, -0.1]);
+        assert!(wgs84_pixel_area(&past_north, 0, 0).is_err());
+    }
 
     #[test]
     fn ellipsoidal_area_matches_high_precision_reference() {

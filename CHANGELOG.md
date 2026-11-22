@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rust core `scan_ground_area` streams continuous statistics weighted by each valid pixel's ellipsoidal footprint, assigned by pixel center, for single-band north-up EPSG:4326 GeoTIFFs on H3, A5, S2 and HEALPix. Records carry valid pixel count, retained area in m², the area-weighted sum and mean. Weighted statistics that overflow, within a window or after cells merge, fail the stream. Partitioned scans are not supported.
+
 - The DuckDB direct Parquet exporters for H3, A5, S2 and HEALPix accept `bands` for wide continuous output.
 
 - Python and CLI Parquet exporters can stream selected raster bands into a single GeoParquet file with the multi-band scan schema and per-band nulls.
@@ -35,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HorizonStreamKernel::worker_bytes_per_sample`: the worst-case worker bytes one sample can add to one resolution's cell map (a new table entry, its owned accumulator state and its eviction key). Kernel worker windows are sized from it, so it must not understate. The default keeps the previous 1 KiB allowance, so custom kernels are unaffected. `inline_worker_bytes_per_sample::<A>()` gives the bound for accumulators that own no heap state.
 
 ### Changed
+
+- GeoTIFF CRS detection honours `GTModelTypeGeoKey`: a projected or geocentric raster that carries only a base geographic code now requires an explicit CRS.
 
 - Overlay skips polygon clipping for pixels wholly inside a full-height trapezoidal row slice. Boundary pixels retain their fractional weights.
 

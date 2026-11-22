@@ -29,7 +29,10 @@ Use `scan_ground_area` for a single-band, north-up EPSG:4326 GeoTIFF. Each valid
 pixel contributes its ellipsoidal footprint to the grid cell containing its center.
 The scan supports H3, A5, S2 and HEALPix. It uses the configured aggregation and
 decode budgets. Stored NoData is omitted before calibration, and `min_count`
-counts valid pixels. The mean filters apply to the area-weighted mean.
+counts valid pixels. The mean filters apply to the area-weighted mean. A CRS
+override must name EPSG:4326 itself. Partitioned scans are rejected, and
+weighted statistics that overflow f64, within a window or once cells merge,
+fail the stream.
 
 ```rust
 use dggs_stream_core::aggregator::multi_horizon::{
