@@ -49,6 +49,7 @@ fn print_help() {
           --emit-nodata-value <NUM>  Value of an all-NoData cell's statistics under\n                                     \
                                      `--nodata-policy emit` (default: null)\n  \
           --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
+          --ground-area              Weight center assignments by pixel area in square metres (ipc/jsonl)\n  \
           --bands <LIST|all>         Wide continuous IPC/JSONL/Parquet statistics, e.g. --bands 3,1\n  \
           --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
                                      each pixel into the cell holding its centre),\n                                     \
@@ -103,6 +104,11 @@ fn reject_stream_only_options(
     opts: &dggs_stream_cli::CliStreamOptions,
     subcmd: &str,
 ) -> Result<()> {
+    if opts.ground_area {
+        return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(
+            format!("--ground-area supports ipc and jsonl output; got {subcmd}"),
+        ));
+    }
     if opts.bands.is_some() && subcmd != "parquet" {
         return Err(dggs_stream_core::error::DggsStreamError::InvalidParameter(
             format!("--bands supports ipc, jsonl and parquet, not {subcmd}"),
