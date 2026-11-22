@@ -69,6 +69,38 @@ fn matched(grid: GridKind, offset: i32) -> u8 {
 }
 
 #[test]
+fn parallel_overlay_matches_serial_on_all_grids() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| ((3 * c + r) % 23) as f32);
+    for grid in GridKind::ALL {
+        for mass_preserve in [false, true] {
+            let mut cfg = config(
+                grid,
+                matched(grid, 0),
+                TransferMode::Overlay {
+                    weighted: true,
+                    mass_preserve,
+                },
+            );
+            cfg.custom_nodata = Some(0.0);
+            if !mass_preserve {
+                cfg.valid_coverage_threshold = Some(0.8);
+            }
+            let expected = scan(&path, &cfg);
+            assert!(expected.len() > 128);
+            cfg.aggregation_workers = Some(4);
+            assert_eq!(
+                scan(&path, &cfg),
+                expected,
+                "{grid} mass_preserve={mass_preserve}"
+            );
+        }
+    }
+}
+
+#[test]
 fn sampling_fills_cells_finer_than_pixels_with_interpolated_values() {
     let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
         .origin(ORIGIN.0, ORIGIN.1)

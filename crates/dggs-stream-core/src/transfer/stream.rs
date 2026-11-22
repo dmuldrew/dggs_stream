@@ -1,5 +1,6 @@
 //! The streaming driver of the `interpolate` and `overlay` transfer modes.
 
+use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +28,12 @@ use super::TransferMode;
 const MAX_WINDOW_VALUES: usize = 4 << 20;
 /// Cells listed per block, so the cell list stays small next to the window.
 const TARGET_BLOCK_CELLS: f64 = 150_000.0;
+// Limit the speculative overlap lists to 128 × 1024 (pixel, area) pairs.
+// Leave room for irregular shapes around the estimated mean cell area.
+const OVERLAP_BATCH_CELLS: usize = 128;
+const MAX_PREPARED_OVERLAPS: usize = 1024;
+const MAX_MEAN_PIXELS_PER_CELL: f64 = 512.0;
+
 /// Widest rectangle handed to a polygon fill, in degrees of longitude: fills read a
 /// polygon's edges as the short way round, so wide boxes are cut into slices.
 const MAX_FILL_LON_SPAN: f64 = 60.0;
@@ -209,6 +216,7 @@ pub struct TransferStream<A: TransferAccumulator> {
     mosaic: Arc<MosaicReader>,
     grid: GridKind,
     mode: TransferMode,
+    overlap_pool: Option<Arc<rayon::ThreadPool>>,
     selection: BandSelection,
     bands: Vec<usize>,
     emit_nodata: bool,
@@ -315,6 +323,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
             grid,
             mode,
             bands,
+            overlap_pool: config
+                .aggregation_workers
+                .filter(|&n| n > 1 && matches!(mode, TransferMode::Overlay { .. }))
+                .map(crate::aggregator::multi_horizon::controller::shared_aggregation_pool)
+                .transpose()?,
             selection: BandSelection {
                 band: config.band,
                 nodata: config.custom_nodata,
@@ -671,29 +684,54 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
             }
         };
-        for cell in cells {
-            let before = overlaps.len();
-            let end_row;
-            let mut pieces = 0;
-            let mut last_row = f64::NEG_INFINITY;
-            if !coarse
-                && visit_cell_polygons(self.grid, cell, tile, longitude_bounds, |polygon| {
-                    pieces += 1;
-                    for &(_, row) in polygon {
-                        last_row = last_row.max(row);
-                    }
-                    pixel_overlaps(polygon, rows, width, |c, r, area| {
-                        if area > 1e-12 {
-                            let pixel = (r - rows.0) as usize * band_width + c as usize;
-                            overlaps.push((pixel as u32, area));
-                        }
-                    });
+        let geometry = OverlayGeometry {
+            grid: self.grid,
+            tile,
+            longitude_bounds,
+            rows,
+            width,
+        };
+        // Installing work while the caller is a Rayon worker could steal an
+        // unrelated query that waits for the caller's engine lock.
+        let pool = self.overlap_pool.as_ref().filter(|_| {
+            !coarse
+                && cells.len() >= OVERLAP_BATCH_CELLS / 2
+                && rayon::current_thread_index().is_none()
+                && crate::resolution::pixel_ground_area_m2(tile).is_ok_and(|area| {
+                    self.grid.area_m2(block.resolution) <= MAX_MEAN_PIXELS_PER_CELL * area
                 })
-            {
-                end_row = last_row.ceil() as i64;
-                if pieces > 1 {
-                    merge_seam_overlaps(&mut overlaps, before);
+        });
+        let mut prepared = Vec::<(Option<i64>, Vec<(u32, f64)>)>::new();
+        for (i, &cell) in cells.iter().enumerate() {
+            // Keep the serial reducer in original cell and pixel order.
+            let slot = i % OVERLAP_BATCH_CELLS;
+            if let Some(pool) = pool {
+                if slot == 0 {
+                    let batch = &cells[i..cells.len().min(i + OVERLAP_BATCH_CELLS)];
+                    prepared.resize_with(batch.len(), Default::default);
+                    pool.install(|| {
+                        prepared
+                            .par_iter_mut()
+                            .zip(batch)
+                            .for_each(|((end, pixels), &id)| {
+                                pixels.clear();
+                                *end = geometry.clip(id, pixels, MAX_PREPARED_OVERLAPS);
+                            })
+                    });
                 }
+            }
+            let before = overlaps.len();
+            let clipped_end = match prepared.get_mut(slot) {
+                Some((Some(end), pixels)) => {
+                    overlaps.append(pixels);
+                    Some(*end)
+                }
+                _ if !coarse => geometry.clip(cell, &mut overlaps, usize::MAX),
+                _ => None,
+            };
+            let end_row;
+            if let Some(end) = clipped_end {
+                end_row = end;
             } else if coarse || self.grid.interior_pole(cell).is_some() {
                 // A cell holding a pole has no polygon in a lon/lat raster, and the edges
                 // of a very large cell are far from straight in pixel space: such a cell
@@ -1093,6 +1131,56 @@ fn merge_seam_overlaps(overlaps: &mut Vec<(u32, f64)>, start: usize) {
         }
     }
     overlaps.truncate(end);
+}
+
+/// Geometry shared by workers processing different cells in one row window.
+struct OverlayGeometry<'a> {
+    grid: GridKind,
+    tile: &'a TileDescriptor,
+    longitude_bounds: Option<(f64, f64)>,
+    rows: (i64, i64),
+    width: i64,
+}
+
+impl OverlayGeometry<'_> {
+    /// A worker retains at most `limit` overlaps. Larger cells are processed
+    /// by the serial reducer with its reusable buffer.
+    fn clip(&self, cell: u64, overlaps: &mut Vec<(u32, f64)>, limit: usize) -> Option<i64> {
+        let start = overlaps.len();
+        let mut pieces = 0;
+        let mut last_row = f64::NEG_INFINITY;
+        let mut overflow = false;
+        let projected = visit_cell_polygons(
+            self.grid,
+            cell,
+            self.tile,
+            self.longitude_bounds,
+            |polygon| {
+                pieces += 1;
+                for &(_, row) in polygon {
+                    last_row = last_row.max(row);
+                }
+                pixel_overlaps(polygon, self.rows, self.width, |c, r, area| {
+                    if area > 1e-12 {
+                        if overlaps.len() == limit {
+                            overflow = true;
+                        } else {
+                            let pixel =
+                                (r - self.rows.0) as usize * self.width as usize + c as usize;
+                            overlaps.push((pixel as u32, area));
+                        }
+                    }
+                });
+            },
+        );
+        if !projected || overflow {
+            return None;
+        }
+        if pieces > 1 {
+            merge_seam_overlaps(overlaps, start);
+        }
+        Some(last_row.ceil() as i64)
+    }
 }
 
 /// The continuous longitude extent of a tile whose longitude is affine in pixel space.

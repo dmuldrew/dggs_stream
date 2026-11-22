@@ -226,3 +226,50 @@ resolution 9 on the smaller raster, cells are mostly smaller than one pixel.
 | 1024 × 1024 | 6 | On | 63.6 → 37.8 ms | 51.9 → 52.2 MiB |
 | 128 × 128 | 9 | Off | 322.8 → 322.8 ms | 38.8 → 38.9 MiB |
 | 128 × 128 | 9 | On | 327.2 → 326.5 ms | 39.5 → 39.6 MiB |
+
+### Parallel overlap prototype
+
+On this branch, setting Rust's `MultiResolutionConfig::aggregation_workers` to
+two or more enables parallel projection and clipping for eligible overlay
+blocks. Each worker prepares intersections for individual cells. The caller
+applies them in the original cell and pixel order, including mass-preserving
+normalization and per-band coverage filtering. The default stays serial.
+
+The prototype uses the shared aggregation pool for blocks with at least 64
+candidate cells and at most 512 estimated source pixels per cell. Coarse-cell
+fallbacks and callers already on a Rayon worker use the serial path.
+Prepared lists hold at most 128 × 1,024 pixel–area pairs (2 MiB of entries).
+A cell that exceeds its allowance is clipped again using the serial buffer.
+
+Build the release example to compare worker counts on a local TIFF:
+
+```sh
+cargo build --release -p dggs-stream-core --example overlay_workers
+target/release/examples/overlay_workers raster.tif 9 1
+target/release/examples/overlay_workers raster.tif 9 4
+```
+
+The example reports emitted cells and elapsed milliseconds, including reader
+and stream construction and the full scan. To verify exact output, append
+`ordinary serial.bin` and `ordinary parallel.bin` to the respective commands
+and compare the files with `cmp`. Use `mass` to check mass-preserving overlay.
+State files include resolution, cell ID and the serialized accumulator in
+emission order. Use separate runs without state files for timings.
+
+On arm64 macOS, five alternating warm-cache release runs per worker count,
+each in a fresh process, gave the medians below. Peak RSS covers the whole
+process. Both inputs were single-band 2,048 × 2,048 windows. Hawaii CFL used
+LZW with 256 × 256 tiles and CONUS burn probability used DEFLATE with
+128 × 128 tiles. The upper-left source pixels were (17800, 8850) in
+`CFL_HI_wgs84_cog.tif` and (21600, 39700) in `BP_CONUS_wgs84_cog.tif`.
+Both used floating-point predictor 3. The original 128 × 128-tiled Hawaii
+crop hit an LZW decode error on the baseline as well, so the reported Hawaii
+runs use the same pixels retiled to 256 × 256. H3 resolution 7 exercises the
+serial fallback on these inputs.
+
+| Raster | H3 resolution | Cells | Scan ms, 1 / 4 workers | Peak RSS MiB, 1 / 4 workers |
+| --- | ---: | ---: | ---: | ---: |
+| Hawaii CFL | 7 | 694 | 156.1 / 157.1 | 83.2 / 83.4 |
+| Hawaii CFL | 9 | 31,453 | 345.1 / 245.1 | 96.1 / 96.8 |
+| CONUS burn probability | 7 | 867 | 123.7 / 124.2 | 81.6 / 81.7 |
+| CONUS burn probability | 9 | 39,643 | 334.0 / 224.8 | 94.1 / 95.1 |
