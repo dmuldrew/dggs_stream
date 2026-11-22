@@ -337,6 +337,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         self.new_cell_buffer = new_cells;
         self.key_chunk_buffer = key_chunks;
         result?;
+        self.kernel.finish_batch()?;
         let failures = self.metrics.worker.transform_failures;
         if self.strict_transforms && failures > 0 {
             return Err(DggsStreamError::TransformFailures(failures));

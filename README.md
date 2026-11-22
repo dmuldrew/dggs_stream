@@ -14,7 +14,7 @@ Each panel shows every cell at the indicated level. Cell counts give a common re
 
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
-Statistics use pixel contributions, not ground-area weights. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
+Default scans use pixel contributions. The Rust core also offers [ground-area-weighted center scans](docs/engines/core.md#ground-area-weighted-center-scans) for north-up WGS84 rasters. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
 > **Formerly raster_h3.** See the [changelog](CHANGELOG.md#unreleased) for the new names and migration details.
 
@@ -690,6 +690,8 @@ Python and PostgreSQL always calibrate. See [Band calibration and validity](docs
 For datasets spanning ±180° longitude, dggs_stream automatically wraps coordinates. For ROI bounding box filters across the antimeridian, split into two queries (e.g., `[170.0, 180.0]` and `[-180.0, -170.0]`).
 
 ### BigTIFF & Codec Compatibility
+
+For JPEG-compressed GeoTIFFs with three interleaved 8-bit YCbCr samples and standard full-range color parameters, bands 1, 2 and 3 are red, green and blue. Selecting bands `3,1` returns blue and red. The reader supports shared JPEG tables for local and HTTP scans.
 
 Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, ZSTD, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
 

@@ -9,7 +9,11 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         if let Some(reason) = self.lifecycle.failure_reason() {
             return Err(DggsStreamError::StreamFailed(reason.to_string()));
         }
-        let result = self.latch_panics(|s| s.advance_inner(min_rows.min(2048)));
+        let result = self.latch_panics(|s| {
+            s.advance_inner(min_rows.min(2048))?;
+            // Errors recorded while emitting cells, after the last batch.
+            s.kernel.finish_batch()
+        });
         self.metrics.peak_compaction_bytes = self.compactor.peak_bytes();
         self.metrics.forced_compaction_flushes = self.compactor.forced_flushes();
         if let Some(prefetcher) = &self.prefetcher {

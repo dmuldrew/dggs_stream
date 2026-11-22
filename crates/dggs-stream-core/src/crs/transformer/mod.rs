@@ -126,19 +126,24 @@ pub enum CrsTransformer {
     },
 }
 
+/// The EPSG code a CRS override names (`EPSG:4326`, `epsg: 4326`, `4326`), as
+/// [`CrsTransformer::from_crs_or_epsg`] reads it, or `None` for other text such
+/// as a PROJ string.
+pub fn parse_epsg_code(crs: &str) -> Option<u32> {
+    let s = crs.trim();
+    if let Some(rest) = s.strip_prefix("EPSG:").or_else(|| s.strip_prefix("epsg:")) {
+        rest.trim().parse::<u32>().ok()
+    } else if s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty() {
+        s.parse::<u32>().ok()
+    } else {
+        None
+    }
+}
+
 impl CrsTransformer {
     /// Create a transformer from an optional EPSG code or PROJ string
     pub fn from_crs_or_epsg(epsg: Option<u32>, proj_str: Option<&str>) -> Result<Self> {
-        let parsed_epsg = proj_str.and_then(|s| {
-            let s = s.trim();
-            if let Some(rest) = s.strip_prefix("EPSG:").or_else(|| s.strip_prefix("epsg:")) {
-                rest.trim().parse::<u32>().ok()
-            } else if s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty() {
-                s.parse::<u32>().ok()
-            } else {
-                None
-            }
-        });
+        let parsed_epsg = proj_str.and_then(parse_epsg_code);
 
         let effective_epsg = epsg.or(parsed_epsg);
 

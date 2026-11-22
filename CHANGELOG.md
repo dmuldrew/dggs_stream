@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rust core `scan_ground_area` streams continuous statistics weighted by each valid pixel's ellipsoidal footprint, assigned by pixel center, for single-band north-up EPSG:4326 GeoTIFFs on H3, A5, S2 and HEALPix. Records carry valid pixel count, retained area in m², the area-weighted sum and mean. Weighted statistics that overflow, within a window or after cells merge, fail the stream. Partitioned scans are not supported.
+
 - The DuckDB direct Parquet exporters for H3, A5, S2 and HEALPix accept `bands` for wide continuous output.
 
 - Python and CLI Parquet exporters can stream selected raster bands into a single GeoParquet file with the multi-band scan schema and per-band nulls.
@@ -32,9 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `raster_h3` Python package ships a `py.typed` marker (PEP 561), so type checkers use its annotations instead of treating it as untyped.
 - Test infrastructure: four new cargo-fuzz targets (IPC stream, Arrow array import, remap parser, `Content-Range` parsing), a wider Miri scope (columnar, categorical and predictor unsafe code), a ThreadSanitizer job over the prefetch and aggregation suites, a `cargo llvm-cov` coverage workflow uploading to Codecov, and new proptest invariants in `core/properties.rs`.
+- PR benchmark comparisons: `.github/workflows/benchmarks.yml` compares base vs. PR Criterion `streaming` runs on core, Cargo, or benchmark changes and publishes an informational summary table (`scripts/criterion_summary.py`) plus artifact without gating merges. `crates/dggs-stream-core/benches/streaming.rs` now covers all four grids (`grids`), transfer modes (`transfer`), interleaved/planar multi-band scans (`multiband`), tiled compression/predictors (`codecs`), HTTP/remote range coalescing (`remote`), and IPC/GeoParquet output sinks (`sinks`).
 - `HorizonStreamKernel::worker_bytes_per_sample`: the worst-case worker bytes one sample can add to one resolution's cell map (a new table entry, its owned accumulator state and its eviction key). Kernel worker windows are sized from it, so it must not understate. The default keeps the previous 1 KiB allowance, so custom kernels are unaffected. `inline_worker_bytes_per_sample::<A>()` gives the bound for accumulators that own no heap state.
 
 ### Changed
+
+- GeoTIFF CRS detection honours `GTModelTypeGeoKey`: a projected or geocentric raster that carries only a base geographic code now requires an explicit CRS.
 
 - Overlay skips polygon clipping for pixels wholly inside a full-height trapezoidal row slice. Boundary pixels retain their fractional weights.
 
@@ -89,6 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The free functions `pmtiles::tiler::evict_and_write_tiles` and `pmtiles::tiler::flush_all_tiles`, which had no callers; use the `TilePyramidAccumulator` methods `evict_and_write_tiles` and `flush_all` instead.
 
 ### Fixed
+
+- Standard 8-bit JPEG/YCbCr GeoTIFF scans now report RGB band values. Earlier versions exposed the JPEG luminance and chroma components as three bands.
 
 - DuckDB direct Parquet exports write `compression := 'lz4'` as raw LZ4, which DuckDB can read back, and honour `compression := 'brotli'` instead of falling back to Snappy.
 

@@ -4,6 +4,7 @@
 //! with buffer recycling, supporting DEFLATE, LZW, ZSTD, and uncompressed formats.
 //! It supports both local files (via memory mapping) and remote cloud storage (via HTTP range requests).
 
+mod jpeg;
 mod mask;
 mod planar;
 use mask::InternalMask;
@@ -667,7 +668,14 @@ impl<'a> ChunkDecoder<'a> {
         if let Some(overlay) = &self.remote_overlay {
             overlay.clear();
         }
-        result
+        let (bounds, mut samples) = result?;
+        if self.chunk_info.as_ref().is_some_and(|info| {
+            info.compression == CompressionMethod::ModernJPEG
+                && info.photometric == PhotometricInterpretation::YCbCr
+        }) {
+            jpeg::to_rgb(&mut samples)?;
+        }
+        Ok((bounds, samples))
     }
 
     /// When the accelerated path turns down a remote chunk's layout, hand its bytes to the
@@ -1222,6 +1230,20 @@ impl GeoTiffStreamReader {
             Err(_) => PhotometricInterpretation::BlackIsZero,
         };
 
+        let jpeg_ycbcr = compression == CompressionMethod::ModernJPEG
+            && photometric == PhotometricInterpretation::YCbCr;
+        if jpeg_ycbcr {
+            if bits_per_sample != 8
+                || sample_format != SampleFormat::Uint
+                || samples_per_pixel != 3
+                || metadata.planes.is_some()
+            {
+                return Err(DggsStreamError::InvalidMetadata(
+                    "JPEG/YCbCr requires three interleaved unsigned 8-bit samples".into(),
+                ));
+            }
+            jpeg::validate_color_tags(decoder)?;
+        }
         let byte_order = if format!("{:?}", decoder.byte_order()).contains("BigEndian") {
             TiffByteOrder::BigEndian
         } else {
@@ -1283,6 +1305,11 @@ impl GeoTiffStreamReader {
                     byte_order,
                     photometric,
                 }))
+            }
+            _ if jpeg_ycbcr => {
+                return Err(DggsStreamError::InvalidMetadata(
+                    "JPEG/YCbCr requires matching chunk offset and byte-count tables".into(),
+                ))
             }
             _ if metadata.planes.is_some() => {
                 return Err(DggsStreamError::InvalidMetadata(

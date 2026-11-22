@@ -1325,3 +1325,235 @@ fn wkb_buffer_capacity_all_resolutions_pentagons_and_icosahedron_edges() {
     assert_eq!(max_len_seen, 189);
     assert!(max_len_seen <= WKB_BUF_LEN);
 }
+
+#[test]
+fn ground_area_scan_matches_independent_integration_after_spill() {
+    use dggs_stream_core::aggregator::multi_horizon::area_continuous::scan_ground_area;
+    use dggs_stream_core::grid::GridKind;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("two-latitudes.tif");
+    let gt = GeoTransform::from_gdal_array([-110.0, 0.2, 0.0, 60.0, 0.0, -0.1]);
+    let width = 1024;
+    crate::helpers::TestGeoTiffBuilder::new(width, 2)
+        .origin(gt.c0, gt.f0)
+        .pixel_size_xy(gt.a, -gt.e)
+        .epsg(4326)
+        .gdal_nodata("1")
+        .write_fn(&path, |col, row| 1.0 + ((row * width + col) % 97) as f32)
+        .unwrap();
+
+    // Midpoint quadrature of the ellipsoid surface element, independent of
+    // the production rectangle antiderivative.
+    let row_area = |row: u32| {
+        let f = 1.0 / 298.257223563;
+        let e2 = f * (2.0 - f);
+        let dlat = -gt.e / 1000.0;
+        (0..1000)
+            .map(|i| {
+                let lat =
+                    (gt.f0 + f64::from(row) * gt.e - (f64::from(i) + 0.5) * dlat).to_radians();
+                WGS84_A.powi(2) * (1.0 - e2) * lat.cos() / (1.0 - e2 * lat.sin().powi(2)).powi(2)
+                    * dlat.to_radians()
+                    * gt.a.to_radians()
+            })
+            .sum::<f64>()
+    };
+    for (grid, resolution) in [
+        (GridKind::H3, 4),
+        (GridKind::S2, 8),
+        (GridKind::Healpix, 8),
+        (GridKind::A5, 8),
+    ] {
+        let mut config = MultiResolutionConfig::single(resolution).with_grid(grid);
+        config.aggregation_budget_bytes = 64 * 1024;
+        config.min_count = Some(2.0);
+        let mut expected = HashMap::<u64, (usize, f64, f64)>::new();
+        for row in 0..2 {
+            let area = row_area(row);
+            for col in 0..width {
+                let value = 1.0 + f64::from((row * width + col) % 97);
+                if value == 1.0 {
+                    continue;
+                }
+                let (lon, lat) = gt.pixel_center_to_coord(col as usize, row as usize);
+                let id = grid.cell_at(lat, lon, resolution).unwrap();
+                let entry = expected.entry(id).or_default();
+                entry.0 += 1;
+                entry.1 += area;
+                entry.2 += value * area;
+            }
+        }
+        assert!(expected.values().any(|entry| entry.0 == 1));
+        expected.retain(|_, entry| entry.0 >= 2);
+        let mut stream =
+            scan_ground_area(GeoTiffStreamReader::open(&path).unwrap(), &config).unwrap();
+        while !stream.is_finished() {
+            for record in stream.fetch_next_batch(64).unwrap() {
+                let (count, area, sum) = expected.remove(&record.cell_id).unwrap();
+                let acc = record.accumulator;
+                assert_eq!(acc.pixel_count(), count as f64);
+                assert!((acc.retained_area_m2() - area).abs() < area * 1e-10);
+                assert!((acc.area_weighted_sum() - sum).abs() < sum * 1e-10);
+                assert!((acc.area_stats().mean() - sum / area).abs() < 1e-8);
+            }
+        }
+        assert!(expected.is_empty(), "{grid:?}");
+        assert!(stream.spill_run_count() > 0, "{grid:?}");
+    }
+}
+
+#[test]
+fn ground_area_scan_latches_weight_overflow() {
+    use dggs_stream_core::aggregator::multi_horizon::area_continuous::scan_ground_area;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("overflow.tif");
+    crate::helpers::TestGeoTiffBuilder::new(1, 1)
+        .origin(0.0, 1.0)
+        .pixel_size(1.0)
+        .epsg(4326)
+        .write_constant(&path, f64::MAX)
+        .unwrap();
+    let mut stream = scan_ground_area(
+        GeoTiffStreamReader::open(&path).unwrap(),
+        &MultiResolutionConfig::single(5),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let error = stream.fetch_next_batch(1).unwrap_err();
+        assert!(
+            error.to_string().contains("overflowing area-weighted"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn ground_area_scan_rejects_sums_that_overflow_across_windows() {
+    use dggs_stream_core::aggregator::multi_horizon::area_continuous::scan_ground_area;
+    use dggs_stream_core::grid::GridKind;
+
+    // One valid 0.125° pixel per row, one row per strip (and so per window),
+    // both in the same S2 face cell. Each weighted sum (~1e308) fits in f64;
+    // only the merged cell overflows.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cross-window-overflow.tif");
+    let width = 2048;
+    crate::helpers::TestGeoTiffBuilder::new(width, 2)
+        .origin(-128.0, 0.125)
+        .pixel_size(0.125)
+        .epsg(4326)
+        .gdal_nodata("0")
+        .write_fn(&path, |col, _| if col == 1024 { 5e299f64 } else { 0.0 })
+        .unwrap();
+    let config = MultiResolutionConfig::single(0).with_grid(GridKind::S2);
+    let mut stream = scan_ground_area(GeoTiffStreamReader::open(&path).unwrap(), &config).unwrap();
+    let mut outcome = Ok(Vec::new());
+    while !stream.is_finished() {
+        match stream.fetch_next_batch(64) {
+            Ok(records) => outcome.as_mut().unwrap().extend(records),
+            Err(error) => {
+                outcome = Err(error);
+                break;
+            }
+        }
+    }
+    match outcome {
+        Ok(records) => panic!(
+            "expected an overflow error, got means {:?}",
+            records
+                .iter()
+                .map(|r| r.accumulator.area_stats().mean())
+                .collect::<Vec<_>>()
+        ),
+        Err(error) => assert!(error.to_string().contains("overflow"), "{error}"),
+    }
+    // The failure is latched for later reads.
+    assert!(stream.fetch_next_batch(64).is_err());
+}
+
+#[test]
+fn ground_area_scan_reads_a_last_row_that_rounds_past_the_pole() {
+    use dggs_stream_core::aggregator::multi_horizon::area_continuous::scan_ground_area;
+    use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
+
+    // 0.15° rows ending nominally at 90°S: stepping from the last row's
+    // northern edge gives a southern edge of -90.00000000000001.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("south-pole.tif");
+    let (step, rows, cols) = (0.15, 2u32, 8u32);
+    let north = -90.0 + f64::from(rows) * step;
+    crate::helpers::TestGeoTiffBuilder::new(cols, rows)
+        .origin(0.0, north)
+        .pixel_size(step)
+        .epsg(4326)
+        .write_constant(&path, 2.0f32)
+        .unwrap();
+    let mut stream = scan_ground_area(
+        GeoTiffStreamReader::open(&path).unwrap(),
+        &MultiResolutionConfig::single(2),
+    )
+    .unwrap();
+    let (mut pixels, mut area) = (0.0, 0.0);
+    while !stream.is_finished() {
+        for record in stream.fetch_next_batch(64).unwrap() {
+            pixels += record.accumulator.pixel_count();
+            area += record.accumulator.retained_area_m2();
+            assert_eq!(record.accumulator.area_stats().mean(), 2.0);
+        }
+    }
+    assert_eq!(pixels, f64::from(rows * cols));
+    let expected = wgs84_rectangle_area(0.0, -90.0, f64::from(cols) * step, north).unwrap();
+    assert!(
+        (area - expected).abs() < expected * 1e-9,
+        "{area} vs {expected}"
+    );
+}
+
+#[test]
+fn ground_area_scan_reads_crs_overrides_like_the_resolver() {
+    use dggs_stream_core::aggregator::multi_horizon::area_continuous::scan_ground_area;
+    use dggs_stream_core::aggregator::multi_horizon::plan_partitions;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("no-crs.tif");
+    crate::helpers::TestGeoTiffBuilder::new(4, 4)
+        .origin(10.0, 10.0)
+        .pixel_size(0.1)
+        .with_geokeys(false)
+        .write_constant(&path, 1.0f32)
+        .unwrap();
+    let open = || GeoTiffStreamReader::open(&path).unwrap();
+    for crs in [
+        "EPSG:4326",
+        "EPSG: 4326",
+        "epsg:4326",
+        " 4326 ",
+        "EPSG:04326",
+    ] {
+        let mut config = MultiResolutionConfig::single(3);
+        config.custom_crs = Some(crs.into());
+        assert!(scan_ground_area(open(), &config).is_ok(), "{crs}");
+    }
+    // NAD83 resolves to the same identity transform but is not EPSG:4326.
+    for crs in ["EPSG:4269", "+proj=longlat +datum=WGS84"] {
+        let mut config = MultiResolutionConfig::single(3);
+        config.custom_crs = Some(crs.into());
+        assert!(scan_ground_area(open(), &config).is_err(), "{crs}");
+    }
+
+    // Partitioned scans have no boundary-cell merger for area state.
+    let mut config = MultiResolutionConfig::single(3);
+    config.custom_crs = Some("EPSG:4326".into());
+    let mosaic = MosaicReader::open(
+        std::slice::from_ref(&path),
+        None,
+        Some("EPSG:4326"),
+        OverlapRule::Cutline,
+    )
+    .unwrap();
+    config.partition = Some(plan_partitions(&mosaic, 1).unwrap()[0].clone());
+    let error = scan_ground_area(open(), &config).err().unwrap();
+    assert!(error.to_string().contains("partitioned"), "{error}");
+}

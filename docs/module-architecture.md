@@ -138,7 +138,7 @@ Grid-independent options a scan can add to the default pixel-centre kernel. See 
 | [`continuous_streamer.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/continuous_streamer.rs) | Continuous raster horizon streamer (`ContinuousKernel`, `MultiScanHorizonStreamer`). Implements single-pass streaming aggregation across multiple H3 resolutions for raw raster bands and spectral index formulas. |
 | [`categorical.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/categorical.rs) | Categorical chunk payload processing (`MultiCategoricalRecord`). Processes discrete integer chunk data into class histograms per H3 cell, enforcing mosaic tile ownership rules and class remappings. |
 | [`categorical_streamer.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/categorical_streamer.rs) | Categorical raster horizon streamer (`CategoricalKernel`, `MultiCategoricalHorizonStreamer`). Drives single-pass multi-resolution class aggregation, remapping, and majority fraction filtering. |
-| [`area_continuous.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/area_continuous.rs) | Window-level kernel that weights each pixel by its WGS84 ground area (continuous rasters in a geographic CRS). Not yet connected to the streaming API. |
+| [`area_continuous.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/area_continuous.rs) | Window kernel and Rust streaming entry point for ground-area-weighted continuous WGS84 scans. |
 | [`spectral.rs`](../crates/dggs-stream-core/src/aggregator/multi_horizon/spectral.rs) | On-the-fly spectral index formulas (`SpectralFormula`) and physical reflectance evaluation for NDVI, NDWI, NBR, and EVI with singularity/zero-division protections. |
 
 
