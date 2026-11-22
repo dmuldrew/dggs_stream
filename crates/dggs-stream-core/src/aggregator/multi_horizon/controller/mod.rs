@@ -69,6 +69,11 @@ pub trait HorizonStreamKernel: Send + Sync + 'static {
         output.push_sized(self.make_record(resolution, key, acc), bytes);
     }
 
+    /// Return an error encountered by a worker before publishing this batch.
+    fn finish_batch(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Worst-case worker bytes one sample can add to one resolution's map: a
     /// new table entry, its owned accumulator state and its eviction key.
     /// Window sizes are derived from it, so it must not understate. The

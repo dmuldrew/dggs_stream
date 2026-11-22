@@ -23,6 +23,34 @@ eviction and memory budgets.
 dggs-stream-core = { path = "crates/dggs-stream-core" }
 ```
 
+## Ground-area-weighted center scans
+
+Use `scan_ground_area` for a single-band, north-up EPSG:4326 GeoTIFF. Each valid
+pixel contributes its ellipsoidal footprint to the grid cell containing its center.
+The scan supports H3, A5, S2 and HEALPix. It uses the configured aggregation and
+decode budgets. Stored NoData is omitted before calibration, and `min_count`
+counts valid pixels. The mean filters apply to the area-weighted mean.
+
+```rust
+use dggs_stream_core::aggregator::multi_horizon::{
+    area_continuous::scan_ground_area, MultiResolutionConfig,
+};
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+
+let reader = GeoTiffStreamReader::open("temperature.tif")?;
+let mut stream = scan_ground_area(reader, &MultiResolutionConfig::single(5))?;
+while !stream.is_finished() {
+    for cell in stream.fetch_next_batch(1024)? {
+        let stats = cell.accumulator;
+        println!("{} {} {} {}", cell.cell_id, stats.pixel_count(),
+                 stats.retained_area_m2(), stats.area_stats().mean());
+    }
+}
+```
+
+`area_weighted_sum()` is the integral in value × m². For a density expressed
+per m², that integral has units of the underlying quantity.
+
 ## Pipeline
 
 The sample-unpacking boundary checks TIFF chunk dimensions, arithmetic overflow, source
