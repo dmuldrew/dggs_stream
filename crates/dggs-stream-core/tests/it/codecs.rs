@@ -14,7 +14,7 @@ use tiff::tags::{CompressionMethod, Predictor, Tag};
 use weezl::encode::Encoder as LZWEncoder;
 use weezl::BitOrder;
 
-fn ifd_entry(bytes: &mut [u8], tag: u16) -> &mut [u8] {
+pub(super) fn ifd_entry(bytes: &mut [u8], tag: u16) -> &mut [u8] {
     assert_eq!(&bytes[..2], b"II");
     let offset = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
     let count = u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as usize;

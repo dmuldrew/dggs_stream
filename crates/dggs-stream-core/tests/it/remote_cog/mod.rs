@@ -5,6 +5,7 @@
 
 mod chunk_decode;
 mod etag;
+mod jpeg;
 mod planar;
 mod prefetch;
 mod range_responses;

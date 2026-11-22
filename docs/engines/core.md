@@ -768,3 +768,7 @@ a secondary panic escape; every adapter uses it at its FFI boundary.
 | :--- | :--- |
 | `stream-profile` | Enables per-sample worker instrumentation. Stream-level `StreamProfile` counters (including `waves`, `bridged_waves`, `serial_waves` and memory peaks) are always available. The root crate forwards the feature to core and DuckDB. |
 | `test-hooks` | Exposes test-only synchronisation hooks (for example `OrderedPrefetchQueue::wait_for_blocked_job`) to other workspace crates' tests. Not for release builds. |
+
+### JPEG imagery
+
+For standard full-range, three-sample 8-bit JPEG/YCbCr TIFFs, the chunk reader returns interleaved RGB. Band 1 is red, band 2 is green, and band 3 is blue. Subsampled images require centered chroma positioning. These semantics also apply to statistics and HTTP scans.

@@ -691,6 +691,8 @@ For datasets spanning ±180° longitude, dggs_stream automatically wraps coordin
 
 ### BigTIFF & Codec Compatibility
 
+For JPEG-compressed GeoTIFFs with three interleaved 8-bit YCbCr samples and standard full-range color parameters, bands 1, 2 and 3 are red, green and blue. Selecting bands `3,1` returns blue and red. The reader supports shared JPEG tables for local and HTTP scans.
+
 Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, ZSTD, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
 
 ```bash
