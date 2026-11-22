@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Python and Polars center-assignment scans accept `aggregation_budget_mb` and `decode_budget_mb` in whole MiB.
+
 - Rust core `scan_ground_area` streams continuous statistics weighted by each valid pixel's ellipsoidal footprint, assigned by pixel center, for single-band north-up EPSG:4326 GeoTIFFs on H3, A5, S2 and HEALPix. Records carry valid pixel count, retained area in m², the area-weighted sum and mean. Weighted statistics that overflow, within a window or after cells merge, fail the stream. Partitioned scans are not supported.
 
 - The DuckDB direct Parquet exporters for H3, A5, S2 and HEALPix accept `bands` for wide continuous output.

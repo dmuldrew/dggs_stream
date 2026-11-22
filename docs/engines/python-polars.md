@@ -84,7 +84,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"` or `"overlay"` ([Scan Options](../scan-options.md#transfer-modes)) |
 | `interpolation` | `str` | `None` (`"bilinear"`) | With `"interpolate"`: `nearest`, `bilinear`, `bicubic`, `lanczos` |
 | `overlay_weighted`, `mass_preserve` | `bool` | `None` | With `"overlay"`: count touched pixels once / keep the raster's total in `sum` |
-| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. |
+| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. A spilled resolution may need to read the full input even with a small row limit. |
 | `decode_budget_mb` | `int` | `None` (256 MiB) | Center-assignment decoded buffer budget in MiB. A single oversized chunk can proceed alone. |
 | `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `histogram` | `str \| Sequence[float]` | `None` | Categorical only: `"values"`, `"4:0:100"` or bin edges `[0, 10, 50]`; the `histogram` column becomes `List(Struct)` |

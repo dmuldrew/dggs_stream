@@ -1072,10 +1072,14 @@ impl GeoTiffStreamReader {
     /// Expected decoded size of one full chunk. Without parsed chunk info the
     /// sample width is unknown, so assume the widest (8 bytes).
     pub fn decoded_chunk_bytes(&self) -> usize {
-        let bytes_per_sample = self
-            .chunk_info
-            .as_ref()
-            .map_or(8, |info| (info.bits_per_sample as usize).div_ceil(8).max(1));
+        let bytes_per_sample = self.chunk_info.as_ref().map_or(8, |info| {
+            // Workers queue half-precision samples as f32 after widening.
+            if (info.sample_format, info.bits_per_sample) == (SampleFormat::IEEEFP, 16) {
+                size_of::<f32>()
+            } else {
+                usize::from(info.bits_per_sample).div_ceil(8).max(1)
+            }
+        });
         let bands = usize::from(self.metadata.samples_per_pixel.max(1));
         // A planar worker holds one decoded plane alongside the interleaved result.
         let buffers = bands + usize::from(self.is_planar() && bands > 1);

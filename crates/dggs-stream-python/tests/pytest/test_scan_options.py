@@ -375,10 +375,11 @@ def test_scan_budget_validation(dggs_stream, gradient_tif, option):
         dggs_stream.RasterArrowStream(gradient_tif, transfer="overlay", **{option: 1}).to_dict()
 
 
-def test_decode_budget_limits_prefetched_strips(dggs_stream, tmp_path):
+@pytest.mark.parametrize("dtype", ["f32", "f16"])
+def test_decode_budget_limits_prefetched_strips(dggs_stream, tmp_path, dtype):
     path = tmp_path / "decode.tif"
-    # Each Float32 strip occupies exactly one MiB after decoding.
-    write_geotiff(path, 1024, 768, lambda c, r: 1.0, rows_per_strip=256)
+    # Each strip occupies one MiB after decoding, including widened Float16.
+    write_geotiff(path, 1024, 768, lambda c, r: 1.0, rows_per_strip=256, dtype=dtype)
     report = dggs_stream.profile_raster(path, 4, decode_budget_mb=1)
     assert report["rows"] > 0
     assert report["profile"]["peak_decoded_bytes"] == 1024 * 1024
