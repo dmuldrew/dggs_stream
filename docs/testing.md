@@ -403,14 +403,23 @@ See the [engine deep dives](engines/README.md).
 | :--- | :--- |
 | [`core/performance.rs`](../crates/dggs-stream-core/tests/it/performance.rs) (4) | Continuous, multi-resolution, categorical and supersampled streaming conserve pixel mass, with no wall-clock pass/fail thresholds. |
 | [`core/properties.rs`](../crates/dggs-stream-core/tests/it/properties.rs) (11 generated tests) | Weighted merge equivalence, accumulator merge associativity/commutativity, sketch merge-vs-single-stream and bounded relative error, `quantiles_batch`/`quantile` agreement, IPC stream round trips, Hilbert tile-id round trips and level bounds, WKB validity/truncation, affine and Mercator round trips, and nodata/supersampled conservation plus cell uniqueness across the antimeridian. |
-| [`core/benches/streaming.rs`](../crates/dggs-stream-core/benches/streaming.rs) | Criterion baselines for continuous, multi-resolution, categorical and supersampled streaming; `single_quantile` scalar/batch/plan p50/p90 queries on small positive and larger mixed-sign sketches; hash-sensitive quantile and 8-class inline / 64-class heap categorical accumulators; raw res-10 H3 map insertion/removal. Fixture/input creation is not timed. |
+| [`core/benches/streaming.rs`](../crates/dggs-stream-core/benches/streaming.rs) | Criterion baselines for `streaming` (continuous, multi-resolution, categorical, supersampling), `single_quantile` (scalar/batch/plan), `hash_sensitive`, `h3_map`, `pruning`, `grids` (H3, A5, S2, HEALPix), `transfer` (center assignment, overlay, mass-preserving overlay, bilinear interpolation), `multiband` (interleaved vs. planar, all vs. selected bands, overlay), `codecs` (tiled uncompressed, DEFLATE, DEFLATE FP predictor 3, LZW horizontal predictor 2), `remote` (range coalescing, in-memory remote transport, local HTTP planar selected-band scan), and `sinks` (IPC and GeoParquet single- and multi-band export). Fixture/input creation is not timed. |
 | [`core/super_sampling.rs`](../crates/dggs-stream-core/tests/it/super_sampling.rs) | `benchmark_supersampling` (ignored): manual release throughput comparison. |
 | [`core/horizon_streaming.rs`](../crates/dggs-stream-core/tests/it/horizon_streaming.rs) | `test_parallel_chunk_aggregation_hawaii_dataset`, `test_parallel_categorical_aggregation_hawaii_dataset` (ignored, need data). |
 
-Run `cargo bench --locked -p dggs-stream-core --bench streaming`. To compare a local change
-on the same machine, first pass `-- --save-baseline before`, then run the changed code
-with `-- --baseline before`. Scheduled/manual benchmark runs preserve Criterion results
-as workflow artifacts; shared-runner timings are informational, not release gates.
+Run `cargo bench --locked -p dggs-stream-core --bench streaming`. PRs touching `crates/dggs-stream-core/**`, `Cargo.toml`, `Cargo.lock`, `.github/workflows/benchmarks.yml`, or `scripts/criterion_summary.py` run a base-vs-PR comparison of `streaming` and publish a job summary plus Criterion-results and `criterion-summary.md` artifacts; results are informational and never gate merges. To compare a local change on the same machine, use a fresh `CRITERION_HOME` for each base/head pair (so no earlier comparison's baseline is reused), save a baseline on the base commit, mark the head run start, compare leniently, and summarize:
+
+```bash
+criterion_dir=$(mktemp -d)
+CRITERION_HOME="$criterion_dir" cargo bench --locked -p dggs-stream-core --bench streaming -- --save-baseline base
+# check out your branch
+marker="$criterion_dir/.head-start"
+touch "$marker"
+CRITERION_HOME="$criterion_dir" cargo bench --locked -p dggs-stream-core --bench streaming -- --baseline-lenient base
+python3 scripts/criterion_summary.py "$criterion_dir" --since "$marker"
+```
+
+Scheduled/manual benchmark runs preserve Criterion results as workflow artifacts; shared-runner timings are informational, not release gates.
 Additional workload demonstrations live in [`examples/`](../examples) (`benchmark_*`);
 see [Architecture Comparison](architecture-comparison.md).
 
@@ -628,7 +637,7 @@ Use `--release` for anything that streams real data; debug builds are much slowe
 | `ci.yml` (`metadata`, `package-check`) | Version-check script and its Python unit tests; `cargo package --locked -p dggs-stream-core` | Version/publication policy, license consistency, and a clean-room packaged-core compile |
 | [`safety.yml`](../.github/workflows/safety.yml) | Bounded cargo-fuzz targets, scoped Miri tests over the columnar/categorical/predictor unsafe code and the DuckDB, Python and PostgreSQL FFI layers, and a ThreadSanitizer run over prefetch and aggregation tests | Malformed input, sanitizer smoke checks, FFI ownership and data races; longer fuzz runs weekly |
 | [`coverage.yml`](../.github/workflows/coverage.yml) | `cargo llvm-cov --locked --lcov --output-path lcov.info -p dggs-stream-core -p dggs-stream-cli -p dggs-stream-python -p dggs-stream-pg --lib --test it`, uploaded to Codecov | Line/region/function coverage on every push to main and PR; statuses informational |
-| [`benchmarks.yml`](../.github/workflows/benchmarks.yml) | Criterion streaming benchmarks | Weekly/manual informational timings, not correctness or release gates |
+| [`benchmarks.yml`](../.github/workflows/benchmarks.yml) | Criterion streaming benchmarks (weekly/manual baseline and base-vs-PR comparison on core/`Cargo.*`/benchmark changes) | Informational timings and PR summary tables, not correctness or release gates |
 | `ci.yml`, per platform | `cargo test --locked --release -p dggs-stream-core --example profile_hotspots` | Hotspot harness ownership-sampling correctness; profiling experiments are excluded |
 | `ci.yml`, per platform | `cargo test --locked --release -p dggs-stream-core --example worker_scaling` | Worker-scaling benchmark: every workload produces identical output at 1 and 3 aggregation workers; timings are not run |
 | [`profile.yml`](../.github/workflows/profile.yml) (optional, manual-only) | `cargo run --release -p dggs-stream-core --example worker_scaling -- --json worker-scaling.json` | Informational: wall time, kernel and serial-merge time per workload at 1/2/4/8 aggregation workers; see [Worker Scaling](worker-scaling.md). Hosted runners have few cores, so high worker counts oversubscribe them |
