@@ -58,40 +58,52 @@ pub(super) fn stream<W: Write>(
                 .sum();
             profile.count(Counter::SamplesIndexed, samples.round() as u64);
         }
-        let columns = projection
-            .iter()
-            .map(|&col| match col {
-                0 => ColumnArray::UInt64 {
-                    values: rows.iter().map(|r| r.cell_id).collect(),
-                    validity: None,
-                },
-                1 => ColumnArray::Utf8 {
-                    values: rows.iter().map(|r| format!("{:x}", r.cell_id)).collect(),
-                    validity: None,
-                },
-                2 => ColumnArray::UInt8 {
-                    values: rows.iter().map(|r| r.resolution).collect(),
-                    validity: None,
-                },
-                _ => ColumnArray::Float64 {
-                    values: rows
-                        .iter()
-                        .map(|r| {
-                            let a = &r.accumulator;
-                            opts.output.round(match col {
-                                3 => a.pixel_count(),
-                                4 => a.retained_area_m2(),
-                                5 => a.area_weighted_sum(),
-                                6 => a.area_stats().mean(),
-                                _ => unreachable!("indices belong to the ground-area schema"),
+        let build = || {
+            let columns = projection
+                .iter()
+                .map(|&col| match col {
+                    0 => ColumnArray::UInt64 {
+                        values: rows.iter().map(|r| r.cell_id).collect(),
+                        validity: None,
+                    },
+                    1 => ColumnArray::Utf8 {
+                        values: rows.iter().map(|r| format!("{:x}", r.cell_id)).collect(),
+                        validity: None,
+                    },
+                    2 => ColumnArray::UInt8 {
+                        values: rows.iter().map(|r| r.resolution).collect(),
+                        validity: None,
+                    },
+                    _ => ColumnArray::Float64 {
+                        values: rows
+                            .iter()
+                            .map(|r| {
+                                let a = &r.accumulator;
+                                opts.output.round(match col {
+                                    3 => a.pixel_count(),
+                                    4 => a.retained_area_m2(),
+                                    5 => a.area_weighted_sum(),
+                                    6 => a.area_stats().mean(),
+                                    _ => unreachable!("indices belong to the ground-area schema"),
+                                })
                             })
-                        })
-                        .collect(),
-                    validity: None,
-                },
-            })
-            .collect();
-        Some(RecordBatch::try_new(schema.clone(), columns))
+                            .collect(),
+                        validity: None,
+                    },
+                })
+                .collect();
+            RecordBatch::try_new(schema.clone(), columns)
+        };
+        Some(match &config.profile {
+            Some(profile) => {
+                profile.count(
+                    dggs_stream_core::run_profile::Counter::RowsSerialized,
+                    rows.len() as u64,
+                );
+                profile.time(dggs_stream_core::run_profile::Phase::Serialize, build)
+            }
+            None => build(),
+        })
     });
     let count = match opts.output_format {
         StreamOutputFormat::Ipc => write_ipc_stream(writer, &schema, batches),

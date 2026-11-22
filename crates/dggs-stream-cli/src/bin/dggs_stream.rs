@@ -3,7 +3,7 @@
 //! `parquet`, and `pmtiles` exports, `parquet-to-pmtiles` transcoding, plus `plan` / `merge`
 //! for partitioned scans.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
@@ -16,10 +16,67 @@ use dggs_stream_core::error::Result;
 
 /// Run `f` on a buffered writer for `path`, or stdout when `None`.
 fn with_output<T>(path: Option<String>, f: impl FnOnce(&mut dyn Write) -> Result<T>) -> Result<T> {
-    match path {
-        Some(path) => f(&mut BufWriter::new(File::create(path)?)),
-        None => f(&mut BufWriter::new(io::stdout().lock())),
+    let buffered = |out: &mut dyn Write| {
+        let mut writer = BufWriter::new(out);
+        let value = f(&mut writer)?;
+        writer.flush()?;
+        Ok(value)
+    };
+    let Some(path) = path else {
+        return buffered(&mut io::stdout().lock());
+    };
+    // Replace the target of a link, preserving the link itself (including
+    // relative links to destinations that have not been created yet).
+    let mut target = std::path::PathBuf::from(path);
+    for depth in 0..=40 {
+        match fs::symlink_metadata(&target) {
+            Ok(m) if m.is_symlink() => {
+                if depth == 40 {
+                    return Err(io::Error::other("too many symbolic links in output path").into());
+                }
+                let link = fs::read_link(&target)?;
+                target.set_file_name(link);
+            }
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.into()),
+        }
     }
+    let metadata = match fs::metadata(&target) {
+        Ok(m) if !m.is_file() => return buffered(&mut File::options().write(true).open(target)?),
+        Ok(m) => {
+            // Check the same write permission as an in-place open, without truncation.
+            File::options().write(true).open(&target)?;
+            Some(m)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".dggs-stream-");
+    #[cfg(unix)]
+    if metadata.is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        // Match File::create's permissions for a new file, subject to umask.
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut temp = builder.tempfile_in(parent)?;
+    let value = buffered(temp.as_file_mut())?;
+    if let Some(m) = metadata {
+        let permissions = m.permissions();
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::Permissions::from_mode(permissions.mode() & 0o777)
+        };
+        temp.as_file().set_permissions(permissions)?;
+    }
+    temp.persist(target).map_err(|err| err.error)?;
+    Ok(value)
 }
 
 fn print_help() {

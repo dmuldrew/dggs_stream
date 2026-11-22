@@ -39,7 +39,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--format <wide\|long>` | `ipc`, `jsonl` | Categorical layout (default `wide`) |
 | `--crs <CRS>` (alias `--source-crs`) | all | Source CRS override, e.g. `EPSG:4326` |
 | `--nodata <FLOAT>` | all | NoData override |
-| `--nodata-policy <omit\|emit>` | all | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
+| `--nodata-policy <omit\|emit>` | all (ground-area scans require `omit`) | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
 | `--transfer <assign_centers\|interpolate\|overlay>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)) |
@@ -341,5 +341,5 @@ dggs-stream-cli jsonl temperature.tif --ground-area --grid h3 -r 8 \
 Each row includes the grid-specific index and hex ID, resolution, valid pixel
 count, retained area in square metres, area-weighted sum (value × m²), and
 area-weighted mean (original units). The mean divides the weighted sum by
-the retained area. NoData pixels contribute neither count nor area. Use
+the retained area. Ground-area scans require `--nodata-policy omit` (the default). NoData pixels contribute neither count nor area. Use
 `--ground-area` with `ipc` to stream the same columns in binary form.
