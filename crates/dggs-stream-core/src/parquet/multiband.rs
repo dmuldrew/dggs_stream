@@ -34,7 +34,7 @@ fn buffered_bytes(data_type: &ArrowDataType, nullable: bool) -> usize {
 
 /// Rows per row group: `row_group_size`, lowered so buffered values stay within
 /// [`MULTIBAND_ROW_GROUP_BUDGET_BYTES`].
-fn group_rows(schema: &crate::columnar::ColumnSchema, row_group_size: usize) -> usize {
+pub(super) fn group_rows(schema: &crate::columnar::ColumnSchema, row_group_size: usize) -> usize {
     let row_bytes: usize = schema
         .fields
         .iter()
@@ -181,9 +181,17 @@ pub fn write_multiband_parquet_with_config(
     path: &Path,
     config: &ParquetExportConfig,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    write_batches(reader.schema(), reader, path, config)
+}
+
+pub(super) fn write_batches(
+    schema: Arc<crate::columnar::ColumnSchema>,
+    batches: impl IntoIterator<Item = crate::error::Result<crate::columnar::RecordBatch>>,
+    path: &Path,
+    config: &ParquetExportConfig,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let geo = config.geoparquet;
     let row_group_size = config.row_group_size;
-    let schema = reader.schema();
     if geo && schema.index_of("wkb").is_none() {
         return Err("multi-band GeoParquet requires the wkb column".into());
     }
@@ -245,7 +253,7 @@ pub fn write_multiband_parquet_with_config(
     ];
     let group_rows = group_rows(&schema, row_group_size);
     let (mut rows, mut pending) = (0, 0);
-    for batch in reader {
+    for batch in batches {
         let batch = batch?;
         for (buffer, array) in buffers.iter_mut().zip(batch.columns) {
             buffer.append(array, geo, &mut bounds)?;

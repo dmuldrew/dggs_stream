@@ -9,8 +9,9 @@ use std::path::Path;
 
 use dggs_stream_cli::{
     export_parquet, export_raster_to_pmtiles_with_config, merge_partition_files, parse_merge_args,
-    parse_parquet_to_pmtiles_args, parse_plan_args, parse_stream_args, plan_raster_partitions,
-    stream_raster_to_writer, transcode_parquet_to_pmtiles, write_plan, StreamOutputFormat,
+    parse_parquet_args, parse_parquet_to_pmtiles_args, parse_plan_args, parse_stream_args,
+    plan_raster_partitions, stream_raster_to_writer, transcode_parquet_to_pmtiles, write_plan,
+    StreamOutputFormat,
 };
 use dggs_stream_core::error::Result;
 
@@ -133,6 +134,7 @@ fn print_help() {
           --columns <col1,col2,...>  Column projection pushdown\n  \
           --limit <N>                Maximum number of rows to emit\n  \
           -o, --output <PATH|->      Output file path (default: '-' for stdout on ipc/jsonl/plan/merge)\n  \
+          --partition-by-parent-res <R>  parquet: write a new Hive dataset by H3 parent at resolution R\n  \
           --h3-column <NAME>         parquet-to-pmtiles: H3 column, integer or hex (default: h3_index,\n  \
           \x20                          h3_hex, h3, cell or hex, whichever comes first)\n\n\
         Partitioned scans (shell fan-out; plan and scan with the same --crs and --bbox):\n  \
@@ -211,7 +213,7 @@ fn main() {
         }),
         "merge" => parse_merge_args(rest)
             .and_then(|(opts, out)| with_output(out, |mut w| merge_partition_files(&opts, &mut w))),
-        "parquet" => parse_stream_args(rest, StreamOutputFormat::Ipc).and_then(|(opts, out)| {
+        "parquet" => parse_parquet_args(rest).and_then(|(opts, out)| {
             reject_partition(&opts, "parquet")?;
             reject_stream_only_options(&opts, "parquet")?;
             let out_path = out.ok_or_else(|| {

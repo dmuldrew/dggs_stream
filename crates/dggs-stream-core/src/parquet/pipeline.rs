@@ -252,6 +252,49 @@ pub trait ParquetRowGroupBuffer: Sized + Send + 'static {
     }
 }
 
+pub(super) fn open_writer<B: ParquetRowGroupBuffer>(
+    file: File,
+    grid: GridKind,
+    config: &ParquetExportConfig,
+) -> Result<SerializedFileWriter<File>, Box<dyn std::error::Error + Send + Sync>> {
+    let message_type = B::schema_message_for(
+        grid,
+        config.should_omit_redundant_columns(),
+        config.geoparquet,
+    );
+    let schema = Arc::new(parse_message_type(&message_type)?);
+
+    let props_builder = WriterProperties::builder()
+        .set_writer_version(WriterVersion::PARQUET_2_0)
+        .set_column_encoding(
+            ColumnPath::from(grid.index_column_name()),
+            Encoding::DELTA_BINARY_PACKED,
+        )
+        .set_compression(config.compression);
+
+    Ok(SerializedFileWriter::new(
+        file,
+        schema,
+        Arc::new(props_builder.build()),
+    )?)
+}
+
+pub(super) fn close_writer(
+    mut writer: SerializedFileWriter<File>,
+    file: &mut File,
+    bbox: Option<[f64; 4]>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(bounds) = bbox {
+        writer.append_key_value_metadata(KeyValue::new(
+            "geo".to_string(),
+            build_geoparquet_metadata("geometry", bounds),
+        ));
+    }
+    let metadata = writer.close()?;
+    restore_type_defined_float_orders(file, metadata.file_metadata().column_orders())?;
+    Ok(())
+}
+
 /// Generic double-buffered streaming pipeline from any horizon streamer to Parquet with progress reporting
 pub fn run_parquet_streaming_pipeline_with_progress<S, B, P, F>(
     mut streamer: S,
@@ -273,24 +316,11 @@ where
     B::check_output_policy(&policy)?;
     let run_profile = streamer.run_profile();
 
-    let message_type = B::schema_message_for(grid, compact, geoparquet);
-    let schema = Arc::new(parse_message_type(&message_type)?);
-
-    let props_builder = WriterProperties::builder()
-        .set_writer_version(WriterVersion::PARQUET_2_0)
-        .set_column_encoding(
-            ColumnPath::from(grid.index_column_name()),
-            Encoding::DELTA_BINARY_PACKED,
-        )
-        .set_compression(parquet_config.compression);
-
     // The GeoParquet `geo` metadata is appended once every row is written, so its
     // bbox covers the cell geometries themselves (which extend past the raster).
     let fallback_bbox = streamer
         .bounds_wgs84()
         .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
-
-    let props = Arc::new(props_builder.build());
 
     if let Some(parent) = parquet_path.as_ref().parent() {
         if !parent.as_os_str().is_empty() {
@@ -308,7 +338,7 @@ where
     let output_file = tempfile::NamedTempFile::new_in(parent)?;
     let file = output_file.reopen()?;
     let mut footer_file = output_file.reopen()?;
-    let mut writer = SerializedFileWriter::new(file, schema, props)?;
+    let mut writer = open_writer::<B>(file, grid, &parquet_config)?;
 
     let (writer_tx, writer_rx) = sync_channel::<B>(2);
     let (recycle_tx, recycle_rx) = sync_channel::<B>(2);
@@ -350,14 +380,10 @@ where
                     let _ = recycle_tx.send(buf);
                 }
             }
-            if geoparquet {
-                let geo_json = build_geoparquet_metadata("geometry", bbox.unwrap_or(fallback_bbox));
-                writer.append_key_value_metadata(KeyValue::new("geo".to_string(), geo_json));
-            }
-            let metadata = writer.close()?;
-            restore_type_defined_float_orders(
+            close_writer(
+                writer,
                 &mut footer_file,
-                metadata.file_metadata().column_orders(),
+                geoparquet.then_some(bbox.unwrap_or(fallback_bbox)),
             )?;
             Ok(total_rows)
         },

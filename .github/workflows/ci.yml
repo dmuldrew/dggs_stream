@@ -434,6 +434,10 @@ jobs:
           fi
           cargo test --locked --profile ci-test "${SMOKE_PKGS[@]}" --test it duckdb_sql_smoke -- --ignored
 
+      - name: Verify Hive GeoParquet pruning with DuckDB
+        if: matrix.platform == 'linux_amd64_gcc4'
+        run: PATH="$PWD/duckdb-1.5:$PATH" cargo test --locked --profile ci-test -p dggs-stream-cli --test it duckdb_prunes_hive_parent_files -- --ignored
+
       - name: Run DuckDB 2.0.0 SQL Smoke Test
         if: matrix.cli_arch != '' && env.FULL_ABI == 'true'
         shell: bash
