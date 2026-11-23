@@ -862,6 +862,14 @@ def test_ground_area_rejects_incompatible_options(dggs_stream, gradient_tif, opt
         stream.__arrow_c_schema__()
 
 
+@pytest.mark.parametrize("options", [{"categorical": True}, {"columns": ["nope"]}])
+def test_ground_area_scan_raster_validates_when_called(dggs_stream, gradient_tif, options):
+    # Like `bands`, `ground_area` changes the schema the lazy frame advertises, so
+    # its options and projection are checked by `scan_raster` itself, not at collect.
+    with pytest.raises(RuntimeError):
+        dggs_stream.scan_raster(gradient_tif, ground_area=True, **options)
+
+
 def test_ground_area_rejects_partition(dggs_stream, gradient_tif):
     partition = dggs_stream.plan_partitions(gradient_tif)[0]
     stream = dggs_stream.RasterArrowStream(gradient_tif, ground_area=True, partition=partition)

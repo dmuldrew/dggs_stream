@@ -14,7 +14,7 @@ use dggs_stream_core::columnar::{
 };
 use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
-use dggs_stream_core::raster::mosaic::resolve_raster_sources;
+use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader};
 use dggs_stream_core::transfer::TransferMode;
 
 use crate::config::PyScanConfig;
@@ -205,8 +205,16 @@ impl PyRasterScanner {
                     "ground_area requires one input raster".into(),
                 ));
             };
-            let reader = GroundAreaBatchReader::open(
-                GeoTiffStreamReader::open(path)?,
+            // Open the mosaic as the ordinary readers do: a bbox that misses the raster
+            // is then an error, where a single-reader scan would quietly be empty.
+            let mosaic = Arc::new(MosaicReader::open(
+                std::slice::from_ref(path),
+                mr_cfg.bbox,
+                mr_cfg.custom_crs.as_deref(),
+                mr_cfg.overlap_rule,
+            )?);
+            let reader = GroundAreaBatchReader::open_mosaic(
+                mosaic,
                 &mr_cfg,
                 projection.unwrap_or_else(|| (0..self.base_schema().fields.len()).collect()),
                 self.config.batch_size,

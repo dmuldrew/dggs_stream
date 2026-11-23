@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Python and Polars `RasterArrowStream`, `read_raster` and `scan_raster` accept `ground_area=True` for ground-area-weighted center scans of one north-up, single-band EPSG:4326 raster, with `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` columns. A `bbox` that misses the raster is an error, and partitioned scans are rejected.
+
 - Rust core `GroundAreaBatchReader::open_mosaic` runs a ground-area scan over a prepared single-raster mosaic, so callers that already indexed the raster's chunks do not index them again. DuckDB `ground_area` scans use it.
 
 - DuckDB continuous raster table functions accept `ground_area := true` for ellipsoidal area-weighted center scans on all four grids.

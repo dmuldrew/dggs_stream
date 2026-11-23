@@ -125,7 +125,10 @@ when the scan object is created. The one empty value that falls back to a defaul
 
 `read_raster` and the `RasterArrowStream` methods raise these directly.
 `scan_raster` is lazy, so they surface when the frame is collected, wrapped by Polars in
-a `polars.exceptions.ComputeError`.
+a `polars.exceptions.ComputeError`. The exception is an option that changes the schema
+the lazy frame advertises, `bands` and `ground_area`: their options and column
+projection are checked when `scan_raster` is called, and raise the `RuntimeError`
+immediately.
 
 ---
 

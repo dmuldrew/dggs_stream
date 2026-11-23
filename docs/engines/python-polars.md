@@ -71,6 +71,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `strict_transforms` | `bool` | `False` | Raise when a valid sample cannot be transformed to WGS84 instead of skipping it with a `RuntimeWarning` |
 | `band` | `int` | `None` (1) | 1-indexed band to aggregate |
 | `bands` | sequence of integers | `None` | Ordered one-based bands from one interleaved or band-separated TIFF. Continuous center-assignment scans share the grid columns and return statistics per band. |
+| `ground_area` | `bool` | `None` (off) | Weight each valid pixel by its WGS84 ellipsoidal area, assigned to the cell holding its center. Needs one north-up, single-band EPSG:4326 raster, omitted NoData and the default center sampling; not valid with `bands`, quantiles, formulas, overlay, partitions or a coverage threshold. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` in place of the usual statistics; `min_count` filters on valid pixels. A `bbox` that misses the raster is an error, as in ordinary scans. |
 | `sampling` | `str` | `None` (`"center"`) | Sub-pixel sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point` |
 | `overlap_rule` | `str` | `None` (`"cutline"`) | Mosaic overlaps: `cutline`, `first` or `average` |
 | `min_majority_fraction` | `float` | `None` | Categorical only: drop cells whose majority class covers less than this fraction |
@@ -315,6 +316,10 @@ lf = dggs_stream.scan_raster("tile_west.tif,tile_east.tif", 8, categorical=True)
 ```python
 # Band 2 of a multi-band raster
 lf = dggs_stream.scan_raster("sentinel2.tif", 9, band=2)
+
+# Ground-area weighting for a north-up EPSG:4326 raster: each pixel counts by its area
+lf = dggs_stream.scan_raster("temperature.tif", 8, ground_area=True)
+lf.select("h3_index", "retained_area_m2", "area_weighted_mean").collect()
 
 # Read bands 3 and 1 in one pass. Missing samples and scaling are evaluated per band.
 lf = dggs_stream.scan_raster("sentinel2.tif", 9, bands=[3, 1])
