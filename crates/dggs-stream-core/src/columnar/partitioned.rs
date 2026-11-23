@@ -21,9 +21,11 @@ use crate::aggregator::multi_horizon::{
     encode_partial_state, MultiCategoricalHorizonStreamer, MultiCategoricalRecord,
     MultiContinuousRecord, MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget,
 };
+use crate::aggregator::output_policy::{NodataPolicy, OutputPolicy};
 use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
+use crate::transfer::{Filters, OverlayPartial, TransferAccumulator, TransferMode, TransferStream};
 
 use super::{
     quantiles_projected, ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch,
@@ -71,6 +73,14 @@ pub fn partitioned_output_schema(
 }
 
 enum Streamer {
+    Overlay {
+        streamer: TransferStream<OverlayPartial>,
+        grid: GridKind,
+        policy: OutputPolicy,
+        minimum: f64,
+        quantiles: Vec<QuantileTarget>,
+        count: u64,
+    },
     Continuous {
         streamer: MultiScanHorizonStreamer,
         quantiles: Vec<QuantileTarget>,
@@ -108,7 +118,24 @@ impl PartitionedBatchReader {
         if !quantiles_projected(projection.as_deref(), config.quantiles.len()) {
             config.quantiles.clear();
         }
-        let streamer = MultiScanHorizonStreamer::new_mosaic(open_mosaic(paths, &config)?, &config)?;
+        let mosaic = open_mosaic(paths, &config)?;
+        if config.partition.is_some() && config.transfer == TransferMode::OVERLAY {
+            let streamer = TransferStream::partitioned_overlay(mosaic, &config)?;
+            return Ok(Self::new(
+                Streamer::Overlay {
+                    streamer,
+                    grid: config.grid,
+                    policy: config.output_policy(),
+                    minimum: config.valid_coverage_threshold.unwrap_or(0.0),
+                    quantiles: config.quantiles,
+                    count: 0,
+                },
+                projection,
+                schema,
+                batch_size,
+            ));
+        }
+        let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)?;
         Ok(Self::new(
             Streamer::Continuous {
                 streamer,
@@ -166,6 +193,7 @@ impl PartitionedBatchReader {
     /// Valid sample points dropped by failed coordinate transforms so far.
     pub fn transform_failures(&self) -> u64 {
         match &self.streamer {
+            Streamer::Overlay { streamer, .. } => streamer.transform_failures(),
             Streamer::Continuous { streamer, .. } => streamer.transform_failures(),
             Streamer::Categorical(streamer) => streamer.transform_failures(),
         }
@@ -174,6 +202,7 @@ impl PartitionedBatchReader {
     /// `(interior, boundary)` cells so far; `None` for a scan without a partition.
     pub fn partition_cell_counts(&self) -> Option<(u64, u64)> {
         match &self.streamer {
+            Streamer::Overlay { count, .. } => Some((0, *count)),
             Streamer::Continuous { streamer, .. } => streamer.partition_cell_counts(),
             Streamer::Categorical(streamer) => streamer.partition_cell_counts(),
         }
@@ -184,6 +213,35 @@ impl PartitionedBatchReader {
         let projection = self.projection.as_deref();
         let schema = Arc::clone(&self.schema);
         let (finals, partials) = match &mut self.streamer {
+            Streamer::Overlay {
+                streamer,
+                grid,
+                policy,
+                minimum,
+                quantiles,
+                count,
+            } => {
+                let mut records = Vec::new();
+                let mut states = Vec::new();
+                let n =
+                    streamer.drain_into(self.batch_size, |_, resolution, cell_id, partial| {
+                        states.push(partial.encode(*minimum));
+                        records.push(MultiContinuousRecord {
+                            resolution,
+                            cell_id,
+                            accumulator: partial.stats,
+                        });
+                    })?;
+                if n == 0 {
+                    self.finished = true;
+                    return Ok(());
+                }
+                *count += n as u64;
+                let batch = RecordBatch::from_continuous_records_with(
+                    *grid, policy, &records, quantiles, projection,
+                )?;
+                (None, Some((batch, states)))
+            }
             Streamer::Continuous {
                 streamer,
                 quantiles,
@@ -444,7 +502,16 @@ pub fn merge_partial_batches(
         if !quantiles_projected(projection, config.quantiles.len()) {
             config.quantiles.clear();
         }
-        let records = merge_all!(MultiScanHorizonStreamer::partial_merger(&config));
+        let first = batches
+            .iter()
+            .find(|b| b.num_rows > 0)
+            .map(partial_columns)
+            .transpose()?;
+        let records = if first.is_some_and(|c| OverlayPartial::is_encoded(&c.states[0])) {
+            merge_overlay(batches, &config)?
+        } else {
+            merge_all!(MultiScanHorizonStreamer::partial_merger(&config))
+        };
         let out = records
             .chunks(batch_size)
             .map(|chunk| {
@@ -459,4 +526,57 @@ pub fn merge_partial_batches(
             .collect::<Result<Vec<_>>>()?;
         Ok((schema, out))
     }
+}
+
+fn merge_overlay(
+    batches: &[RecordBatch],
+    config: &MultiResolutionConfig,
+) -> Result<Vec<MultiContinuousRecord>> {
+    let mut cells = std::collections::BTreeMap::<(u8, u64), OverlayPartial>::new();
+    let mut minimum = None;
+    for batch in batches {
+        let cols = partial_columns(batch)?;
+        for i in 0..batch.num_rows {
+            if cols.validity.is_some_and(|v| !v[i]) {
+                return Err(DggsStreamError::InvalidParameter(
+                    "null partial_state in weighted overlay merge".into(),
+                ));
+            }
+            let (partial, threshold) =
+                OverlayPartial::decode(&cols.states[i], config.aggregation_budget_bytes)?;
+            if minimum
+                .replace(threshold)
+                .is_some_and(|prev| prev != threshold)
+            {
+                return Err(DggsStreamError::InvalidParameter(
+                    "weighted overlay partials have different valid coverage thresholds".into(),
+                ));
+            }
+            let cell = cells
+                .entry((cols.resolution[i], cols.h3_index[i]))
+                .or_default();
+            cell.covered += partial.covered;
+            cell.stats.merge(&partial.stats);
+        }
+    }
+    let filters = Filters {
+        min_count: config.min_count,
+        min_mean: config.min_mean,
+        max_mean: config.max_mean,
+        ..Filters::default()
+    };
+    let minimum = minimum.unwrap_or(0.0);
+    Ok(cells
+        .into_iter()
+        .filter(|(_, p)| {
+            (p.stats.has_samples() || config.nodata_policy == NodataPolicy::Emit)
+                && p.stats.count >= minimum * p.covered
+                && p.stats.passes(&filters)
+        })
+        .map(|((resolution, cell_id), p)| MultiContinuousRecord {
+            resolution,
+            cell_id,
+            accumulator: p.stats,
+        })
+        .collect())
 }

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Spark and Python partitioned scans support single-band continuous weighted overlay. The reducer applies valid coverage and statistics filters after merging all partitions touching a cell.
+
 - Python and Polars `RasterArrowStream`, `read_raster` and `scan_raster` accept `ground_area=True` for ground-area-weighted center scans of one north-up, single-band EPSG:4326 raster, with `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` columns. A `bbox` that misses the raster is an error, and partitioned scans are rejected.
 
 - Fine-resolution overlay scans can project and clip cells in parallel when `aggregation_workers` is set to two or more. The default stays serial.

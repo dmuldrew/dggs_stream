@@ -20,7 +20,7 @@ Each Spark partition scans one partition planned by `dggs_stream.plan_partitions
 set of TIFF tiles or strips), so executors read one raster in parallel and no pixel is read
 twice. The data source returns the scan's columns with Spark's signed types plus
 `partial_state`: rows where it is null are final cells, the others are shares of cells that
-several partitions reach. `merge_partials` shuffles those by `h3_index` and merges them, so
+several partitions reach. Weighted overlay emits a partial for every touched cell. `merge_partials` shuffles those by `h3_index` and merges them, so
 the result equals one unpartitioned scan (up to floating-point summation order).
 
 Options (all optional except the path), with the names and meanings of
@@ -31,6 +31,8 @@ Options (all optional except the path), with the names and meanings of
     categorical          "true" for categorical aggregation (wide format)
     columns              comma-separated output columns (keep h3_index and resolution)
     crs, nodata, bbox    CRS override, NoData override, "minx,miny,maxx,maxy" in WGS84
+    transfer             assign_centers (default) or overlay (single-band continuous)
+    valid_coverage_threshold   minimum valid share of covered area for overlay
     band, sampling, overlap_rule, spectral_formula, nir_band, red_band, green_band,
     blue_band, swir_band, quantiles, remap, min_count, min_mean, max_mean,
     min_majority_fraction, strict_transforms
@@ -94,6 +96,8 @@ _SCAN_OPTIONS = {
     "strict_transforms": _bool,
     "band": _INT,
     "sampling": _STR,
+    "transfer": _STR,
+    "valid_coverage_threshold": _FLOAT,
     "overlap_rule": _STR,
     "spectral_formula": _STR,
     "nir_band": _INT,

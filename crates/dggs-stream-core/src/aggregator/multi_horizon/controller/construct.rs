@@ -25,7 +25,10 @@ use crate::raster::prefetch::PrefetchedMosaicReader;
 /// Refuse a `band` (or spectral formula band) that some mosaic tile does not have. The
 /// sample kernels index pixels by band without a bounds check that fails the scan, so an
 /// out-of-range band would otherwise read another band's values.
-fn check_bands_exist(mosaic: &MosaicReader, config: &MultiResolutionConfig) -> Result<()> {
+pub(crate) fn check_bands_exist(
+    mosaic: &MosaicReader,
+    config: &MultiResolutionConfig,
+) -> Result<()> {
     let bands = match &config.spectral_formula {
         Some(formula) => formula.bands(),
         None => vec![config.band],

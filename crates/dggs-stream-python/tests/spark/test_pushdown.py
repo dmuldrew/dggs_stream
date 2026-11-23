@@ -116,3 +116,14 @@ def test_register_follows_the_session_setting(spark, terrain):
     spark_ds.register(spark)
     df = spark.read.format("dggs_stream").option("resolutions", "9").load(terrain).where("resolution = 9")
     assert "Filter" not in plan(df)
+
+
+def test_partitioned_weighted_overlay(spark, terrain):
+    columns = ["h3_index", "resolution", "count", "sum", "mean"]
+    options = dict(resolutions=[8], transfer="overlay", columns=columns, valid_coverage_threshold=0.75)
+    distributed = spark_ds.read(spark, terrain, target_chunks=8, **options).toArrow()
+    serial = pa.table(dggs_stream.RasterArrowStream(terrain, **options))
+    def keyed(table):
+        return {(r["resolution"], r["h3_index"], False): [r] for r in table.to_pylist()}
+    assert distributed.num_rows == serial.num_rows > 0
+    assert_same_rows(keyed(distributed), keyed(serial))

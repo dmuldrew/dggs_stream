@@ -99,7 +99,15 @@ impl RowWindow {
         rows: Range<u32>,
         cache: &mut ChunkCache,
     ) -> Result<Self> {
-        Self::load_bands(tile, &[selection.band], selection, rows, cache, None)
+        Self::load_bands(
+            tile,
+            &[selection.band],
+            selection,
+            rows,
+            0..tile.reader.metadata.width,
+            cache,
+            None,
+        )
     }
 
     pub(super) fn load_bands(
@@ -107,6 +115,7 @@ impl RowWindow {
         bands: &[usize],
         selection: BandSelection,
         rows: Range<u32>,
+        cols: Range<u32>,
         cache: &mut ChunkCache,
         profile: Option<&crate::run_profile::RunProfile>,
     ) -> Result<Self> {
@@ -151,7 +160,8 @@ impl RowWindow {
         // Open lazily so cached and sparse chunks need no TIFF decoder.
         let mut decoder = None;
         for chunk_row in chunk_rows {
-            for chunk_col in 0..layout.chunks_across {
+            for chunk_col in cols.start / layout.chunk_width..cols.end.div_ceil(layout.chunk_width)
+            {
                 let index = chunk_row * layout.chunks_across + chunk_col;
                 let bounds = layout.get_chunk_bounds(index, width, height);
                 if bounds.width == 0 || bounds.height == 0 {

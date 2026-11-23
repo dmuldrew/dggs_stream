@@ -45,6 +45,8 @@ pub trait TransferAccumulator: Send + 'static {
     fn empty(track_quantiles: bool) -> Self;
     /// Add `value` with `weight`.
     fn add(&mut self, value: f64, weight: f64);
+    /// Record geometric overlap, including missing pixels, for partition merging.
+    fn cover(&mut self, _area: f64) {}
     /// Initialize the selected bands of an overlay cell.
     fn empty_bands(track_quantiles: bool, bands: usize) -> Self
     where
@@ -261,6 +263,15 @@ impl<A: TransferAccumulator> TransferStream<A> {
         config: &MultiResolutionConfig,
         bands: Vec<usize>,
     ) -> Result<Self> {
+        Self::build(mosaic, config, bands, false)
+    }
+
+    fn build(
+        mosaic: Arc<MosaicReader>,
+        config: &MultiResolutionConfig,
+        bands: Vec<usize>,
+        partial_overlay: bool,
+    ) -> Result<Self> {
         config.validate_coverage_threshold()?;
         let mode = config.transfer;
         let histogram_bins = config
@@ -288,7 +299,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             }
             _ => {}
         }
-        if config.partition.is_some() {
+        if config.partition.is_some() && !partial_overlay {
             return invalid("cannot be combined with a partitioned scan");
         }
         if config.should_compact_h3_children() {
@@ -314,6 +325,22 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     &mut blocks,
                 );
             }
+        }
+        if partial_overlay {
+            let partition = config.partition.as_ref().expect("partitioned overlay");
+            partition.validate_for(&mosaic)?;
+            blocks = partition_blocks(&mosaic, partition, blocks);
+        }
+        let overlay = matches!(mode, TransferMode::Overlay { .. });
+        for block in &mut blocks {
+            block.bbox = block_bbox(
+                grid,
+                block.resolution,
+                &mosaic.tiles[block.tile],
+                &block.rows,
+                &block.cols,
+                overlay,
+            );
         }
         // Everything a later block can still emit lies south of this latitude.
         let mut horizon = vec![f64::NEG_INFINITY; blocks.len() + 1];
@@ -350,6 +377,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     ..
                 } => config
                     .valid_coverage_threshold
+                    .filter(|_| !partial_overlay)
                     .filter(|&t| t > 0.0)
                     .map(|minimum| CoverageFilter {
                         minimum,
@@ -472,20 +500,27 @@ impl<A: TransferAccumulator> TransferStream<A> {
     }
 
     /// Read a window of `tile`, timed as decoding when a profile is attached.
-    fn load_window(&mut self, tile: &TileDescriptor, rows: Range<u32>) -> Result<RowWindow> {
+    fn load_window(
+        &mut self,
+        tile: &TileDescriptor,
+        rows: Range<u32>,
+        cols: Range<u32>,
+    ) -> Result<RowWindow> {
         use crate::run_profile::{Counter, Phase, PhaseTimer};
         let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
+        let read_width = cols.len() as u64;
         let window = RowWindow::load_bands(
             tile,
             &self.bands,
             self.selection,
             rows,
+            cols,
             &mut self.cache,
             self.profile.as_deref(),
         )?;
         if let (Some(profile), Some(timer)) = (&self.profile, timer) {
             timer.stop(profile, Phase::Decode);
-            let pixels = u64::from(window.width()) * window.rows().len() as u64;
+            let pixels = read_width * window.rows().len() as u64;
             profile.count(Counter::DecodedBytes, pixels * 8 * self.bands.len() as u64);
         }
         Ok(window)
@@ -554,7 +589,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let tile = &mosaic.tiles[block.tile];
         let margin = method.margin();
         let rows = block.rows.start.saturating_sub(margin)..block.rows.end.saturating_add(margin);
-        let window = self.load_window(tile, rows)?;
+        let window = self.load_window(tile, rows, 0..tile.reader.metadata.width)?;
         let cells = cells_in_bbox(
             self.grid,
             bbox,
@@ -603,7 +638,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
     ) -> Result<()> {
         let mosaic = Arc::clone(&self.mosaic);
         let tile = &mosaic.tiles[block.tile];
-        let window = self.load_window(tile, block.rows.clone())?;
+        let window = self.load_window(tile, block.rows.clone(), block.cols.clone())?;
         let width = i64::from(window.width());
         let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
         let band_width = window.width() as usize;
@@ -659,6 +694,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
             let index = pixel as usize;
             let col = (index % band_width) as i64;
             let row = rows.0 + (index / band_width) as i64;
+            if !block.cols.contains(&(col as u32)) {
+                return;
+            }
             if let Some(cache) = &mut selected {
                 let inside = cache[index].get_or_insert_with(|| {
                     let (x, y) = gt.pixel_to_coord(col as f64 + 0.5, row as f64 + 0.5);
@@ -675,6 +713,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
             }
             pending.touched = true;
+            pending.acc.cover(area);
             let mut coverage = coverage;
             if let Some(c) = coverage.as_mut() {
                 c.covered_area += area;
@@ -829,7 +868,12 @@ impl<A: TransferAccumulator> TransferStream<A> {
         if self.pending.is_empty() {
             return;
         }
-        let end = i64::from(block.rows.end);
+        let end = i64::from(
+            self.blocks
+                .get(self.next_block)
+                .filter(|b| b.tile == block.tile && b.resolution == block.resolution)
+                .map_or(block.rows.end, |b| b.rows.start),
+        );
         let last_block_of_resolution = self
             .blocks
             .get(self.next_block)
@@ -864,6 +908,64 @@ impl<A: TransferAccumulator> TransferStream<A> {
             }
         }
     }
+}
+
+/// Intersect serial windows with this worker's owned chunks. Group adjacent columns
+/// so each row band is decoded once for the common strip and rectangular partitions.
+fn partition_blocks(
+    mosaic: &MosaicReader,
+    partition: &crate::aggregator::multi_horizon::ScanPartition,
+    blocks: Vec<Block>,
+) -> Vec<Block> {
+    use std::collections::BTreeMap;
+    let mut owned = vec![BTreeMap::<u32, Vec<u32>>::new(); mosaic.tiles.len()];
+    for chunk in &mosaic.chunk_refs {
+        if partition.contains_chunk(mosaic, chunk) {
+            let across = mosaic.tiles[chunk.tile_idx]
+                .reader
+                .chunk_layout
+                .chunks_across;
+            owned[chunk.tile_idx]
+                .entry(chunk.chunk_idx / across)
+                .or_default()
+                .push(chunk.chunk_idx % across);
+        }
+    }
+    for tile in &mut owned {
+        for cols in tile.values_mut() {
+            cols.sort_unstable();
+        }
+    }
+    let mut out = Vec::new();
+    for block in blocks {
+        let tile = &mosaic.tiles[block.tile];
+        let layout = tile.reader.chunk_layout;
+        for (&row, cols) in owned[block.tile].range(
+            block.rows.start / layout.chunk_height..block.rows.end.div_ceil(layout.chunk_height),
+        ) {
+            let rows = block.rows.start.max(row * layout.chunk_height)
+                ..block
+                    .rows
+                    .end
+                    .min((row + 1).saturating_mul(layout.chunk_height));
+            for run in cols.chunk_by(|a, b| *b == *a + 1) {
+                let cols = run[0] * layout.chunk_width
+                    ..tile
+                        .reader
+                        .metadata
+                        .width
+                        .min((run[run.len() - 1] + 1).saturating_mul(layout.chunk_width));
+                out.push(Block {
+                    bbox: None,
+                    rows: rows.clone(),
+                    cols,
+                    last_of_tile: false,
+                    ..block
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Cut one tile into blocks for `mode` at `resolution`.
@@ -916,13 +1018,12 @@ fn plan_tile(
             let col_end = (col + cols).min(width);
             let block_rows = row..row_end;
             let block_cols = col..col_end;
-            let bbox = block_bbox(grid, resolution, tile, &block_rows, &block_cols, overlay);
             blocks.push(Block {
                 resolution,
                 tile: tile_idx,
                 rows: block_rows,
                 cols: block_cols,
-                bbox,
+                bbox: None,
                 last_of_tile: false,
             });
             col = col_end;
@@ -1288,6 +1389,17 @@ fn last_overlapping_tile(mosaic: &MosaicReader, grid: GridKind, cell: u64, from:
         }
     }
     last
+}
+
+impl TransferStream<super::OverlayPartial> {
+    pub(crate) fn partitioned_overlay(
+        mosaic: Arc<MosaicReader>,
+        config: &MultiResolutionConfig,
+    ) -> Result<Self> {
+        config.validate()?;
+        crate::aggregator::multi_horizon::controller::check_bands_exist(&mosaic, config)?;
+        Self::build(mosaic, config, vec![config.band], true)
+    }
 }
 
 #[cfg(test)]

@@ -219,3 +219,47 @@ def test_merge_without_the_scans_filters_keeps_merged_cells(dggs_stream, striped
         assert table.filter(pc.is_null(table.column(dggs_stream.PARTIAL_STATE_COLUMN))).num_rows == 0
     assert dggs_stream.merge_partials(partials, min_count=1e9).num_rows == 0
     assert dggs_stream.merge_partials(partials).num_rows > 0
+
+
+@pytest.mark.parametrize("threshold,keep", [(0.65, True), (0.68, False)])
+def test_overlay_merges_nodata_coverage_across_three_strips(dggs_stream, tmp_path, threshold, keep):
+    path = tmp_path / "three-strips.tif"
+    write_geotiff(path, 4, 3, lambda c, r: (2, -999, 8)[r], pixel=0.000001, rows_per_strip=1)
+    options = dict(transfer="overlay", nodata=-999, valid_coverage_threshold=threshold,
+                   min_count=7, columns=["resolution", "h3_index", "count", "sum", "mean"])
+    scan = dggs_stream.RasterArrowStream
+    serial = pa.table(scan(path, 8, **options))
+    specs = dggs_stream.plan_partitions(path, target_chunks=1)
+    assert len(specs) == 3
+    parts = [pa.table(scan(path, 8, partition=spec, **options)) for spec in specs]
+    assert all(part.num_rows == 1 and part["partial_state"].null_count == 0 for part in parts)
+    assert sorted(part["count"][0].as_py() for part in parts) == pytest.approx([0, 4, 4])
+    merged = dggs_stream.merge_partials(parts[::-1], columns=options["columns"], min_count=7)
+    assert_tables_match(serial, merged)
+    assert merged.num_rows == int(keep)
+    if keep:
+        assert [merged[name][0].as_py() for name in ("count", "sum", "mean")] == pytest.approx([8, 40, 5])
+
+
+def test_partitioned_overlay_fractional_edges(dggs_stream, striped_gradient):
+    options = dict(transfer="overlay", columns=["resolution", "h3_index", "count", "sum", "mean"])
+    serial = sort(pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, **options)))
+    merged, partitions, partials = run_partitioned(dggs_stream, striped_gradient, 4, **options)
+    assert partitions > 1 and partials > 0
+    assert any(0 < count < 1 for count in serial["count"].to_pylist())
+    assert_tables_match(serial, merged)
+
+
+def test_overlay_empty_cell_policy_after_merge(dggs_stream, tmp_path):
+    path = tmp_path / "missing.tif"
+    write_geotiff(path, 4, 3, lambda c, r: -999, pixel=0.000001, rows_per_strip=1)
+    specs = dggs_stream.plan_partitions(path, target_chunks=1)
+    columns = ["resolution", "h3_index", "count", "sum", "mean"]
+    for policy, expected_rows in (("omit", 0), ("emit", 1)):
+        options = dict(transfer="overlay", nodata=-999, columns=columns, nodata_policy=policy)
+        scan = dggs_stream.RasterArrowStream
+        serial = pa.table(scan(path, 8, **options))
+        parts = [pa.table(scan(path, 8, partition=spec, **options)) for spec in specs]
+        merged = dggs_stream.merge_partials(parts, columns=columns, nodata_policy=policy)
+        assert merged.num_rows == expected_rows
+        assert merged.equals(serial)
