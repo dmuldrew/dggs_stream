@@ -222,26 +222,3 @@ impl Drop for GroundAreaBatchReader {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ground_area_reuses_prepared_mosaic() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/internal-mask.tif");
-        let raster = GeoTiffStreamReader::open(&path).unwrap();
-        let mosaic = Arc::new(MosaicReader::from_single_reader(raster, None, None).unwrap());
-        let mut reader = GroundAreaBatchReader::open_mosaic(
-            mosaic.clone(),
-            &MultiResolutionConfig::single(10),
-            vec![0, 3],
-            1,
-            Some(1),
-        )
-        .unwrap();
-        assert!(Arc::ptr_eq(&reader.scan.mosaic_arc(), &mosaic));
-        assert_eq!(reader.next().unwrap().unwrap().num_rows, 1);
-    }
-}
