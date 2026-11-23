@@ -80,6 +80,7 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `interpolation` | `str \| None` | `"bilinear"` | With `"interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
 | `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
 | `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `ground_area` | `bool` | Off | For one north-up, single-band EPSG:4326 raster, assign each valid pixel to its center cell and weight its value by its ellipsoidal area. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` (value × m²), and `area_weighted_mean`. `min_count` filters by pixel count. |
 | `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. |
 | `decode_budget_mb` | `int` | `None` (256 MiB) | Center-assignment decoded buffer budget in MiB. A single oversized chunk can proceed alone. |
 | `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
