@@ -308,9 +308,6 @@ impl RasterTable for ContinuousTable {
         config.min_mean = bind.min_mean;
         config.max_mean = bind.max_mean;
         if bind.ground_area {
-            let [tile] = mosaic.tiles.as_slice() else {
-                return Err("ground_area requires one raster".into());
-            };
             let mut projection = without_row_id(projected_columns);
             if bind.common.emit_geom {
                 // The optional DuckDB geometry column uses the same bytes as WKB.
@@ -320,8 +317,8 @@ impl RasterTable for ContinuousTable {
                     }
                 }
             }
-            let reader = GroundAreaBatchReader::open(
-                tile.reader.clone(),
+            let reader = GroundAreaBatchReader::open_mosaic(
+                mosaic,
                 &config,
                 projection,
                 get_vector_size(),

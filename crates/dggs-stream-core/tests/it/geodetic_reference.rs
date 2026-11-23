@@ -1557,3 +1557,81 @@ fn ground_area_scan_reads_crs_overrides_like_the_resolver() {
     let error = scan_ground_area(open(), &config).err().unwrap();
     assert!(error.to_string().contains("partitioned"), "{error}");
 }
+
+/// Every row of a ground-area reader as (cell id, pixel count, area, sum, mean).
+fn ground_area_rows(
+    reader: dggs_stream_core::columnar::ground_area::GroundAreaBatchReader,
+) -> Vec<(u64, f64, f64, f64, f64)> {
+    use dggs_stream_core::columnar::ColumnArray;
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let [ColumnArray::UInt64 { values: ids, .. }, ColumnArray::Float64 { values: n, .. }, ColumnArray::Float64 { values: area, .. }, ColumnArray::Float64 { values: sum, .. }, ColumnArray::Float64 { values: mean, .. }] =
+            batch.columns.as_slice()
+        else {
+            panic!("unexpected projected columns");
+        };
+        for i in 0..batch.num_rows {
+            rows.push((ids[i], n[i], area[i], sum[i], mean[i]));
+        }
+    }
+    rows
+}
+
+#[test]
+fn ground_area_batch_reader_reusing_a_prepared_mosaic_matches_a_direct_open() {
+    use dggs_stream_core::columnar::ground_area::GroundAreaBatchReader;
+    use dggs_stream_core::grid::GridKind;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/internal-mask.tif");
+    let metadata = GeoTiffStreamReader::open(&path).unwrap().metadata;
+    let gt = &metadata.geotransform;
+    let (west, north) = gt.pixel_to_coord(0.0, 0.0);
+    let (east, south) = gt.pixel_to_coord(f64::from(metadata.width), f64::from(metadata.height));
+    let (min_lon, max_lon) = (west.min(east), west.max(east));
+    let (min_lat, max_lat) = (south.min(north), south.max(north));
+    // The whole raster, then its western half.
+    let half = [min_lon, min_lat, (min_lon + max_lon) / 2.0, max_lat];
+    let mut seen_rows = Vec::new();
+    for grid in GridKind::ALL {
+        for bbox in [None, Some(half)] {
+            let mut config = MultiResolutionConfig::single(match grid {
+                GridKind::H3 => 10,
+                GridKind::A5 => 16,
+                GridKind::S2 => 16,
+                GridKind::Healpix => 15,
+            })
+            .with_grid(grid);
+            config.bbox = bbox;
+            let projection = vec![0, 3, 4, 5, 6];
+            let direct = ground_area_rows(
+                GroundAreaBatchReader::open(
+                    GeoTiffStreamReader::open(&path).unwrap(),
+                    &config,
+                    projection.clone(),
+                    64,
+                    None,
+                )
+                .unwrap(),
+            );
+            let mosaic = Arc::new(
+                MosaicReader::from_single_reader(
+                    GeoTiffStreamReader::open(&path).unwrap(),
+                    bbox,
+                    None,
+                )
+                .unwrap(),
+            );
+            let reused = ground_area_rows(
+                GroundAreaBatchReader::open_mosaic(mosaic, &config, projection, 64, None).unwrap(),
+            );
+            assert!(!direct.is_empty(), "{grid:?} {bbox:?}");
+            assert_eq!(direct, reused, "{grid:?} {bbox:?}");
+            seen_rows.push((grid, bbox.is_some(), direct.len()));
+        }
+    }
+    // The western half keeps fewer cells than the whole raster on every grid.
+    for pair in seen_rows.chunks(2) {
+        assert!(pair[1].2 < pair[0].2, "{pair:?}");
+    }
+}
