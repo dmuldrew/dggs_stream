@@ -942,6 +942,13 @@ fn real_sql_ground_area_matches_core_on_all_grids() {
                 let a = expected
                     .remove(&id)
                     .expect("unexpected or duplicate SQL cell");
+                // Center assignment depends only on pixel positions, so both sides agree
+                // to rounding. Overlay clips pixels against cell boundaries computed
+                // with the platform's libm; on osx_amd64 the extension runs under
+                // Rosetta while this test binary runs natively, so boundary vertices
+                // can differ in their last bits and clipping scales that to about
+                // 1e-12 of a statistic. A different algorithm would differ by far more.
+                let tolerance = if overlay { 1e-9 } else { 1e-12 };
                 for (actual, want) in [
                     (v[0], a.area_stats().mean()),
                     (v[2], a.retained_area_m2()),
@@ -950,8 +957,8 @@ fn real_sql_ground_area_matches_core_on_all_grids() {
                 ] {
                     assert!(
                         (actual.parse::<f64>().unwrap() - want).abs()
-                            <= 1e-12 * want.abs().max(1.0),
-                        "{grid} {id} {actual} vs {want}"
+                            <= tolerance * want.abs().max(1.0),
+                        "{grid} {id} overlay={overlay} {actual} vs {want}"
                     );
                 }
                 assert_eq!(v[5], format!("{id:x}"));
