@@ -61,6 +61,40 @@ while !stream.is_finished() {
 `area_weighted_sum()` is the integral in value × m². For a density expressed
 per m², that integral has units of the underlying quantity.
 
+## Ground-area-weighted overlay
+
+Use the Rust core iterator to integrate a density across the cells that overlap
+each pixel of one north-up, single-band EPSG:4326 raster.
+
+```rust
+use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream_core::transfer::{scan_ground_area_overlay, TransferMode};
+
+let mut config = MultiResolutionConfig::single(8);
+config.transfer = TransferMode::OVERLAY;
+let raster = GeoTiffStreamReader::open("population_per_km2.tif")?;
+for row in scan_ground_area_overlay(raster, &config)? {
+    let (_, cell, stats) = row?;
+    let population = stats.area_weighted_sum() / 1_000_000.0;
+    println!("{cell:x} {population}");
+}
+```
+
+Each valid intersection contributes its planar fraction to `pixel_count()` and
+its ellipsoidal area to `retained_area_m2()`. The integral weights the calibrated
+pixel value by that area. Densities per m² need no unit conversion. A bbox selects
+pixels by center. `valid_coverage_threshold` divides valid square metres by all
+selected raster-overlap square metres for the completed cell, including masked
+and NoData pixels in the denominator.
+
+The geometry uses straight segments between the grid boundary vertices in
+longitude/latitude. Partial-pixel integration accounts for the change in area
+with latitude along those segments. Curved grid edges can introduce a separate
+boundary approximation. The scan returns an error for resolutions with a maximum
+cell diameter above 500 km or a candidate cell enclosing a pole. It processes
+row windows serially and supports weighted overlay with omitted NoData.
+
 ## Pipeline
 
 The sample-unpacking boundary checks TIFF chunk dimensions, arithmetic overflow, source

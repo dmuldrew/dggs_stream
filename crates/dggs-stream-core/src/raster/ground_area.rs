@@ -1,7 +1,4 @@
-//! Ellipsoidal ground area for axis-aligned WGS84 geographic rectangles.
-//!
-//! These helpers calculate pixel footprints only. They do not enable area-weighted
-//! aggregation or calculate exact intersections with H3 cell boundaries.
+//! Ellipsoidal ground areas for north-up WGS84 pixels and clipped longitude/latitude polygons.
 
 use crate::error::{DggsStreamError, Result};
 use crate::raster::geotransform::GeoTransform;
@@ -119,9 +116,92 @@ pub fn wgs84_pixel_area(gt: &GeoTransform, col: usize, row: usize) -> Result<f64
     wgs84_rectangle_area(west, south, east, north)
 }
 
+/// Pixel fraction and ellipsoidal area of a clipped, straight-edged polygon in
+/// pixel coordinates. The caller has validated a north-up EPSG:4326 transform.
+/// Green's theorem gives both areas as an edge integral of (x - origin) dy,
+/// with an additional latitude-dependent surface density for the physical area.
+pub(crate) fn clipped_pixel_area(gt: &GeoTransform, polygon: &[(f64, f64)]) -> (f64, f64) {
+    let Some(&(origin, _)) = polygon.first() else {
+        return (0.0, 0.0);
+    };
+    let mut previous = polygon[polygon.len() - 1];
+    let mut fraction = 0.0;
+    let mut area = 0.0;
+    for &(x1, y1) in polygon {
+        let (x0, y0) = previous;
+        previous = (x1, y1);
+        let dy = y1 - y0;
+        if dy == 0.0 {
+            continue;
+        }
+        let left = x0 - origin;
+        let dx = x1 - x0;
+        fraction += (left + 0.5 * dx) * dy;
+        // Four-point Gauss-Legendre quadrature on segments of at most five
+        // degrees. Longitude varies linearly along each clipped edge.
+        let n = ((dy * gt.e).abs() / 5.0).ceil().max(1.0) as usize;
+        let half = 0.5 / n as f64;
+        for i in 0..n {
+            let mid = (2 * i + 1) as f64 * half;
+            for (node, weight) in [
+                (0.3399810435848563, 0.6521451548625461),
+                (0.8611363115940526, 0.3478548451374538),
+            ] {
+                for t in [mid - half * node, mid + half * node] {
+                    let lat = gt.e.mul_add(dy.mul_add(t, y0), gt.f0).to_radians();
+                    let d = 1.0 - WGS84_E2 * lat.sin().powi(2);
+                    area += dy * half * weight * dx.mul_add(t, left) * lat.cos() / (d * d);
+                }
+            }
+        }
+    }
+    let scale = WGS84_A.powi(2) * (1.0 - WGS84_E2) * gt.a.to_radians() * (-gt.e).to_radians();
+    (fraction.abs().min(1.0), area.abs() * scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_triangle_area_matches_latitude_strip_integration() {
+        for north in [5.0, 85.0] {
+            let gt = GeoTransform::from_gdal_array([179.0, 2.0, 0.0, north, 0.0, -10.0]);
+            // The diagonal splits the pixel into two equal planar fractions.
+            let triangle = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+            let (fraction, measured) = clipped_pixel_area(&gt, &triangle);
+            assert_eq!(fraction, 0.5);
+            // Independent Simpson integration of horizontal strip width times
+            // the meridional and prime-vertical radii of curvature.
+            let n = 1024;
+            let expected: f64 = (0..=n)
+                .map(|i| {
+                    let t = f64::from(i) / f64::from(n);
+                    let phi = (north - 10.0 * t).to_radians();
+                    let q = 1.0 - WGS84_E2 * phi.sin().powi(2);
+                    let meridian = WGS84_A * (1.0 - WGS84_E2) / q.powf(1.5);
+                    let parallel = WGS84_A * phi.cos() / q.sqrt();
+                    let weight = if i == 0 || i == n {
+                        1.0
+                    } else if i % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    weight * (2.0 * (1.0 - t)).to_radians() * parallel * meridian
+                })
+                .sum::<f64>()
+                * 10.0_f64.to_radians()
+                / f64::from(3 * n);
+            assert!((measured / expected - 1.0).abs() < 2e-13);
+            let (_, other) = clipped_pixel_area(&gt, &[(1.0, 1.0), (1.0, 0.0), (0.0, 1.0)]);
+            let full = wgs84_pixel_area(&gt, 0, 0).unwrap();
+            assert!(((measured + other) / full - 1.0).abs() < 2e-13);
+            if north > 80.0 {
+                assert!(measured < 0.45 * full);
+            }
+        }
+    }
 
     #[test]
     fn pixel_edges_tolerate_rounding_at_the_poles_only() {

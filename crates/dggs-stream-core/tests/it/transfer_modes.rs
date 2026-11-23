@@ -1117,3 +1117,77 @@ fn valid_coverage_uses_selected_area_even_for_unweighted_statistics() {
     cfg.transfer = TransferMode::AssignCenters;
     assert!(cfg.validate().is_err());
 }
+
+#[test]
+fn ground_area_overlay_conserves_masked_density_on_all_grids() {
+    use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    for (west, north) in [(179.995, 0.02), (14.0, 75.0)] {
+        let step = 0.005;
+        let (_tmp, path) = TestGeoTiffBuilder::new(4, 3)
+            .origin(west, north)
+            .pixel_size(step)
+            .create_f32_tempfile(|c, r| if c == r { -99.0 } else { (r + 1) as f32 });
+        let mut expected_area = 0.0;
+        let mut expected_sum = 0.0;
+        for r in 0..3 {
+            let top = north - f64::from(r) * step;
+            let area = 3.0 * wgs84_rectangle_area(0.0, top - step, step, top).unwrap();
+            expected_area += area;
+            expected_sum += area * f64::from(r + 1);
+        }
+        for grid in GridKind::ALL {
+            let mut cfg = config(grid, matched(grid, -1), TransferMode::OVERLAY);
+            cfg.custom_nodata = Some(-99.0);
+            let open = || GeoTiffStreamReader::open(&path).unwrap();
+            let mut count = 0.0;
+            let mut m2 = 0.0;
+            let mut sum = 0.0;
+            let mut partial = false;
+            let mut ids = std::collections::HashSet::new();
+            for row in scan_ground_area_overlay(open(), &cfg).unwrap() {
+                let (_, id, a) = row.unwrap();
+                assert!(ids.insert(id));
+                partial |= a.pixel_count() > 0.0 && a.pixel_count() < 1.0;
+                count += a.pixel_count();
+                m2 += a.retained_area_m2();
+                sum += a.area_weighted_sum();
+            }
+            assert!(partial, "{grid}");
+            assert!((count - 9.0).abs() < 1e-7, "{grid}: {count}");
+            assert!(
+                (m2 / expected_area - 1.0).abs() < 1e-8,
+                "{grid}: {m2} vs {expected_area}"
+            );
+            assert!(
+                (sum / expected_sum - 1.0).abs() < 1e-8,
+                "{grid}: {sum} vs {expected_sum}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ground_area_overlay_coverage_uses_mask_and_completed_cell_area() {
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/internal-mask.tif");
+    let mut cfg = config(GridKind::H3, 10, TransferMode::OVERLAY);
+    let run = |cfg: &MultiResolutionConfig| {
+        scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), cfg)
+            .unwrap()
+            .map(|row| {
+                let (_, id, a) = row.unwrap();
+                (id, a)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let before = run(&cfg);
+    cfg.valid_coverage_threshold = Some(1.0);
+    let after = run(&cfg);
+    assert!(!after.is_empty() && after.len() < before.len());
+    for (id, a) in after {
+        assert_eq!(a, before[&id]);
+    }
+    cfg.transfer = TransferMode::AssignCenters;
+    assert!(scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).is_err());
+}

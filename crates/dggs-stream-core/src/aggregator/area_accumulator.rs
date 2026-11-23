@@ -26,12 +26,19 @@ impl AreaAccumulator {
     /// calling this method, so the variance uses one observation per pixel.
     /// Invalid inputs leave the state unchanged.
     pub fn update_pixel(&mut self, value: f64, pixel_fraction: f64, area_m2: f64) -> Result<()> {
-        let area = pixel_fraction * area_m2;
+        self.update_overlap(value, pixel_fraction, pixel_fraction * area_m2)
+    }
+
+    /// Add the measured ground area of one pixel-cell intersection.
+    pub(crate) fn update_overlap(
+        &mut self,
+        value: f64,
+        pixel_fraction: f64,
+        area: f64,
+    ) -> Result<()> {
         if !value.is_finite()
             || !pixel_fraction.is_finite()
             || !(0.0 < pixel_fraction && pixel_fraction <= 1.0)
-            || !area_m2.is_finite()
-            || area_m2 <= 0.0
             || !area.is_finite()
             || area <= 0.0
             || !(self.pixel_count + pixel_fraction).is_finite()
