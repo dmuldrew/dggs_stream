@@ -107,6 +107,23 @@ pub(super) fn visit_overlaps<const SKIP_INTERIOR: bool>(
     width: i64,
     mut visit: impl FnMut(i64, i64, f64) -> bool,
 ) -> bool {
+    visit_pixel_shapes::<SKIP_INTERIOR>(polygon, rows, width, |c, r, clipped| {
+        let area = clipped.map_or(1.0, polygon_area);
+        if area > 0.0 {
+            visit(c, r, area.min(1.0))
+        } else {
+            true
+        }
+    })
+}
+
+/// None denotes a full interior square. The clipped vertices are valid during the callback.
+pub(super) fn visit_pixel_shapes<const SKIP_INTERIOR: bool>(
+    polygon: &[(f64, f64)],
+    rows: (i64, i64),
+    width: i64,
+    mut visit: impl FnMut(i64, i64, Option<&[(f64, f64)]>) -> bool,
+) -> bool {
     if polygon.len() < 3 {
         return true;
     }
@@ -142,15 +159,14 @@ pub(super) fn visit_overlaps<const SKIP_INTERIOR: bool>(
         };
         for c in first_col..last_col {
             if interior.contains(&c) {
-                if !visit(c, r, 1.0) {
+                if !visit(c, r, None) {
                     return false;
                 }
                 continue;
             }
             clip_half_plane(&slab, &mut right, true, c as f64, true);
             clip_half_plane(&right, &mut cell, true, (c + 1) as f64, false);
-            let area = polygon_area(&cell);
-            if area > 0.0 && !visit(c, r, area.min(1.0)) {
+            if cell.len() >= 3 && !visit(c, r, Some(&cell)) {
                 return false;
             }
         }

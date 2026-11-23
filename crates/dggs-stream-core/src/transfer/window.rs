@@ -24,11 +24,19 @@ pub struct RowWindow {
 /// two windows (or supplies an interpolation margin) is decoded once.
 #[derive(Default)]
 pub struct ChunkCache {
+    byte_budget: Option<usize>,
     mask: crate::raster::geotiff::MaskChunkCache,
     chunks: HashMap<u32, Arc<Vec<f64>>>,
 }
 
 impl ChunkCache {
+    pub(in crate::transfer) fn with_budget(bytes: usize) -> Self {
+        Self {
+            byte_budget: Some(bytes),
+            ..Self::default()
+        }
+    }
+
     /// Forget every chunk (when moving to another tile).
     pub fn clear(&mut self) {
         self.chunks.clear();
@@ -124,6 +132,11 @@ impl RowWindow {
         cache
             .chunks
             .retain(|index, _| chunk_rows.contains(&(index / layout.chunks_across)));
+        let mut cached_bytes = cache
+            .chunks
+            .values()
+            .map(|v| v.capacity() * size_of::<f64>())
+            .sum::<usize>();
         let nodata = selection.nodata.or(meta.nodata);
         let spp = usize::from(meta.samples_per_pixel.max(1));
 
@@ -161,6 +174,16 @@ impl RowWindow {
                     Some(decoded) => Arc::clone(decoded),
                     None => {
                         let chunk_len = bounds.width as usize * bounds.height as usize;
+                        let bytes = chunk_len * bands.len() * size_of::<f64>();
+                        if cache
+                            .byte_budget
+                            .is_some_and(|limit| bytes > limit.saturating_sub(cached_bytes))
+                        {
+                            // Previous chunks have already been copied into their windows.
+                            // An oversized chunk may be decoded only in isolation.
+                            cache.chunks.clear();
+                            cached_bytes = 0;
+                        }
                         let mut out = Vec::with_capacity(chunk_len * bands.len());
                         let present = |slot| tile.reader.band_chunk_present(index, slot);
                         if alpha_index.is_some_and(|a| !present(a))
@@ -201,6 +224,7 @@ impl RowWindow {
                                 }
                             }
                         }
+                        cached_bytes += out.capacity() * size_of::<f64>();
                         let decoded = Arc::new(out);
                         cache.chunks.insert(index, Arc::clone(&decoded));
                         decoded
@@ -340,5 +364,36 @@ mod tests {
             (Some(12.0), Some(21.0), None)
         );
         assert_eq!(DECODER_OPENS.get(), before + 1);
+    }
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::*;
+    use crate::raster::geotiff::GeoTiffStreamReader;
+
+    #[test]
+    fn decoded_tiles_within_a_window_respect_budget() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/internal-mask.tif");
+        let tile = TileDescriptor::new(0, GeoTiffStreamReader::open(path).unwrap(), None).unwrap();
+        let selection = BandSelection {
+            band: 1,
+            nodata: None,
+            apply_scale_offset: true,
+        };
+        let mut unbounded = ChunkCache::default();
+        let expected = RowWindow::load(&tile, selection, 0..8, &mut unbounded).unwrap();
+        assert!(unbounded.chunks.len() > 1);
+        for budget in [1, 2048] {
+            let mut cache = ChunkCache::with_budget(budget);
+            let actual = RowWindow::load(&tile, selection, 0..8, &mut cache).unwrap();
+            assert_eq!(cache.chunks.len(), 1);
+            assert!(actual
+                .values
+                .iter()
+                .zip(&expected.values)
+                .all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
     }
 }
