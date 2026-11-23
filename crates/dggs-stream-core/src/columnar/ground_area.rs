@@ -40,6 +40,13 @@ pub struct GroundAreaBatchReader {
     batch_size: usize,
 }
 impl GroundAreaBatchReader {
+    /// Start a ground-area scan of `reader` (see [`scan_ground_area`] for the
+    /// supported rasters and options).
+    ///
+    /// `projection` lists indices into [`ground_area_schema`]`(config.grid, true)`
+    /// in output order; index 7 is WKB. An empty projection yields batches with no
+    /// columns that still report `num_rows`, for row counts. Each batch holds at
+    /// most `batch_size` rows, and at most `limit` rows are returned in total.
     pub fn open(
         reader: GeoTiffStreamReader,
         config: &MultiResolutionConfig,
@@ -60,9 +67,12 @@ impl GroundAreaBatchReader {
             batch_size: batch_size.max(1),
         })
     }
+    /// The projected schema of every batch, in projection order.
     pub fn schema(&self) -> Arc<ColumnSchema> {
         self.schema.clone()
     }
+    /// Valid sample points dropped so far because their coordinate transform
+    /// failed or left the valid latitude/longitude domain.
     pub fn transform_failures(&self) -> u64 {
         self.scan.transform_failures()
     }

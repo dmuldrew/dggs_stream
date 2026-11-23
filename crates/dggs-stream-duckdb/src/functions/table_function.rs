@@ -311,7 +311,7 @@ impl RasterTable for ContinuousTable {
             let [tile] = mosaic.tiles.as_slice() else {
                 return Err("ground_area requires one raster".into());
             };
-            let mut projection = projected_columns;
+            let mut projection = without_row_id(projected_columns);
             if bind.common.emit_geom {
                 // The optional DuckDB geometry column uses the same bytes as WKB.
                 for col in &mut projection {
@@ -335,7 +335,7 @@ impl RasterTable for ContinuousTable {
             let [tile] = mosaic.tiles.as_slice() else {
                 return Err("bands requires one input raster".into());
             };
-            let mut projection = projected_columns;
+            let mut projection = without_row_id(projected_columns);
             if bind.common.emit_geom {
                 let geom = wide_schema(config.grid, bands, &config.quantiles)
                     .fields
@@ -529,6 +529,17 @@ impl RasterTable for ContinuousTable {
 ///
 /// # Safety
 /// The callback owns the live output chunk with the schema declared at bind.
+/// DuckDB 1.2.0 asks for only its synthetic row-ID column (`u64::MAX`) when a
+/// query needs no data columns, as in `COUNT(*)`. Batch readers validate indices
+/// against their schema, so drop it: an empty projection still yields batches
+/// that carry their row counts.
+fn without_row_id(projected_columns: Vec<usize>) -> Vec<usize> {
+    projected_columns
+        .into_iter()
+        .filter(|&col| col != u64::MAX as usize)
+        .collect()
+}
+
 unsafe fn scan_columns<I>(reader: &Mutex<I>, ctx: &ScanContext<'_>)
 where
     I: Iterator<Item = crate::error::Result<dggs_stream_core::columnar::RecordBatch>>,

@@ -1405,3 +1405,100 @@ fn long_categorical_rows_are_rounded() {
         assert_eq!(*r, (round(p.0), round(p.1)));
     }
 }
+
+/// Rows a ground-area scan returns for `projection`, scanning to the end.
+fn ground_area_row_count(path: &std::path::Path, projection: Vec<usize>) -> Result<usize, String> {
+    let named = HashMap::from([
+        ("resolution".to_string(), MockVal::Int(8)),
+        ("ground_area".to_string(), MockVal::Bool(true)),
+    ]);
+    scan_row_count(path, named, projection)
+}
+
+/// Rows a continuous scan with `named` options returns for `projection`.
+fn scan_row_count(
+    path: &std::path::Path,
+    named: HashMap<String, MockVal>,
+    projection: Vec<usize>,
+) -> Result<usize, String> {
+    install_mock_api();
+    let mut bind_ctx = MockBindContext::new(
+        vec![MockVal::Str(path.to_string_lossy().into_owned())],
+        named,
+    );
+    // SAFETY: the context is a live `MockBindContext`, which the installed mock C API
+    // treats as the bind info.
+    unsafe {
+        raster_h3_bind(&mut bind_ctx as *mut MockBindContext as duckdb_bind_info);
+    }
+    assert!(bind_ctx.error.is_none(), "{:?}", bind_ctx.error);
+    let width = projection.len().max(1);
+    let mut init_ctx = MockInitContext::new(bind_ctx.bind_data, projection);
+    let mut local_ctx = MockInitContext::new(bind_ctx.bind_data, Vec::new());
+    // SAFETY: the contexts are live `MockInitContext`s carrying the bind data installed
+    // by the bind callback, which is still owned by its bind context.
+    unsafe {
+        raster_h3_init(&mut init_ctx as *mut MockInitContext as duckdb_init_info);
+        raster_h3_init_local(&mut local_ctx as *mut MockInitContext as duckdb_init_info);
+    }
+    if let Some(error) = init_ctx.error.take() {
+        return Err(error);
+    }
+    let mut func_ctx = MockFuncContext {
+        bind_data: bind_ctx.bind_data,
+        init_data: init_ctx.init_data,
+        local_init_data: local_ctx.init_data,
+        error: None,
+    };
+    let mut rows = 0;
+    loop {
+        let mut chunk = MockDataChunk::new(width, 2048);
+        // SAFETY: the function context carries bind/init/local data installed above
+        // (still owned by their live contexts), and the chunk has one 2048-row mock
+        // vector per projected column.
+        unsafe {
+            raster_h3_scan(
+                &mut func_ctx as *mut MockFuncContext as duckdb_function_info,
+                &mut chunk as *mut MockDataChunk as duckdb_data_chunk,
+            );
+        }
+        if let Some(error) = func_ctx.error.take() {
+            return Err(error);
+        }
+        if chunk.size == 0 {
+            return Ok(rows);
+        }
+        rows += chunk.size;
+    }
+}
+
+#[test]
+fn ground_area_count_star_accepts_the_row_id_projection() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(32, 32)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .epsg(4326)
+        .create_f32_tempfile(|c, r| (c + r + 10) as f32);
+    let expected = ground_area_row_count(&path, vec![0]).unwrap();
+    assert!(expected > 0);
+    // DuckDB 1.2.0 projects only its synthetic row-ID column for COUNT(*).
+    let row_id = u64::MAX as usize;
+    assert_eq!(ground_area_row_count(&path, vec![row_id]), Ok(expected));
+    assert_eq!(ground_area_row_count(&path, Vec::new()), Ok(expected));
+}
+
+#[test]
+fn band_selection_count_star_accepts_the_row_id_projection() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dggs-stream-core/tests/fixtures/multiband-12-planar.tif");
+    let named = || {
+        HashMap::from([
+            ("resolution".to_string(), MockVal::Int(12)),
+            ("bands".to_string(), MockVal::Str("3,1".to_string())),
+        ])
+    };
+    let expected = scan_row_count(&path, named(), vec![0]).unwrap();
+    assert!(expected > 0);
+    let row_id = u64::MAX as usize;
+    assert_eq!(scan_row_count(&path, named(), vec![row_id]), Ok(expected));
+}

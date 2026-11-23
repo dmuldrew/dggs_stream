@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- DuckDB `COUNT(*)` over a `bands` scan no longer fails on DuckDB 1.2.0, which projects only its synthetic row-ID column for row counts.
+
 - Standard 8-bit JPEG/YCbCr GeoTIFF scans now report RGB band values. Earlier versions exposed the JPEG luminance and chroma components as three bands.
 
 - DuckDB direct Parquet exports write `compression := 'lz4'` as raw LZ4, which DuckDB can read back, and honour `compression := 'brotli'` instead of falling back to Snappy.
