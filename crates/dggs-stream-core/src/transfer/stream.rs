@@ -18,7 +18,7 @@ use crate::grid::{wrap_lon_180, GridKind};
 use crate::raster::mosaic::{MosaicReader, TileDescriptor};
 use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError};
 
-use super::clip::pixel_overlaps;
+use super::clip::visit_overlaps;
 use super::interp::{interpolate, Interpolation};
 use super::window::{BandSelection, ChunkCache, RowWindow};
 use super::TransferMode;
@@ -1169,8 +1169,7 @@ impl OverlayGeometry<'_> {
         let start = overlaps.len();
         let mut pieces = 0;
         let mut last_row = f64::NEG_INFINITY;
-        let mut overflow = false;
-        let projected = visit_cell_polygons(
+        let completed = visit_cell_polygons(
             self.grid,
             cell,
             self.tile,
@@ -1180,20 +1179,19 @@ impl OverlayGeometry<'_> {
                 for &(_, row) in polygon {
                     last_row = last_row.max(row);
                 }
-                pixel_overlaps(polygon, self.rows, self.width, |c, r, area| {
+                visit_overlaps::<true>(polygon, self.rows, self.width, |c, r, area| {
                     if area > 1e-12 {
                         if overlaps.len() == limit {
-                            overflow = true;
-                        } else {
-                            let pixel =
-                                (r - self.rows.0) as usize * self.width as usize + c as usize;
-                            overlaps.push((pixel as u32, area));
+                            return false;
                         }
+                        let pixel = (r - self.rows.0) as usize * self.width as usize + c as usize;
+                        overlaps.push((pixel as u32, area));
                     }
-                });
+                    true
+                })
             },
         );
-        if !projected || overflow {
+        if !completed {
             return None;
         }
         if pieces > 1 {
@@ -1228,7 +1226,7 @@ fn visit_cell_polygons(
     cell: u64,
     tile: &TileDescriptor,
     longitude_bounds: Option<(f64, f64)>,
-    mut visit: impl FnMut(&[(f64, f64)]),
+    mut visit: impl FnMut(&[(f64, f64)]) -> bool,
 ) -> bool {
     let mut ring = [(0.0, 0.0); 10];
     let n = grid.boundary_lng_lat(cell, &mut ring);
@@ -1266,7 +1264,9 @@ fn visit_cell_polygons(
             };
             *point = pixel;
         }
-        visit(&pixels[..n]);
+        if !visit(&pixels[..n]) {
+            return false;
+        }
     }
     true
 }

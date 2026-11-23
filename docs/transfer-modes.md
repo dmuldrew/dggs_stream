@@ -239,7 +239,8 @@ The overlay scan uses the shared aggregation pool for blocks with at least 64
 candidate cells and at most 512 estimated source pixels per cell. Coarse-cell
 fallbacks and callers already on a Rayon worker use the serial path.
 Prepared lists hold at most 128 × 1,024 pixel–area pairs (2 MiB of entries).
-A cell that exceeds its allowance is clipped again using the serial buffer.
+On the first overlap beyond that allowance, the worker stops visiting the cell.
+The serial reducer then clips the full cell using its reusable buffer.
 
 Build the release example to compare worker counts on a local TIFF:
 
