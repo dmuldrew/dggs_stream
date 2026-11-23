@@ -69,6 +69,72 @@ fn matched(grid: GridKind, offset: i32) -> u8 {
 }
 
 #[test]
+fn parallel_overlay_matches_serial_on_all_grids() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| ((3 * c + r) % 23) as f32);
+    for grid in GridKind::ALL {
+        for mass_preserve in [false, true] {
+            let mut cfg = config(
+                grid,
+                matched(grid, 0),
+                TransferMode::Overlay {
+                    weighted: true,
+                    mass_preserve,
+                },
+            );
+            cfg.custom_nodata = Some(0.0);
+            if !mass_preserve {
+                cfg.valid_coverage_threshold = Some(0.8);
+            }
+            let expected = scan(&path, &cfg);
+            assert!(expected.len() > 128);
+            cfg.aggregation_workers = Some(4);
+            assert_eq!(
+                scan(&path, &cfg),
+                expected,
+                "{grid} mass_preserve={mass_preserve}"
+            );
+        }
+    }
+}
+
+#[test]
+fn oversized_parallel_overlay_cells_retry_without_losing_or_repeating_pixels() {
+    // Narrow columns and tall rows: the mean cell area fits the worker gate,
+    // yet one cell can intersect over 1,024 columns within a single row.
+    let (_tmp, path) = TestGeoTiffBuilder::new(2048, 8)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size_xy(0.000002, 0.25)
+        .create_f32_tempfile(|c, r| (1 + (c + 3 * r) % 31) as f32);
+    let mut cfg = config(
+        GridKind::H3,
+        8,
+        TransferMode::Overlay {
+            weighted: false,
+            mass_preserve: false,
+        },
+    );
+    let touched = scan(&path, &cfg);
+    assert!(touched.len() > 128);
+    assert!(touched.values().any(|a| a.count > 1024.0));
+    cfg.aggregation_workers = Some(4);
+    assert_eq!(scan(&path, &cfg), touched);
+
+    for mass_preserve in [false, true] {
+        cfg.transfer = TransferMode::Overlay {
+            weighted: true,
+            mass_preserve,
+        };
+        cfg.aggregation_workers = Some(1);
+        let serial = scan(&path, &cfg);
+        cfg.aggregation_workers = Some(4);
+        assert_eq!(scan(&path, &cfg), serial);
+    }
+}
+
+#[test]
 fn sampling_fills_cells_finer_than_pixels_with_interpolated_values() {
     let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
         .origin(ORIGIN.0, ORIGIN.1)

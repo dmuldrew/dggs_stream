@@ -346,6 +346,7 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
   interpolates a value at each cell's centre; for exact area weighting, `transfer=overlay`
   splits each pixel across the cells it overlaps. Both stream the raster in bands of rows.
   Rust, CLI, DuckDB, and Python/Polars overlay scans can filter cells by the fraction of their selected overlap with valid data.
+  In Rust, setting `aggregation_workers` to two or more also clips fine-resolution overlay cells in parallel ([details](docs/transfer-modes.md#parallel-overlap-calculation)).
   See [Scan Options](docs/scan-options.md).
 
 See [Core Engineering Architecture](#core-engineering-architecture) for how each step is

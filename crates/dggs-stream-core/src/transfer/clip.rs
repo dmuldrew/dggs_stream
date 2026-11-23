@@ -92,19 +92,23 @@ pub fn pixel_overlaps(
     polygon: &[(f64, f64)],
     rows: (i64, i64),
     width: i64,
-    visit: impl FnMut(i64, i64, f64),
+    mut visit: impl FnMut(i64, i64, f64),
 ) {
-    visit_overlaps::<true>(polygon, rows, width, visit);
+    visit_overlaps::<true>(polygon, rows, width, |c, r, area| {
+        visit(c, r, area);
+        true
+    });
 }
 
-fn visit_overlaps<const SKIP_INTERIOR: bool>(
+/// Return false immediately when the visitor declines an overlap.
+pub(super) fn visit_overlaps<const SKIP_INTERIOR: bool>(
     polygon: &[(f64, f64)],
     rows: (i64, i64),
     width: i64,
-    mut visit: impl FnMut(i64, i64, f64),
-) {
+    mut visit: impl FnMut(i64, i64, f64) -> bool,
+) -> bool {
     if polygon.len() < 3 {
-        return;
+        return true;
     }
     let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
     for &(_, y) in polygon {
@@ -112,7 +116,7 @@ fn visit_overlaps<const SKIP_INTERIOR: bool>(
         max_y = max_y.max(y);
     }
     if !(min_y.is_finite() && max_y.is_finite()) {
-        return;
+        return true;
     }
     let first_row = (min_y.floor() as i64).max(rows.0);
     let last_row = (max_y.ceil() as i64).min(rows.1);
@@ -138,17 +142,20 @@ fn visit_overlaps<const SKIP_INTERIOR: bool>(
         };
         for c in first_col..last_col {
             if interior.contains(&c) {
-                visit(c, r, 1.0);
+                if !visit(c, r, 1.0) {
+                    return false;
+                }
                 continue;
             }
             clip_half_plane(&slab, &mut right, true, c as f64, true);
             clip_half_plane(&right, &mut cell, true, (c + 1) as f64, false);
             let area = polygon_area(&cell);
-            if area > 0.0 {
-                visit(c, r, area.min(1.0));
+            if area > 0.0 && !visit(c, r, area.min(1.0)) {
+                return false;
             }
         }
     }
+    true
 }
 
 #[cfg(test)]
@@ -159,6 +166,19 @@ mod tests {
         let mut out = Vec::new();
         pixel_overlaps(polygon, rows, width, |c, r, a| out.push((c, r, a)));
         out
+    }
+
+    #[test]
+    fn stopping_at_a_boundary_or_interior_overlap_ends_the_walk() {
+        let rect = [(0.5, 0.0), (4095.5, 0.0), (4095.5, 4.0), (0.5, 4.0)];
+        for stop_at in [1, 1025] {
+            let mut visits = 0;
+            assert!(!visit_overlaps::<true>(&rect, (0, 4), 4096, |_, _, _| {
+                visits += 1;
+                visits < stop_at
+            }));
+            assert_eq!(visits, stop_at);
+        }
     }
 
     #[test]
@@ -183,7 +203,10 @@ mod tests {
             for _ in 0..2 {
                 for rows in [(0, 15), (3, 7)] {
                     let mut reference = Vec::new();
-                    visit_overlaps::<false>(&shape, rows, 18, |c, r, a| reference.push((c, r, a)));
+                    visit_overlaps::<false>(&shape, rows, 18, |c, r, a| {
+                        reference.push((c, r, a));
+                        true
+                    });
                     assert_eq!(overlaps(&shape, rows, 18), reference);
                 }
                 shape.reverse();
