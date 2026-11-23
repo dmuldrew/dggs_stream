@@ -1191,3 +1191,25 @@ fn ground_area_overlay_coverage_uses_mask_and_completed_cell_area() {
     cfg.transfer = TransferMode::AssignCenters;
     assert!(scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).is_err());
 }
+
+#[test]
+fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(36000, 2)
+        .origin(-180.0, 0.01)
+        .pixel_size(0.01)
+        .create_f32_tempfile(|_, r| if r == 0 { 3.0 } else { 8.0 });
+    let mut cfg = config(GridKind::S2, 18, TransferMode::OVERLAY);
+    cfg.bbox = Some([179.994, 0.004, -179.994, 0.006]);
+    let rows = dggs_stream_core::transfer::scan_ground_area_overlay(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &cfg,
+    )
+    .unwrap();
+    let mut pixels = 0.0;
+    for row in rows {
+        let (_, _, a) = row.unwrap();
+        pixels += a.pixel_count();
+        assert!((a.area_stats().mean() - 3.0).abs() < 1e-12);
+    }
+    assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
+}

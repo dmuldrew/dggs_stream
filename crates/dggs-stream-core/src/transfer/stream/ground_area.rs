@@ -1,6 +1,6 @@
 //! Physical-area overlay for a single north-up WGS84 raster.
 use super::{
-    cells_in_bbox, periodic_longitude_bounds, plan_tile, visit_cell_polygons, Block,
+    block_bbox, cells_in_bbox, periodic_longitude_bounds, plan_tile, visit_cell_polygons, Block,
     ContainmentMode, COARSE_CELL_DIAMETER_KM,
 };
 use crate::aggregator::area_accumulator::AreaAccumulator;
@@ -18,6 +18,7 @@ use crate::transfer::clip::visit_pixel_shapes;
 use crate::transfer::window::{BandSelection, ChunkCache, RowWindow};
 use crate::transfer::TransferMode;
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 /// Stream (resolution, cell ID, statistics) from the straight-edged cell
 /// polygons used by weighted overlay. Set `config.transfer = TransferMode::OVERLAY`.
@@ -45,15 +46,52 @@ pub fn scan_ground_area_overlay(
         return Err(DggsStreamError::InvalidParameter("ground-area overlay requires weighted continuous overlay with omitted NoData and no mass normalization, supersampling, compaction, quantiles, histogram or formula".into()));
     }
     let tile = TileDescriptor::new(0, reader, config.custom_crs.as_deref())?;
+    let meta = &tile.reader.metadata;
+    let gt = &meta.geotransform;
+    let mut columns = Vec::<Range<u32>>::new();
+    let mut rows = 0..meta.height;
+    if let Some(bbox) = config.bbox {
+        // The transform is north-up. Latitude decreases monotonically and
+        // wrapped longitude can select two disjoint runs across the seam.
+        let latitude = |r: u32| gt.pixel_to_coord(0.0, f64::from(r) + 0.5).1;
+        let mut selected = rows.clone().filter(|&r| {
+            let lat = latitude(r);
+            lat >= bbox[1] && lat <= bbox[3]
+        });
+        rows = selected.next().map_or(0..0, |first| {
+            first..selected.next_back().unwrap_or(first) + 1
+        });
+        for c in 0..meta.width {
+            let lon = gt.pixel_to_coord(f64::from(c) + 0.5, 0.0).0;
+            if is_point_in_bbox(wrap_lon_180(lon), bbox[1], Some(bbox)) {
+                match columns.last_mut() {
+                    Some(run) if run.end == c => run.end += 1,
+                    _ => columns.push(c..c + 1),
+                }
+            }
+        }
+    } else {
+        columns.push(0..meta.width);
+    }
     let mut blocks = Vec::new();
     for &res in &config.resolutions {
         if config.grid.spec().max_cell_diameter_km(res) > COARSE_CELL_DIAMETER_KM {
             return Err(DggsStreamError::InvalidParameter("ground-area overlay requires a valid resolution with polygon clipping (cell diameter bound at most 500 km)".into()));
         }
-        plan_tile(config.grid, config.transfer, res, 0, &tile, 1, &mut blocks);
+        if !rows.is_empty() && !columns.is_empty() {
+            let mut bands = Vec::new();
+            plan_tile(config.grid, config.transfer, res, 0, &tile, 1, &mut bands);
+            for mut block in bands {
+                block.rows = block.rows.start.max(rows.start)..block.rows.end.min(rows.end);
+                if !block.rows.is_empty() {
+                    block.last_of_tile = block.rows.end == rows.end;
+                    blocks.push(block);
+                }
+            }
+        }
     }
     let config = config.clone();
-    let mut cache = ChunkCache::default();
+    let mut cache = ChunkCache::with_budget(config.decode_budget_bytes);
     let mut pending = BTreeMap::new();
     let mut ready = Vec::new().into_iter();
     let mut blocks = blocks.into_iter();
@@ -64,7 +102,7 @@ pub fn scan_ground_area_overlay(
                 return Some(Ok(row));
             }
             let block = blocks.next()?;
-            match scan_block(&tile, &config, &block, &mut cache, &mut pending) {
+            match scan_block(&tile, &config, &block, &columns, &mut cache, &mut pending) {
                 Ok(rows) => ready = rows.into_iter(),
                 Err(err) => {
                     failed = true;
@@ -87,12 +125,10 @@ fn scan_block(
     tile: &TileDescriptor,
     config: &MultiResolutionConfig,
     block: &Block,
+    columns: &[Range<u32>],
     cache: &mut ChunkCache,
     pending: &mut BTreeMap<u64, Cell>,
 ) -> Result<Vec<(u8, u64, AreaAccumulator)>> {
-    let bbox = block
-        .bbox
-        .ok_or_else(|| DggsStreamError::InvalidParameter("invalid WGS84 overlay extent".into()))?;
     let window = RowWindow::load(
         tile,
         BandSelection {
@@ -112,7 +148,24 @@ fn scan_block(
     let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
     let longitude = periodic_longitude_bounds(tile);
     let mut overlaps = Vec::new();
-    for id in cells_in_bbox(config.grid, bbox, block.resolution, ContainmentMode::Covers)? {
+    let mut candidates = Vec::new();
+    for cols in columns {
+        let bbox = block_bbox(config.grid, block.resolution, tile, &block.rows, cols, true)
+            .ok_or_else(|| {
+                DggsStreamError::InvalidParameter("invalid WGS84 overlay extent".into())
+            })?;
+        candidates.extend(cells_in_bbox(
+            config.grid,
+            bbox,
+            block.resolution,
+            ContainmentMode::Covers,
+        )?);
+    }
+    if columns.len() > 1 {
+        candidates.sort_unstable();
+        candidates.dedup();
+    }
+    for id in candidates {
         let mut end = i64::MIN;
         let mut pieces = 0;
         let completed = visit_cell_polygons(config.grid, id, tile, longitude, |polygon| {
@@ -186,4 +239,55 @@ fn scan_block(
         false
     });
     Ok(ready)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cells_crossing_a_window_boundary_are_emitted_once() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/internal-mask.tif");
+        let tile = TileDescriptor::new(0, GeoTiffStreamReader::open(path).unwrap(), None).unwrap();
+        let mut config = MultiResolutionConfig::single(10);
+        config.transfer = TransferMode::OVERLAY;
+        let width = tile.reader.metadata.width;
+        let height = tile.reader.metadata.height;
+        let run = |ends: &[u32]| {
+            let mut cells = BTreeMap::new();
+            let mut pending = BTreeMap::new();
+            let mut cache = ChunkCache::with_budget(256);
+            let mut start = 0;
+            for &end in ends {
+                let block = Block {
+                    resolution: 10,
+                    tile: 0,
+                    rows: start..end,
+                    cols: 0..width,
+                    bbox: None,
+                    last_of_tile: end == height,
+                };
+                for (_, id, stats) in scan_block(
+                    &tile,
+                    &config,
+                    &block,
+                    std::slice::from_ref(&(0..width)),
+                    &mut cache,
+                    &mut pending,
+                )
+                .unwrap()
+                {
+                    assert!(cells.insert(id, stats).is_none());
+                }
+                if end < height {
+                    assert!(!pending.is_empty());
+                }
+                start = end;
+            }
+            assert!(pending.is_empty());
+            cells
+        };
+        assert_eq!(run(&[8, height]), run(&[height]));
+    }
 }
