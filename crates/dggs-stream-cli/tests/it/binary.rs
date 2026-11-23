@@ -603,3 +603,51 @@ fn multiband_parquet_refuses_repeated_columns() {
     );
     assert!(!out.exists());
 }
+
+#[test]
+fn ground_area_file_output_is_committed_only_after_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("cells");
+    let (_file, raster) = gradient_tif();
+    let corrupt = corrupt_strip_geotiff();
+    for sub in ["jsonl", "ipc"] {
+        std::fs::write(&output, b"previous result").unwrap();
+        for (input, crs) in [(&*raster, "EPSG:3857"), (corrupt.path(), "EPSG:4326")] {
+            run_err(
+                &[
+                    sub,
+                    s(input),
+                    "--ground-area",
+                    "--crs",
+                    crs,
+                    "-o",
+                    s(&output),
+                ],
+                "Error:",
+            );
+            assert_eq!(std::fs::read(&output).unwrap(), b"previous result");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+        let result = run_ok(&[
+            sub,
+            s(&raster),
+            "--ground-area",
+            "--crs",
+            "EPSG:4326",
+            "--profile",
+            "--limit",
+            "1",
+            "-o",
+            s(&output),
+        ]);
+        assert!(String::from_utf8_lossy(&result.stderr).contains("rows serialized 1,"));
+        let bytes = std::fs::read(&output).unwrap();
+        if sub == "jsonl" {
+            let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(row["retained_area_m2"].as_f64().unwrap() > 0.0);
+        } else {
+            let (_, batches) = read_ipc_stream(&mut bytes.as_slice()).unwrap();
+            assert_eq!(batches[0].num_rows, 1);
+        }
+    }
+}

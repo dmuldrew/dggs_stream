@@ -152,6 +152,20 @@ impl PyRasterScanner {
         if let Some(spec) = &self.config.histogram {
             mr_cfg.set_histogram(spec.clone())?;
         }
+        if (self.config.aggregation_budget_bytes.is_some()
+            || self.config.decode_budget_bytes.is_some())
+            && mr_cfg.transfer != dggs_stream_core::transfer::TransferMode::AssignCenters
+        {
+            return Err(DggsStreamError::InvalidParameter(
+                "aggregation_budget_mb and decode_budget_mb require transfer=assign_centers".into(),
+            ));
+        }
+        if let Some(bytes) = self.config.aggregation_budget_bytes {
+            mr_cfg.aggregation_budget_bytes = bytes;
+        }
+        if let Some(bytes) = self.config.decode_budget_bytes {
+            mr_cfg.decode_budget_bytes = bytes;
+        }
         mr_cfg.profile = self.config.profile.clone();
         self.config.apply_cell_options(&mut mr_cfg);
         mr_cfg.strict_transforms = self.config.strict_transforms;

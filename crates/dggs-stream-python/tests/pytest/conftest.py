@@ -40,12 +40,12 @@ def write_geotiff(
 ) -> None:
     """Uncompressed little-endian GeoTIFF (EPSG:4326 GeoKeys) of one or two bands.
 
-    `dtype` is `"f32"` (IEEE float) or `"u8"`; `value(col, row)` gives each pixel, as a
+    `dtype` is `"f16"` or `"f32"` (IEEE float), or `"u8"`; `value(col, row)` gives each pixel, as a
     tuple of `bands` values when `bands` is 2 (stored pixel-interleaved). The image is one
     strip unless `rows_per_strip` is set.
     """
     assert bands in (1, 2), "per-sample tags of more than two bands do not fit inline"
-    fmt, bits, sample_format = {"f32": ("f", 32, 3), "u8": ("B", 8, 1)}[dtype]
+    fmt, bits, sample_format = {"f16": ("e", 16, 3), "f32": ("f", 32, 3), "u8": ("B", 8, 1)}[dtype]
     values = [value(c, r) for r in range(height) for c in range(width)]
     if bands > 1:
         values = [v for px in values for v in px]

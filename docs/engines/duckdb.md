@@ -763,3 +763,12 @@ README's [Troubleshooting](../../README.md#troubleshooting--common-pitfalls) sec
 | `tests/it/package_extension.rs` | Extension footer packaging |
 | `tests/it/multi_engine_e2e.rs` | DuckDB results compared with the other engines when `duckdb` is on `PATH` |
 | `cargo test -p dggs-stream-duckdb` | Crate unit tests and its `tests/it` binary (uses the core `test-hooks` feature) |
+
+### Ground-area-weighted center scans
+
+For one north-up, single-band EPSG:4326 raster, `ground_area := true` assigns each valid pixel to the cell containing its center and weights its value by its ellipsoidal footprint. The four statistics are `pixel_count`, `retained_area_m2`, `area_weighted_sum` (value × m²) and `area_weighted_mean` (original units). `min_count` filters by pixel count. NoData is omitted. Cell IDs, resolution and WKB are available on all four grids.
+
+```sql
+SELECT h3_hex, pixel_count, retained_area_m2, area_weighted_mean
+FROM raster_h3('temperature.tif', resolution := 8, ground_area := true);
+```

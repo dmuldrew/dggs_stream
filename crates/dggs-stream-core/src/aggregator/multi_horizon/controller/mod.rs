@@ -299,7 +299,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
 
     /// Copy the stream's stage totals into its runtime profile. Called when the scan
     /// ends (and by the stream wrappers when dropped early); later calls do nothing.
-    pub(crate) fn publish_profile(&mut self) {
+    pub fn publish_profile(&mut self) {
         use crate::run_profile::{Counter, Phase};
         let Some(profile) = &self.run_profile else {
             return;

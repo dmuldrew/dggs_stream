@@ -39,7 +39,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--format <wide\|long>` | `ipc`, `jsonl` | Categorical layout (default `wide`) |
 | `--crs <CRS>` (alias `--source-crs`) | all | Source CRS override, e.g. `EPSG:4326` |
 | `--nodata <FLOAT>` | all | NoData override |
-| `--nodata-policy <omit\|emit>` | all | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
+| `--nodata-policy <omit\|emit>` | all (ground-area scans require `omit`) | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
 | `--transfer <assign_centers\|interpolate\|overlay>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)) |
@@ -53,6 +53,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--profile` | all | Print a runtime profile on stderr ([Scan Options](../scan-options.md#runtime-profile)) |
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
+| `--ground-area` | `ipc`, `jsonl` | Compute area-weighted continuous statistics for one single-band, north-up EPSG:4326 raster. |
 | `--bands <list or all>` | `ipc`, `jsonl`, `parquet` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,wkb,band_3_mean,band_1_count`. |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl`, multi-band `parquet` | Column projection, in the given order. Include `wkb` when projecting GeoParquet. |
 | `--limit <N>` | `ipc`, `jsonl`, multi-band `parquet` | Maximum rows |
@@ -325,3 +326,20 @@ The binary is a thin wrapper over [`src/lib.rs`](../../crates/dggs-stream-cli/sr
 cargo test -p dggs-stream-cli        # argument parsing, IPC round trip, JSONL, plan/partition/merge vs one scan
 cargo test -p dggs_stream --test it multi_engine_e2e # runs the built binary for all four subcommands
 ```
+
+### Ground-area-weighted statistics
+
+For a north-up, single-band WGS84 raster, this command assigns each valid pixel
+to the grid cell containing its center. Its ellipsoidal footprint supplies the
+weight. The same option works with H3, A5, S2 and HEALPix.
+
+```sh
+dggs-stream-cli jsonl temperature.tif --ground-area --grid h3 -r 8 \
+  --columns h3_hex,pixel_count,retained_area_m2,area_weighted_mean
+```
+
+Each row includes the grid-specific index and hex ID, resolution, valid pixel
+count, retained area in square metres, area-weighted sum (value × m²), and
+area-weighted mean (original units). The mean divides the weighted sum by
+the retained area. Ground-area scans require `--nodata-policy omit` (the default). NoData pixels contribute neither count nor area. Use
+`--ground-area` with `ipc` to stream the same columns in binary form.
