@@ -159,6 +159,9 @@ fn scan_block(
             apply_scale_offset: config.apply_scale_offset,
         },
         block.rows.clone(),
+        // Not a partitioned scan: decode the tile's full width, as before windows
+        // could be limited to a partition's columns.
+        0..tile.reader.metadata.width,
         cache,
         config.profile.as_deref(),
     )?;

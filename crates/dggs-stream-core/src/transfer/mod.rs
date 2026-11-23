@@ -17,6 +17,9 @@
 //! open across band edges, so memory stays flat in the raster's height.
 
 mod clip;
+mod partial;
+pub(crate) use partial::OverlayPartial;
+pub(crate) use stream::Filters;
 mod interp;
 mod stream;
 mod window;

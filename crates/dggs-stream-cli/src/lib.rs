@@ -342,6 +342,13 @@ fn stream_partition<W: Write>(
     if opts.limit.is_some() {
         return refuse("cannot be combined with --limit (a partition holds parts of cells)");
     }
+    if config.transfer != TransferMode::AssignCenters {
+        return refuse(
+            "supports center assignment only: partition files do not record the transfer \
+             mode, so `merge` could mix them (weighted overlay partitions come from Python \
+             and Spark)",
+        );
+    }
     if opts.categorical && opts.categorical_format == CategoricalFormat::Long {
         return refuse("needs the wide categorical format");
     }

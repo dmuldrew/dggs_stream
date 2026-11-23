@@ -13,6 +13,7 @@
 mod advance;
 mod batch;
 mod construct;
+pub(crate) use construct::check_bands_exist;
 mod pipeline;
 
 #[cfg(test)]
