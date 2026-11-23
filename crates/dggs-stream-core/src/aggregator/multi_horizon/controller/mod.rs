@@ -21,6 +21,7 @@ mod pipeline_tests;
 mod tests;
 
 pub use pipeline::inline_worker_bytes_per_sample;
+pub(crate) use pipeline::shared_aggregation_pool;
 
 use std::collections::HashMap;
 use std::sync::Arc;

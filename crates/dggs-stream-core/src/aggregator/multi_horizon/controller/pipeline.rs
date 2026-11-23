@@ -148,7 +148,7 @@ impl ExactSizeIterator for WindowJobs<'_> {}
 /// Dedicated aggregation pool of `threads` workers, shared by all live
 /// streams requesting the same size so concurrent queries do not each spawn
 /// their own threads.
-pub(super) fn shared_aggregation_pool(threads: usize) -> Result<Arc<rayon::ThreadPool>> {
+pub(crate) fn shared_aggregation_pool(threads: usize) -> Result<Arc<rayon::ThreadPool>> {
     static POOLS: OnceLock<Mutex<HashMap<usize, Weak<rayon::ThreadPool>>>> = OnceLock::new();
     let mut pools = POOLS
         .get_or_init(Default::default)
