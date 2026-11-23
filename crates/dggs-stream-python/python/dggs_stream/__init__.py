@@ -528,6 +528,8 @@ def _encode_columns(columns: Optional[Sequence[str]]) -> Optional[bytes]:
 #: Scan options sent to the `_v2` entry points as one JSON object, beyond the original
 #: positional C-ABI arguments. Every one defaults to `None` (unset).
 _SCAN_OPTIONS = (
+    "aggregation_budget_mb",
+    "decode_budget_mb",
     "grid",
     "band",
     "bands",
@@ -559,6 +561,8 @@ _SCAN_OPTIONS = (
 )
 
 _INT_OPTIONS = (
+    "aggregation_budget_mb",
+    "decode_budget_mb",
     "band",
     "nir_band",
     "red_band",
@@ -795,6 +799,8 @@ class RasterArrowStream:
         grid: Optional[str] = None,
         band: Optional[int] = None,
         bands: Optional[Sequence[int]] = None,
+        aggregation_budget_mb: Optional[int] = None,
+        decode_budget_mb: Optional[int] = None,
         sampling: Optional[str] = None,
         overlap_rule: Optional[str] = None,
         spectral_formula: Optional[str] = None,
@@ -1105,6 +1111,8 @@ def scan_raster(
     grid: Optional[str] = None,
     band: Optional[int] = None,
     bands: Optional[Sequence[int]] = None,
+    aggregation_budget_mb: Optional[int] = None,
+    decode_budget_mb: Optional[int] = None,
     sampling: Optional[str] = None,
     overlap_rule: Optional[str] = None,
     spectral_formula: Optional[str] = None,
@@ -1160,6 +1168,9 @@ def scan_raster(
     - `band`: 1-indexed band to aggregate (default 1).
     - `bands`: select ordered bands from one raster, e.g. `[3, 1]` for
       `band_3_mean` and `band_1_mean` in a continuous center-assignment scan.
+    - `aggregation_budget_mb`, `decode_budget_mb`: positive whole MiB for center
+      assignment. Aggregation may spill to disk. The decode budget controls prefetched
+      sample buffers and permits one oversized chunk to proceed alone.
     - `sampling`: sub-pixel sampling pattern, one of `center` (default), `5point`,
       `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`.
     - `overlap_rule`: how overlapping mosaic tiles are resolved: `cutline` (default),
