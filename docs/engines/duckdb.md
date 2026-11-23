@@ -772,3 +772,20 @@ For one north-up, single-band EPSG:4326 raster, `ground_area := true` assigns ea
 SELECT h3_hex, pixel_count, retained_area_m2, area_weighted_mean
 FROM raster_h3('temperature.tif', resolution := 8, ground_area := true);
 ```
+
+Add `transfer := 'overlay'` to integrate partial pixels. The overlay reports the
+sum of valid pixel fractions in `pixel_count` and the ellipsoidal intersection
+area in `retained_area_m2`. A coverage threshold compares valid square metres
+with the cell's selected raster-overlap square metres. For population density
+per km², divide the area-weighted sum by one million to obtain population:
+
+```sql
+SELECT h3_index, area_weighted_sum / 1000000 AS population
+FROM raster_h3('population_per_km2.tif', resolution := 8,
+               ground_area := true, transfer := 'overlay');
+```
+
+Ground-area overlay uses one aggregation worker regardless of the SQL `workers` setting.
+The overlay follows straight segments between grid boundary vertices. It requires
+a resolution with a maximum cell diameter of at most 500 km and errors on
+pole-containing candidate cells. See the [core geometry and units](core.md#ground-area-weighted-overlay).

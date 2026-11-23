@@ -208,6 +208,14 @@ impl RasterTable for ContinuousTable {
 
         let ground_area = bind.get_named_bool("ground_area").unwrap_or(false);
         let bands = if ground_area {
+            use dggs_stream_core::transfer::TransferMode;
+            if !matches!(
+                common.execution.transfer,
+                TransferMode::AssignCenters | TransferMode::OVERLAY
+            ) {
+                bind.set_error("ground_area requires center assignment or weighted overlay without mass_preserve");
+                return None;
+            }
             if common.resolved_paths.len() != 1
                 || bind.get_named_string("bands").is_some()
                 || bind.get_named_string("formula").is_some()

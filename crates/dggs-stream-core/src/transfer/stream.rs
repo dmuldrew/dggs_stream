@@ -1,6 +1,7 @@
 //! The streaming driver of the `interpolate` and `overlay` transfer modes.
 
 mod ground_area;
+pub(crate) use ground_area::ground_area_overlay_tile;
 pub use ground_area::scan_ground_area_overlay;
 
 use rayon::prelude::*;
