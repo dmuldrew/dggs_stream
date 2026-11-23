@@ -333,53 +333,59 @@ pub fn scan_ground_area(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,
 ) -> Result<MultiHorizonStreamer<GroundAreaKernel>> {
-    config.validate()?;
-    let metadata = &reader.metadata;
-    // Read an override exactly as the CRS resolver will. Require code 4326
-    // itself, since the resolver maps NAD83 to the same identity transform.
-    let wgs84 = match config.custom_crs.as_deref() {
-        Some(crs) => crate::crs::transformer::parse_epsg_code(crs) == Some(4326),
-        None => metadata.epsg == Some(4326),
-    };
-    if config.partition.is_some() {
-        return Err(DggsStreamError::InvalidParameter(
-            "ground-area scans do not support partitioned scans".into(),
-        ));
-    }
-    if !wgs84
-        || metadata.samples_per_pixel != 1
-        || metadata.alpha_sample.is_some()
-        || config.band != 1
-    {
-        return Err(DggsStreamError::InvalidParameter(
-            "ground-area scans require a single-band EPSG:4326 raster".into(),
-        ));
-    }
-    wgs84_pixel_area(&metadata.geotransform, 0, 0)?;
-    wgs84_pixel_area(
-        &metadata.geotransform,
-        metadata.width.saturating_sub(1) as usize,
-        metadata.height.saturating_sub(1) as usize,
-    )?;
-    if !matches!(config.sampling.points.as_slice(), [p] if p.dx == 0.5 && p.dy == 0.5 && p.weight == 1.0)
-        || config.transfer != crate::transfer::TransferMode::AssignCenters
-        || config.track_quantiles()
-        || config.histogram.is_some()
-        || config.spectral_formula.is_some()
-        || config.nodata_policy != crate::aggregator::output_policy::NodataPolicy::Omit
-    {
-        return Err(DggsStreamError::InvalidParameter("ground-area scans require center assignment and omitted NoData, with no spectral formula, quantiles or histogram".into()));
-    }
-    MultiHorizonStreamer::new(
-        reader,
-        config,
-        GroundAreaKernel {
+    let kernel = GroundAreaKernel::for_reader(&reader, config)?;
+    MultiHorizonStreamer::new(reader, config, kernel)
+}
+
+impl GroundAreaKernel {
+    pub(crate) fn for_reader(
+        reader: &GeoTiffStreamReader,
+        config: &MultiResolutionConfig,
+    ) -> Result<Self> {
+        config.validate()?;
+        let metadata = &reader.metadata;
+        // Read an override exactly as the CRS resolver will. Require code 4326
+        // itself, since the resolver maps NAD83 to the same identity transform.
+        let wgs84 = match config.custom_crs.as_deref() {
+            Some(crs) => crate::crs::transformer::parse_epsg_code(crs) == Some(4326),
+            None => metadata.epsg == Some(4326),
+        };
+        if config.partition.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "ground-area scans do not support partitioned scans".into(),
+            ));
+        }
+        if !wgs84
+            || metadata.samples_per_pixel != 1
+            || metadata.alpha_sample.is_some()
+            || config.band != 1
+        {
+            return Err(DggsStreamError::InvalidParameter(
+                "ground-area scans require a single-band EPSG:4326 raster".into(),
+            ));
+        }
+        wgs84_pixel_area(&metadata.geotransform, 0, 0)?;
+        wgs84_pixel_area(
+            &metadata.geotransform,
+            metadata.width.saturating_sub(1) as usize,
+            metadata.height.saturating_sub(1) as usize,
+        )?;
+        if !matches!(config.sampling.points.as_slice(), [p] if p.dx == 0.5 && p.dy == 0.5 && p.weight == 1.0)
+            || config.transfer != crate::transfer::TransferMode::AssignCenters
+            || config.track_quantiles()
+            || config.histogram.is_some()
+            || config.spectral_formula.is_some()
+            || config.nodata_policy != crate::aggregator::output_policy::NodataPolicy::Omit
+        {
+            return Err(DggsStreamError::InvalidParameter("ground-area scans require center assignment and omitted NoData, with no spectral formula, quantiles or histogram".into()));
+        }
+        Ok(Self {
             min_count: config.min_count,
             min_mean: config.min_mean,
             max_mean: config.max_mean,
             error: Default::default(),
-        },
-    )
+        })
+    }
 }
 
 #[cfg(test)]
