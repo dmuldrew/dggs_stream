@@ -23,6 +23,7 @@ mod window;
 
 pub use clip::{pixel_overlaps, polygon_area};
 pub use interp::{interpolate, Interpolation};
+pub(crate) use stream::ground_area_overlay_tile;
 pub use stream::{scan_ground_area_overlay, TransferAccumulator, TransferStream};
 pub use window::RowWindow;
 

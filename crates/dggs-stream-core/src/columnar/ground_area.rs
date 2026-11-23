@@ -1,6 +1,8 @@
 //! Projected ground-area batches shared by SQL and CLI streams.
 use super::{ArrowDataType, ColumnArray, ColumnField, ColumnSchema, RecordBatch};
-use crate::aggregator::multi_horizon::area_continuous::{scan_ground_area, GroundAreaKernel};
+use crate::aggregator::multi_horizon::area_continuous::{
+    scan_ground_area, GroundAreaKernel, GroundAreaRecord,
+};
 use crate::aggregator::multi_horizon::{MultiHorizonStreamer, MultiResolutionConfig};
 use crate::aggregator::output_policy::OutputPolicy;
 use crate::encoding::{cell_index_to_wkb, WKB_BUF_LEN};
@@ -28,9 +30,23 @@ pub fn ground_area_schema(grid: GridKind, with_wkb: bool) -> ColumnSchema {
     ColumnSchema::new(fields)
 }
 
+enum GroundAreaScan {
+    Center(Box<MultiHorizonStreamer<GroundAreaKernel>>),
+    Overlay(Box<dyn Iterator<Item = Result<GroundAreaRecord>> + Send>),
+}
+
+impl GroundAreaScan {
+    fn fetch_next_batch(&mut self, limit: usize) -> Result<Vec<GroundAreaRecord>> {
+        match self {
+            Self::Center(scan) => scan.fetch_next_batch(limit),
+            Self::Overlay(rows) => rows.take(limit).collect(),
+        }
+    }
+}
+
 /// Bounded batches of completed, area-weighted cells in projection order.
 pub struct GroundAreaBatchReader {
-    scan: MultiHorizonStreamer<GroundAreaKernel>,
+    scan: GroundAreaScan,
     grid: GridKind,
     projection: Vec<usize>,
     schema: Arc<ColumnSchema>,
@@ -56,7 +72,11 @@ impl GroundAreaBatchReader {
         limit: Option<usize>,
     ) -> Result<Self> {
         Self::open_with(
-            || scan_ground_area(reader, config),
+            || {
+                Ok(GroundAreaScan::Center(Box::new(scan_ground_area(
+                    reader, config,
+                )?)))
+            },
             config,
             projection,
             batch_size,
@@ -64,7 +84,8 @@ impl GroundAreaBatchReader {
         )
     }
 
-    /// Use a single-raster mosaic already prepared with this scan's bbox and source CRS.
+    /// Use a single-raster mosaic prepared with this scan's bbox and source CRS.
+    /// Supports center assignment and weighted ground-area overlay.
     pub fn open_mosaic(
         mosaic: Arc<MosaicReader>,
         config: &MultiResolutionConfig,
@@ -79,8 +100,24 @@ impl GroundAreaBatchReader {
                         "ground_area requires one raster".into(),
                     ));
                 };
+                if matches!(
+                    config.transfer,
+                    crate::transfer::TransferMode::Overlay { .. }
+                ) {
+                    let rows = crate::transfer::ground_area_overlay_tile(tile.clone(), config)?
+                        .map(|row| {
+                            row.map(|(resolution, cell_id, accumulator)| GroundAreaRecord {
+                                resolution,
+                                cell_id,
+                                accumulator,
+                            })
+                        });
+                    return Ok(GroundAreaScan::Overlay(Box::new(rows)));
+                }
                 let kernel = GroundAreaKernel::for_reader(&tile.reader, config)?;
-                MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)
+                Ok(GroundAreaScan::Center(Box::new(
+                    MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?,
+                )))
             },
             config,
             projection,
@@ -90,7 +127,7 @@ impl GroundAreaBatchReader {
     }
 
     fn open_with(
-        open_scan: impl FnOnce() -> Result<MultiHorizonStreamer<GroundAreaKernel>>,
+        open_scan: impl FnOnce() -> Result<GroundAreaScan>,
         config: &MultiResolutionConfig,
         projection: Vec<usize>,
         batch_size: usize,
@@ -116,7 +153,10 @@ impl GroundAreaBatchReader {
     /// Valid sample points dropped so far because their coordinate transform
     /// failed or left the valid latitude/longitude domain.
     pub fn transform_failures(&self) -> u64 {
-        self.scan.transform_failures()
+        match &self.scan {
+            GroundAreaScan::Center(scan) => scan.transform_failures(),
+            GroundAreaScan::Overlay(_) => 0,
+        }
     }
 }
 impl Iterator for GroundAreaBatchReader {
@@ -216,7 +256,9 @@ impl Iterator for GroundAreaBatchReader {
 }
 impl Drop for GroundAreaBatchReader {
     fn drop(&mut self) {
-        self.scan.publish_profile();
+        if let GroundAreaScan::Center(scan) = &mut self.scan {
+            scan.publish_profile();
+        }
         if let Some(p) = &self.profile {
             p.stream_finished();
         }

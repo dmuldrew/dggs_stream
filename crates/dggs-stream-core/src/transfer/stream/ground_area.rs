@@ -14,6 +14,7 @@ use crate::grid::wrap_lon_180;
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::ground_area::{clipped_pixel_area, wgs84_pixel_area};
 use crate::raster::mosaic::TileDescriptor;
+use crate::run_profile::{Counter, Phase, PhaseTimer};
 use crate::transfer::clip::visit_pixel_shapes;
 use crate::transfer::window::{BandSelection, ChunkCache, RowWindow};
 use crate::transfer::TransferMode;
@@ -31,8 +32,16 @@ pub fn scan_ground_area_overlay(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,
 ) -> Result<impl Iterator<Item = Result<(u8, u64, AreaAccumulator)>> + Send + 'static> {
+    let tile = TileDescriptor::new(0, reader, config.custom_crs.as_deref())?;
+    ground_area_overlay_tile(tile, config)
+}
+
+pub(crate) fn ground_area_overlay_tile(
+    tile: TileDescriptor,
+    config: &MultiResolutionConfig,
+) -> Result<impl Iterator<Item = Result<(u8, u64, AreaAccumulator)>> + Send + 'static> {
     config.validate()?;
-    validate_ground_area_raster(&reader, config)?;
+    validate_ground_area_raster(&tile.reader, config)?;
     if config.transfer != TransferMode::OVERLAY
         || config.nodata_policy != NodataPolicy::Omit
         || config.sampling != SamplingPattern::center()
@@ -45,7 +54,6 @@ pub fn scan_ground_area_overlay(
     {
         return Err(DggsStreamError::InvalidParameter("ground-area overlay requires weighted continuous overlay with omitted NoData and no mass normalization, supersampling, compaction, quantiles, histogram or formula".into()));
     }
-    let tile = TileDescriptor::new(0, reader, config.custom_crs.as_deref())?;
     let meta = &tile.reader.metadata;
     let gt = &meta.geotransform;
     let mut columns = Vec::<Range<u32>>::new();
@@ -102,7 +110,19 @@ pub fn scan_ground_area_overlay(
                 return Some(Ok(row));
             }
             let block = blocks.next()?;
-            match scan_block(&tile, &config, &block, &columns, &mut cache, &mut pending) {
+            let mut run = || scan_block(&tile, &config, &block, &columns, &mut cache, &mut pending);
+            let result = match &config.profile {
+                Some(profile) => {
+                    profile.count(Counter::Windows, 1);
+                    profile.count(
+                        Counter::PixelsRead,
+                        block.rows.len() as u64 * block.cols.len() as u64,
+                    );
+                    profile.time(Phase::Kernel, run)
+                }
+                None => run(),
+            };
+            match result {
                 Ok(rows) => ready = rows.into_iter(),
                 Err(err) => {
                     failed = true;
@@ -129,8 +149,10 @@ fn scan_block(
     cache: &mut ChunkCache,
     pending: &mut BTreeMap<u64, Cell>,
 ) -> Result<Vec<(u8, u64, AreaAccumulator)>> {
-    let window = RowWindow::load(
+    let decode = config.profile.as_ref().map(|_| PhaseTimer::start());
+    let window = RowWindow::load_bands(
         tile,
+        &[1],
         BandSelection {
             band: 1,
             nodata: config.custom_nodata,
@@ -138,7 +160,15 @@ fn scan_block(
         },
         block.rows.clone(),
         cache,
+        config.profile.as_deref(),
     )?;
+    if let (Some(profile), Some(timer)) = (&config.profile, decode) {
+        timer.stop(profile, Phase::Decode);
+        profile.count(
+            Counter::DecodedBytes,
+            block.rows.len() as u64 * u64::from(window.width()) * 8,
+        );
+    }
     let gt = &tile.reader.metadata.geotransform;
     let row_areas: Vec<_> = block
         .rows

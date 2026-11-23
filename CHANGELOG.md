@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- DuckDB continuous scans accept `ground_area := true, transfer := 'overlay'` to integrate valid partial-pixel areas and densities on all four grids.
+
 - Rust core `scan_ground_area_overlay` integrates densities over clipped pixel footprints on north-up, single-band WGS84 rasters.
 
 - Python and Polars `RasterArrowStream`, `read_raster` and `scan_raster` accept `ground_area=True` for ground-area-weighted center scans of one north-up, single-band EPSG:4326 raster, with `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` columns. A `bbox` that misses the raster is an error, and partitioned scans are rejected.
