@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DuckDB continuous scans accept `ground_area := true, transfer := 'overlay'` to integrate valid partial-pixel areas and densities on all four grids.
 
-- Spark and Python partitioned scans support single-band continuous weighted overlay. The reducer applies valid coverage and statistics filters after merging all partitions touching a cell.
+- Spark and Python partitioned scans support single-band continuous weighted overlay. Workers finalize H3 cells whose WGS84 footprints are clear of other partitions. Boundary cells receive valid coverage and statistics filters after merging. With a caller-persisted Spark DataFrame, only partial rows enter the exchange.
 
 - Rust core `scan_ground_area_overlay` integrates densities over clipped pixel footprints on north-up, single-band WGS84 rasters.
 
