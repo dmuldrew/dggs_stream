@@ -785,6 +785,7 @@ FROM raster_h3('population_per_km2.tif', resolution := 8,
                ground_area := true, transfer := 'overlay');
 ```
 
+Ground-area overlay uses one aggregation worker regardless of the SQL `workers` setting.
 The overlay follows straight segments between grid boundary vertices. It requires
 a resolution with a maximum cell diameter of at most 500 km and errors on
 pole-containing candidate cells. See the [core geometry and units](core.md#ground-area-weighted-overlay).

@@ -218,13 +218,13 @@ impl Iterator for GroundAreaBatchReader {
                             .iter()
                             .map(|r| {
                                 let a = &r.accumulator;
-                                self.policy.round(match col {
+                                match col {
                                     3 => a.pixel_count(),
-                                    4 => a.retained_area_m2(),
-                                    5 => a.area_weighted_sum(),
-                                    6 => a.area_stats().mean(),
+                                    4 => self.policy.round(a.retained_area_m2()),
+                                    5 => self.policy.round(a.area_weighted_sum()),
+                                    6 => self.policy.round(a.area_stats().mean()),
                                     _ => unreachable!("indices belong to the ground-area schema"),
-                                })
+                                }
                             })
                             .collect(),
                         validity: None,

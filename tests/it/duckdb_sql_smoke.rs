@@ -919,6 +919,16 @@ fn real_sql_ground_area_matches_core_on_all_grids() {
                 engine.query(&format!("SELECT count(*) FROM {table}")),
                 count.to_string()
             );
+            if overlay {
+                let row = engine.query(&format!(
+                    "SELECT {id}, pixel_count FROM raster_{}({}, resolution := {resolution}, ground_area := true{mode}, decimals := 0) ORDER BY pixel_count, {id} LIMIT 1",
+                    grid.label(), quoted(&path), id = grid.index_column_name()
+                ));
+                let (id, value) = row.trim().split_once(',').unwrap();
+                let want = expected[&id.parse::<u64>().unwrap()].pixel_count();
+                assert!(want > 0.0 && want.fract() != 0.0, "{grid} {want}");
+                assert_eq!(value.parse::<f64>().unwrap(), want);
+            }
             let filtered = expected
                 .values()
                 .filter(|a| a.pixel_count() >= 2.0 && a.area_stats().mean() >= 10.0)
