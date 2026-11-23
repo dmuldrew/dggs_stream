@@ -304,6 +304,60 @@ fn categorical_partitions_match_a_single_scan() {
 }
 
 #[test]
+fn plan_partitions_rejects_options_a_partitioned_scan_cannot_honour() {
+    use dggs_stream_python::raster_h3_py_plan_partitions_v2;
+    let dir = tempfile::tempdir().unwrap();
+    let path = CString::new(gradient(dir.path()).to_str().unwrap()).unwrap();
+    let plan_with = |options: Option<&str>| -> Result<usize, String> {
+        let options = options.map(|o| CString::new(o).unwrap());
+        let mut err: *mut c_char = ptr::null_mut();
+        // SAFETY: valid C strings or NULL, and a writable error pointer.
+        let json = unsafe {
+            raster_h3_py_plan_partitions_v2(
+                path.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                4,
+                options.as_ref().map_or(ptr::null(), |o| o.as_ptr()),
+                &mut err,
+            )
+        };
+        // SAFETY: `err` was set by the library or left NULL.
+        if let Some(msg) = unsafe { take_err(err) } {
+            return Err(msg);
+        }
+        // SAFETY: a non-null result is a NUL-terminated string owned by us.
+        let text = unsafe { std::ffi::CStr::from_ptr(json) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // SAFETY: `json` came from this library and is freed exactly once.
+        unsafe { raster_h3_py_free_string(json) };
+        Ok(serde_json::from_str::<Vec<serde_json::Value>>(&text)
+            .unwrap()
+            .len())
+    };
+    assert!(plan_with(None).unwrap() > 1);
+    assert!(plan_with(Some("{}")).unwrap() > 1);
+    // Area-weighted and multi-band scans have no partial-state merge.
+    for (options, message) in [
+        (
+            r#"{"ground_area":true}"#,
+            "ground_area cannot be combined with partitions",
+        ),
+        (
+            r#"{"bands":[1]}"#,
+            "bands cannot be combined with partitions",
+        ),
+    ] {
+        let error = plan_with(Some(options)).unwrap_err();
+        assert!(error.contains(message), "{options}: {error}");
+    }
+    // `ground_area: false` is the default, not a request.
+    assert!(plan_with(Some(r#"{"ground_area":false}"#)).unwrap() > 1);
+}
+
+#[test]
 fn partitioned_scans_reject_unsupported_options() {
     let dir = tempfile::tempdir().unwrap();
     let path = gradient(dir.path());

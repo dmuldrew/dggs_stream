@@ -175,8 +175,9 @@ def test_scan_errors_raise(dggs_stream, gradient_tif, tmp_path):
         dggs_stream.scan_raster(tmp_path / "missing.tif", RES).collect()
     with pytest.raises(pl.exceptions.ColumnNotFoundError):
         dggs_stream.scan_raster(gradient_tif, RES).select("nope").collect()
-    with pytest.raises(Exception, match="bounding box"):
-        dggs_stream.scan_raster(gradient_tif, RES, bbox=[5, 5, 6, 6]).collect()
+    for options in ({}, {"ground_area": True}):
+        with pytest.raises(Exception, match="bounding box"):
+            dggs_stream.scan_raster(gradient_tif, RES, bbox=[5, 5, 6, 6], **options).collect()
 
 
 @pytest.mark.parametrize(

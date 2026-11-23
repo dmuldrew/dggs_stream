@@ -22,6 +22,8 @@ pub struct PyScanConfig {
     pub grid: GridKind,
     pub resolutions: Vec<u8>,
     pub categorical: bool,
+    /// Weight continuous center samples by their WGS84 footprint.
+    pub ground_area: bool,
     pub format: CategoricalFormat,
     pub crs: Option<String>,
     pub nodata: Option<f64>,
@@ -100,6 +102,7 @@ impl Default for PyScanConfig {
             grid: GridKind::H3,
             resolutions: vec![8],
             categorical: false,
+            ground_area: false,
             format: CategoricalFormat::Wide,
             crs: None,
             nodata: None,

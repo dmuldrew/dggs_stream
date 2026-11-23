@@ -224,6 +224,11 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
                 let opts: PyScanOptions = serde_json::from_str(&json).map_err(|e| {
                     DggsStreamError::InvalidParameter(format!("Invalid scan options: {e}"))
                 })?;
+                if opts.ground_area {
+                    return Err(DggsStreamError::InvalidParameter(
+                        "ground_area cannot be combined with partitions".into(),
+                    ));
+                }
                 if opts.bands.is_some() {
                     return Err(DggsStreamError::InvalidParameter(
                         "bands cannot be combined with partitions".into(),

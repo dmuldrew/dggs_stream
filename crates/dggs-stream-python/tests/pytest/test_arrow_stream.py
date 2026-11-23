@@ -132,8 +132,12 @@ def test_bad_input_raises(dggs_stream, gradient_tif, tmp_path):
     not_tiff.write_bytes(b"definitely not a TIFF")
     with pytest.raises(RuntimeError):
         pa.table(dggs_stream.RasterArrowStream(not_tiff, RES))
-    with pytest.raises(RuntimeError, match="bounding box"):
-        pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, bbox=[5, 5, 6, 6]))
+    # A bbox that misses the raster is an error, with or without area weighting.
+    for options in ({}, {"ground_area": True}):
+        with pytest.raises(RuntimeError, match="bounding box"):
+            pa.table(
+                dggs_stream.RasterArrowStream(gradient_tif, RES, bbox=[5, 5, 6, 6], **options)
+            )
     for bbox in ["1,2,3", "x,y,z,w", [1, 2, 3]]:
         with pytest.raises(RuntimeError, match="Invalid bbox"):
             pa.table(dggs_stream.RasterArrowStream(gradient_tif, RES, bbox=bbox))

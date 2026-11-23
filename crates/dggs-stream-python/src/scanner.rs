@@ -4,6 +4,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
+use dggs_stream_core::aggregator::{NodataPolicy, SamplingPattern};
+use dggs_stream_core::columnar::ground_area::{ground_area_schema, GroundAreaBatchReader};
 use dggs_stream_core::columnar::multiband::{wide_schema, MultiBandBatchReader};
 use dggs_stream_core::columnar::{
     partitioned_output_schema, ArrowArrayStream, ArrowSchema, CategoricalBatchReader,
@@ -12,7 +14,8 @@ use dggs_stream_core::columnar::{
 };
 use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
-use dggs_stream_core::raster::mosaic::resolve_raster_sources;
+use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader};
+use dggs_stream_core::transfer::TransferMode;
 
 use crate::config::PyScanConfig;
 
@@ -40,6 +43,9 @@ impl PyRasterScanner {
 
     fn base_schema(&self) -> ColumnSchema {
         let grid = self.config.grid;
+        if self.config.ground_area {
+            return ground_area_schema(grid, true);
+        }
         if let Some(bands) = &self.config.bands {
             return wide_schema(grid, bands, &self.config.quantiles);
         }
@@ -57,6 +63,27 @@ impl PyRasterScanner {
     }
 
     pub(crate) fn resolve_projection(&self) -> Result<Option<Vec<usize>>> {
+        let cfg = &self.config;
+        if cfg.ground_area
+            && (cfg.categorical
+                || cfg.bands.is_some()
+                || cfg.band != 1
+                || !cfg.quantiles.is_empty()
+                || cfg.spectral_formula.is_some()
+                || cfg.transfer != TransferMode::AssignCenters
+                || cfg.sampling != SamplingPattern::center()
+                || cfg.output.nodata != NodataPolicy::Omit
+                || cfg.valid_coverage_threshold.is_some())
+        {
+            return Err(DggsStreamError::InvalidParameter(
+            "ground_area requires a continuous single-band center scan with omitted NoData and no bands, formulas, quantiles or coverage threshold".into(),
+        ));
+        }
+        if self.config.ground_area && self.config.partition.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "ground_area cannot be combined with partitions".into(),
+            ));
+        }
         if self.config.bands.is_some() && self.config.partition.is_some() {
             return Err(DggsStreamError::InvalidParameter(
                 "bands cannot be combined with partitions".into(),
@@ -154,7 +181,7 @@ impl PyRasterScanner {
         }
         if (self.config.aggregation_budget_bytes.is_some()
             || self.config.decode_budget_bytes.is_some())
-            && mr_cfg.transfer != dggs_stream_core::transfer::TransferMode::AssignCenters
+            && mr_cfg.transfer != TransferMode::AssignCenters
         {
             return Err(DggsStreamError::InvalidParameter(
                 "aggregation_budget_mb and decode_budget_mb require transfer=assign_centers".into(),
@@ -172,6 +199,29 @@ impl PyRasterScanner {
         mr_cfg.transform_failure_counter = self.config.transform_failure_counter.clone();
 
         let projection = self.resolve_projection()?;
+        if self.config.ground_area {
+            let [path] = paths.as_slice() else {
+                return Err(DggsStreamError::InvalidParameter(
+                    "ground_area requires one input raster".into(),
+                ));
+            };
+            // Open the mosaic as the ordinary readers do: a bbox that misses the raster
+            // is then an error, where a single-reader scan would quietly be empty.
+            let mosaic = Arc::new(MosaicReader::open(
+                std::slice::from_ref(path),
+                mr_cfg.bbox,
+                mr_cfg.custom_crs.as_deref(),
+                mr_cfg.overlap_rule,
+            )?);
+            let reader = GroundAreaBatchReader::open_mosaic(
+                mosaic,
+                &mr_cfg,
+                projection.unwrap_or_else(|| (0..self.base_schema().fields.len()).collect()),
+                self.config.batch_size,
+                self.config.limit,
+            )?;
+            return Ok((reader.schema(), Box::new(reader)));
+        }
         if let Some(bands) = &self.config.bands {
             let [path] = paths.as_slice() else {
                 return Err(DggsStreamError::InvalidParameter(

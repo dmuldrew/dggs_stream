@@ -823,3 +823,55 @@ def test_histogram_option_errors(dggs_stream, classes_tif):
             dggs_stream.scan_raster(classes_tif, 9, **options).collect()
     with pytest.raises(TypeError, match="numbers"):
         dggs_stream.scan_raster(classes_tif, 9, histogram=["a", "b"])
+
+
+@pytest.mark.parametrize("grid", GRIDS)
+def test_ground_area_arrow_and_polars(dggs_stream, grid):
+    path = Path(__file__).resolve().parents[3] / "dggs-stream-core/tests/fixtures/internal-mask.tif"
+    resolution = 10 if grid == "h3" else 15
+    opts = dict(grid=grid, ground_area=True)
+    index = f"{grid}_index"
+    table = pa.table(dggs_stream.RasterArrowStream(path, resolution, **opts))
+    assert table.column_names == [
+        index, f"{grid}_hex", "resolution", "pixel_count", "retained_area_m2",
+        "area_weighted_sum", "area_weighted_mean", "wkb",
+    ]
+    df = frame(table).sort(index)
+    counts = dggs_stream.read_raster(path, resolution, grid=grid, columns=[index, "count"]).sort(index)
+    assert df[index].to_list() == counts[index].to_list()
+    assert df["pixel_count"].to_list() == counts["count"].to_list()
+    assert df["retained_area_m2"].min() > 0
+    assert df["area_weighted_mean"].to_list() == pytest.approx(
+        (df["area_weighted_sum"] / df["retained_area_m2"]).to_list()
+    )
+    columns = ["area_weighted_mean", index]
+    actual = dggs_stream.scan_raster(
+        path, resolution, min_count=2, columns=columns, **opts
+    ).collect().sort(index)
+    assert actual.height > 0
+    assert actual.rows() == df.filter(pl.col("pixel_count") >= 2).select(columns).rows()
+
+
+@pytest.mark.parametrize("options", [
+    {"categorical": True}, {"bands": [1]}, {"quantiles": ["p50"]},
+    {"transfer": "overlay"}, {"nodata_policy": "emit"},
+])
+def test_ground_area_rejects_incompatible_options(dggs_stream, gradient_tif, options):
+    stream = dggs_stream.RasterArrowStream(gradient_tif, ground_area=True, **options)
+    with pytest.raises(RuntimeError, match="ground_area"):
+        stream.__arrow_c_schema__()
+
+
+@pytest.mark.parametrize("options", [{"categorical": True}, {"columns": ["nope"]}])
+def test_ground_area_scan_raster_validates_when_called(dggs_stream, gradient_tif, options):
+    # Like `bands`, `ground_area` changes the schema the lazy frame advertises, so
+    # its options and projection are checked by `scan_raster` itself, not at collect.
+    with pytest.raises(RuntimeError):
+        dggs_stream.scan_raster(gradient_tif, ground_area=True, **options)
+
+
+def test_ground_area_rejects_partition(dggs_stream, gradient_tif):
+    partition = dggs_stream.plan_partitions(gradient_tif)[0]
+    stream = dggs_stream.RasterArrowStream(gradient_tif, ground_area=True, partition=partition)
+    with pytest.raises(RuntimeError, match="ground_area cannot be combined with partitions"):
+        stream.__arrow_c_schema__()

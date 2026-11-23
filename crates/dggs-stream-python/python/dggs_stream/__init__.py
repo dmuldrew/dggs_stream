@@ -533,6 +533,7 @@ _SCAN_OPTIONS = (
     "grid",
     "band",
     "bands",
+    "ground_area",
     "sampling",
     "overlap_rule",
     "spectral_formula",
@@ -581,7 +582,7 @@ _STR_OPTIONS = (
     "histogram_weight",
     "histogram_normalize",
 )
-_BOOL_OPTIONS = ("overlay_weighted", "mass_preserve")
+_BOOL_OPTIONS = ("ground_area", "overlay_weighted", "mass_preserve")
 _FLOAT_OPTIONS = (
     "valid_coverage_threshold",
     "min_count",
@@ -799,6 +800,7 @@ class RasterArrowStream:
         grid: Optional[str] = None,
         band: Optional[int] = None,
         bands: Optional[Sequence[int]] = None,
+        ground_area: Optional[bool] = None,
         aggregation_budget_mb: Optional[int] = None,
         decode_budget_mb: Optional[int] = None,
         sampling: Optional[str] = None,
@@ -1111,6 +1113,7 @@ def scan_raster(
     grid: Optional[str] = None,
     band: Optional[int] = None,
     bands: Optional[Sequence[int]] = None,
+    ground_area: Optional[bool] = None,
     aggregation_budget_mb: Optional[int] = None,
     decode_budget_mb: Optional[int] = None,
     sampling: Optional[str] = None,
@@ -1166,6 +1169,8 @@ def scan_raster(
     Further options, matching the DuckDB table functions' named parameters:
 
     - `band`: 1-indexed band to aggregate (default 1).
+    - `ground_area=True`: weight continuous center samples by their WGS84 pixel area.
+      Requires one north-up, single-band EPSG:4326 raster.
     - `bands`: select ordered bands from one raster, e.g. `[3, 1]` for
       `band_3_mean` and `band_1_mean` in a continuous center-assignment scan.
     - `aggregation_budget_mb`, `decode_budget_mb`: positive whole MiB for center
@@ -1254,7 +1259,19 @@ def scan_raster(
         from polars.io.plugins import register_io_source  # type: ignore
 
         # Build Polars schema from field names
-        if not categorical:
+        if ground_area:
+            stream.__arrow_c_schema__()
+            pl_schema = {
+                index_col: pl.UInt64,
+                hex_col: pl.String,
+                "resolution": pl.UInt8,
+                "pixel_count": pl.Float64,
+                "retained_area_m2": pl.Float64,
+                "area_weighted_sum": pl.Float64,
+                "area_weighted_mean": pl.Float64,
+                "wkb": pl.Binary,
+            }
+        elif not categorical:
             pl_schema = {
                 index_col: pl.UInt64,
                 hex_col: pl.String,

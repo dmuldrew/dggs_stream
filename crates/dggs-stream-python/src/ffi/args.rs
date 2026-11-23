@@ -189,6 +189,8 @@ pub(crate) struct PyScanOptions {
     pub(crate) grid: Option<String>,
     aggregation_budget_mb: Option<i64>,
     decode_budget_mb: Option<i64>,
+    #[serde(default)]
+    pub(crate) ground_area: bool,
     band: Option<i64>,
     pub(crate) bands: Option<Vec<usize>>,
     sampling: Option<String>,
@@ -440,6 +442,7 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
             cfg.spectral_formula = Some(formula);
         }
     }
+    cfg.ground_area = opts.ground_area;
     if let Some(bands) = opts.bands {
         if cfg.categorical
             || opts.band.is_some()
