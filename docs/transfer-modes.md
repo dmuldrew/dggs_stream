@@ -227,15 +227,15 @@ resolution 9 on the smaller raster, cells are mostly smaller than one pixel.
 | 128 × 128 | 9 | Off | 322.8 → 322.8 ms | 38.8 → 38.9 MiB |
 | 128 × 128 | 9 | On | 327.2 → 326.5 ms | 39.5 → 39.6 MiB |
 
-### Parallel overlap prototype
+### Parallel overlap calculation
 
-On this branch, setting Rust's `MultiResolutionConfig::aggregation_workers` to
+Setting Rust's `MultiResolutionConfig::aggregation_workers` to
 two or more enables parallel projection and clipping for eligible overlay
 blocks. Each worker prepares intersections for individual cells. The caller
 applies them in the original cell and pixel order, including mass-preserving
 normalization and per-band coverage filtering. The default stays serial.
 
-The prototype uses the shared aggregation pool for blocks with at least 64
+The overlay scan uses the shared aggregation pool for blocks with at least 64
 candidate cells and at most 512 estimated source pixels per cell. Coarse-cell
 fallbacks and callers already on a Rayon worker use the serial path.
 Prepared lists hold at most 128 × 1,024 pixel–area pairs (2 MiB of entries).
@@ -273,3 +273,19 @@ serial fallback on these inputs.
 | Hawaii CFL | 9 | 31,453 | 345.1 / 245.1 | 96.1 / 96.8 |
 | CONUS burn probability | 7 | 867 | 123.7 / 124.2 | 81.6 / 81.7 |
 | CONUS burn probability | 9 | 39,643 | 334.0 / 224.8 | 94.1 / 95.1 |
+
+At H3 resolution 10, the same windows gave the following medians over five
+warm-cache scans per worker count, reversing worker order on alternating runs.
+Ordinary weighted overlay was timed. Separate ordinary and mass-preserving
+runs produced byte-identical output states at all four worker counts.
+
+| Raster | Cells | Workers | Median scan, ms | Median peak RSS, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Hawaii CFL | 218,370 | 1 | 961.9 | 108.0 |
+| Hawaii CFL | 218,370 | 2 | 705.9 | 108.3 |
+| Hawaii CFL | 218,370 | 4 | 604.0 | 111.5 |
+| Hawaii CFL | 218,370 | 8 | 649.9 | 109.3 |
+| CONUS burn probability | 275,405 | 1 | 1118.9 | 115.2 |
+| CONUS burn probability | 275,405 | 2 | 793.5 | 115.8 |
+| CONUS burn probability | 275,405 | 4 | 668.4 | 119.2 |
+| CONUS burn probability | 275,405 | 8 | 720.6 | 116.4 |
