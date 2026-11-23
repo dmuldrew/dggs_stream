@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fine-resolution overlay scans can project and clip cells in parallel when `aggregation_workers` is set to two or more. The default stays serial.
 
+- Rust core `GroundAreaBatchReader::open_mosaic` runs a ground-area scan over a prepared single-raster mosaic, so callers that already indexed the raster's chunks do not index them again. DuckDB `ground_area` scans use it.
+
 - DuckDB continuous raster table functions accept `ground_area := true` for ellipsoidal area-weighted center scans on all four grids.
 
 - CLI IPC and JSONL scans accept `--ground-area` for continuous center assignment on north-up, single-band EPSG:4326 rasters. The output includes valid pixel count, retained square metres, area-weighted sum and mean.

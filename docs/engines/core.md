@@ -34,6 +34,13 @@ override must name EPSG:4326 itself. Partitioned scans are rejected, and
 weighted statistics that overflow f64, within a window or once cells merge,
 fail the stream.
 
+For projected, column-batched output, `columnar::ground_area::GroundAreaBatchReader`
+wraps the scan. `open` takes an opened reader. `open_mosaic` takes a single-raster
+`MosaicReader` you have already prepared, so a caller that has indexed the raster's
+chunks (as the DuckDB extension does at table initialization) does not index them
+again. Build that mosaic with the same `bbox` and source CRS as the scan's
+`MultiResolutionConfig`; results then match `open` exactly.
+
 ```rust
 use dggs_stream_core::aggregator::multi_horizon::{
     area_continuous::scan_ground_area, MultiResolutionConfig,

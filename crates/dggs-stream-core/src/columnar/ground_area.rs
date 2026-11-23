@@ -4,9 +4,10 @@ use crate::aggregator::multi_horizon::area_continuous::{scan_ground_area, Ground
 use crate::aggregator::multi_horizon::{MultiHorizonStreamer, MultiResolutionConfig};
 use crate::aggregator::output_policy::OutputPolicy;
 use crate::encoding::{cell_index_to_wkb, WKB_BUF_LEN};
-use crate::error::Result;
+use crate::error::{DggsStreamError, Result};
 use crate::grid::GridKind;
 use crate::raster::geotiff::GeoTiffStreamReader;
+use crate::raster::mosaic::MosaicReader;
 use crate::run_profile::{Counter, Phase, RunProfile};
 use std::sync::Arc;
 
@@ -54,9 +55,50 @@ impl GroundAreaBatchReader {
         batch_size: usize,
         limit: Option<usize>,
     ) -> Result<Self> {
+        Self::open_with(
+            || scan_ground_area(reader, config),
+            config,
+            projection,
+            batch_size,
+            limit,
+        )
+    }
+
+    /// Use a single-raster mosaic already prepared with this scan's bbox and source CRS.
+    pub fn open_mosaic(
+        mosaic: Arc<MosaicReader>,
+        config: &MultiResolutionConfig,
+        projection: Vec<usize>,
+        batch_size: usize,
+        limit: Option<usize>,
+    ) -> Result<Self> {
+        Self::open_with(
+            || {
+                let [tile] = mosaic.tiles.as_slice() else {
+                    return Err(DggsStreamError::InvalidParameter(
+                        "ground_area requires one raster".into(),
+                    ));
+                };
+                let kernel = GroundAreaKernel::for_reader(&tile.reader, config)?;
+                MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)
+            },
+            config,
+            projection,
+            batch_size,
+            limit,
+        )
+    }
+
+    fn open_with(
+        open_scan: impl FnOnce() -> Result<MultiHorizonStreamer<GroundAreaKernel>>,
+        config: &MultiResolutionConfig,
+        projection: Vec<usize>,
+        batch_size: usize,
+        limit: Option<usize>,
+    ) -> Result<Self> {
         let schema = Arc::new(ground_area_schema(config.grid, true).project(&projection)?);
         Ok(Self {
-            scan: scan_ground_area(reader, config)?,
+            scan: open_scan()?,
             grid: config.grid,
             schema,
             projection,
