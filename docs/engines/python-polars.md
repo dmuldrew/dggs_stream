@@ -71,7 +71,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `strict_transforms` | `bool` | `False` | Raise when a valid sample cannot be transformed to WGS84 instead of skipping it with a `RuntimeWarning` |
 | `band` | `int` | `None` (1) | 1-indexed band to aggregate |
 | `bands` | sequence of integers | `None` | Ordered one-based bands from one interleaved or band-separated TIFF. Continuous center-assignment scans share the grid columns and return statistics per band. |
-| `ground_area` | `bool` | `None` (off) | Weight each valid pixel by its WGS84 ellipsoidal area, assigned to the cell holding its center. Needs one north-up, single-band EPSG:4326 raster, omitted NoData and the default center sampling; not valid with `bands`, quantiles, formulas, overlay, partitions or a coverage threshold. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` in place of the usual statistics; `min_count` filters on valid pixels. A `bbox` that misses the raster is an error, as in ordinary scans. |
+| `ground_area` | `bool` | `None` (off) | Weight values by WGS84 ellipsoidal area. Center assignment uses the full pixel. Weighted overlay uses the clipped intersection with each cell and accepts `valid_coverage_threshold` in terms of valid area divided by selected overlap area. Needs one north-up, single-band EPSG:4326 raster, omitted NoData and the default center sampling; incompatible with `bands`, quantiles, formulas, partitions and mass normalization. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` in place of the usual statistics; `min_count` filters on the sum of valid pixel fractions. A `bbox` that misses the raster is an error, as in ordinary scans. |
 | `sampling` | `str` | `None` (`"center"`) | Sub-pixel sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point` |
 | `overlap_rule` | `str` | `None` (`"cutline"`) | Mosaic overlaps: `cutline`, `first` or `average` |
 | `min_majority_fraction` | `float` | `None` | Categorical only: drop cells whose majority class covers less than this fraction |
@@ -321,6 +321,12 @@ lf = dggs_stream.scan_raster("sentinel2.tif", 9, band=2)
 lf = dggs_stream.scan_raster("temperature.tif", 8, ground_area=True)
 lf.select("h3_index", "retained_area_m2", "area_weighted_mean").collect()
 
+# Integrate population density (people/km²) over the valid portion of each cell.
+lf = dggs_stream.scan_raster(
+    "population_per_km2.tif", 8, ground_area=True, transfer="overlay", valid_coverage_threshold=0.5
+)
+lf.select("h3_index", (pl.col("area_weighted_sum") / 1_000_000).alias("population")).collect()
+
 # Read bands 3 and 1 in one pass. Missing samples and scaling are evaluated per band.
 lf = dggs_stream.scan_raster("sentinel2.tif", 9, bands=[3, 1])
 lf.select("h3_index", "band_3_mean", "band_1_mean").collect()
@@ -339,6 +345,9 @@ lf = dggs_stream.scan_raster(
     overlap_rule="first", min_majority_fraction=0.5,
 )
 ```
+
+Ground-area overlay runs serially and follows straight segments between grid boundary vertices.
+It requires a resolution with a maximum cell diameter of at most 500 km and rejects pole-containing candidate cells. [Geometry and units](core.md#ground-area-weighted-overlay)
 
 The names and defaults match the DuckDB parameters; see the
 [scan options](../polars-api-reference.md#keyword-parameters) and

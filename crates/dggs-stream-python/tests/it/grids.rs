@@ -358,3 +358,155 @@ fn grid_polygon_fill_matches_core() {
     };
     assert_eq!(status, 4);
 }
+
+/// `(cell, pixel_count, area_m2, weighted_sum, mean)` of the core's ground-area overlay,
+/// sorted by cell.
+fn core_overlay_cells(
+    tif: &Path,
+    grid: GridKind,
+    coverage: Option<f64>,
+) -> Vec<(u64, f64, f64, f64, f64)> {
+    use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+    use dggs_stream_core::transfer::{scan_ground_area_overlay, TransferMode};
+    let mut cfg = MultiResolutionConfig::single(res_of(grid)).with_grid(grid);
+    cfg.transfer = TransferMode::OVERLAY;
+    cfg.valid_coverage_threshold = coverage;
+    let mut rows: Vec<_> = scan_ground_area_overlay(GeoTiffStreamReader::open(tif).unwrap(), &cfg)
+        .unwrap()
+        .map(|row| {
+            let (_, cell, a) = row.unwrap();
+            (
+                cell,
+                a.pixel_count(),
+                a.retained_area_m2(),
+                a.area_weighted_sum(),
+                a.area_stats().mean(),
+            )
+        })
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    rows
+}
+
+fn floats(json: &serde_json::Map<String, serde_json::Value>, name: &str) -> Vec<f64> {
+    json[name]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect()
+}
+
+#[test]
+fn v2_ground_area_overlay_matches_the_core_on_every_grid() {
+    let (_tmp, tif) = gradient_tif();
+    for grid in GridKind::ALL {
+        for (coverage, decimals) in [(None, None), (Some(0.5), Some(0))] {
+            let expected = core_overlay_cells(&tif, grid, coverage);
+            assert!(expected.len() > 1, "{grid}");
+            let mut options = serde_json::json!({
+                "grid": grid.to_string(),
+                "ground_area": true,
+                "transfer": "overlay",
+            });
+            if let Some(coverage) = coverage {
+                options["valid_coverage_threshold"] = coverage.into();
+            }
+            if let Some(decimals) = decimals {
+                options["decimals"] = decimals.into();
+            }
+            let options = CString::new(options.to_string()).unwrap();
+            let json = scan_json(&tif, &res_of(grid).to_string(), &options).unwrap();
+            let ids: Vec<u64> = json[grid.index_column_name()]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap())
+                .collect();
+            let (counts, areas) = (
+                floats(&json, "pixel_count"),
+                floats(&json, "retained_area_m2"),
+            );
+            let (sums, means) = (
+                floats(&json, "area_weighted_sum"),
+                floats(&json, "area_weighted_mean"),
+            );
+            let mut rows: Vec<_> = (0..ids.len())
+                .map(|i| (ids[i], counts[i], areas[i], sums[i], means[i]))
+                .collect();
+            rows.sort_by_key(|r| r.0);
+            assert_eq!(rows.len(), expected.len(), "{grid}");
+            for (got, want) in rows.iter().zip(&expected) {
+                assert_eq!(got.0, want.0, "{grid} cells");
+                // Fractional pixel counts are never rounded (rounding to 0 decimals would
+                // move one by up to 0.5), though the JSON round trip may differ in the
+                // last bit; the area statistics are rounded.
+                assert!(
+                    (got.1 - want.1).abs() <= 1e-12 * want.1.max(1.0),
+                    "{grid} {} pixel_count: {} vs {}",
+                    got.0,
+                    got.1,
+                    want.1
+                );
+                for (a, b, name) in [
+                    (got.2, want.2, "area"),
+                    (got.3, want.3, "sum"),
+                    (got.4, want.4, "mean"),
+                ] {
+                    // With `decimals: 0` the rounded statistic is within 0.5 of the exact one.
+                    let tolerance = if decimals.is_some() {
+                        0.5 + 1e-12 * b.abs()
+                    } else {
+                        1e-12 * b.abs().max(1.0)
+                    };
+                    assert!(
+                        (a - b).abs() <= tolerance,
+                        "{grid} {} {name}: {a} vs {b}",
+                        got.0
+                    );
+                }
+            }
+            // Overlay counts partial pixels, which centre assignment never does.
+            assert!(
+                rows.iter().any(|r| r.1.fract() != 0.0),
+                "{grid}: no fractional counts"
+            );
+        }
+    }
+}
+
+#[test]
+fn v2_ground_area_overlay_validates_its_options() {
+    let (_tmp, tif) = gradient_tif();
+    for (options, message) in [
+        // A coverage threshold needs weighted overlay and a fraction.
+        (
+            r#"{"ground_area":true,"valid_coverage_threshold":0.5}"#,
+            "valid_coverage_threshold",
+        ),
+        (
+            r#"{"ground_area":true,"transfer":"overlay","valid_coverage_threshold":1.5}"#,
+            "valid_coverage_threshold",
+        ),
+        // Mass-preserving, unweighted and interpolating transfers are not area integrals.
+        (
+            r#"{"ground_area":true,"transfer":"overlay","mass_preserve":true}"#,
+            "ground_area",
+        ),
+        (
+            r#"{"ground_area":true,"transfer":"overlay","overlay_weighted":false}"#,
+            "ground_area",
+        ),
+        (
+            r#"{"ground_area":true,"transfer":"interpolate"}"#,
+            "ground_area",
+        ),
+    ] {
+        let options = CString::new(options).unwrap();
+        let error = scan_json(&tif, "9", &options).unwrap_err();
+        assert!(error.contains(message), "{options:?}: {error}");
+    }
+    // Weighted overlay is accepted.
+    let ok = CString::new(r#"{"ground_area":true,"transfer":"overlay"}"#).unwrap();
+    assert!(scan_json(&tif, "9", &ok).is_ok());
+}

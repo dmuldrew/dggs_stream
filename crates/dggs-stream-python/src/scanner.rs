@@ -70,14 +70,23 @@ impl PyRasterScanner {
                 || cfg.band != 1
                 || !cfg.quantiles.is_empty()
                 || cfg.spectral_formula.is_some()
-                || cfg.transfer != TransferMode::AssignCenters
+                || !matches!(
+                    cfg.transfer,
+                    TransferMode::AssignCenters | TransferMode::OVERLAY
+                )
                 || cfg.sampling != SamplingPattern::center()
-                || cfg.output.nodata != NodataPolicy::Omit
-                || cfg.valid_coverage_threshold.is_some())
+                || cfg.output.nodata != NodataPolicy::Omit)
         {
             return Err(DggsStreamError::InvalidParameter(
-            "ground_area requires a continuous single-band center scan with omitted NoData and no bands, formulas, quantiles or coverage threshold".into(),
-        ));
+                "ground_area requires a continuous single-band center scan or weighted overlay with omitted NoData and no bands, formulas, quantiles or mass normalization".into(),
+            ));
+        }
+        if cfg.ground_area
+            && cfg
+                .valid_coverage_threshold
+                .is_some_and(|t| cfg.transfer != TransferMode::OVERLAY || !(0.0..=1.0).contains(&t))
+        {
+            return Err(DggsStreamError::InvalidParameter("ground_area valid_coverage_threshold requires weighted overlay and a fraction in [0, 1]".into()));
         }
         if self.config.ground_area && self.config.partition.is_some() {
             return Err(DggsStreamError::InvalidParameter(

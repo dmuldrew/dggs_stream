@@ -852,9 +852,32 @@ def test_ground_area_arrow_and_polars(dggs_stream, grid):
     assert actual.rows() == df.filter(pl.col("pixel_count") >= 2).select(columns).rows()
 
 
+# Cell counts from DuckDB ground-area overlay on the same masked fixture at 50% coverage.
+@pytest.mark.parametrize(("grid", "cell_count"), [("h3", 137), ("a5", 93), ("s2", 45), ("healpix", 75)])
+def test_ground_area_overlay_mask_coverage_and_rounding(dggs_stream, grid, cell_count):
+    path = Path(__file__).resolve().parents[3] / "dggs-stream-core/tests/fixtures/internal-mask.tif"
+    res = 10 if grid == "h3" else 15
+    index = f"{grid}_index"
+    opts = dict(grid=grid, ground_area=True, transfer="overlay")
+    all_cells = dggs_stream.read_raster(path, res, **opts).sort(index)
+    opts["valid_coverage_threshold"] = 0.5
+    arrow = frame(pa.table(dggs_stream.RasterArrowStream(path, res, **opts))).sort(index)
+    assert arrow.height == cell_count < all_cells.height
+    selected = all_cells.join(arrow.select(index), on=index, how="semi").sort(index)
+    assert selected.rows() == arrow.rows()
+    lazy = dggs_stream.scan_raster(path, res, decimals=0, **opts)
+    counts = lazy.select(index, "pixel_count").collect().sort(index)
+    assert counts.rows() == arrow.select(index, "pixel_count").rows()
+    assert any(0 < n < 1 for n in all_cells["pixel_count"])
+    if grid == "h3":
+        assert any(0 < n < 0.5 for n in counts["pixel_count"])
+
+
 @pytest.mark.parametrize("options", [
     {"categorical": True}, {"bands": [1]}, {"quantiles": ["p50"]},
-    {"transfer": "overlay"}, {"nodata_policy": "emit"},
+    {"transfer": "interpolate"}, {"transfer": "overlay", "overlay_weighted": False},
+    {"transfer": "overlay", "mass_preserve": True}, {"nodata_policy": "emit"},
+    {"valid_coverage_threshold": 0.5}, {"transfer": "overlay", "valid_coverage_threshold": 1.1},
 ])
 def test_ground_area_rejects_incompatible_options(dggs_stream, gradient_tif, options):
     stream = dggs_stream.RasterArrowStream(gradient_tif, ground_area=True, **options)
