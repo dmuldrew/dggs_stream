@@ -39,8 +39,9 @@ How they run:
   coarsest two or three resolutions of each grid.
 - **Categorical scans.** They accept `overlay`, and `interpolate` only with `nearest`; classes
   can't be interpolated.
-- **Combinations refused.** Transfer modes can't be combined with partitioned scans,
-  compaction, spectral formulas or sub-pixel sampling.
+- **Combinations refused.** Transfer modes exclude compaction, spectral formulas and sub-pixel sampling.
+  Partitioned Python and Spark scans support ordinary single-band continuous weighted overlay.
+  See [Spark weighted overlay](engines/spark.md#partitioned-weighted-overlay).
 - **PostgreSQL.** It does not expose transfer modes yet.
 
 The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands,

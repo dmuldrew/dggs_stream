@@ -126,7 +126,7 @@ Every adapter follows the same steps:
    `set_histogram`; `nodata_policy`, `emit_nodata_value` and `decimals` (or
    `output_policy()` to read them back); and `profile`
    ([Scan Options](../scan-options.md)). Combinations that can't work are refused when the scan
-   opens, such as `emit` with `min_count` (`validate()`) or a transfer mode with partitions
+   opens, such as `emit` with `min_count` (`validate()`) or interpolation with partitions
    (the transfer stream).
    For overlay, set `valid_coverage_threshold = Some(0.75)` to keep cells with valid data over at least 75% of their selected raster overlap. Mass-preserving scans retain all contributions.
 2. Open a mosaic and a horizon streamer. With `transfer` set to `Sample` or `Overlay`, the

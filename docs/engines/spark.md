@@ -41,6 +41,19 @@ flowchart LR
    every share of a cell meets in one task, and combine them with
    `dggs_stream.merge_partials`. Edge cells are typically a few percent of the output.
 
+### Partitioned weighted overlay
+
+Use `dggs_stream.spark.read(spark, path, resolutions=[8], transfer="overlay",
+valid_coverage_threshold=0.75)` for a continuous single-band scan. Each task reads
+its assigned TIFF chunks. Every touched cell goes through the shuffle, including
+cells touched by only one partition. Choose `target_chunks` with that shuffle
+cost in mind.
+
+A partial carries both valid pixel area (the weighted count) and total covered
+pixel area, including NoData. The reducer applies the coverage threshold and
+statistics filters after combining all contributions. In the example a cell
+qualifies when valid pixels account for at least 75% of its covered area.
+
 ## Setup
 
 Every executor needs the `dggs_stream` Python package (with its native library) and
@@ -105,7 +118,7 @@ SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20')
   omitted) and `buckets`; the output columns are the input's without `partial_state`.
 - **Options** have the names and meanings of `RasterArrowStream`: `resolutions`,
   `target_chunks` (default 256), `categorical`, `columns`, `crs`, `nodata`, `bbox`, `band`,
-  `sampling`, `overlap_rule`, `spectral_formula` and its `*_band` options, `quantiles`,
+  `sampling`, `transfer`, `valid_coverage_threshold`, `overlap_rule`, `spectral_formula` and its `*_band` options, `quantiles`,
   `remap`, `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`,
   `strict_transforms`. Unknown names and malformed values raise when the DataFrame is
   defined.
@@ -129,8 +142,7 @@ The data source and its merge are H3-only for now: they key partial cells on `h3
 so the `grid` option and the other grids ([Grids](../grids.md)) are not available through
 `dggs_stream.spark`. A partitioned scan of another grid can use the Python package directly
 (`plan_partitions`, `RasterArrowStream(..., grid=..., partition=...)` and
-`merge_partials(..., grid=...)`), as in the `mapInArrow` pipeline below. Transfer modes and
-histograms are not available in partitioned scans on any engine.
+`merge_partials(..., grid=...)`), as in the `mapInArrow` pipeline below. Partitioned transfer supports single-band continuous weighted overlay.
 
 ## A partitioned scan with `mapInArrow`
 
