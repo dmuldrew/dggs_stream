@@ -43,7 +43,17 @@ impl OverlayPartial {
         let mut bytes = Self::PREFIX.to_vec();
         bytes.extend_from_slice(&minimum.to_le_bytes());
         bytes.extend_from_slice(&self.covered.to_le_bytes());
-        bytes.extend(encode_partial_state(&self.stats));
+        if self.stats.m2 < 0.0 {
+            // Weighted updates keep two independently rounded means, so constant
+            // samples can leave the variance numerator a few ULPs below zero. The true
+            // value is zero (serial variance clamps it too), and the decoder rejects
+            // negative state, so encode the clamped value.
+            let mut stats = self.stats.clone();
+            stats.m2 = 0.0;
+            bytes.extend(encode_partial_state(&stats));
+        } else {
+            bytes.extend(encode_partial_state(&self.stats));
+        }
         bytes
     }
     pub fn decode(bytes: &[u8], limit: usize) -> Result<(Self, f64)> {
@@ -64,5 +74,31 @@ impl OverlayPartial {
             },
             minimum,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_pixels_with_fractional_weights_round_trip() {
+        // Two independently rounded running means straddle 7, which leaves the
+        // variance numerator a few ULPs below zero.
+        let mut partial = OverlayPartial::empty(false);
+        for weight in [0.2871112485674534, 1.0] {
+            partial.cover(weight);
+            partial.add(7.0, weight);
+        }
+        assert!(
+            partial.stats.m2 < 0.0,
+            "the rounding case this test exists for"
+        );
+        let bytes = partial.encode(0.5);
+        let (decoded, minimum) = OverlayPartial::decode(&bytes, 1 << 20).unwrap();
+        assert_eq!(minimum, 0.5);
+        assert_eq!(decoded.stats.m2, 0.0);
+        assert_eq!(decoded.stats.variance(), 0.0);
+        assert!((decoded.stats.mean() - 7.0).abs() < 1e-12);
     }
 }

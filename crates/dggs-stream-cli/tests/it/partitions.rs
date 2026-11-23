@@ -337,6 +337,15 @@ fn misuse_is_rejected() {
         &[&["ipc", r, "--columns", "mean"][..], &p0].concat(),
         "h3_index",
     );
+    // Partition headers do not record the transfer mode, so `merge` could not
+    // tell overlay files from center-assignment ones; overlay partitions come
+    // from Python and Spark.
+    for mode in ["overlay", "interpolate"] {
+        run_err(
+            &[&["ipc", r, "--transfer", mode][..], &p0].concat(),
+            "center assignment",
+        );
+    }
     run_err(
         &[&["parquet", r, "-o", "x.parquet"][..], &p0].concat(),
         "does not take --partition",

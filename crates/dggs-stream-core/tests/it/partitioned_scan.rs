@@ -17,7 +17,11 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget, ScanPartition,
 };
 use dggs_stream_core::aggregator::sampling::SamplingPattern;
+use dggs_stream_core::columnar::{
+    merge_partial_batches, ColumnArray, PartitionedBatchReader, RecordBatch, PARTIAL_STATE_COLUMN,
+};
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
+use dggs_stream_core::transfer::TransferMode;
 
 use crate::helpers::{write_geotiff, write_tiled, Crs, Layout};
 
@@ -734,4 +738,135 @@ fn partitions_refuse_other_mosaics_and_misuse() {
     let mosaic = Arc::new(open(&[a], OverlapRule::Cutline));
     assert!(MultiScanHorizonStreamer::new_mosaic(mosaic, &cfg).is_err());
     assert!(ScanPartition::from_json("{").is_err());
+}
+
+// -----------------------------------------------------------------------------------------
+// Weighted overlay
+// -----------------------------------------------------------------------------------------
+
+/// Weighted-overlay statistics of one cell: (valid area, weighted sum, mean).
+type OverlayStats = (f64, f64, f64);
+
+fn overlay_config(resolution: u8, coverage: Option<f64>) -> MultiResolutionConfig {
+    let mut config = MultiResolutionConfig::single(resolution);
+    config.transfer = TransferMode::Overlay {
+        weighted: true,
+        mass_preserve: false,
+    };
+    config.valid_coverage_threshold = coverage;
+    config
+}
+
+/// `(resolution, cell) -> stats` of the batches' rows.
+fn overlay_rows(batches: &[RecordBatch]) -> BTreeMap<(u8, u64), OverlayStats> {
+    let mut rows = BTreeMap::new();
+    for batch in batches {
+        let at = |name: &str| batch.schema.index_of(name).unwrap();
+        let (id, res) = (at("h3_index"), at("resolution"));
+        let (count, sum, mean) = (at("count"), at("sum"), at("mean"));
+        let ColumnArray::UInt64 { values: ids, .. } = &batch.columns[id] else {
+            panic!("cell ids");
+        };
+        let ColumnArray::UInt8 {
+            values: resolutions,
+            ..
+        } = &batch.columns[res]
+        else {
+            panic!("resolutions");
+        };
+        let float = |i: usize| match &batch.columns[i] {
+            ColumnArray::Float64 { values, .. } => values.clone(),
+            _ => panic!("statistic"),
+        };
+        let (count, sum, mean) = (float(count), float(sum), float(mean));
+        for row in 0..batch.num_rows {
+            let key = (resolutions[row], ids[row]);
+            let stats = (count[row], sum[row], mean[row]);
+            assert!(rows.insert(key, stats).is_none(), "cell {key:?} twice");
+        }
+    }
+    rows
+}
+
+/// Every partition of a plan scanned through the shipped JSON spec, then merged.
+fn partitioned_overlay(
+    paths: &[PathBuf],
+    config: &MultiResolutionConfig,
+    target_chunks: usize,
+) -> (BTreeMap<(u8, u64), OverlayStats>, usize) {
+    let plan = plan_partitions(&open(paths, OverlapRule::Cutline), target_chunks).unwrap();
+    let mut partials = Vec::new();
+    for partition in &plan {
+        let mut cfg = config.clone();
+        cfg.partition = Some(ScanPartition::from_json(&partition.to_json()).unwrap());
+        let reader = PartitionedBatchReader::open_continuous(paths, &cfg, None, 512).unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            // Overlay partitions hand every touched cell on, none as a final row.
+            let state = batch.schema.index_of(PARTIAL_STATE_COLUMN).unwrap();
+            let ColumnArray::Binary { validity, .. } = &batch.columns[state] else {
+                panic!("partial states");
+            };
+            assert!(validity.is_none(), "a final row in an overlay partition");
+            partials.push(batch);
+        }
+    }
+    let (_, merged) = merge_partial_batches(&partials, false, config, None, 512).unwrap();
+    (overlay_rows(&merged), plan.len())
+}
+
+#[test]
+fn weighted_overlay_partitions_match_single_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sf.tif");
+    // NoData pixels (-9999) make some cells partly invalid, and with a coverage
+    // threshold some of them drop out; both must agree with a single scan.
+    write_tiled(&path, (300, 220), (32, 32), SF, "-9999", surface);
+    let paths = vec![path];
+    let mut kept = Vec::new();
+    for coverage in [None, Some(0.97)] {
+        let config = overlay_config(9, coverage);
+        let mut single = MultiScanHorizonStreamer::new_mosaic(
+            Arc::new(open(&paths, OverlapRule::Cutline)),
+            &config,
+        )
+        .unwrap();
+        let mut cells = BTreeMap::new();
+        while single
+            .drain_completed_into(1024, |_, r| {
+                let a = r.accumulator;
+                assert!(cells
+                    .insert((r.resolution, r.cell_id), (a.count, a.sum, a.mean()))
+                    .is_none());
+            })
+            .unwrap()
+            > 0
+        {}
+        assert!(cells.len() > 50, "{} cells", cells.len());
+        kept.push(cells.len());
+
+        let mut prev = 0;
+        for target in [20, 7, 3] {
+            let (merged, partitions) = partitioned_overlay(&paths, &config, target);
+            assert!(
+                partitions > prev,
+                "target {target}: {partitions} partitions"
+            );
+            prev = partitions;
+            assert!(
+                merged.keys().eq(cells.keys()),
+                "coverage {coverage:?} target {target}: {} vs {} cells",
+                merged.len(),
+                cells.len()
+            );
+            for (key, &(count, sum, mean)) in &merged {
+                let (c, s, m) = cells[key];
+                close(count, c, "valid area", *key);
+                close(sum, s, "weighted sum", *key);
+                close(mean, m, "mean", *key);
+            }
+        }
+    }
+    // The threshold must actually drop partly invalid cells for this to test it.
+    assert!(kept[1] < kept[0], "coverage kept {kept:?} cells");
 }
