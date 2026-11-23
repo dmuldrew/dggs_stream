@@ -379,8 +379,8 @@ SQL functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...; 
 
 Feature coverage differs per engine: DuckDB exposes every parameter (sampling, bands,
 spectral formulas, quantiles, remapping, budgets), DataFusion exposes most of them through
-builders, Python exposes all but compaction, single-cell pushdown and resource budgets
-(and pushes Polars filters into the engine), and PostgreSQL and the CLI expose the common subset (resolutions, CRS, NoData, bbox,
+builders, and Python exposes center-scan aggregation and decode budgets and pushes Polars
+filters into the engine. PostgreSQL and the CLI expose the common subset (resolutions, CRS, NoData, bbox,
 categorical layout). Every engine takes the grid, `auto` resolution, the NoData policy and
 `decimals`; transfer modes and histograms are in every engine except PostgreSQL, and the
 runtime profile in all but PostgreSQL ([Scan Options](docs/scan-options.md#option-names-by-engine)).

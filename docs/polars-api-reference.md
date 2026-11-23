@@ -80,6 +80,8 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `interpolation` | `str \| None` | `"bilinear"` | With `"interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
 | `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
 | `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
+| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. |
+| `decode_budget_mb` | `int` | `None` (256 MiB) | Center-assignment decoded buffer budget in MiB. A single oversized chunk can proceed alone. |
 | `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `histogram` | `str \| Sequence[float] \| None` | `None` | Categorical only: `"values"`, `"N:min:max"` or bin edges. The `histogram` column becomes `List(Struct({class, weight}))` or `List(Struct({lower, upper, weight}))`. |
 | `histogram_weight` | `str \| None` | `"count"` | `"count"` or `"area"` (runs the weighted overlay). |
@@ -100,7 +102,7 @@ example through the `duckdb` Python package) or the Rust APIs when you need to c
 | Single-cell pushdown | Use `bbox` or a Polars filter instead | `h3_cell`, `h3_hex` |
 | Compaction | Not available | `compact` |
 | Geometry column | `wkb` (`Binary`) only | `geom := true` (`GEOMETRY`) |
-| Threads, decode memory | Engine defaults | `workers`, `decode_workers`, `fetch_workers`, `decode_budget_mb` |
+| Threads | Engine defaults | `workers`, `decode_workers`, `fetch_workers` |
 
 ### Validation
 

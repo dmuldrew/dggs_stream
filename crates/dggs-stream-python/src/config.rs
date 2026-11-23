@@ -28,6 +28,10 @@ pub struct PyScanConfig {
     pub bbox: Option<[f64; 4]>,
     pub columns: Option<Vec<String>>,
     pub batch_size: usize,
+    /// Override the core aggregation budget for center assignment.
+    pub aggregation_budget_bytes: Option<usize>,
+    /// Override the decoded chunk buffer budget for center assignment.
+    pub decode_budget_bytes: Option<usize>,
     pub limit: Option<usize>,
     /// Fail the scan when a valid sample point cannot be transformed to WGS84.
     pub strict_transforms: bool,
@@ -102,6 +106,8 @@ impl Default for PyScanConfig {
             bbox: None,
             columns: None,
             batch_size: 2048,
+            aggregation_budget_bytes: None,
+            decode_budget_bytes: None,
             limit: None,
             strict_transforms: false,
             transform_failure_counter: None,
