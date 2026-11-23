@@ -1169,7 +1169,8 @@ def scan_raster(
     Further options, matching the DuckDB table functions' named parameters:
 
     - `band`: 1-indexed band to aggregate (default 1).
-    - `ground_area=True`: weight continuous center samples by their WGS84 pixel area.
+    - `ground_area=True`: weight continuous values by WGS84 ground area. With `transfer="overlay"`,
+      each cell receives the area of its intersection with each valid pixel.
       Requires one north-up, single-band EPSG:4326 raster.
     - `bands`: select ordered bands from one raster, e.g. `[3, 1]` for
       `band_3_mean` and `band_1_mean` in a continuous center-assignment scan.

@@ -22,7 +22,7 @@ pub struct PyScanConfig {
     pub grid: GridKind,
     pub resolutions: Vec<u8>,
     pub categorical: bool,
-    /// Weight continuous center samples by their WGS84 footprint.
+    /// Weight continuous center or overlay contributions by their WGS84 area.
     pub ground_area: bool,
     pub format: CategoricalFormat,
     pub crs: Option<String>,
