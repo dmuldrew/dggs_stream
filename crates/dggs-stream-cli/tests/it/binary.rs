@@ -651,3 +651,299 @@ fn ground_area_file_output_is_committed_only_after_success() {
         }
     }
 }
+
+fn parent_parts(dataset: &Path) -> Vec<PathBuf> {
+    let mut parts = Vec::new();
+    for folder in dataset.read_dir().unwrap() {
+        for file in folder.unwrap().path().read_dir().unwrap() {
+            parts.push(file.unwrap().path());
+        }
+    }
+    parts.sort();
+    parts
+}
+
+fn parquet_rows(path: &Path) -> Vec<parquet::record::Row> {
+    let reader = SerializedFileReader::new(File::open(path).unwrap()).unwrap();
+    assert!(reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .unwrap()
+        .iter()
+        .any(|kv| kv.key == "geo"));
+    reader
+        .get_row_iter(None)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+fn cell_id(row: &parquet::record::Row) -> h3o::CellIndex {
+    let (_, id) = row
+        .get_column_iter()
+        .find(|(key, _)| *key == "h3_index")
+        .unwrap();
+    let id = match id {
+        Field::Long(v) => *v as u64,
+        Field::ULong(v) => *v,
+        _ => panic!("integer H3 index expected"),
+    };
+    h3o::CellIndex::try_from(id).unwrap()
+}
+
+#[test]
+fn hive_parent_dataset_matches_single_file() {
+    let (_tmp, input) = gradient_tif();
+    let dir = tempfile::tempdir().unwrap();
+    for categorical in [false, true] {
+        let set = dir.path().join(format!("dataset-{categorical}"));
+        let file = dir.path().join(format!("reference-{categorical}.parquet"));
+        let mut args = vec!["parquet", s(&input), "-r", "8,9"];
+        if categorical {
+            args.push("-c");
+        }
+        let mut single = args.clone();
+        single.extend(["-o", s(&file)]);
+        run_ok(&single);
+        args.extend(["--partition-by-parent-res", "7", "-o", s(&set)]);
+        run_ok(&args);
+        let mut want = parquet_rows(&file);
+        let mut got = Vec::new();
+        let parts = parent_parts(&set);
+        assert!(parts.len() > 1);
+        for part in parts {
+            for row in parquet_rows(&part) {
+                let parent = cell_id(&row).parent(h3o::Resolution::Seven).unwrap();
+                assert_eq!(
+                    part.parent()
+                        .unwrap()
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    format!("h3_07={parent}")
+                );
+                got.push(row);
+            }
+        }
+        got.sort_by_key(cell_id);
+        want.sort_by_key(cell_id);
+        assert_eq!(got, want);
+        run_err(&args, "already exists");
+    }
+}
+
+#[test]
+fn hive_parent_wide_projection_omits_internal_routing_key() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dggs-stream-core/tests/fixtures/multiband-12-planar.tif");
+    let dir = tempfile::tempdir().unwrap();
+    let set = dir.path().join("dataset");
+    let file = dir.path().join("single.parquet");
+    let args = [
+        "parquet",
+        s(&path),
+        "-r",
+        "10",
+        "--bands",
+        "3,1",
+        "--columns",
+        "band_3_mean,wkb,band_1_mean",
+    ];
+    run_ok(&[&args[..], &["-o", s(&file)]].concat());
+    run_ok(
+        &[
+            &args[..],
+            &["--partition-by-parent-res", "8", "-o", s(&set)],
+        ]
+        .concat(),
+    );
+    let sorted = |rows: Vec<parquet::record::Row>| {
+        let mut values = rows
+            .into_iter()
+            .map(|row| {
+                assert_eq!(
+                    row.get_column_iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect::<Vec<_>>(),
+                    ["band_3_mean", "wkb", "band_1_mean"]
+                );
+                format!("{row:?}")
+            })
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    };
+    let rows = parent_parts(&set)
+        .iter()
+        .flat_map(|part| parquet_rows(part))
+        .collect();
+    assert_eq!(sorted(rows), sorted(parquet_rows(&file)));
+}
+
+#[test]
+fn hive_parent_invalid_or_failed_export_leaves_no_dataset() {
+    let (_tmp, input) = gradient_tif();
+    let dir = tempfile::tempdir().unwrap();
+    let set = dir.path().join("dataset");
+    let flag = ["--partition-by-parent-res", "8", "-o", s(&set)];
+    run_err(
+        &[&["parquet", s(&input), "-r", "7"][..], &flag].concat(),
+        "no finer",
+    );
+    run_err(
+        &[&["parquet", s(&input), "--grid", "s2"][..], &flag].concat(),
+        "requires H3",
+    );
+    run_err(
+        &[&["ipc", s(&input)][..], &flag].concat(),
+        "--partition-by-parent-res",
+    );
+    let corrupt = corrupt_strip_geotiff();
+    run_err(
+        &[&["parquet", s(corrupt.path())][..], &flag].concat(),
+        "Error:",
+    );
+    assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+}
+
+#[test]
+fn hive_parent_wide_export_refuses_repeated_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dggs-stream-core/tests/fixtures/multiband-12-planar.tif");
+    let set = dir.path().join("dataset");
+    // The names are checked once, before any part file, so a dataset is never started.
+    run_err(
+        &[
+            "parquet",
+            s(&path),
+            "-r",
+            "12",
+            "--bands",
+            "3,1",
+            "--columns",
+            "wkb,band_3_mean,BAND_3_MEAN",
+            "--partition-by-parent-res",
+            "8",
+            "-o",
+            s(&set),
+        ],
+        "duplicate Parquet column 'band_3_mean'",
+    );
+    assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+}
+
+#[test]
+#[ignore = "requires the DuckDB CLI on PATH"]
+fn duckdb_prunes_hive_parent_files() {
+    let (_tmp, input) = gradient_tif();
+    let dir = tempfile::tempdir().unwrap();
+    let set = dir.path().join("dataset");
+    let file = dir.path().join("single.parquet");
+    run_ok(&["parquet", s(&input), "-r", "9", "-o", s(&file)]);
+    run_ok(&[
+        "parquet",
+        s(&input),
+        "-r",
+        "9",
+        "--partition-by-parent-res",
+        "7",
+        "-o",
+        s(&set),
+    ]);
+    let parts = parent_parts(&set);
+    let parent = cell_id(&parquet_rows(&parts[0])[0])
+        .parent(h3o::Resolution::Seven)
+        .unwrap();
+    let ids = parquet_rows(&file)
+        .iter()
+        .map(cell_id)
+        .filter(|c| c.parent(h3o::Resolution::Seven) == Some(parent))
+        .map(|c| u64::from(c).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = |query: &str| {
+        let result = Command::new("duckdb")
+            .args(["-csv", "-noheader", "-c", query])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap()
+    };
+    let dataset = format!(
+        "read_parquet('{}/*/*.parquet', hive_partitioning=true)",
+        set.display()
+    );
+    for filtered in [false, true] {
+        let mut have = format!("SELECT * EXCLUDE(h3_07) FROM {dataset}");
+        let mut want = format!("SELECT * FROM '{}'", file.display());
+        if filtered {
+            have += &format!(" WHERE h3_07='{parent}'");
+            want += &format!(" WHERE h3_index IN ({ids})");
+        }
+        let query = format!("SELECT count(*) FROM (({want} EXCEPT ALL {have}) UNION ALL ({have} EXCEPT ALL {want}))");
+        assert_eq!(sql(&query).trim(), "0");
+    }
+    let plan = sql(&format!(
+        "EXPLAIN ANALYZE SELECT sum(pixel_count) FROM {dataset} WHERE h3_07='{parent}'"
+    ));
+    assert!(parts.len() > 1);
+    assert!(
+        plan.contains(&format!("Scanning Files: 1/{}", parts.len())),
+        "{plan}"
+    );
+    assert!(plan.contains("Total Files Read: 1"), "{plan}");
+}
+
+#[test]
+fn hive_parent_revisited_across_windows_and_empty_scan() {
+    use dggs_stream_core::aggregator::multi_horizon::MultiScanHorizonStreamer;
+    use dggs_stream_core::parquet::{
+        write_parent_records, ContinuousRowGroupBuffer, ParquetExportConfig,
+    };
+    use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+    let (_tmp, input) = gradient_tif();
+    let dir = tempfile::tempdir().unwrap();
+    let single = dir.path().join("single.parquet");
+    run_ok(&["parquet", s(&input), "-r", "8", "-o", s(&single)]);
+    for empty in [false, true] {
+        let mut config = MultiResolutionConfig::new(vec![8]);
+        if empty {
+            config.min_count = Some(1e12);
+        }
+        let streamer =
+            MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&input).unwrap(), &config)
+                .unwrap();
+        let dataset = dir.path().join(format!("dataset-{empty}"));
+        let opts = ParquetExportConfig {
+            row_group_size: 3,
+            geoparquet: true,
+            ..Default::default()
+        };
+        let n =
+            write_parent_records::<_, ContinuousRowGroupBuffer>(streamer, &dataset, 0, opts, |r| {
+                r.cell_id
+            })
+            .unwrap();
+        let parts = parent_parts(&dataset);
+        let mut got: Vec<_> = parts.iter().flat_map(|p| parquet_rows(p)).collect();
+        assert_eq!(n, got.len());
+        if empty {
+            assert_eq!(n, 0);
+            assert_eq!(parts.len(), 1);
+        } else {
+            assert!(parts.len() > 1);
+            assert!(parts.iter().all(|p| p.parent() == parts[0].parent()));
+            let mut want = parquet_rows(&single);
+            got.sort_by_key(cell_id);
+            want.sort_by_key(cell_id);
+            assert_eq!(got, want);
+        }
+    }
+}

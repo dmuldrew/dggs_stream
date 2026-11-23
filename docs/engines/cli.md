@@ -104,6 +104,31 @@ dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
 dggs-stream-cli pmtiles landcover.tif -c -r 5,6,7,8 -o landcover.pmtiles
 ```
 
+#### Hive-partitioned H3 output
+
+Pass `--partition-by-parent-res R` to write a new directory. Choose an H3
+resolution no finer than the coarsest requested output. For example, this
+places resolution 8 and 9 cells in directories named `h3_06=<parent hex>`.
+
+```bash
+dggs-stream-cli parquet dem.tif -r 8,9 --partition-by-parent-res 6 -o dem_by_parent
+```
+
+DuckDB can filter on the Hive column before opening individual files.
+
+```sql
+SELECT h3_index, avg_value
+FROM read_parquet('dem_by_parent/*/*.parquet', hive_partitioning = true)
+WHERE h3_06 = '862830827ffffff';
+```
+
+Each part has the single-file export's columns and GeoParquet metadata, with
+bounds for its own geometries. A parent can contain several part files. Coarser
+parents reduce the number of small files. The CLI stages the complete dataset
+before publishing it and requires a fresh output path for each run. Empty
+results include one schema-only part. Categorical and selected-band exports use
+the same layout.
+
 ### `parquet-to-pmtiles`
 
 Turns any Parquet file with an H3 column into a PMTiles v3 archive, one hexagon feature per

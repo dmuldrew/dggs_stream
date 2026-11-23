@@ -32,17 +32,36 @@ fn buffered_bytes(data_type: &ArrowDataType, nullable: bool) -> usize {
     }
 }
 
-/// Rows per row group: `row_group_size`, lowered so buffered values stay within
-/// [`MULTIBAND_ROW_GROUP_BUDGET_BYTES`].
-fn group_rows(schema: &crate::columnar::ColumnSchema, row_group_size: usize) -> usize {
-    let row_bytes: usize = schema
+/// Rough bytes of buffered values per row of `schema`.
+pub(super) fn row_bytes(schema: &crate::columnar::ColumnSchema) -> usize {
+    schema
         .fields
         .iter()
         .map(|f| buffered_bytes(&f.data_type, f.nullable))
-        .sum();
+        .sum()
+}
+
+/// Rows per row group: `row_group_size`, lowered so buffered values stay within
+/// [`MULTIBAND_ROW_GROUP_BUDGET_BYTES`].
+pub(super) fn group_rows(schema: &crate::columnar::ColumnSchema, row_group_size: usize) -> usize {
     row_group_size
-        .min(MULTIBAND_ROW_GROUP_BUDGET_BYTES / row_bytes.max(1))
+        .min(MULTIBAND_ROW_GROUP_BUDGET_BYTES / row_bytes(schema).max(1))
         .max(1)
+}
+
+/// Parquet readers resolve columns by name, ignoring case here, so a repeated
+/// name makes the file ambiguous. Linear in the number of columns; callers that
+/// write many files with one schema check it once.
+pub(super) fn check_unique_names(
+    schema: &crate::columnar::ColumnSchema,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut seen = std::collections::HashSet::with_capacity(schema.fields.len());
+    for f in &schema.fields {
+        if !seen.insert(f.name.to_ascii_lowercase()) {
+            return Err(format!("duplicate Parquet column '{}'", f.name).into());
+        }
+    }
+    Ok(())
 }
 
 /// Values of one column buffered until the next row group is written.
@@ -181,19 +200,23 @@ pub fn write_multiband_parquet_with_config(
     path: &Path,
     config: &ParquetExportConfig,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let schema = reader.schema();
+    check_unique_names(&schema)?;
+    write_batches(schema, reader, path, config)
+}
+
+/// Write `batches` to one file. The caller has checked the schema's column
+/// names with [`check_unique_names`].
+pub(super) fn write_batches(
+    schema: Arc<crate::columnar::ColumnSchema>,
+    batches: impl IntoIterator<Item = crate::error::Result<crate::columnar::RecordBatch>>,
+    path: &Path,
+    config: &ParquetExportConfig,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let geo = config.geoparquet;
     let row_group_size = config.row_group_size;
-    let schema = reader.schema();
     if geo && schema.index_of("wkb").is_none() {
         return Err("multi-band GeoParquet requires the wkb column".into());
-    }
-    for (i, f) in schema.fields.iter().enumerate() {
-        if schema.fields[..i]
-            .iter()
-            .any(|g| g.name.eq_ignore_ascii_case(&f.name))
-        {
-            return Err(format!("duplicate Parquet column '{}'", f.name).into());
-        }
     }
     let mut message = String::from("message cells {");
     let mut buffers = Vec::with_capacity(schema.fields.len());
@@ -245,7 +268,7 @@ pub fn write_multiband_parquet_with_config(
     ];
     let group_rows = group_rows(&schema, row_group_size);
     let (mut rows, mut pending) = (0, 0);
-    for batch in reader {
+    for batch in batches {
         let batch = batch?;
         for (buffer, array) in buffers.iter_mut().zip(batch.columns) {
             buffer.append(array, geo, &mut bounds)?;

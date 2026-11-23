@@ -34,7 +34,10 @@ use dggs_stream_core::columnar::{
 use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::histogram::HistogramSpec;
-use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
+use dggs_stream_core::parquet::{
+    write_parent_records, CategoricalRowGroupBuffer, ContinuousRowGroupBuffer, ParquetExportConfig,
+    ParquetWriter,
+};
 use dggs_stream_core::pmtiles::{PmtilesExportSummary, PmtilesTiler};
 use dggs_stream_core::raster::mosaic::{resolve_raster_sources, MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::ResolutionSpec;
@@ -54,6 +57,8 @@ pub enum StreamOutputFormat {
 /// Configuration for streaming a raster aggregation to a writer (`stdout` or file).
 #[derive(Debug, Clone)]
 pub struct CliStreamOptions {
+    /// Hive-partition the CLI GeoParquet dataset by this H3 parent resolution.
+    pub partition_by_parent_res: Option<u8>,
     pub input_path: String,
     pub bands: Option<String>,
     /// Weight continuous center assignments by ellipsoidal pixel area.
@@ -94,6 +99,7 @@ impl Default for CliStreamOptions {
     fn default() -> Self {
         Self {
             input_path: String::new(),
+            partition_by_parent_res: None,
             bands: None,
             ground_area: false,
             grid: GridKind::H3,
@@ -232,24 +238,44 @@ pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
             "--ground-area supports ipc and jsonl output".into(),
         ));
     }
+    if let Some(parent) = opts.partition_by_parent_res {
+        if opts.grid != GridKind::H3 || parent > 15 || opts.resolutions.iter().any(|&r| r < parent)
+        {
+            return Err(DggsStreamError::InvalidParameter("--partition-by-parent-res requires H3 and a resolution in 0..=15 no finer than any output resolution".into()));
+        }
+    }
     let config = opts.scan_config();
     let Some(selector) = &opts.bands else {
-        return export_raster_to_parquet_with_config(
+        return export_parquet_layout(
             &opts.input_path,
             path,
             opts.categorical,
             true,
             config,
+            opts.partition_by_parent_res,
         );
     };
     let paths = resolve_raster_sources(&opts.input_path)?;
-    let mut reader = open_multiband(opts, selector, &paths, &config)?;
-    let rows = dggs_stream_core::parquet::write_multiband_parquet(
-        &mut reader,
-        path,
-        true,
-        ParquetExportConfig::default().row_group_size,
-    )
+    // Keep the routing key internally even for a projection that omits it.
+    let mut scan = opts.clone();
+    let hidden_index = opts.partition_by_parent_res.is_some()
+        && scan.columns.as_ref().is_some_and(|cols| {
+            !cols.is_empty() && !cols.iter().any(|c| c.eq_ignore_ascii_case("h3_index"))
+        });
+    if hidden_index {
+        scan.columns.as_mut().unwrap().push("h3_index".into());
+    }
+    let mut reader = open_multiband(&scan, selector, &paths, &config)?;
+    let rows = if let Some(parent) = opts.partition_by_parent_res {
+        dggs_stream_core::parquet::write_parent_multiband(&mut reader, path, parent, hidden_index)
+    } else {
+        dggs_stream_core::parquet::write_multiband_parquet(
+            &mut reader,
+            path,
+            true,
+            ParquetExportConfig::default().row_group_size,
+        )
+    }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(reader.transform_failures());
     drop(reader);
@@ -1037,7 +1063,25 @@ pub fn export_raster_to_parquet_with_config(
     output_path: &Path,
     categorical: bool,
     geoparquet: bool,
+    config: MultiResolutionConfig,
+) -> Result<usize> {
+    export_parquet_layout(
+        input_path,
+        output_path,
+        categorical,
+        geoparquet,
+        config,
+        None,
+    )
+}
+
+fn export_parquet_layout(
+    input_path: &str,
+    output_path: &Path,
+    categorical: bool,
+    geoparquet: bool,
     mut config: MultiResolutionConfig,
+    parent: Option<u8>,
 ) -> Result<usize> {
     let report_profile = config.profile.clone();
     let paths = resolve_raster_sources(input_path)?;
@@ -1064,10 +1108,30 @@ pub fn export_raster_to_parquet_with_config(
 
     let rows = if !categorical {
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)?;
-        ParquetWriter::write_continuous_streamer_to_parquet(streamer, output_path, pq_cfg)
+        if let Some(parent) = parent {
+            write_parent_records::<_, ContinuousRowGroupBuffer>(
+                streamer,
+                output_path,
+                parent,
+                pq_cfg,
+                |r| r.cell_id,
+            )
+        } else {
+            ParquetWriter::write_continuous_streamer_to_parquet(streamer, output_path, pq_cfg)
+        }
     } else {
         let streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &config)?;
-        ParquetWriter::write_categorical_streamer_to_parquet(streamer, output_path, pq_cfg)
+        if let Some(parent) = parent {
+            write_parent_records::<_, CategoricalRowGroupBuffer>(
+                streamer,
+                output_path,
+                parent,
+                pq_cfg,
+                |r| r.cell_id,
+            )
+        } else {
+            ParquetWriter::write_categorical_streamer_to_parquet(streamer, output_path, pq_cfg)
+        }
     }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(failures.load(Ordering::Relaxed).saturating_sub(before));
@@ -1303,6 +1367,19 @@ pub fn parse_stream_args(
     args: &[String],
     default_format: StreamOutputFormat,
 ) -> Result<(CliStreamOptions, Option<String>)> {
+    parse_export_args(args, default_format, false)
+}
+
+/// Parse the Parquet subcommand, including its dataset layout option.
+pub fn parse_parquet_args(args: &[String]) -> Result<(CliStreamOptions, Option<String>)> {
+    parse_export_args(args, StreamOutputFormat::Ipc, true)
+}
+
+fn parse_export_args(
+    args: &[String],
+    default_format: StreamOutputFormat,
+    parquet: bool,
+) -> Result<(CliStreamOptions, Option<String>)> {
     let mut opts = CliStreamOptions {
         output_format: default_format,
         ..Default::default()
@@ -1401,6 +1478,13 @@ pub fn parse_stream_args(
             "--histogram" => histogram[0] = Some(value()?.to_string()),
             "--histogram-weight" => histogram[1] = Some(value()?.to_string()),
             "--histogram-normalize" => histogram[2] = Some(value()?.to_string()),
+            "--partition-by-parent-res" if parquet => {
+                let v = value()?;
+                opts.partition_by_parent_res = Some(
+                    v.parse()
+                        .map_err(|_| invalid(flag, v, "H3 resolution 0..=15"))?,
+                );
+            }
             "--ground-area" => opts.ground_area = true,
             "--bands" => opts.bands = Some(value()?.to_string()),
             "--profile" => opts.profile = Some(RunProfile::new()),
