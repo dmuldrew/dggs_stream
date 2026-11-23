@@ -242,6 +242,12 @@ pub struct TransferStream<A: TransferAccumulator> {
     strict_transforms: bool,
     /// Runtime telemetry, updated once per block.
     profile: Option<Arc<crate::run_profile::RunProfile>>,
+    /// Worker batches run, and cells those workers handed back to the serial
+    /// reducer, so tests can tell the parallel path from the serial one.
+    #[cfg(test)]
+    overlap_batches: usize,
+    #[cfg(test)]
+    overlap_retries: usize,
 }
 
 impl<A: TransferAccumulator> TransferStream<A> {
@@ -371,6 +377,10 @@ impl<A: TransferAccumulator> TransferStream<A> {
             failure_counter: config.transform_failure_counter.clone(),
             strict_transforms: config.strict_transforms,
             profile: config.profile.clone(),
+            #[cfg(test)]
+            overlap_batches: 0,
+            #[cfg(test)]
+            overlap_retries: 0,
         })
     }
 
@@ -707,6 +717,10 @@ impl<A: TransferAccumulator> TransferStream<A> {
             let slot = i % OVERLAP_BATCH_CELLS;
             if let Some(pool) = pool {
                 if slot == 0 {
+                    #[cfg(test)]
+                    {
+                        self.overlap_batches += 1;
+                    }
                     let batch = &cells[i..cells.len().min(i + OVERLAP_BATCH_CELLS)];
                     prepared.resize_with(batch.len(), Default::default);
                     pool.install(|| {
@@ -726,7 +740,13 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     overlaps.append(pixels);
                     Some(*end)
                 }
-                _ if !coarse => geometry.clip(cell, &mut overlaps, usize::MAX),
+                _ if !coarse => {
+                    #[cfg(test)]
+                    if pool.is_some() {
+                        self.overlap_retries += 1;
+                    }
+                    geometry.clip(cell, &mut overlaps, usize::MAX)
+                }
                 _ => None,
             };
             let end_row;
@@ -1357,5 +1377,99 @@ mod tests {
             assert!((a.count - want.count).abs() < 1e-8);
             assert!((a.sum - want.sum).abs() < 1e-7);
         }
+    }
+
+    /// A geographic (EPSG:4326) float raster with square-or-not pixels.
+    fn geographic_raster(
+        width: u32,
+        height: u32,
+        origin: (f64, f64),
+        pixel: (f64, f64),
+        value: impl Fn(u32, u32) -> f32,
+    ) -> tempfile::NamedTempFile {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = TiffEncoder::new(file.as_file()).unwrap();
+        let mut image = encoder
+            .new_image::<colortype::Gray32Float>(width, height)
+            .unwrap();
+        let tags = image.encoder();
+        tags.write_tag(
+            Tag::GeoKeyDirectoryTag,
+            &[1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326][..],
+        )
+        .unwrap();
+        tags.write_tag(Tag::ModelPixelScaleTag, &[pixel.0, pixel.1, 0.0][..])
+            .unwrap();
+        tags.write_tag(
+            Tag::ModelTiepointTag,
+            &[0.0f64, 0.0, 0.0, origin.0, origin.1, 0.0][..],
+        )
+        .unwrap();
+        let pixels: Vec<_> = (0..height)
+            .flat_map(|r| (0..width).map(move |c| (r, c)))
+            .map(|(r, c)| value(c, r))
+            .collect();
+        image.write_data(&pixels).unwrap();
+        file
+    }
+
+    /// Cells, plus the worker batches run and cells retried serially.
+    fn overlay_scan(
+        file: &tempfile::NamedTempFile,
+        grid: GridKind,
+        resolution: u8,
+        workers: Option<usize>,
+    ) -> (BTreeMap<u64, ContinuousAccumulator>, usize, usize) {
+        let mosaic = Arc::new(
+            MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap(),
+        );
+        let mut config = MultiResolutionConfig::single(resolution).with_grid(grid);
+        config.transfer = TransferMode::Overlay {
+            weighted: false,
+            mass_preserve: false,
+        };
+        config.aggregation_workers = workers;
+        let mut stream = TransferStream::<ContinuousAccumulator>::new(mosaic, &config).unwrap();
+        let mut cells = BTreeMap::new();
+        while stream
+            .drain_into(128, |_, _, id, a| {
+                assert!(cells.insert(id, a).is_none());
+            })
+            .unwrap()
+            > 0
+        {}
+        (cells, stream.overlap_batches, stream.overlap_retries)
+    }
+
+    #[test]
+    fn overlay_workers_clip_cell_batches_and_hand_oversized_cells_back() {
+        // Fine cells: pixels a few times smaller than a cell, so every batch
+        // of cells is prepared by workers and none is oversized.
+        let fine = geographic_raster(60, 48, (-122.45, 37.80), (0.001, 0.001), |c, r| {
+            (1 + (3 * c + r) % 23) as f32
+        });
+        let (serial, serial_batches, _) = overlay_scan(&fine, GridKind::H3, 10, Some(1));
+        let (parallel, batches, retries) = overlay_scan(&fine, GridKind::H3, 10, Some(4));
+        assert!(serial.len() > 128);
+        assert_eq!(serial_batches, 0, "one worker must clip serially");
+        assert!(batches > 0, "four workers never prepared a batch");
+        assert_eq!(retries, 0);
+        assert_eq!(parallel, serial);
+
+        // Narrow columns and tall rows: the mean cell area passes the worker
+        // gate, yet a cell crosses more than MAX_PREPARED_OVERLAPS pixels.
+        let narrow = geographic_raster(2048, 8, (-122.45, 37.80), (0.000002, 0.25), |c, r| {
+            (1 + (c + 3 * r) % 31) as f32
+        });
+        let (serial, _, _) = overlay_scan(&narrow, GridKind::H3, 8, Some(1));
+        let (parallel, batches, retries) = overlay_scan(&narrow, GridKind::H3, 8, Some(4));
+        assert!(serial
+            .values()
+            .any(|a| a.count > MAX_PREPARED_OVERLAPS as f64));
+        assert!(batches > 0, "four workers never prepared a batch");
+        assert!(retries > 0, "no oversized cell was handed back");
+        assert_eq!(parallel, serial);
     }
 }
