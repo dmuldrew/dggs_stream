@@ -148,6 +148,33 @@ pub fn write_parent_multiband(
     resolution: u8,
     hidden_index: bool,
 ) -> Result<usize> {
+    write_parent_multiband_within(
+        source,
+        destination,
+        resolution,
+        hidden_index,
+        super::multiband::MULTIBAND_ROW_GROUP_BUDGET_BYTES,
+    )
+    .map(|(rows, _)| rows)
+}
+
+/// Heap and header bytes one column adds to every parent group of a window,
+/// whatever the group's row count: the array itself and its value allocation.
+const COLUMN_SLOT_BYTES: usize = size_of::<ColumnArray>() + 32;
+
+/// [`write_parent_multiband`] flushing a window once its estimated retained
+/// bytes reach `budget`. Returns the rows written and the peak retained bytes.
+///
+/// The estimate counts each parent group's values and its full set of column
+/// arrays. A window spanning many parents retains one set per parent, so a wide
+/// selection would otherwise hold far more than its values suggest.
+fn write_parent_multiband_within(
+    source: &mut MultiBandBatchReader,
+    destination: &Path,
+    resolution: u8,
+    hidden_index: bool,
+    budget: usize,
+) -> Result<(usize, usize)> {
     let mut dataset = Dataset::new(destination, resolution)?;
     let input = source.schema();
     let key = input
@@ -161,9 +188,13 @@ pub fn write_parent_multiband(
         geoparquet: true,
         ..Default::default()
     };
+    super::multiband::check_unique_names(&schema)?;
     let limit = super::multiband::group_rows(&input, config.row_group_size);
+    let row_bytes = super::multiband::row_bytes(&input);
+    let group_slots = fields.len() * COLUMN_SLOT_BYTES;
     let mut groups = BTreeMap::<Option<CellIndex>, Vec<RecordBatch>>::new();
-    let mut pending = 0;
+    // Rows and estimated bytes retained in `groups`.
+    let (mut pending, mut retained, mut peak) = (0, 0usize, 0usize);
     let mut total = 0;
     let flush =
         |dataset: &mut Dataset, groups: &mut BTreeMap<_, Vec<RecordBatch>>| -> Result<usize> {
@@ -202,13 +233,16 @@ pub fn write_parent_multiband(
                     .entry(Some(parent))
                     .or_default()
                     .push(RecordBatch::try_new(schema.clone(), cols)?);
+                pending += indices.len();
+                retained += group_slots + indices.len() * row_bytes;
+                peak = peak.max(retained);
+                // A parent seen again after a flush gets another part file.
+                if pending >= limit || retained >= budget {
+                    total += flush(&mut dataset, &mut groups)?;
+                    (pending, retained) = (0, 0);
+                }
             }
-            pending += end - offset;
             offset = end;
-            if pending == limit {
-                total += flush(&mut dataset, &mut groups)?;
-                pending = 0;
-            }
         }
     }
     if pending == 0 && total == 0 {
@@ -216,7 +250,7 @@ pub fn write_parent_multiband(
     }
     total += flush(&mut dataset, &mut groups)?;
     dataset.publish(destination)?;
-    Ok(total)
+    Ok((total, peak))
 }
 
 fn select_wide_rows(array: &ColumnArray, indices: &[usize]) -> Result<ColumnArray> {
@@ -240,4 +274,96 @@ fn select_wide_rows(array: &ColumnArray, indices: &[usize]) -> Result<ColumnArra
         ColumnArray::Utf8 { values, .. } => select!(Utf8, values),
         _ => return Err("unexpected column in wide GeoParquet export".into()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregator::multi_horizon::MultiResolutionConfig;
+    use crate::raster::geotiff::GeoTiffStreamReader;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::record::RowAccessor;
+
+    /// `(h3_index, band_3_mean bits)` of every row of every part file, and the
+    /// number of part files.
+    fn dataset_rows(dir: &Path) -> (BTreeMap<u64, Option<u64>>, usize) {
+        let (mut rows, mut parts) = (BTreeMap::new(), 0);
+        for parent in std::fs::read_dir(dir).unwrap() {
+            for part in std::fs::read_dir(parent.unwrap().path()).unwrap() {
+                parts += 1;
+                let reader =
+                    SerializedFileReader::new(File::open(part.unwrap().path()).unwrap()).unwrap();
+                let names: Vec<_> = reader
+                    .metadata()
+                    .file_metadata()
+                    .schema_descr()
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_owned())
+                    .collect();
+                let at = |name: &str| names.iter().position(|n| n == name).unwrap();
+                let (id, mean) = (at("h3_index"), at("band_3_mean"));
+                for row in reader.get_row_iter(None).unwrap() {
+                    let row = row.unwrap();
+                    let value = row.get_double(mean).ok().map(f64::to_bits);
+                    assert!(rows.insert(row.get_ulong(id).unwrap(), value).is_none());
+                }
+            }
+        }
+        (rows, parts)
+    }
+
+    use std::fs::File;
+
+    fn export(destination: &Path, budget: usize) -> (usize, usize) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/multiband-12-interleaved.tif");
+        let bands: Vec<usize> = (1..=12).collect();
+        let mut reader = MultiBandBatchReader::open(
+            GeoTiffStreamReader::open(&path).unwrap(),
+            &MultiResolutionConfig::single(12),
+            &bands,
+            None,
+            64,
+            None,
+        )
+        .unwrap();
+        // Cells are resolution 12 and arrive in latitude order, so every 64-row batch
+        // touches most of the few resolution-8 parents: many small groups per window.
+        write_parent_multiband_within(&mut reader, destination, 8, false, budget).unwrap()
+    }
+
+    #[test]
+    fn wide_windows_with_many_parents_stay_within_the_memory_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let (default_dir, small_dir) = (dir.path().join("default"), dir.path().join("small"));
+        let (rows, default_peak) = export(
+            &default_dir,
+            super::super::multiband::MULTIBAND_ROW_GROUP_BUDGET_BYTES,
+        );
+        let budget = 128 << 10;
+        let (small_rows, small_peak) = export(&small_dir, budget);
+        assert_eq!(small_rows, rows);
+        assert!(rows > 3000, "{rows} rows");
+
+        // One group is a few KiB here, so the retained estimate may pass the budget
+        // by at most the group that tripped it.
+        assert!(
+            small_peak < 2 * budget,
+            "peak {small_peak} for budget {budget}"
+        );
+        // Without the byte bound the same window retains every parent's arrays.
+        assert!(
+            default_peak > 10 * small_peak,
+            "unbounded peak {default_peak} vs bounded {small_peak}"
+        );
+
+        // Bounding the window changes how rows split into files, not their content.
+        let (expected, expected_parts) = dataset_rows(&default_dir);
+        let (actual, parts) = dataset_rows(&small_dir);
+        assert_eq!(actual, expected);
+        assert_eq!(expected.len(), rows);
+        // A parent met again after a flush gets another file.
+        assert!(parts > expected_parts, "{parts} vs {expected_parts} files");
+    }
 }

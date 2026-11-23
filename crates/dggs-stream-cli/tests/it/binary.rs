@@ -809,6 +809,33 @@ fn hive_parent_invalid_or_failed_export_leaves_no_dataset() {
 }
 
 #[test]
+fn hive_parent_wide_export_refuses_repeated_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dggs-stream-core/tests/fixtures/multiband-12-planar.tif");
+    let set = dir.path().join("dataset");
+    // The names are checked once, before any part file, so a dataset is never started.
+    run_err(
+        &[
+            "parquet",
+            s(&path),
+            "-r",
+            "12",
+            "--bands",
+            "3,1",
+            "--columns",
+            "wkb,band_3_mean,BAND_3_MEAN",
+            "--partition-by-parent-res",
+            "8",
+            "-o",
+            s(&set),
+        ],
+        "duplicate Parquet column 'band_3_mean'",
+    );
+    assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+}
+
+#[test]
 #[ignore = "requires the DuckDB CLI on PATH"]
 fn duckdb_prunes_hive_parent_files() {
     let (_tmp, input) = gradient_tif();
