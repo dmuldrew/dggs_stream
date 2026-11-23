@@ -124,6 +124,21 @@ fn v2_scans_take_the_grid_from_options() {
 }
 
 #[test]
+fn v2_scan_accepts_budgets_and_rejects_invalid_sizes() {
+    let (_tmp, tif) = gradient_tif();
+    let options = c"{\"aggregation_budget_mb\":1,\"decode_budget_mb\":1}";
+    let result = scan_json(&tif, "9", options).unwrap();
+    assert_eq!(
+        result["count"].as_array().unwrap().len(),
+        core_cells(&tif, GridKind::H3).len()
+    );
+    for name in ["aggregation_budget_mb", "decode_budget_mb"] {
+        let invalid = CString::new(format!(r#"{{"{name}":0}}"#)).unwrap();
+        assert!(scan_json(&tif, "9", &invalid).unwrap_err().contains(name));
+    }
+}
+
+#[test]
 fn resolutions_are_bounded_by_the_grid() {
     let (_tmp, tif) = gradient_tif();
     for grid in GridKind::ALL {

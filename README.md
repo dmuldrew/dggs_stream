@@ -379,8 +379,8 @@ SQL functions (`s2_raster_continuous_aggregate`, `healpix_lonlat_to_cell`, ...; 
 
 Feature coverage differs per engine: DuckDB exposes every parameter (sampling, bands,
 spectral formulas, quantiles, remapping, budgets), DataFusion exposes most of them through
-builders, Python exposes all but compaction, single-cell pushdown and resource budgets
-(and pushes Polars filters into the engine), and PostgreSQL and the CLI expose the common subset (resolutions, CRS, NoData, bbox,
+builders, and Python exposes center-scan aggregation and decode budgets and pushes Polars
+filters into the engine. PostgreSQL and the CLI expose the common subset (resolutions, CRS, NoData, bbox,
 categorical layout). Every engine takes the grid, `auto` resolution, the NoData policy and
 `decimals`; transfer modes and histograms are in every engine except PostgreSQL, and the
 runtime profile in all but PostgreSQL ([Scan Options](docs/scan-options.md#option-names-by-engine)).
@@ -690,6 +690,8 @@ Python and PostgreSQL always calibrate. See [Band calibration and validity](docs
 For datasets spanning ±180° longitude, dggs_stream automatically wraps coordinates. For ROI bounding box filters across the antimeridian, split into two queries (e.g., `[170.0, 180.0]` and `[-180.0, -170.0]`).
 
 ### BigTIFF & Codec Compatibility
+
+For JPEG-compressed GeoTIFFs with three interleaved 8-bit YCbCr samples and standard full-range color parameters, bands 1, 2 and 3 are red, green and blue. Selecting bands `3,1` returns blue and red. The reader supports shared JPEG tables for local and HTTP scans.
 
 Natively decodes TIFF 6.0 and BigTIFF (>4 GB) with: Raw, Deflate (Zlib), LZW, ZSTD, PackBits compression and `Float32/64`, `UInt8/16/32`, `Int8/16/32` pixel types. For unsupported codecs (JPEG2000, WebP, LERC), convert first:
 

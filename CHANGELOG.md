@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CLI IPC and JSONL scans accept `--ground-area` for continuous center assignment on north-up, single-band EPSG:4326 rasters. The output includes valid pixel count, retained square metres, area-weighted sum and mean.
 
+- Python and Polars center-assignment scans accept `aggregation_budget_mb` and `decode_budget_mb` in whole MiB.
+
 - Rust core `scan_ground_area` streams continuous statistics weighted by each valid pixel's ellipsoidal footprint, assigned by pixel center, for single-band north-up EPSG:4326 GeoTIFFs on H3, A5, S2 and HEALPix. Records carry valid pixel count, retained area in m², the area-weighted sum and mean. Weighted statistics that overflow, within a window or after cells merge, fail the stream. Partitioned scans are not supported.
 
 - The DuckDB direct Parquet exporters for H3, A5, S2 and HEALPix accept `bands` for wide continuous output.
@@ -98,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The free functions `pmtiles::tiler::evict_and_write_tiles` and `pmtiles::tiler::flush_all_tiles`, which had no callers; use the `TilePyramidAccumulator` methods `evict_and_write_tiles` and `flush_all` instead.
 
 ### Fixed
+
+- Standard 8-bit JPEG/YCbCr GeoTIFF scans now report RGB band values. Earlier versions exposed the JPEG luminance and chroma components as three bands.
 
 - DuckDB direct Parquet exports write `compression := 'lz4'` as raw LZ4, which DuckDB can read back, and honour `compression := 'brotli'` instead of falling back to Snappy.
 
