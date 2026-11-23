@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- DuckDB continuous raster table functions accept `ground_area := true` for ellipsoidal area-weighted center scans on all four grids.
+
 - CLI IPC and JSONL scans accept `--ground-area` for continuous center assignment on north-up, single-band EPSG:4326 rasters. The output includes valid pixel count, retained square metres, area-weighted sum and mean.
 
 - Python and Polars center-assignment scans accept `aggregation_budget_mb` and `decode_budget_mb` in whole MiB.
@@ -98,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The free functions `pmtiles::tiler::evict_and_write_tiles` and `pmtiles::tiler::flush_all_tiles`, which had no callers; use the `TilePyramidAccumulator` methods `evict_and_write_tiles` and `flush_all` instead.
 
 ### Fixed
+
+- DuckDB `COUNT(*)` over a `bands` scan no longer fails on DuckDB 1.2.0, which projects only its synthetic row-ID column for row counts.
 
 - Standard 8-bit JPEG/YCbCr GeoTIFF scans now report RGB band values. Earlier versions exposed the JPEG luminance and chroma components as three bands.
 
