@@ -9,6 +9,8 @@
 //! - Partitioned scans for shell fan-outs: [`plan_raster_partitions`], a partition per
 //!   [`CliStreamOptions::partition`] scan, and [`merge_partition_files`]
 
+mod ground_area;
+
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -54,6 +56,8 @@ pub enum StreamOutputFormat {
 pub struct CliStreamOptions {
     pub input_path: String,
     pub bands: Option<String>,
+    /// Weight continuous center assignments by ellipsoidal pixel area.
+    pub ground_area: bool,
     pub grid: GridKind,
     pub resolutions: Vec<u8>,
     pub categorical: bool,
@@ -91,6 +95,7 @@ impl Default for CliStreamOptions {
         Self {
             input_path: String::new(),
             bands: None,
+            ground_area: false,
             grid: GridKind::H3,
             resolutions: vec![8],
             categorical: false,
@@ -222,6 +227,11 @@ fn open_multiband(
 
 /// Export from the CLI scan options, preserving wide column order for selected bands.
 pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
+    if opts.ground_area {
+        return Err(DggsStreamError::InvalidParameter(
+            "--ground-area supports ipc and jsonl output".into(),
+        ));
+    }
     let config = opts.scan_config();
     let Some(selector) = &opts.bands else {
         return export_raster_to_parquet_with_config(
@@ -250,6 +260,9 @@ pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
 fn stream_raster<W: Write>(opts: &CliStreamOptions, writer: &mut W) -> Result<usize> {
     let paths = resolve_raster_sources(&opts.input_path)?;
     let mut config = opts.scan_config();
+    if opts.ground_area {
+        return ground_area::stream(opts, &paths, &config, writer);
+    }
     if let Some(spec) = &opts.histogram {
         if opts.partition.is_some() {
             return Err(DggsStreamError::InvalidParameter(
@@ -1381,6 +1394,7 @@ pub fn parse_stream_args(
             "--histogram" => histogram[0] = Some(value()?.to_string()),
             "--histogram-weight" => histogram[1] = Some(value()?.to_string()),
             "--histogram-normalize" => histogram[2] = Some(value()?.to_string()),
+            "--ground-area" => opts.ground_area = true,
             "--bands" => opts.bands = Some(value()?.to_string()),
             "--profile" => opts.profile = Some(RunProfile::new()),
             "--nodata-policy" => {
@@ -2205,6 +2219,74 @@ mod tests {
             &["--histogram-weight", "area", "--transfer", "interpolate"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn ground_area_outputs_match_the_core_on_every_grid() {
+        use dggs_stream_core::aggregator::multi_horizon::area_continuous::scan_ground_area;
+        use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+
+        let input = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dggs-stream-core/tests/fixtures/internal-mask.tif");
+        for grid in [GridKind::H3, GridKind::A5, GridKind::S2, GridKind::Healpix] {
+            let args = [
+                input.to_str().unwrap(),
+                "--ground-area",
+                "--grid",
+                grid.label(),
+                "-r",
+                "8",
+            ]
+            .map(str::to_owned);
+            let (mut opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+            opts.batch_size = 2;
+            let mut core = scan_ground_area(
+                GeoTiffStreamReader::open(&input).unwrap(),
+                &opts.scan_config(),
+            )
+            .unwrap();
+            let mut expected = std::collections::HashMap::new();
+            loop {
+                let rows = core.fetch_next_batch(8).unwrap();
+                if rows.is_empty() {
+                    break;
+                }
+                for r in rows {
+                    expected.insert(r.cell_id, r.accumulator);
+                }
+            }
+            assert!(!expected.is_empty());
+            let mut json = Vec::new();
+            assert_eq!(
+                stream_raster_to_writer(&opts, &mut json).unwrap(),
+                expected.len()
+            );
+            for line in std::str::from_utf8(&json).unwrap().lines() {
+                let r: serde_json::Value = serde_json::from_str(line).unwrap();
+                let id = r[grid.index_column_name()].as_u64().unwrap();
+                let a = expected.remove(&id).unwrap();
+                assert_eq!(r[grid.hex_column_name()], format!("{id:x}"));
+                assert_eq!(r["resolution"], 8);
+                for (field, value) in [
+                    ("pixel_count", a.pixel_count()),
+                    ("retained_area_m2", a.retained_area_m2()),
+                    ("area_weighted_sum", a.area_weighted_sum()),
+                    ("area_weighted_mean", a.area_stats().mean()),
+                ] {
+                    assert!((r[field].as_f64().unwrap() - value).abs() <= value.abs() * 1e-12);
+                }
+            }
+            assert!(expected.is_empty());
+            opts.output_format = StreamOutputFormat::Ipc;
+            opts.columns = Some(vec!["area_weighted_mean".into(), "pixel_count".into()]);
+            opts.limit = Some(1);
+            let mut ipc = Vec::new();
+            assert_eq!(stream_raster_to_writer(&opts, &mut ipc).unwrap(), 1);
+            let (schema, batches) = read_ipc_stream(&mut ipc.as_slice()).unwrap();
+            assert_eq!(schema.fields[0].name, "area_weighted_mean");
+            assert_eq!(schema.fields[1].name, "pixel_count");
+            assert_eq!(batches[0].num_rows, 1);
         }
     }
 
