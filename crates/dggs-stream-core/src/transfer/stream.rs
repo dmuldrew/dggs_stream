@@ -1,5 +1,8 @@
 //! The streaming driver of the `interpolate` and `overlay` transfer modes.
 
+mod ground_area;
+pub use ground_area::scan_ground_area_overlay;
+
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;

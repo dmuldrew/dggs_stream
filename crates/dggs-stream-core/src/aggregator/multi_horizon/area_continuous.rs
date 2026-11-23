@@ -343,33 +343,7 @@ impl GroundAreaKernel {
         config: &MultiResolutionConfig,
     ) -> Result<Self> {
         config.validate()?;
-        let metadata = &reader.metadata;
-        // Read an override exactly as the CRS resolver will. Require code 4326
-        // itself, since the resolver maps NAD83 to the same identity transform.
-        let wgs84 = match config.custom_crs.as_deref() {
-            Some(crs) => crate::crs::transformer::parse_epsg_code(crs) == Some(4326),
-            None => metadata.epsg == Some(4326),
-        };
-        if config.partition.is_some() {
-            return Err(DggsStreamError::InvalidParameter(
-                "ground-area scans do not support partitioned scans".into(),
-            ));
-        }
-        if !wgs84
-            || metadata.samples_per_pixel != 1
-            || metadata.alpha_sample.is_some()
-            || config.band != 1
-        {
-            return Err(DggsStreamError::InvalidParameter(
-                "ground-area scans require a single-band EPSG:4326 raster".into(),
-            ));
-        }
-        wgs84_pixel_area(&metadata.geotransform, 0, 0)?;
-        wgs84_pixel_area(
-            &metadata.geotransform,
-            metadata.width.saturating_sub(1) as usize,
-            metadata.height.saturating_sub(1) as usize,
-        )?;
+        validate_ground_area_raster(reader, config)?;
         if !matches!(config.sampling.points.as_slice(), [p] if p.dx == 0.5 && p.dy == 0.5 && p.weight == 1.0)
             || config.transfer != crate::transfer::TransferMode::AssignCenters
             || config.track_quantiles()
@@ -386,6 +360,40 @@ impl GroundAreaKernel {
             error: Default::default(),
         })
     }
+}
+
+pub(crate) fn validate_ground_area_raster(
+    reader: &GeoTiffStreamReader,
+    config: &MultiResolutionConfig,
+) -> Result<()> {
+    let metadata = &reader.metadata;
+    // Read an override exactly as the CRS resolver will. Require code 4326
+    // itself, since the resolver maps NAD83 to the same identity transform.
+    let wgs84 = match config.custom_crs.as_deref() {
+        Some(crs) => crate::crs::transformer::parse_epsg_code(crs) == Some(4326),
+        None => metadata.epsg == Some(4326),
+    };
+    if config.partition.is_some() {
+        return Err(DggsStreamError::InvalidParameter(
+            "ground-area scans do not support partitioned scans".into(),
+        ));
+    }
+    if !wgs84
+        || metadata.samples_per_pixel != 1
+        || metadata.alpha_sample.is_some()
+        || config.band != 1
+    {
+        return Err(DggsStreamError::InvalidParameter(
+            "ground-area scans require a single-band EPSG:4326 raster".into(),
+        ));
+    }
+    wgs84_pixel_area(&metadata.geotransform, 0, 0)?;
+    wgs84_pixel_area(
+        &metadata.geotransform,
+        metadata.width.saturating_sub(1) as usize,
+        metadata.height.saturating_sub(1) as usize,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
