@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- DuckDB continuous raster table functions accept `ground_area := true` for ellipsoidal area-weighted center scans on all four grids.
+
 - CLI IPC and JSONL scans accept `--ground-area` for continuous center assignment on north-up, single-band EPSG:4326 rasters. The output includes valid pixel count, retained square metres, area-weighted sum and mean.
 
 - Rust core `scan_ground_area` streams continuous statistics weighted by each valid pixel's ellipsoidal footprint, assigned by pixel center, for single-band north-up EPSG:4326 GeoTIFFs on H3, A5, S2 and HEALPix. Records carry valid pixel count, retained area in m², the area-weighted sum and mean. Weighted statistics that overflow, within a window or after cells merge, fail the stream. Partitioned scans are not supported.

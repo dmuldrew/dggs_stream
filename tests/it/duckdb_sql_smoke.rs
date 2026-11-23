@@ -861,3 +861,91 @@ fn real_sql_multiband_parquet_selectors() {
     assert!(names.lines().any(|n| n == "band_12_mean"));
     assert!(!names.lines().any(|n| n == "s2_hex"));
 }
+
+#[test]
+#[ignore = "requires DuckDB CLI and a built extension"]
+fn real_sql_ground_area_matches_core_on_all_grids() {
+    use dggs_stream_core::aggregator::multi_horizon::{
+        area_continuous::scan_ground_area, MultiResolutionConfig,
+    };
+    use dggs_stream_core::grid::GridKind;
+    use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+    use std::collections::HashMap;
+
+    let engine = DuckDbHarness::new();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/dggs-stream-core/tests/fixtures/internal-mask.tif");
+    for (grid, resolution) in [
+        (GridKind::H3, 10),
+        (GridKind::A5, 15),
+        (GridKind::S2, 15),
+        (GridKind::Healpix, 15),
+    ] {
+        let config = MultiResolutionConfig::single(resolution).with_grid(grid);
+        let mut scan =
+            scan_ground_area(GeoTiffStreamReader::open(&path).unwrap(), &config).unwrap();
+        let mut expected = HashMap::new();
+        loop {
+            let rows = scan.fetch_next_batch(64).unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            for r in rows {
+                expected.insert(r.cell_id, r.accumulator);
+            }
+        }
+        let table = format!(
+            "raster_{}({}, resolution := {resolution}, ground_area := true)",
+            grid.label(),
+            quoted(&path)
+        );
+        let count = expected.len();
+        assert!(count > 1);
+        assert_eq!(
+            engine.query(&format!("SELECT count(*) FROM {table}")),
+            count.to_string()
+        );
+        let filtered = expected
+            .values()
+            .filter(|a| a.pixel_count() >= 2.0 && a.area_stats().mean() >= 10.0)
+            .count();
+        let filtered_sql = format!("SELECT count(*) FROM raster_{}({}, resolution := {resolution}, ground_area := true, min_count := 2, min_mean := 10)", grid.label(),quoted(&path));
+        assert_eq!(engine.query(&filtered_sql), filtered.to_string());
+        let sql = format!("SELECT area_weighted_mean, {id}, retained_area_m2, pixel_count, area_weighted_sum, {hex}, resolution, octet_length(wkb) FROM {table}",id=grid.index_column_name(),hex=grid.hex_column_name());
+        for line in engine.query(&sql).lines() {
+            let v: Vec<_> = line.split(',').collect();
+            let id = v[1].parse::<u64>().unwrap();
+            let a = expected
+                .remove(&id)
+                .expect("unexpected or duplicate SQL cell");
+            for (actual, want) in [
+                (v[0], a.area_stats().mean()),
+                (v[2], a.retained_area_m2()),
+                (v[3], a.pixel_count()),
+                (v[4], a.area_weighted_sum()),
+            ] {
+                assert!(
+                    (actual.parse::<f64>().unwrap() - want).abs() <= 1e-12 * want.abs().max(1.0),
+                    "{grid} {id} {actual} vs {want}"
+                );
+            }
+            assert_eq!(v[5], format!("{id:x}"));
+            assert_eq!(v[6], resolution.to_string());
+            assert!(v[7].parse::<usize>().unwrap() > 0);
+        }
+        assert!(expected.is_empty());
+    }
+    for options in [
+        "bands := '1'",
+        "quantiles := 'p50'",
+        "transfer := 'overlay'",
+        "nodata_policy := 'emit'",
+    ] {
+        let sql = format!(
+            "LOAD {}; SELECT * FROM raster_h3({}, ground_area := true, {options})",
+            quoted(&engine.extension),
+            quoted(&path)
+        );
+        assert!(try_query_cli(&engine.cli, &sql).is_err(), "{options}");
+    }
+}

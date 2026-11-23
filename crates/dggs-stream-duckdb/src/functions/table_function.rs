@@ -18,6 +18,7 @@ use crate::grid::GridKind;
 use crate::raster::mosaic::MosaicReader;
 use dggs_stream_core::aggregator::output_policy::{ContinuousStats, OutputPolicy};
 
+use dggs_stream_core::columnar::ground_area::{ground_area_schema, GroundAreaBatchReader};
 use dggs_stream_core::columnar::multiband::{resolve_bands, wide_schema, MultiBandBatchReader};
 use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
 
@@ -25,6 +26,7 @@ use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
 pub struct RasterH3BindData {
     pub common: CommonRasterParams,
     pub bands: Option<Vec<usize>>,
+    pub ground_area: bool,
     pub spectral_formula: Option<SpectralFormula>,
     pub min_count: Option<f64>,
     pub min_mean: Option<f64>,
@@ -38,6 +40,7 @@ pub struct RasterH3BindData {
 pub enum RasterH3GlobalData {
     Single(Box<SingleBandGlobal>),
     Wide(Box<Mutex<MultiBandBatchReader>>),
+    GroundArea(Box<Mutex<GroundAreaBatchReader>>),
 }
 
 pub struct SingleBandGlobal {
@@ -83,6 +86,28 @@ unsafe fn fill_optional(
     }
 }
 
+fn add_batch_columns(
+    bind: &BindHelper,
+    schema: dggs_stream_core::columnar::ColumnSchema,
+    emit_geom: bool,
+) {
+    for field in schema.fields {
+        let ty = match field.data_type {
+            ArrowDataType::UInt64 => DuckDBType::UBigInt,
+            ArrowDataType::UInt8 => DuckDBType::UTinyInt,
+            ArrowDataType::Utf8 => DuckDBType::Varchar,
+            ArrowDataType::Binary => DuckDBType::Blob,
+            ArrowDataType::Float64 => DuckDBType::Double,
+            _ => unreachable!("continuous schema"),
+        };
+        bind.add_result_column(&field.name, ty);
+    }
+    if emit_geom {
+        // SAFETY: the bind callback owns the live bind info.
+        unsafe { add_geom_column(bind) };
+    }
+}
+
 /// First quantile column: right after `wkb`, or after `geom` when emitted.
 fn quantile_start_column(emit_geom: bool) -> usize {
     if emit_geom {
@@ -112,6 +137,7 @@ impl RasterTable for ContinuousTable {
     unsafe fn register_named_parameters(tf: duckdb_table_function) {
         // SAFETY: `tf` is a live, unregistered table function (caller contract).
         unsafe {
+            add_named_parameter(tf, "ground_area", DuckDBType::Boolean);
             add_named_parameter(tf, "bands", DuckDBType::Varchar);
             add_named_parameter(tf, "chunk_size", DuckDBType::BigInt);
             add_named_parameter(tf, "formula", DuckDBType::Varchar);
@@ -180,7 +206,24 @@ impl RasterTable for ContinuousTable {
             return None;
         }
 
-        let bands = if let Some(selector) = bind.get_named_string("bands") {
+        let ground_area = bind.get_named_bool("ground_area").unwrap_or(false);
+        let bands = if ground_area {
+            if common.resolved_paths.len() != 1
+                || bind.get_named_string("bands").is_some()
+                || bind.get_named_string("formula").is_some()
+                || partition.is_some()
+                || !quantiles.is_empty()
+            {
+                bind.set_error("ground_area requires one unpartitioned single-band raster without bands, formulas or quantiles");
+                return None;
+            }
+            add_batch_columns(
+                bind,
+                ground_area_schema(common.grid, true),
+                common.emit_geom,
+            );
+            None
+        } else if let Some(selector) = bind.get_named_string("bands") {
             if bind.get_named_int("band").is_some()
                 || bind.get_named_string("formula").is_some()
                 || partition.is_some()
@@ -206,21 +249,11 @@ impl RasterTable for ContinuousTable {
                     return None;
                 }
             };
-            for field in wide_schema(common.grid, &bands, &quantiles).fields {
-                let ty = match field.data_type {
-                    ArrowDataType::UInt64 => DuckDBType::UBigInt,
-                    ArrowDataType::UInt8 => DuckDBType::UTinyInt,
-                    ArrowDataType::Utf8 => DuckDBType::Varchar,
-                    ArrowDataType::Binary => DuckDBType::Blob,
-                    ArrowDataType::Float64 => DuckDBType::Double,
-                    _ => unreachable!("continuous schema"),
-                };
-                bind.add_result_column(&field.name, ty);
-            }
-            if common.emit_geom {
-                // SAFETY: the bind callback owns the live bind info.
-                unsafe { add_geom_column(bind) };
-            }
+            add_batch_columns(
+                bind,
+                wide_schema(common.grid, &bands, &quantiles),
+                common.emit_geom,
+            );
             Some(bands)
         } else {
             bind.add_result_column(common.grid.index_column_name(), DuckDBType::UBigInt);
@@ -247,6 +280,7 @@ impl RasterTable for ContinuousTable {
             None
         };
         Some(RasterH3BindData {
+            ground_area,
             bands,
             common,
             spectral_formula,
@@ -273,6 +307,29 @@ impl RasterTable for ContinuousTable {
         config.min_count = bind.min_count;
         config.min_mean = bind.min_mean;
         config.max_mean = bind.max_mean;
+        if bind.ground_area {
+            let [tile] = mosaic.tiles.as_slice() else {
+                return Err("ground_area requires one raster".into());
+            };
+            let mut projection = projected_columns;
+            if bind.common.emit_geom {
+                // The optional DuckDB geometry column uses the same bytes as WKB.
+                for col in &mut projection {
+                    if *col == 8 {
+                        *col = 7;
+                    }
+                }
+            }
+            let reader = GroundAreaBatchReader::open(
+                tile.reader.clone(),
+                &config,
+                projection,
+                get_vector_size(),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(RasterH3GlobalData::GroundArea(Box::new(Mutex::new(reader))));
+        }
         if let Some(bands) = &bind.bands {
             config.quantiles = bind.quantiles.clone();
             let [tile] = mosaic.tiles.as_slice() else {
@@ -337,7 +394,11 @@ impl RasterTable for ContinuousTable {
         unsafe {
             let global = match global {
                 RasterH3GlobalData::Wide(reader) => {
-                    scan_wide(reader, ctx);
+                    scan_columns(reader, ctx);
+                    return;
+                }
+                RasterH3GlobalData::GroundArea(reader) => {
+                    scan_columns(reader, ctx);
                     return;
                 }
                 RasterH3GlobalData::Single(single) => single,
@@ -468,7 +529,10 @@ impl RasterTable for ContinuousTable {
 ///
 /// # Safety
 /// The callback owns the live output chunk with the schema declared at bind.
-unsafe fn scan_wide(reader: &Mutex<MultiBandBatchReader>, ctx: &ScanContext<'_>) {
+unsafe fn scan_columns<I>(reader: &Mutex<I>, ctx: &ScanContext<'_>)
+where
+    I: Iterator<Item = crate::error::Result<dggs_stream_core::columnar::RecordBatch>>,
+{
     // SAFETY: types and order follow the bound projection and the reader caps rows at DuckDB's vector size.
     unsafe {
         let batch = match reader.lock().unwrap_or_else(|e| e.into_inner()).next() {

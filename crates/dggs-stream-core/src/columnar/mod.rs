@@ -3,6 +3,7 @@
 //! and streaming IPC serialization for `dggs-stream-core`.
 
 pub mod arrow_c;
+pub mod ground_area;
 pub mod ipc;
 pub mod multiband;
 pub mod partitioned;
