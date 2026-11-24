@@ -263,3 +263,50 @@ def test_overlay_empty_cell_policy_after_merge(dggs_stream, tmp_path):
         merged = dggs_stream.merge_partials(parts, columns=columns, nodata_policy=policy)
         assert merged.num_rows == expected_rows
         assert merged.equals(serial)
+
+
+def test_overlay_interior_filters_and_boundary_rows(dggs_stream, striped_gradient):
+    options = dict(transfer="overlay", columns=["resolution", "h3_index", "count", "sum", "mean"],
+                   min_count=2, valid_coverage_threshold=0.8)
+    serial = sort(pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, **options)))
+    merged, _, partials = run_partitioned(dggs_stream, striped_gradient, 1000, **options)
+    assert partials == 0 and serial.num_rows > 0
+    assert_tables_match(serial, merged)
+
+    specs = dggs_stream.plan_partitions(striped_gradient, target_chunks=4)
+    final_keys, boundary_keys = [], set()
+    for spec in specs:
+        table = pa.table(dggs_stream.RasterArrowStream(striped_gradient, RESOLUTIONS, partition=spec, **options))
+        for row in table.to_pylist():
+            key = (row["resolution"], row["h3_index"])
+            if row["partial_state"] is None:
+                final_keys.append(key)
+            else:
+                boundary_keys.add(key)
+    assert final_keys and boundary_keys
+    assert len(final_keys) == len(set(final_keys))
+    assert set(final_keys).isdisjoint(boundary_keys)
+    merged, _, _ = run_partitioned(dggs_stream, striped_gradient, 4, **options)
+    assert_tables_match(serial, merged)
+
+
+def test_overlay_interior_nodata_threshold(dggs_stream, tmp_path):
+    path = tmp_path / "missing-strip.tif"
+    write_geotiff(path, 4, 3, lambda c, r: (2, -999, 8)[r], pixel=0.000001, rows_per_strip=1)
+    spec, = dggs_stream.plan_partitions(path, target_chunks=3)
+    for threshold, expected in [(0.65, 1), (0.68, 0)]:
+        options = dict(transfer="overlay", nodata=-999, valid_coverage_threshold=threshold)
+        serial = pa.table(dggs_stream.RasterArrowStream(path, 8, **options))
+        table = pa.table(dggs_stream.RasterArrowStream(path, 8, partition=spec, **options))
+        assert table.num_rows == table["partial_state"].null_count == expected
+        assert_tables_match(serial, table.drop(["partial_state"]))
+
+
+def test_projected_overlay_keeps_partial_states(dggs_stream, striped_gradient):
+    crs = "EPSG:3857"
+    spec, = dggs_stream.plan_partitions(striped_gradient, crs=crs, target_chunks=1000)
+    options = dict(crs=crs, transfer="overlay")
+    table = pa.table(dggs_stream.RasterArrowStream(striped_gradient, 8, partition=spec, **options))
+    assert table.num_rows > 0 and table["partial_state"].null_count == 0
+    serial = pa.table(dggs_stream.RasterArrowStream(striped_gradient, 8, **options))
+    assert_tables_match(sort(serial), sort(dggs_stream.merge_partials(table)))
