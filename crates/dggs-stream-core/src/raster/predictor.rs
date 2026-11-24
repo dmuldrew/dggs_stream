@@ -118,6 +118,29 @@ pub fn apply_horizontal_predictor_u16(data: &mut [u16], data_w: usize, data_h: u
     }
 }
 
+/// Apply TIFF Horizontal Predictor on `i16` samples with ARM NEON acceleration when `spp == 1`.
+#[inline]
+pub fn apply_horizontal_predictor_i16(data: &mut [i16], data_w: usize, data_h: usize, spp: usize) {
+    if spp != 1 {
+        apply_horizontal_predictor(data, data_w, data_h, spp);
+        return;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: `i16` and `u16` have identical size (2 bytes), alignment (2),
+        // validity across every bit pattern, and two's-complement wrapping addition;
+        // `data` is exclusively borrowed for this call.
+        let as_u16 =
+            unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<u16>(), data.len()) };
+        apply_horizontal_predictor_u16(as_u16, data_w, data_h, spp);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        apply_horizontal_predictor(data, data_w, data_h, spp);
+    }
+}
+
 /// Trait abstracting endian decoding and photometric inversion for primitive TIFF samples
 ///
 /// Sealed: [`unpack_integer_samples`] memcpys raw bytes into `[Self]`, which is
@@ -222,7 +245,7 @@ macro_rules! impl_tiff_int_sample {
 }
 
 impl_tiff_int_sample!(u16, |x: u16| 65535 - x, apply_horizontal_predictor_u16);
-impl_tiff_int_sample!(i16, |x: i16| x);
+impl_tiff_int_sample!(i16, |x: i16| x, apply_horizontal_predictor_i16);
 impl_tiff_int_sample!(u32, |x: u32| u32::MAX - x);
 impl_tiff_int_sample!(i32, |x: i32| x);
 impl_tiff_int_sample!(u64, |x: u64| u64::MAX - x);
@@ -1111,6 +1134,33 @@ mod tests {
                 "u16 horizontal predictor mismatch at width {}",
                 w
             );
+        }
+    }
+
+    #[test]
+    fn test_apply_horizontal_predictor_i16_parity() {
+        for spp in [1, 3] {
+            for &w in &[0, 1, 7, 8, 9, 15, 16, 17, 64, 512] {
+                let h = 3;
+                let mut data_scalar = vec![0i16; w * h * spp];
+                for (i, b) in data_scalar.iter_mut().enumerate() {
+                    // Exercise positive, negative, and wrapping extremes.
+                    *b = match i % 5 {
+                        0 => i16::MAX,
+                        1 => i16::MIN,
+                        _ => (i as i32 * 4001 - 15000) as i16,
+                    };
+                }
+                let mut data_neon = data_scalar.clone();
+
+                apply_horizontal_predictor(&mut data_scalar, w, h, spp);
+                apply_horizontal_predictor_i16(&mut data_neon, w, h, spp);
+
+                assert_eq!(
+                    data_scalar, data_neon,
+                    "i16 horizontal predictor mismatch at width {w}, spp {spp}",
+                );
+            }
         }
     }
 }

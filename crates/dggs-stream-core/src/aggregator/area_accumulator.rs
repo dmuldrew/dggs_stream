@@ -91,6 +91,48 @@ impl AreaAccumulator {
         self.pixel_count += other.pixel_count;
         self.area_stats.merge(&other.area_stats);
     }
+
+    /// Merge a unit-weight contiguous row span where every pixel has ground area `area_m2`.
+    pub(crate) fn merge_unit_span(
+        &mut self,
+        unit: &ContinuousAccumulator,
+        area_m2: f64,
+    ) -> Result<()> {
+        if unit.count == 0.0 {
+            return Ok(());
+        }
+        if !area_m2.is_finite() || area_m2 <= 0.0 || unit.quantiles.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "invalid or overflowing area-weighted pixel contribution".into(),
+            ));
+        }
+        let span = Self {
+            pixel_count: unit.count,
+            area_stats: ContinuousAccumulator::from_weighted_stats(
+                unit.sum * area_m2,
+                unit.count * area_m2,
+                unit.count * area_m2 * area_m2,
+                unit.min,
+                unit.max,
+                unit.m2 * area_m2,
+            ),
+        };
+        if !span.is_finite() || !span.area_stats.min.is_finite() || !span.area_stats.max.is_finite()
+        {
+            return Err(DggsStreamError::InvalidParameter(
+                "invalid or overflowing area-weighted pixel contribution".into(),
+            ));
+        }
+        let mut merged = self.clone();
+        merged.merge(&span);
+        if !merged.is_finite() {
+            return Err(DggsStreamError::InvalidParameter(
+                "invalid or overflowing area-weighted pixel contribution".into(),
+            ));
+        }
+        *self = merged;
+        Ok(())
+    }
 }
 
 impl AccumulatorMerge for AreaAccumulator {
@@ -187,5 +229,35 @@ mod tests {
             assert!(acc.update_pixel(value, fraction, area).is_err());
             assert_eq!(acc, before);
         }
+    }
+
+    #[test]
+    fn merge_unit_span_matches_pixel_updates_and_preserves_state_on_overflow() {
+        let vals = [3.5, 7.0, 12.25, 19.0, 22.5, 1.25];
+        let area_m2 = 4250.75;
+
+        let mut expected = AreaAccumulator::default();
+        expected.update_overlap(9.0, 0.5, 0.5 * area_m2).unwrap();
+        for &v in &vals {
+            expected.update_overlap(v, 1.0, area_m2).unwrap();
+        }
+
+        let mut unit = ContinuousAccumulator::default();
+        for &v in &vals {
+            unit.update(v);
+        }
+        let mut actual = AreaAccumulator::default();
+        actual.update_overlap(9.0, 0.5, 0.5 * area_m2).unwrap();
+        actual.merge_unit_span(&unit, area_m2).unwrap();
+
+        assert_eq!(actual.pixel_count(), expected.pixel_count());
+        assert!((actual.retained_area_m2() - expected.retained_area_m2()).abs() < 1e-9);
+        assert!((actual.area_weighted_sum() - expected.area_weighted_sum()).abs() < 1e-9);
+        assert!((actual.area_stats().variance() - expected.area_stats().variance()).abs() < 1e-11);
+
+        // Overflow must error without mutating state.
+        let before = actual.clone();
+        assert!(actual.merge_unit_span(&unit, f64::MAX).is_err());
+        assert_eq!(actual, before);
     }
 }

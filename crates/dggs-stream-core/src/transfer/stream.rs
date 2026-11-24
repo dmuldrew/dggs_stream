@@ -45,8 +45,9 @@ const OVERLAP_BATCH_CELLS: usize = 128;
 const MAX_PREPARED_OVERLAPS: usize = 1024;
 const MAX_MEAN_PIXELS_PER_CELL: f64 = 512.0;
 /// Batch size and threshold for end-to-end parallel clip + accumulate workers.
-const DIRECT_BATCH_CELLS: usize = 4096;
-const MIN_PARALLEL_DIRECT_CELLS: usize = 16;
+pub(super) const DIRECT_BATCH_CELLS: usize = 4096;
+pub(super) const MIN_PARALLEL_DIRECT_CELLS: usize = 16;
+const MIN_PARALLEL_INTERPOLATE_CELLS: usize = 64;
 
 /// Widest rectangle handed to a polygon fill, in degrees of longitude: fills read a
 /// polygon's edges as the short way round, so wide boxes are cut into slices.
@@ -453,10 +454,36 @@ struct CoverageFilter {
     cells: HashMap<u64, BandCoverage>,
 }
 
-enum OverlapParallelism {
+pub(super) enum OverlapParallelism {
     Serial,
     Ambient,
     Dedicated(Arc<rayon::ThreadPool>),
+}
+
+impl OverlapParallelism {
+    pub(super) fn from_workers(workers: Option<usize>) -> Result<Self> {
+        Ok(match workers {
+            Some(1) => Self::Serial,
+            Some(n) => Self::Dedicated(
+                crate::aggregator::multi_horizon::controller::shared_aggregation_pool(n)?,
+            ),
+            None => Self::Ambient,
+        })
+    }
+
+    #[inline]
+    pub(super) fn should_run_parallel(&self, len: usize, min_len: usize) -> bool {
+        len >= min_len && rayon::current_thread_index().is_none() && !matches!(self, Self::Serial)
+    }
+
+    #[inline]
+    pub(super) fn install(&self, f: impl FnOnce() + Send) {
+        match self {
+            Self::Dedicated(pool) => pool.install(f),
+            Self::Ambient => f(),
+            Self::Serial => unreachable!(),
+        }
+    }
 }
 
 /// Streams `(resolution, cell, accumulator)` for the `interpolate` and `overlay` modes.
@@ -616,17 +643,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             grid,
             mode,
             bands,
-            overlap_parallelism: if overlay {
-                match config.aggregation_workers {
-                    Some(1) => OverlapParallelism::Serial,
-                    Some(n) => OverlapParallelism::Dedicated(
-                        crate::aggregator::multi_horizon::controller::shared_aggregation_pool(n)?,
-                    ),
-                    None => OverlapParallelism::Ambient,
-                }
-            } else {
-                OverlapParallelism::Serial
-            },
+            overlap_parallelism: OverlapParallelism::from_workers(config.aggregation_workers)?,
             selection: BandSelection {
                 band: config.band,
                 nodata: config.custom_nodata,
@@ -907,34 +924,55 @@ impl<A: TransferAccumulator> TransferStream<A> {
             block.resolution,
             ContainmentMode::ContainsCentroid,
         )?;
+        let histogram_bins_arc = self.histogram_bins.clone();
+        let remapper_arc = self.remapper.clone();
+        let ctx = InterpBlockCtx {
+            grid: self.grid,
+            mosaic: &mosaic,
+            tile,
+            tile_idx: block.tile,
+            window: &window,
+            method,
+            rows: block.rows.clone(),
+            cols: block.cols.clone(),
+            track_quantiles: self.track_quantiles,
+            emit_nodata: self.emit_nodata,
+            bbox: self.bbox,
+            filters: self.filters,
+            histogram_bins: histogram_bins_arc.as_deref(),
+            remapper: remapper_arc.as_deref(),
+        };
         let mut failures = 0;
-        for cell in cells {
-            let Some((lat, lng)) = self.grid.center_lat_lng(cell) else {
-                continue;
-            };
-            if !is_point_in_bbox(lng, lat, self.bbox) {
-                continue;
+        let output = &mut self.output;
+        let mut apply_outcome = |cell: u64, outcome: InterpOutcome<A>| match outcome {
+            InterpOutcome::Skip => {}
+            InterpOutcome::Failed => failures += 1,
+            InterpOutcome::Emit(acc) => output.push_back((block.resolution, cell, acc)),
+        };
+
+        if self
+            .overlap_parallelism
+            .should_run_parallel(cells.len(), MIN_PARALLEL_INTERPOLATE_CELLS)
+        {
+            let mut outcomes: Vec<InterpOutcome<A>> = Vec::new();
+            for batch in cells.chunks(DIRECT_BATCH_CELLS) {
+                #[cfg(test)]
+                {
+                    self.overlap_batches += 1;
+                }
+                outcomes.resize_with(batch.len(), InterpOutcome::default);
+                self.overlap_parallelism.install(|| {
+                    outcomes.par_iter_mut().zip(batch).for_each(|(out, &cell)| {
+                        *out = interpolate_cell(cell, &ctx);
+                    });
+                });
+                for (&cell, outcome) in batch.iter().zip(outcomes.drain(..)) {
+                    apply_outcome(cell, outcome);
+                }
             }
-            let Some((col, row)) = to_pixel(tile, lng, lat) else {
-                failures += 1;
-                continue;
-            };
-            // A cell belongs to the block holding its centre, so it is emitted once.
-            let in_block = col >= f64::from(block.cols.start)
-                && col < f64::from(block.cols.end)
-                && row >= f64::from(block.rows.start)
-                && row < f64::from(block.rows.end);
-            if !in_block || !mosaic.is_point_owned_by(block.tile, lng, lat) {
-                continue;
-            }
-            let mut acc = A::empty(self.track_quantiles);
-            if let Some(value) = interpolate(&window, method, col, row).and_then(|v| {
-                Self::mapped(self.histogram_bins.as_deref(), self.remapper.as_deref(), v)
-            }) {
-                acc.add(value, 1.0);
-            }
-            if (acc.has_samples() || self.emit_nodata) && acc.passes(&self.filters) {
-                self.output.push_back((block.resolution, cell, acc));
+        } else {
+            for &cell in &cells {
+                apply_outcome(cell, interpolate_cell(cell, &ctx));
             }
         }
         self.record_failures(failures)
@@ -1942,6 +1980,65 @@ struct CellWorkerScratch {
     seam_runs: Vec<OverlapRun>,
 }
 
+#[derive(Default)]
+enum InterpOutcome<A> {
+    #[default]
+    Skip,
+    Failed,
+    Emit(A),
+}
+
+struct InterpBlockCtx<'a> {
+    grid: GridKind,
+    mosaic: &'a MosaicReader,
+    tile: &'a TileDescriptor,
+    tile_idx: usize,
+    window: &'a RowWindow,
+    method: Interpolation,
+    rows: Range<u32>,
+    cols: Range<u32>,
+    track_quantiles: bool,
+    emit_nodata: bool,
+    bbox: Option<[f64; 4]>,
+    filters: Filters,
+    histogram_bins: Option<&'a crate::histogram::HistogramBins>,
+    remapper: Option<&'a CategoryRemapper>,
+}
+
+fn interpolate_cell<A: TransferAccumulator>(
+    cell: u64,
+    ctx: &InterpBlockCtx<'_>,
+) -> InterpOutcome<A> {
+    let Some((lat, lng)) = ctx.grid.center_lat_lng(cell) else {
+        return InterpOutcome::Skip;
+    };
+    if !is_point_in_bbox(lng, lat, ctx.bbox) {
+        return InterpOutcome::Skip;
+    }
+    let Some((col, row)) = to_pixel(ctx.tile, lng, lat) else {
+        return InterpOutcome::Failed;
+    };
+    // A cell belongs to the block holding its centre, so it is emitted once.
+    let in_block = col >= f64::from(ctx.cols.start)
+        && col < f64::from(ctx.cols.end)
+        && row >= f64::from(ctx.rows.start)
+        && row < f64::from(ctx.rows.end);
+    if !in_block || !ctx.mosaic.is_point_owned_by(ctx.tile_idx, lng, lat) {
+        return InterpOutcome::Skip;
+    }
+    let mut acc = A::empty(ctx.track_quantiles);
+    if let Some(value) = interpolate(ctx.window, ctx.method, col, row)
+        .and_then(|v| TransferStream::<A>::mapped(ctx.histogram_bins, ctx.remapper, v))
+    {
+        acc.add(value, 1.0);
+    }
+    if (acc.has_samples() || ctx.emit_nodata) && acc.passes(&ctx.filters) {
+        InterpOutcome::Emit(acc)
+    } else {
+        InterpOutcome::Skip
+    }
+}
+
 struct DirectState<A> {
     acc: A,
     touched: bool,
@@ -2264,13 +2361,13 @@ fn periodic_longitude_bounds(tile: &TileDescriptor) -> Option<(f64, f64)> {
     }
 }
 
-enum ProjectedCell {
+pub(super) enum ProjectedCell {
     Polygons { count: usize, len: usize },
     Pole,
     Failed,
 }
 
-fn project_cell_polygons(
+pub(super) fn project_cell_polygons(
     grid: GridKind,
     cell: u64,
     tile: &TileDescriptor,
@@ -2905,5 +3002,66 @@ mod tests {
         let cat4 = drain_cat(&cat_multi);
         assert!(!cat1.is_empty());
         assert_eq!(cat1, cat4);
+    }
+
+    #[test]
+    fn parallel_interpolate_matches_serial() {
+        let file = geographic_multi_strip_raster(64, 64, 16, -9999.0, &[]);
+        let reader = GeoTiffStreamReader::open(file.path()).unwrap();
+        let mosaic = Arc::new(MosaicReader::from_single_reader(reader, None, None).unwrap());
+
+        for method in [Interpolation::Bilinear, Interpolation::Bicubic] {
+            let drain_cont = |workers: Option<usize>| {
+                let mut cfg = MultiResolutionConfig::new(vec![9]);
+                cfg.transfer = TransferMode::Interpolate(method);
+                cfg.aggregation_workers = workers;
+                let mut stream =
+                    TransferStream::<ContinuousAccumulator>::new(mosaic.clone(), &cfg).unwrap();
+                let mut out = BTreeMap::new();
+                while stream
+                    .drain_into(256, |_, res, id, acc| {
+                        assert!(out.insert((res, id), acc).is_none());
+                    })
+                    .unwrap()
+                    > 0
+                {}
+                (out, stream.overlap_batches)
+            };
+            let (s1, b1) = drain_cont(Some(1));
+            let (s4, b4) = drain_cont(Some(4));
+            let (s_amb, b_amb) = drain_cont(None);
+            assert_eq!(b1, 0);
+            assert!(b4 > 0, "{method:?}");
+            assert!(b_amb > 0, "{method:?}");
+            assert!(!s1.is_empty());
+            assert_eq!(s4, s1, "{method:?} dedicated parallel != serial");
+            assert_eq!(s_amb, s1, "{method:?} ambient parallel != serial");
+        }
+
+        let drain_cat = |workers: Option<usize>| {
+            let mut cfg = MultiResolutionConfig::new(vec![9]);
+            cfg.transfer = TransferMode::Interpolate(Interpolation::Nearest);
+            cfg.aggregation_workers = workers;
+            let mut stream =
+                TransferStream::<CategoricalAccumulator>::new(mosaic.clone(), &cfg).unwrap();
+            let mut out = BTreeMap::new();
+            while stream
+                .drain_into(256, |_, res, id, acc| {
+                    assert!(out.insert((res, id), acc).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            (out, stream.overlap_batches)
+        };
+        let (c1, cb1) = drain_cat(Some(1));
+        let (c4, cb4) = drain_cat(Some(4));
+        let (camb, cb_amb) = drain_cat(None);
+        assert_eq!(cb1, 0);
+        assert!(cb4 > 0);
+        assert!(cb_amb > 0);
+        assert!(!c1.is_empty());
+        assert_eq!(c4, c1);
+        assert_eq!(camb, c1);
     }
 }

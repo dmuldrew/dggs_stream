@@ -2,6 +2,7 @@
 use super::*;
 use dggs_stream_core::columnar::ground_area::{ground_area_schema, GroundAreaBatchReader};
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+use dggs_stream_core::raster::mosaic::MosaicReader;
 
 pub(super) fn stream<W: Write>(
     opts: &CliStreamOptions,
@@ -26,8 +27,13 @@ pub(super) fn stream<W: Write>(
     let schema = ground_area_schema(config.grid, false);
     let projection = resolve_projection_indices(&schema, &opts.columns)?
         .unwrap_or_else(|| (0..schema.fields.len()).collect());
-    let mut reader = GroundAreaBatchReader::open(
+    let mosaic = Arc::new(MosaicReader::from_single_reader(
         GeoTiffStreamReader::open(path)?,
+        config.bbox,
+        config.custom_crs.as_deref(),
+    )?);
+    let mut reader = GroundAreaBatchReader::open_mosaic(
+        mosaic,
         config,
         projection,
         opts.batch_size,

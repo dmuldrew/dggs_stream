@@ -93,6 +93,10 @@ pub struct CliStreamOptions {
     /// `--profile`: collect runtime telemetry of the scan (see
     /// [`dggs_stream_core::run_profile`]); the binary prints the report on stderr.
     pub profile: Option<Arc<RunProfile>>,
+    /// Override `MultiResolutionConfig::decode_workers` when `Some`.
+    pub decode_workers: Option<usize>,
+    /// Override `MultiResolutionConfig::aggregation_workers` when `Some`.
+    pub aggregation_workers: Option<usize>,
 }
 
 impl Default for CliStreamOptions {
@@ -120,6 +124,8 @@ impl Default for CliStreamOptions {
             valid_coverage_threshold: None,
             histogram: None,
             profile: None,
+            decode_workers: None,
+            aggregation_workers: None,
         }
     }
 }
@@ -185,6 +191,12 @@ impl CliStreamOptions {
         config.transfer = self.transfer;
         config.profile = self.profile.clone();
         config.valid_coverage_threshold = self.valid_coverage_threshold;
+        if let Some(n) = self.decode_workers {
+            config.decode_workers = n;
+        }
+        if let Some(n) = self.aggregation_workers {
+            config.aggregation_workers = Some(n);
+        }
         config
     }
 }
@@ -1488,6 +1500,24 @@ fn parse_export_args(
             "--ground-area" => opts.ground_area = true,
             "--bands" => opts.bands = Some(value()?.to_string()),
             "--profile" => opts.profile = Some(RunProfile::new()),
+            "--decode-workers" => {
+                let v = value()?;
+                opts.decode_workers = Some(
+                    v.parse()
+                        .ok()
+                        .filter(|&n: &usize| n >= 1)
+                        .ok_or_else(|| invalid(flag, v, "a positive integer (>= 1)"))?,
+                );
+            }
+            "--aggregation-workers" => {
+                let v = value()?;
+                opts.aggregation_workers = Some(
+                    v.parse()
+                        .ok()
+                        .filter(|&n: &usize| n >= 1)
+                        .ok_or_else(|| invalid(flag, v, "a positive integer (>= 1)"))?,
+                );
+            }
             "--nodata-policy" => {
                 let v = value()?;
                 opts.output.nodata = NodataPolicy::parse(v)
@@ -2382,6 +2412,57 @@ mod tests {
     }
 
     #[test]
+    fn ground_area_overlay_outputs_match_the_core() {
+        use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
+        use dggs_stream_core::transfer::scan_ground_area_overlay;
+
+        let input = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dggs-stream-core/tests/fixtures/internal-mask.tif");
+        let args = [
+            input.to_str().unwrap(),
+            "--ground-area",
+            "--transfer",
+            "overlay",
+            "-r",
+            "8",
+        ]
+        .map(str::to_owned);
+        let (mut opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
+        opts.batch_size = 2;
+        let mut expected = std::collections::HashMap::new();
+        for row in scan_ground_area_overlay(
+            GeoTiffStreamReader::open(&input).unwrap(),
+            &opts.scan_config(),
+        )
+        .unwrap()
+        {
+            let (_res, id, acc) = row.unwrap();
+            expected.insert(id, acc);
+        }
+        assert!(!expected.is_empty());
+        let mut json = Vec::new();
+        assert_eq!(
+            stream_raster_to_writer(&opts, &mut json).unwrap(),
+            expected.len()
+        );
+        for line in std::str::from_utf8(&json).unwrap().lines() {
+            let r: serde_json::Value = serde_json::from_str(line).unwrap();
+            let id = r["h3_index"].as_u64().unwrap();
+            let a = expected.remove(&id).unwrap();
+            assert_eq!(r["resolution"], 8);
+            for (field, value) in [
+                ("pixel_count", a.pixel_count()),
+                ("retained_area_m2", a.retained_area_m2()),
+                ("area_weighted_sum", a.area_weighted_sum()),
+                ("area_weighted_mean", a.area_stats().mean()),
+            ] {
+                assert!((r[field].as_f64().unwrap() - value).abs() <= value.abs() * 1e-12);
+            }
+        }
+        assert!(expected.is_empty());
+    }
+
+    #[test]
     fn test_cli_transfer_modes() {
         let tif = write_test_tif(24, 24, 2.5);
         let input = tif.path().to_str().unwrap();
@@ -2604,6 +2685,32 @@ mod tests {
                 .unwrap();
                 assert!(written > 0, "{grid}");
                 assert!(std::fs::metadata(&tiles).unwrap().len() > 127);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cli_worker_flags_override_config() {
+        let tif = write_test_tif(8, 8, 1.0);
+        let input = tif.path().to_str().unwrap();
+        let args: Vec<String> = [input, "--decode-workers", "6", "--aggregation-workers", "3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Ipc).unwrap();
+        assert_eq!(opts.decode_workers, Some(6));
+        assert_eq!(opts.aggregation_workers, Some(3));
+        let cfg = opts.scan_config();
+        assert_eq!(cfg.decode_workers, 6);
+        assert_eq!(cfg.aggregation_workers, Some(3));
+
+        for flag in ["--decode-workers", "--aggregation-workers"] {
+            for bad in ["0", "abc"] {
+                let bad_args = vec![input.to_string(), flag.to_string(), bad.to_string()];
+                assert!(
+                    parse_stream_args(&bad_args, StreamOutputFormat::Ipc).is_err(),
+                    "{flag} {bad} should be rejected"
+                );
             }
         }
     }

@@ -357,6 +357,13 @@ pub struct MultiResolutionConfig {
 }
 
 impl MultiResolutionConfig {
+    /// Default decode worker count for background TIFF decompression.
+    pub fn default_decode_workers() -> usize {
+        std::thread::available_parallelism()
+            .map(|p| (p.get().saturating_sub(2)).clamp(4, 12))
+            .unwrap_or(4)
+    }
+
     /// Create a new multi-resolution configuration
     pub fn new(resolutions: Vec<u8>) -> Self {
         Self {
@@ -365,7 +372,7 @@ impl MultiResolutionConfig {
             prefetch_chunks: 16,
             decode_budget_bytes: 256 * 1024 * 1024,
             compaction_budget_bytes: None,
-            decode_workers: 4,
+            decode_workers: Self::default_decode_workers(),
             aggregation_workers: None,
             fetch_workers: crate::raster::remote_prefetch::DEFAULT_PREFETCH_WORKERS,
             grid: GridKind::H3,
