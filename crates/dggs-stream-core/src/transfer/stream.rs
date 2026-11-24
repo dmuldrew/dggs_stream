@@ -35,6 +35,8 @@ use super::TransferMode;
 /// Values of one window: enough for wide rasters without holding much more than a
 /// chunk band.
 const MAX_WINDOW_VALUES: usize = 4 << 20;
+/// Cap expanded native chunk-row windows so very tall strips do not widen blocks indefinitely.
+const MAX_NATIVE_CHUNK_ROW_WINDOW: u32 = 1024;
 /// Cells listed per block, so the cell list stays small next to the window.
 const TARGET_BLOCK_CELLS: f64 = 150_000.0;
 // Limit the speculative overlap lists to 128 × 1024 (pixel, area) pairs.
@@ -42,6 +44,9 @@ const TARGET_BLOCK_CELLS: f64 = 150_000.0;
 const OVERLAP_BATCH_CELLS: usize = 128;
 const MAX_PREPARED_OVERLAPS: usize = 1024;
 const MAX_MEAN_PIXELS_PER_CELL: f64 = 512.0;
+/// Batch size and threshold for end-to-end parallel clip + accumulate workers.
+const DIRECT_BATCH_CELLS: usize = 4096;
+const MIN_PARALLEL_DIRECT_CELLS: usize = 16;
 
 /// Widest rectangle handed to a polygon fill, in degrees of longitude: fills read a
 /// polygon's edges as the short way round, so wide boxes are cut into slices.
@@ -114,6 +119,14 @@ pub trait TransferAccumulator: Send + 'static {
     fn passes(&self, filters: &Filters) -> bool;
     /// Whether values are class codes (only whole pixels' values make sense).
     const CATEGORICAL: bool;
+    /// Whether [`Self::merge_from`] losslessly combines two accumulators for the same cell.
+    const SUPPORTS_MERGE: bool = false;
+    /// Whether geometric overlap over NoData pixels must still be recorded (e.g. partial coverage).
+    const NEEDS_COVER: bool = false;
+    /// Combine another accumulator built for the same cell into `self`.
+    fn merge_from(&mut self, _other: &Self) {
+        debug_assert!(Self::SUPPORTS_MERGE);
+    }
 }
 
 /// The cell filters of a scan (`min_count`, `min_mean`, `max_mean`,
@@ -128,6 +141,10 @@ pub struct Filters {
 
 impl TransferAccumulator for ContinuousAccumulator {
     const CATEGORICAL: bool = false;
+    const SUPPORTS_MERGE: bool = true;
+    fn merge_from(&mut self, other: &Self) {
+        self.merge(other);
+    }
 
     fn empty(track_quantiles: bool) -> Self {
         if track_quantiles {
@@ -235,6 +252,12 @@ impl TransferAccumulator for ContinuousAccumulator {
 
 impl TransferAccumulator for Vec<ContinuousAccumulator> {
     const CATEGORICAL: bool = false;
+    const SUPPORTS_MERGE: bool = true;
+    fn merge_from(&mut self, other: &Self) {
+        for (a, b) in self.iter_mut().zip(other) {
+            a.merge(b);
+        }
+    }
     fn empty(track_quantiles: bool) -> Self {
         Self::empty_bands(track_quantiles, 1)
     }
@@ -282,6 +305,10 @@ impl TransferAccumulator for Vec<ContinuousAccumulator> {
 
 impl TransferAccumulator for CategoricalAccumulator {
     const CATEGORICAL: bool = true;
+    const SUPPORTS_MERGE: bool = true;
+    fn merge_from(&mut self, other: &Self) {
+        self.merge(other);
+    }
 
     fn empty(_track_quantiles: bool) -> Self {
         Self::default()
@@ -426,12 +453,18 @@ struct CoverageFilter {
     cells: HashMap<u64, BandCoverage>,
 }
 
+enum OverlapParallelism {
+    Serial,
+    Ambient,
+    Dedicated(Arc<rayon::ThreadPool>),
+}
+
 /// Streams `(resolution, cell, accumulator)` for the `interpolate` and `overlay` modes.
 pub struct TransferStream<A: TransferAccumulator> {
     mosaic: Arc<MosaicReader>,
     grid: GridKind,
     mode: TransferMode,
-    overlap_pool: Option<Arc<rayon::ThreadPool>>,
+    overlap_parallelism: OverlapParallelism,
     selection: BandSelection,
     bands: Vec<usize>,
     emit_nodata: bool,
@@ -530,6 +563,13 @@ impl<A: TransferAccumulator> TransferStream<A> {
         if !config.sampling.is_single_point() {
             return invalid("replaces sub-pixel sampling: leave sampling at 'center'");
         }
+        let allow_chunk_row_window = matches!(
+            mode,
+            TransferMode::Overlay {
+                mass_preserve: false,
+                ..
+            }
+        );
         let grid = config.grid;
         let mut blocks = Vec::new();
         for &resolution in &config.resolutions {
@@ -541,6 +581,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     tile_idx,
                     tile,
                     bands.len(),
+                    allow_chunk_row_window,
                     &mut blocks,
                 );
             }
@@ -575,11 +616,17 @@ impl<A: TransferAccumulator> TransferStream<A> {
             grid,
             mode,
             bands,
-            overlap_pool: config
-                .aggregation_workers
-                .filter(|&n| n > 1 && matches!(mode, TransferMode::Overlay { .. }))
-                .map(crate::aggregator::multi_horizon::controller::shared_aggregation_pool)
-                .transpose()?,
+            overlap_parallelism: if overlay {
+                match config.aggregation_workers {
+                    Some(1) => OverlapParallelism::Serial,
+                    Some(n) => OverlapParallelism::Dedicated(
+                        crate::aggregator::multi_horizon::controller::shared_aggregation_pool(n)?,
+                    ),
+                    None => OverlapParallelism::Ambient,
+                }
+            } else {
+                OverlapParallelism::Serial
+            },
             selection: BandSelection {
                 band: config.band,
                 nodata: config.custom_nodata,
@@ -938,23 +985,19 @@ impl<A: TransferAccumulator> TransferStream<A> {
             }
             owners
         };
-        // Coarse cells are exactly those holding a pixel centre.
-        let cells = if coarse {
-            let owners = owners_of_block();
-            let mut cells: Vec<u64> = owners.iter().flatten().copied().collect();
-            cells.sort_unstable();
-            cells.dedup();
-            pixel_cells = Some(owners);
-            cells
-        } else {
-            cells
-        };
-        let mut selected = (self.bbox.is_some() || several_tiles)
+
+        let band_count = self.bands.len();
+        let track_quantiles = self.track_quantiles;
+        let grid = self.grid;
+        let bbox_filter = self.bbox;
+        let histogram_bins_arc = self.histogram_bins.clone();
+        let remapper_arc = self.remapper.clone();
+        let histogram_bins = histogram_bins_arc.as_deref();
+        let remapper = remapper_arc.as_deref();
+
+        let mut selected = (!(!mass_preserve && !coarse && A::SUPPORTS_MERGE)
+            && (bbox_filter.is_some() || several_tiles))
             .then(|| vec![None; band_width * block.rows.len()]);
-        let bands = &self.bands;
-        let bbox = self.bbox;
-        let histogram_bins = self.histogram_bins.as_deref();
-        let remapper = self.remapper.as_deref();
         let mut contribute_run = |pending: &mut Pending<A>,
                                   mut coverage: Option<&mut BandCoverage>,
                                   run: OverlapRun,
@@ -981,7 +1024,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 if let Some(c) = coverage.as_mut() {
                     c.covered_area += clipped_len as f64;
                 }
-                for slot in 0..bands.len() {
+                for slot in 0..band_count {
                     let valid = window.accumulate_unit_span(
                         slot,
                         row_off,
@@ -1006,7 +1049,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                         tile.crs_transformer
                             .transform_point(x, y)
                             .is_ok_and(|(lon, lat)| {
-                                is_point_in_bbox(wrap_lon_180(lon), lat, bbox)
+                                is_point_in_bbox(wrap_lon_180(lon), lat, bbox_filter)
                                     && (!several_tiles
                                         || mosaic.is_point_owned_by(block.tile, lon, lat))
                             })
@@ -1020,7 +1063,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 if let Some(c) = coverage.as_mut() {
                     c.covered_area += run.area;
                 }
-                for slot in 0..bands.len() {
+                for slot in 0..band_count {
                     if let Some(sample) = window.band_value_at(slot, row_off, clipped_c0 + offset) {
                         if let Some(c) = coverage.as_mut() {
                             c.valid_area[slot] += run.area;
@@ -1032,8 +1075,169 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
             }
         };
+
+        if !mass_preserve && !coarse && A::SUPPORTS_MERGE {
+            let ctx = OverlayBlockCtx {
+                grid,
+                mosaic: &mosaic,
+                tile,
+                tile_idx: block.tile,
+                several_tiles,
+                window: &window,
+                longitude_bounds,
+                rows,
+                cols: block.cols.clone(),
+                width,
+                band_count,
+                weighted,
+                track_quantiles,
+                need_coverage: self.coverage_filter.is_some(),
+                emit_nodata: self.emit_nodata,
+                bbox: bbox_filter,
+                histogram_bins,
+                remapper,
+            };
+            let use_parallel = cells.len() >= MIN_PARALLEL_DIRECT_CELLS
+                && rayon::current_thread_index().is_none()
+                && !matches!(self.overlap_parallelism, OverlapParallelism::Serial);
+            let mut apply_outcome = |cell: u64, outcome: CellOutcome<A>| match outcome {
+                CellOutcome::NoDataOnly { end_row } => {
+                    if let Some(pending) = self.pending.get_mut(&cell) {
+                        if block.tile == pending.last_tile {
+                            pending.end_row = Some(end_row);
+                        }
+                    }
+                }
+                CellOutcome::Failed => failures += 1,
+                CellOutcome::Pole => {
+                    let before = overlaps.len();
+                    let end_row = i64::from(tile.reader.metadata.height);
+                    let owners = pixel_cells.get_or_insert_with(&owners_of_block);
+                    for (pixel, owner) in owners.iter().enumerate() {
+                        if *owner == Some(cell) {
+                            overlaps.push(OverlapRun {
+                                pixel: pixel as u32,
+                                len: 1,
+                                area: 1.0,
+                            });
+                        }
+                    }
+                    if overlaps.len() > before || self.pending.contains_key(&cell) {
+                        let pending = self.pending.entry(cell).or_insert_with(|| Pending {
+                            acc: A::empty_bands(track_quantiles, band_count),
+                            touched: false,
+                            end_row: None,
+                            last_tile: if several_tiles {
+                                last_overlapping_tile(&mosaic, grid, cell, block.tile)
+                            } else {
+                                block.tile
+                            },
+                        });
+                        if block.tile == pending.last_tile {
+                            pending.end_row = Some(end_row);
+                        }
+                        let mut coverage = self.coverage_filter.as_mut().map(|filter| {
+                            filter.cells.entry(cell).or_insert_with(|| BandCoverage {
+                                valid_area: vec![0.0; band_count],
+                                covered_area: 0.0,
+                            })
+                        });
+                        for run in overlaps.drain(..) {
+                            let weight = if weighted { run.area } else { 1.0 };
+                            contribute_run(pending, coverage.as_deref_mut(), run, weight);
+                        }
+                    }
+                }
+                CellOutcome::Accumulated {
+                    end_row,
+                    acc,
+                    touched,
+                    coverage: cell_cov,
+                } => {
+                    let last_tile = if several_tiles {
+                        last_overlapping_tile(&mosaic, grid, cell, block.tile)
+                    } else {
+                        block.tile
+                    };
+                    match self.pending.entry(cell) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(Pending {
+                                acc,
+                                touched,
+                                end_row: (block.tile == last_tile).then_some(end_row),
+                                last_tile,
+                            });
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot) => {
+                            let pending = slot.get_mut();
+                            pending.acc.merge_from(&acc);
+                            pending.touched |= touched;
+                            if block.tile == pending.last_tile {
+                                pending.end_row = Some(end_row);
+                            }
+                        }
+                    }
+                    if let (Some(filter), Some(cov)) = (self.coverage_filter.as_mut(), cell_cov) {
+                        let entry = filter.cells.entry(cell).or_insert_with(|| BandCoverage {
+                            valid_area: vec![0.0; band_count],
+                            covered_area: 0.0,
+                        });
+                        entry.covered_area += cov.covered_area;
+                        for (dst, src) in entry.valid_area.iter_mut().zip(cov.valid_area) {
+                            *dst += src;
+                        }
+                    }
+                }
+            };
+
+            if use_parallel {
+                let mut outcomes: Vec<CellOutcome<A>> = Vec::new();
+                for batch in cells.chunks(DIRECT_BATCH_CELLS) {
+                    #[cfg(test)]
+                    {
+                        self.overlap_batches += 1;
+                    }
+                    outcomes.resize_with(batch.len(), CellOutcome::default);
+                    let mut run_batch = || {
+                        outcomes.par_iter_mut().zip(batch).for_each_init(
+                            CellWorkerScratch::default,
+                            |scratch, (out, &cell)| {
+                                *out = clip_and_accumulate_cell(cell, &ctx, scratch);
+                            },
+                        );
+                    };
+                    match &self.overlap_parallelism {
+                        OverlapParallelism::Dedicated(pool) => pool.install(run_batch),
+                        OverlapParallelism::Ambient => run_batch(),
+                        OverlapParallelism::Serial => unreachable!(),
+                    }
+                    for (&cell, outcome) in batch.iter().zip(outcomes.drain(..)) {
+                        apply_outcome(cell, outcome);
+                    }
+                }
+            } else {
+                let mut direct_scratch = CellWorkerScratch::default();
+                for &cell in &cells {
+                    let outcome = clip_and_accumulate_cell(cell, &ctx, &mut direct_scratch);
+                    apply_outcome(cell, outcome);
+                }
+            }
+            return self.record_failures(failures);
+        }
+
+        // Coarse cells are exactly those holding a pixel centre.
+        let cells = if coarse {
+            let owners = owners_of_block();
+            let mut cells: Vec<u64> = owners.iter().flatten().copied().collect();
+            cells.sort_unstable();
+            cells.dedup();
+            pixel_cells = Some(owners);
+            cells
+        } else {
+            cells
+        };
         let geometry = OverlayGeometry {
-            grid: self.grid,
+            grid,
             tile,
             longitude_bounds,
             rows,
@@ -1041,35 +1245,37 @@ impl<A: TransferAccumulator> TransferStream<A> {
         };
         // Installing work while the caller is a Rayon worker could steal an
         // unrelated query that waits for the caller's engine lock.
-        let pool = self.overlap_pool.as_ref().filter(|_| {
-            !coarse
-                && cells.len() >= OVERLAP_BATCH_CELLS / 2
-                && rayon::current_thread_index().is_none()
-                && crate::resolution::pixel_ground_area_m2(tile).is_ok_and(|area| {
-                    self.grid.area_m2(block.resolution) <= MAX_MEAN_PIXELS_PER_CELL * area
-                })
-        });
+        let parallel_prep = !coarse
+            && cells.len() >= OVERLAP_BATCH_CELLS / 2
+            && rayon::current_thread_index().is_none()
+            && !matches!(self.overlap_parallelism, OverlapParallelism::Serial)
+            && crate::resolution::pixel_ground_area_m2(tile).is_ok_and(|area| {
+                self.grid.area_m2(block.resolution) <= MAX_MEAN_PIXELS_PER_CELL * area
+            });
         let mut prepared = Vec::<(Option<i64>, Vec<OverlapRun>)>::new();
         for (i, &cell) in cells.iter().enumerate() {
             // Keep the serial reducer in original cell and pixel order.
             let slot = i % OVERLAP_BATCH_CELLS;
-            if let Some(pool) = pool {
-                if slot == 0 {
-                    #[cfg(test)]
-                    {
-                        self.overlap_batches += 1;
-                    }
-                    let batch = &cells[i..cells.len().min(i + OVERLAP_BATCH_CELLS)];
-                    prepared.resize_with(batch.len(), Default::default);
-                    pool.install(|| {
-                        prepared.par_iter_mut().zip(batch).for_each_init(
-                            ClipScratch::default,
-                            |scratch, ((end, pixels), &id)| {
-                                pixels.clear();
-                                *end = geometry.clip(id, pixels, MAX_PREPARED_OVERLAPS, scratch);
-                            },
-                        )
-                    });
+            if parallel_prep && slot == 0 {
+                #[cfg(test)]
+                {
+                    self.overlap_batches += 1;
+                }
+                let batch = &cells[i..cells.len().min(i + OVERLAP_BATCH_CELLS)];
+                prepared.resize_with(batch.len(), Default::default);
+                let mut run_prep = || {
+                    prepared.par_iter_mut().zip(batch).for_each_init(
+                        ClipScratch::default,
+                        |scratch, ((end, pixels), &id)| {
+                            pixels.clear();
+                            *end = geometry.clip(id, pixels, MAX_PREPARED_OVERLAPS, scratch);
+                        },
+                    );
+                };
+                match &self.overlap_parallelism {
+                    OverlapParallelism::Dedicated(pool) => pool.install(run_prep),
+                    OverlapParallelism::Ambient => run_prep(),
+                    OverlapParallelism::Serial => unreachable!(),
                 }
             }
             let before = overlaps.len();
@@ -1080,7 +1286,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
                 _ if !coarse => {
                     #[cfg(test)]
-                    if pool.is_some() {
+                    if parallel_prep {
                         self.overlap_retries += 1;
                     }
                     geometry.clip(cell, &mut overlaps, usize::MAX, &mut clip_scratch)
@@ -1114,10 +1320,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             if overlaps.len() == before && !self.pending.contains_key(&cell) {
                 continue;
             }
-            let track_quantiles = self.track_quantiles;
-            let grid = self.grid;
             let pending = self.pending.entry(cell).or_insert_with(|| Pending {
-                acc: A::empty_bands(track_quantiles, bands.len()),
+                acc: A::empty_bands(track_quantiles, band_count),
                 touched: false,
                 end_row: None,
                 last_tile: if several_tiles {
@@ -1140,7 +1344,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             } else {
                 let mut coverage = self.coverage_filter.as_mut().map(|filter| {
                     filter.cells.entry(cell).or_insert_with(|| BandCoverage {
-                        valid_area: vec![0.0; bands.len()],
+                        valid_area: vec![0.0; band_count],
                         covered_area: 0.0,
                     })
                 });
@@ -1293,6 +1497,7 @@ fn partition_blocks(
 }
 
 /// Cut one tile into blocks for `mode` at `resolution`.
+#[allow(clippy::too_many_arguments)]
 fn plan_tile(
     grid: GridKind,
     mode: TransferMode,
@@ -1300,6 +1505,7 @@ fn plan_tile(
     tile_idx: usize,
     tile: &TileDescriptor,
     band_count: usize,
+    allow_chunk_row_window: bool,
     blocks: &mut Vec<Block>,
 ) {
     let (width, height) = (tile.reader.metadata.width, tile.reader.metadata.height);
@@ -1316,11 +1522,20 @@ fn plan_tile(
         TransferMode::Interpolate(method) => 2 * method.margin(),
         _ => 0,
     };
-    let window_rows = ((MAX_WINDOW_VALUES / band_count / width as usize) as u32)
+    let coarse = grid.spec().max_cell_diameter_km(resolution) > COARSE_CELL_DIAMETER_KM;
+    let base_window_rows = ((MAX_WINDOW_VALUES / band_count / width as usize) as u32)
         .saturating_sub(margin)
         .max(1);
     // Whole chunk rows where the budgets allow, so chunks are not decoded twice.
     let chunk_height = tile.reader.chunk_layout.chunk_height.max(1);
+    let window_rows = if allow_chunk_row_window
+        && !coarse
+        && super::window::supports_native_tiled_window(tile, band_count)
+    {
+        base_window_rows.max(chunk_height.min(MAX_NATIVE_CHUNK_ROW_WINDOW))
+    } else {
+        base_window_rows
+    };
     let mut rows = ((block_pixels / f64::from(width)).floor() as u32).clamp(1, window_rows);
     if rows > chunk_height {
         rows -= rows % chunk_height;
@@ -1700,6 +1915,269 @@ fn merge_seam_overlaps(overlaps: &mut Vec<OverlapRun>, start: usize) {
     overlaps.truncate(end);
 }
 
+struct CellCoverage {
+    valid_area: Vec<f64>,
+    covered_area: f64,
+}
+
+#[derive(Default)]
+enum CellOutcome<A> {
+    NoDataOnly {
+        end_row: i64,
+    },
+    #[default]
+    Failed,
+    Pole,
+    Accumulated {
+        end_row: i64,
+        acc: A,
+        touched: bool,
+        coverage: Option<CellCoverage>,
+    },
+}
+
+#[derive(Default)]
+struct CellWorkerScratch {
+    clip: ClipScratch,
+    seam_runs: Vec<OverlapRun>,
+}
+
+struct DirectState<A> {
+    acc: A,
+    touched: bool,
+    coverage: Option<CellCoverage>,
+}
+
+struct OverlayBlockCtx<'a> {
+    grid: GridKind,
+    mosaic: &'a MosaicReader,
+    tile: &'a TileDescriptor,
+    tile_idx: usize,
+    several_tiles: bool,
+    window: &'a RowWindow,
+    longitude_bounds: Option<(f64, f64)>,
+    rows: (i64, i64),
+    cols: Range<u32>,
+    width: i64,
+    band_count: usize,
+    weighted: bool,
+    track_quantiles: bool,
+    need_coverage: bool,
+    emit_nodata: bool,
+    bbox: Option<[f64; 4]>,
+    histogram_bins: Option<&'a crate::histogram::HistogramBins>,
+    remapper: Option<&'a CategoryRemapper>,
+}
+
+impl OverlayBlockCtx<'_> {
+    #[inline]
+    fn is_pixel_selected(&self, col: i64, row: i64) -> bool {
+        if self.bbox.is_none() && !self.several_tiles {
+            return true;
+        }
+        let gt = &self.tile.reader.metadata.geotransform;
+        let (x, y) = gt.pixel_to_coord(col as f64 + 0.5, row as f64 + 0.5);
+        self.tile
+            .crs_transformer
+            .transform_point(x, y)
+            .is_ok_and(|(lon, lat)| {
+                is_point_in_bbox(wrap_lon_180(lon), lat, self.bbox)
+                    && (!self.several_tiles
+                        || self.mosaic.is_point_owned_by(self.tile_idx, lon, lat))
+            })
+    }
+}
+
+fn accumulate_span_direct<A: TransferAccumulator>(
+    ctx: &OverlayBlockCtx<'_>,
+    row: i64,
+    c0: i64,
+    c1: i64,
+    area: f64,
+    weight: f64,
+    state: &mut DirectState<A>,
+) {
+    let clipped_c0 = (c0.max(0) as usize).max(ctx.cols.start as usize);
+    let clipped_c1 = (c1.max(0) as usize).min(ctx.cols.end as usize);
+    if clipped_c0 >= clipped_c1 {
+        return;
+    }
+    let clipped_len = clipped_c1 - clipped_c0;
+    let row_off = (row - ctx.rows.0) as usize;
+    if clipped_len >= 4
+        && area == 1.0
+        && weight == 1.0
+        && ctx.bbox.is_none()
+        && !ctx.several_tiles
+        && ctx.histogram_bins.is_none()
+        && (!A::CATEGORICAL || ctx.remapper.is_none())
+    {
+        state.touched = true;
+        state.acc.cover(clipped_len as f64);
+        if let Some(cov) = state.coverage.as_mut() {
+            cov.covered_area += clipped_len as f64;
+        }
+        for slot in 0..ctx.band_count {
+            let valid = ctx.window.accumulate_unit_span(
+                slot,
+                row_off,
+                clipped_c0,
+                clipped_c1,
+                &mut state.acc,
+            );
+            if let Some(cov) = state.coverage.as_mut() {
+                cov.valid_area[slot] += valid as f64;
+            }
+        }
+        return;
+    }
+    let filter_pixels = ctx.bbox.is_some() || ctx.several_tiles;
+    for col in clipped_c0..clipped_c1 {
+        if filter_pixels && !ctx.is_pixel_selected(col as i64, row) {
+            continue;
+        }
+        state.touched = true;
+        state.acc.cover(area);
+        if let Some(cov) = state.coverage.as_mut() {
+            cov.covered_area += area;
+        }
+        for slot in 0..ctx.band_count {
+            if let Some(sample) = ctx.window.band_value_at(slot, row_off, col) {
+                if let Some(cov) = state.coverage.as_mut() {
+                    cov.valid_area[slot] += area;
+                }
+                if let Some(value) =
+                    TransferStream::<A>::mapped(ctx.histogram_bins, ctx.remapper, sample)
+                {
+                    state.acc.add_band(slot, value, weight);
+                }
+            }
+        }
+    }
+}
+
+fn clip_and_accumulate_cell<A: TransferAccumulator>(
+    cell: u64,
+    ctx: &OverlayBlockCtx<'_>,
+    scratch: &mut CellWorkerScratch,
+) -> CellOutcome<A> {
+    let mut rings = [[(0.0, 0.0); 10]; 3];
+    let (copies, len) =
+        match project_cell_polygons(ctx.grid, cell, ctx.tile, ctx.longitude_bounds, &mut rings) {
+            ProjectedCell::Polygons { count, len } => (count, len),
+            ProjectedCell::Pole => return CellOutcome::Pole,
+            ProjectedCell::Failed => return CellOutcome::Failed,
+        };
+    if copies == 0 {
+        return CellOutcome::NoDataOnly { end_row: i64::MIN };
+    }
+    let mut last_row = f64::NEG_INFINITY;
+    let mut any_data = false;
+    let check_data = !ctx.emit_nodata && !ctx.need_coverage && !A::NEEDS_COVER;
+    for poly in &rings[..copies] {
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for &(x, y) in &poly[..len] {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            last_row = last_row.max(y);
+        }
+        if !any_data {
+            let bx0 = min_x.max(f64::from(ctx.cols.start));
+            let bx1 = max_x.min(f64::from(ctx.cols.end));
+            let by0 = min_y.max(ctx.rows.0 as f64);
+            let by1 = max_y.min(ctx.rows.1 as f64);
+            if bx0 < bx1
+                && by0 < by1
+                && (!check_data || ctx.window.bbox_has_any_data(bx0, bx1, by0, by1))
+            {
+                any_data = true;
+            }
+        }
+    }
+    let end_row = last_row.ceil() as i64;
+    if !any_data {
+        return CellOutcome::NoDataOnly { end_row };
+    }
+
+    let mut state = DirectState {
+        acc: A::empty_bands(ctx.track_quantiles, ctx.band_count),
+        touched: false,
+        coverage: ctx.need_coverage.then(|| CellCoverage {
+            valid_area: vec![0.0; ctx.band_count],
+            covered_area: 0.0,
+        }),
+    };
+
+    if copies == 1 {
+        let completed = visit_overlap_spans_into(
+            &rings[0][..len],
+            ctx.rows,
+            ctx.width,
+            &mut scratch.clip,
+            |r, c0, c1, area| {
+                if area > 1e-12 {
+                    let weight = if ctx.weighted { area } else { 1.0 };
+                    accumulate_span_direct(ctx, r, c0, c1, area, weight, &mut state);
+                }
+                true
+            },
+        );
+        if !completed {
+            return CellOutcome::Failed;
+        }
+    } else {
+        scratch.seam_runs.clear();
+        for poly in &rings[..copies] {
+            let completed = visit_overlap_spans_into(
+                &poly[..len],
+                ctx.rows,
+                ctx.width,
+                &mut scratch.clip,
+                |r, c0, c1, area| {
+                    if area > 1e-12 {
+                        let pixel = (r - ctx.rows.0) as usize * ctx.width as usize + c0 as usize;
+                        scratch.seam_runs.push(OverlapRun {
+                            pixel: pixel as u32,
+                            len: (c1 - c0) as u32,
+                            area,
+                        });
+                    }
+                    true
+                },
+            );
+            if !completed {
+                return CellOutcome::Failed;
+            }
+        }
+        if !scratch.seam_runs.is_empty() {
+            merge_seam_overlaps(&mut scratch.seam_runs, 0);
+            for &run in &scratch.seam_runs {
+                let pixel = run.pixel as usize;
+                let row = ctx.rows.0 + (pixel as i64 / ctx.width);
+                let c0 = pixel as i64 % ctx.width;
+                let c1 = c0 + i64::from(run.len);
+                let weight = if ctx.weighted { run.area } else { 1.0 };
+                accumulate_span_direct(ctx, row, c0, c1, run.area, weight, &mut state);
+            }
+        }
+    }
+
+    if !state.touched || (check_data && !state.acc.has_samples()) {
+        return CellOutcome::NoDataOnly { end_row };
+    }
+    CellOutcome::Accumulated {
+        end_row,
+        acc: state.acc,
+        touched: state.touched,
+        coverage: state.coverage,
+    }
+}
+
 /// Geometry shared by workers processing different cells in one row window.
 struct OverlayGeometry<'a> {
     grid: GridKind,
@@ -1786,19 +2264,27 @@ fn periodic_longitude_bounds(tile: &TileDescriptor) -> Option<(f64, f64)> {
     }
 }
 
-/// Visit the cell polygon on each longitude branch touching the raster. A
-/// straddling cell uses the same accumulator for the pieces at its two edges.
-fn visit_cell_polygons(
+enum ProjectedCell {
+    Polygons { count: usize, len: usize },
+    Pole,
+    Failed,
+}
+
+fn project_cell_polygons(
     grid: GridKind,
     cell: u64,
     tile: &TileDescriptor,
     longitude_bounds: Option<(f64, f64)>,
-    mut visit: impl FnMut(&[(f64, f64)]) -> bool,
-) -> bool {
+    rings: &mut [[(f64, f64); 10]; 3],
+) -> ProjectedCell {
     let mut ring = [(0.0, 0.0); 10];
     let n = grid.boundary_lng_lat(cell, &mut ring);
     if n < 3 || (longitude_bounds.is_some() && grid.interior_pole(cell).is_some()) {
-        return false;
+        return if grid.interior_pole(cell).is_some() {
+            ProjectedCell::Pole
+        } else {
+            ProjectedCell::Failed
+        };
     }
     let ring = &mut ring[..n];
     let mut shifts = [0.0; 3];
@@ -1823,15 +2309,41 @@ fn visit_cell_polygons(
             }
         }
     }
-    let mut pixels = [(0.0, 0.0); 10];
-    for &shift in &shifts[..copies] {
-        for (point, &(lon, lat)) in pixels.iter_mut().zip(ring.iter()) {
+    for (copy_idx, &shift) in shifts[..copies].iter().enumerate() {
+        for (point, &(lon, lat)) in rings[copy_idx][..n].iter_mut().zip(ring.iter()) {
             let Some(pixel) = to_pixel_raw(tile, lon + shift, lat) else {
-                return false;
+                return if grid.interior_pole(cell).is_some() {
+                    ProjectedCell::Pole
+                } else {
+                    ProjectedCell::Failed
+                };
             };
             *point = pixel;
         }
-        if !visit(&pixels[..n]) {
+    }
+    ProjectedCell::Polygons {
+        count: copies,
+        len: n,
+    }
+}
+
+/// Visit the cell polygon on each longitude branch touching the raster. A
+/// straddling cell uses the same accumulator for the pieces at its two edges.
+fn visit_cell_polygons(
+    grid: GridKind,
+    cell: u64,
+    tile: &TileDescriptor,
+    longitude_bounds: Option<(f64, f64)>,
+    mut visit: impl FnMut(&[(f64, f64)]) -> bool,
+) -> bool {
+    let mut rings = [[(0.0, 0.0); 10]; 3];
+    let ProjectedCell::Polygons { count, len } =
+        project_cell_polygons(grid, cell, tile, longitude_bounds, &mut rings)
+    else {
+        return false;
+    };
+    for ring in &rings[..count] {
+        if !visit(&ring[..len]) {
             return false;
         }
     }
@@ -2000,14 +2512,15 @@ mod tests {
         grid: GridKind,
         resolution: u8,
         workers: Option<usize>,
+        mass_preserve: bool,
     ) -> (BTreeMap<u64, ContinuousAccumulator>, usize, usize) {
         let mosaic = Arc::new(
             MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap(),
         );
         let mut config = MultiResolutionConfig::single(resolution).with_grid(grid);
         config.transfer = TransferMode::Overlay {
-            weighted: false,
-            mass_preserve: false,
+            weighted: mass_preserve,
+            mass_preserve,
         };
         config.aggregation_workers = workers;
         let mut stream = TransferStream::<ContinuousAccumulator>::new(mosaic, &config).unwrap();
@@ -2025,31 +2538,180 @@ mod tests {
     #[test]
     fn overlay_workers_clip_cell_batches_and_hand_oversized_cells_back() {
         // Fine cells: pixels a few times smaller than a cell, so every batch
-        // of cells is prepared by workers and none is oversized.
+        // of cells is handled in parallel with zero retries.
         let fine = geographic_raster(60, 48, (-122.45, 37.80), (0.001, 0.001), |c, r| {
             (1 + (3 * c + r) % 23) as f32
         });
-        let (serial, serial_batches, _) = overlay_scan(&fine, GridKind::H3, 10, Some(1));
-        let (parallel, batches, retries) = overlay_scan(&fine, GridKind::H3, 10, Some(4));
+        let (serial, serial_batches, _) = overlay_scan(&fine, GridKind::H3, 10, Some(1), false);
+        let (parallel, batches, retries) = overlay_scan(&fine, GridKind::H3, 10, Some(4), false);
+        let (ambient, ambient_batches, _) = overlay_scan(&fine, GridKind::H3, 10, None, false);
         assert!(serial.len() > 128);
-        assert_eq!(serial_batches, 0, "one worker must clip serially");
-        assert!(batches > 0, "four workers never prepared a batch");
+        assert_eq!(serial_batches, 0, "one worker must run serially");
+        assert!(batches > 0, "four workers never ran a direct batch");
+        assert!(ambient_batches > 0, "ambient default never ran in parallel");
         assert_eq!(retries, 0);
         assert_eq!(parallel, serial);
+        assert_eq!(ambient, serial);
 
-        // Narrow columns and tall rows: the mean cell area passes the worker
-        // gate, yet a cell crosses more than MAX_PREPARED_OVERLAPS pixels within one row.
+        // Narrow columns and tall rows: direct parallel overlay handles oversized cells
+        // natively with zero retries, while mass_preserve prepared overlaps still retry.
         let narrow = geographic_raster(2048, 8, (-122.45, 37.80), (0.000002, 0.25), |c, r| {
             (1 + (c + 3 * r) % 31) as f32
         });
-        let (serial, _, _) = overlay_scan(&narrow, GridKind::H3, 8, Some(1));
-        let (parallel, batches, retries) = overlay_scan(&narrow, GridKind::H3, 8, Some(4));
-        assert!(serial
+        let (serial_direct, _, _) = overlay_scan(&narrow, GridKind::H3, 8, Some(1), false);
+        let (par_direct, batches_direct, retries_direct) =
+            overlay_scan(&narrow, GridKind::H3, 8, Some(4), false);
+        assert!(serial_direct
             .values()
             .any(|a| a.count > MAX_PREPARED_OVERLAPS as f64));
-        assert!(batches > 0, "four workers never prepared a batch");
-        assert!(retries > 0, "no oversized cell was handed back");
-        assert_eq!(parallel, serial);
+        assert!(batches_direct > 0);
+        assert_eq!(retries_direct, 0);
+        assert_eq!(par_direct, serial_direct);
+
+        let (serial_mp, _, _) = overlay_scan(&narrow, GridKind::H3, 8, Some(1), true);
+        let (par_mp, batches_mp, retries_mp) =
+            overlay_scan(&narrow, GridKind::H3, 8, Some(4), true);
+        assert!(batches_mp > 0, "four workers never prepared a batch");
+        assert!(retries_mp > 0, "no oversized cell was handed back");
+        assert_eq!(par_mp, serial_mp);
+    }
+
+    #[test]
+    fn parallel_direct_overlay_matches_serial_with_large_cells_and_all_nodata_tiles() {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+
+        // Strips: strips 0..4 are all NoData, strips 4..12 mix valid and NoData, at res 6
+        // where each H3 cell covers > 512 pixels (previously excluded from parallel overlay).
+        let (w, h, rps) = (128u32, 96u32, 8u32);
+        let nodata = -9999.0f32;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = TiffEncoder::new(file.as_file()).unwrap();
+        let mut image = encoder.new_image::<colortype::Gray32Float>(w, h).unwrap();
+        image.rows_per_strip(rps).unwrap();
+        let tags = image.encoder();
+        tags.write_tag(
+            Tag::GeoKeyDirectoryTag,
+            &[1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326][..],
+        )
+        .unwrap();
+        tags.write_tag(Tag::ModelPixelScaleTag, &[0.002f64, 0.002, 0.0][..])
+            .unwrap();
+        tags.write_tag(
+            Tag::ModelTiepointTag,
+            &[0.0f64, 0.0, 0.0, -122.5, 37.9, 0.0][..],
+        )
+        .unwrap();
+        tags.write_tag(Tag::Unknown(42113), "-9999").unwrap();
+        let pixels: Vec<f32> = (0..h)
+            .flat_map(|r| {
+                (0..w).map(move |c| {
+                    if r < 32 || (r + c) % 7 == 0 {
+                        nodata
+                    } else {
+                        ((r * 5 + c) % 13 + 1) as f32
+                    }
+                })
+            })
+            .collect();
+        image.write_data(&pixels).unwrap();
+
+        let mosaic = Arc::new(
+            MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap(),
+        );
+
+        let drain_cont = |workers: Option<usize>, emit: bool, cov: Option<f64>, quantiles: bool| {
+            let mut cfg = MultiResolutionConfig::new(vec![6, 7]);
+            cfg.transfer = TransferMode::OVERLAY;
+            cfg.aggregation_workers = workers;
+            cfg.valid_coverage_threshold = cov;
+            if emit {
+                cfg.nodata_policy = NodataPolicy::Emit;
+            }
+            if quantiles {
+                cfg.quantiles = vec![
+                    crate::aggregator::multi_horizon::QuantileTarget::Percentile(0.5, "p50".into()),
+                ];
+            }
+            let mut stream =
+                TransferStream::<ContinuousAccumulator>::new(mosaic.clone(), &cfg).unwrap();
+            let mut out = BTreeMap::new();
+            while stream
+                .drain_into(128, |_, res, id, acc| {
+                    assert!(out.insert((res, id), acc).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            (out, stream.overlap_batches, stream.overlap_retries)
+        };
+
+        for (emit, cov, quantiles) in [
+            (false, None, false),
+            (false, Some(0.5), false),
+            (true, None, false),
+            (false, None, true),
+        ] {
+            let (s1, b1, _) = drain_cont(Some(1), emit, cov, quantiles);
+            let (s4, b4, r4) = drain_cont(Some(4), emit, cov, quantiles);
+            let (sa, ba, _) = drain_cont(None, emit, cov, quantiles);
+            assert!(!s1.is_empty());
+            assert_eq!(b1, 0);
+            assert!(b4 > 0, "emit={emit} cov={cov:?} quantiles={quantiles}");
+            assert!(ba > 0);
+            assert_eq!(r4, 0);
+            assert_eq!(s4, s1, "emit={emit} cov={cov:?} quantiles={quantiles}");
+            assert_eq!(sa, s1, "emit={emit} cov={cov:?} quantiles={quantiles}");
+        }
+
+        // Categorical + OverlayPartial (checks NEEDS_COVER retains cover over AllNoData strips).
+        let drain_part = |workers: Option<usize>| {
+            let mut cfg = MultiResolutionConfig::new(vec![6, 7]);
+            cfg.transfer = TransferMode::OVERLAY;
+            cfg.aggregation_workers = workers;
+            let mut stream =
+                TransferStream::<super::super::OverlayPartial>::new(mosaic.clone(), &cfg).unwrap();
+            let mut out = BTreeMap::new();
+            while stream
+                .drain_into(128, |_, res, id, part| {
+                    assert!(out.insert((res, id), (part.covered, part.stats)).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            (out, stream.overlap_batches)
+        };
+        let (p1, pb1) = drain_part(Some(1));
+        let (p4, pb4) = drain_part(Some(4));
+        assert_eq!(pb1, 0);
+        assert!(pb4 > 0);
+        assert!(p1.values().any(|(cov, st)| *cov > 0.0 && st.count == 0.0));
+        assert_eq!(p4, p1);
+
+        let drain_cat = |workers: Option<usize>| {
+            let mut cfg = MultiResolutionConfig::new(vec![6, 7]);
+            cfg.transfer = TransferMode::Overlay {
+                weighted: false,
+                mass_preserve: false,
+            };
+            cfg.aggregation_workers = workers;
+            let mut stream =
+                TransferStream::<CategoricalAccumulator>::new(mosaic.clone(), &cfg).unwrap();
+            let mut out = BTreeMap::new();
+            while stream
+                .drain_into(128, |_, res, id, acc| {
+                    assert!(out.insert((res, id), acc).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            (out, stream.overlap_batches)
+        };
+        let (c1, cb1) = drain_cat(Some(1));
+        let (c4, cb4) = drain_cat(Some(4));
+        assert_eq!(cb1, 0);
+        assert!(cb4 > 0);
+        assert_eq!(c4, c1);
     }
 
     fn geographic_multi_strip_raster(

@@ -265,8 +265,9 @@ pub struct MultiResolutionConfig {
     /// helper-thread spawn instead of running serially. That overhead grows as
     /// a small `aggregation_budget_bytes` shrinks windows and multiplies waves.
     ///
-    /// For overlay, two or more explicit workers enable parallel cell clipping
-    /// on eligible fine-resolution blocks when called outside a Rayon worker.
+    /// For overlay, `None` uses the caller's ambient Rayon pool (and stays
+    /// serial on a Rayon worker) while `Some(n)` uses a dedicated `n`-thread
+    /// pool (`Some(1)` runs serially).
     pub aggregation_workers: Option<usize>,
     /// Concurrent HTTP range-request workers for remote tiles.
     pub fetch_workers: usize,

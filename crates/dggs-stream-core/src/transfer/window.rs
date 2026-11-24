@@ -18,6 +18,9 @@ use crate::raster::RasterChunk;
 use super::TransferAccumulator;
 
 enum CachedChunk {
+    AllNoData {
+        nodata_bits: Option<u64>,
+    },
     NativeSingleBand {
         bounds: RasterChunk,
         row_stride: usize,
@@ -32,6 +35,7 @@ enum CachedChunk {
 impl CachedChunk {
     fn byte_size(&self) -> usize {
         match self {
+            Self::AllNoData { .. } => 0,
             Self::NativeSingleBand { data, .. } => decoded_buffer_bytes(data),
             Self::DenseF64 { planes, .. } => planes.capacity() * size_of::<f64>(),
         }
@@ -118,6 +122,16 @@ pub(super) fn chunk_is_absent(
             .any(|&b| reader.band_chunk_present(index, b))
 }
 
+/// Whether a tile and band selection qualify for zero-copy single-band native windows.
+#[inline]
+pub(super) fn supports_native_tiled_window(tile: &TileDescriptor, band_count: usize) -> bool {
+    let meta = &tile.reader.metadata;
+    band_count == 1
+        && meta.samples_per_pixel.max(1) == 1
+        && meta.alpha_sample.is_none()
+        && !meta.has_internal_mask()
+}
+
 struct NativeChunk {
     bounds: RasterChunk,
     row_stride: usize,
@@ -129,6 +143,7 @@ struct TiledNativeWindow {
     chunk_height: u32,
     first_chunk_row: u32,
     first_chunk_col: u32,
+    chunk_rows: u32,
     chunk_cols: u32,
     chunks: Vec<Option<NativeChunk>>,
     nodata: Option<f64>,
@@ -264,6 +279,58 @@ impl RowWindow {
     /// The rows the window holds.
     pub fn rows(&self) -> Range<u32> {
         self.first_row..self.first_row + self.rows
+    }
+
+    /// Returns `true` if any chunk intersecting the pixel bounding box may contain valid data
+    /// (always `true` for dense `f64` windows).
+    #[inline]
+    pub(super) fn bbox_has_any_data(&self, min_x: f64, max_x: f64, min_y: f64, max_y: f64) -> bool {
+        if !(min_x < max_x && min_y < max_y) {
+            return false;
+        }
+        match &self.storage {
+            WindowStorage::DenseF64(_) => true,
+            WindowStorage::TiledNative(native) => {
+                if native.chunk_rows == 0
+                    || native.chunk_cols == 0
+                    || self.rows == 0
+                    || self.width == 0
+                {
+                    return false;
+                }
+                let r_lo = min_y.floor().max(f64::from(self.first_row));
+                let r_hi = max_y.ceil().min(f64::from(self.first_row + self.rows));
+                let c_lo = min_x.floor().max(0.0);
+                let c_hi = max_x.ceil().min(f64::from(self.width));
+                if !(r_lo < r_hi && c_lo < c_hi) {
+                    return false;
+                }
+                let r0 = r_lo as u32;
+                let r1 = (r_hi as u32).saturating_sub(1);
+                let c0 = c_lo as u32;
+                let c1 = (c_hi as u32).saturating_sub(1);
+                let cr0 = (r0 / native.chunk_height).max(native.first_chunk_row);
+                let cr1 =
+                    (r1 / native.chunk_height).min(native.first_chunk_row + native.chunk_rows - 1);
+                let cc0 = (c0 / native.chunk_width).max(native.first_chunk_col);
+                let cc1 =
+                    (c1 / native.chunk_width).min(native.first_chunk_col + native.chunk_cols - 1);
+                if cr0 > cr1 || cc0 > cc1 {
+                    return false;
+                }
+                for cr in cr0..=cr1 {
+                    let rel_row = (cr - native.first_chunk_row) as usize;
+                    for cc in cc0..=cc1 {
+                        let rel_col = (cc - native.first_chunk_col) as usize;
+                        let slot = rel_row * native.chunk_cols as usize + rel_col;
+                        if native.chunks.get(slot).is_some_and(Option::is_some) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
     }
 
     /// The value of pixel `(col, row)`; `None` if it is NoData or outside the window.
@@ -409,7 +476,13 @@ impl RowWindow {
                 }
 
                 if let Some(cached) = cache.chunks.get(&index) {
+                    let mut cache_hit = true;
                     match cached {
+                        CachedChunk::AllNoData { nodata_bits }
+                            if *nodata_bits == nodata.map(f64::to_bits) => {}
+                        CachedChunk::AllNoData { .. } => {
+                            cache_hit = false;
+                        }
                         CachedChunk::NativeSingleBand {
                             bounds: cbounds,
                             row_stride,
@@ -458,7 +531,9 @@ impl RowWindow {
                             );
                         }
                     }
-                    continue;
+                    if cache_hit {
+                        continue;
+                    }
                 }
 
                 let (bounds, data) = if let Some(pf) = prefetcher {
@@ -499,6 +574,18 @@ impl RowWindow {
 
                 if let Some(ref mut grid) = native_chunks {
                     let row_stride = validated_native_stride(&bounds, &data)?;
+                    if BorrowedSamples::from(&data).all_nodata(nodata) {
+                        if let Some(pf) = prefetcher {
+                            pf.recycle(data);
+                        }
+                        cache.chunks.insert(
+                            index,
+                            CachedChunk::AllNoData {
+                                nodata_bits: nodata.map(f64::to_bits),
+                            },
+                        );
+                        continue;
+                    }
                     let bytes = decoded_buffer_bytes(&data);
                     if cache
                         .byte_budget
@@ -567,6 +654,7 @@ impl RowWindow {
                 chunk_height: layout.chunk_height,
                 first_chunk_row,
                 first_chunk_col,
+                chunk_rows: chunk_rows_count as u32,
                 chunk_cols: chunk_cols_count as u32,
                 chunks,
                 nodata,
@@ -1188,5 +1276,118 @@ mod cache_budget_tests {
         assert_eq!(s1.count, s2.count);
         assert!((s1.sum - s2.sum).abs() < 1e-12);
         assert!((s1.m2 - s2.m2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn all_nodata_native_chunks_are_skipped_recycled_and_match_dense() {
+        use crate::aggregator::accumulator::ContinuousAccumulator;
+
+        // 32x8 tiled as 16x8: left tile all NoData, right tile mixed valid/NoData.
+        let (w, h, tw, th) = (32u32, 8u32, 16u32, 8u32);
+        let tile0_f32: Vec<u8> = (0..tw * th)
+            .flat_map(|i| {
+                let v = if i % 2 == 0 { -9999.0f32 } else { f32::NAN };
+                v.to_le_bytes()
+            })
+            .collect();
+        let tile1_f32: Vec<u8> = (0..tw * th)
+            .flat_map(|i| {
+                let v = if i % 5 == 0 {
+                    -9999.0f32
+                } else {
+                    (i % 11 + 1) as f32
+                };
+                v.to_le_bytes()
+            })
+            .collect();
+        let f_f32 = write_raw_tiled_tiff(
+            (w, h),
+            (tw, th),
+            (3, 32),
+            Some("-9999"),
+            None,
+            &[tile0_f32, tile1_f32.clone()],
+        );
+        let t_f32 = TileDescriptor::new(
+            0,
+            GeoTiffStreamReader::open(f_f32.path()).unwrap(),
+            Some("EPSG:4326"),
+        )
+        .unwrap();
+        let sel = BandSelection {
+            band: 1,
+            nodata: None,
+            apply_scale_offset: false,
+        };
+        let pf = PrefetchedChunkReader::spawn_with_workers(t_f32.reader.clone(), vec![0, 1], 16, 2);
+        let mut cache = ChunkCache::default();
+        let native_win =
+            RowWindow::load_bands(&t_f32, &[1], sel, 0..h, 0..w, &mut cache, Some(&pf), None)
+                .unwrap();
+        assert!(matches!(native_win.storage, WindowStorage::TiledNative(_)));
+        assert!(matches!(
+            cache.chunks.get(&0),
+            Some(CachedChunk::AllNoData { .. })
+        ));
+        assert_eq!(cache.chunks[&0].byte_size(), 0);
+        assert!(matches!(
+            cache.chunks.get(&1),
+            Some(CachedChunk::NativeSingleBand { .. })
+        ));
+
+        // Bbox entirely inside tile 0 reports false; crossing into tile 1 reports true.
+        assert!(!native_win.bbox_has_any_data(0.5, 15.5, 1.0, 7.0));
+        assert!(native_win.bbox_has_any_data(15.5, 16.5, 1.0, 7.0));
+        assert!(native_win.bbox_has_any_data(16.0, 32.0, 0.0, 8.0));
+        assert!(!native_win.bbox_has_any_data(32.0, 40.0, 0.0, 8.0));
+        assert!(!native_win.bbox_has_any_data(f64::NAN, 10.0, 0.0, 4.0));
+
+        let mut dense_cache = ChunkCache::with_budget(1);
+        let dense_win = RowWindow::load(&t_f32, sel, 0..h, &mut dense_cache).unwrap();
+        assert!(matches!(dense_win.storage, WindowStorage::DenseF64(_)));
+        for r in 0..h as usize {
+            for c in 0..w as i64 {
+                assert_eq!(native_win.get(c, r as i64), dense_win.get(c, r as i64));
+            }
+            let (mut a1, mut a2) = (
+                ContinuousAccumulator::default(),
+                ContinuousAccumulator::default(),
+            );
+            assert_eq!(
+                native_win.accumulate_unit_span(0, r, 0, w as usize, &mut a1),
+                dense_win.accumulate_unit_span(0, r, 0, w as usize, &mut a2)
+            );
+            assert_eq!(a1.count, a2.count);
+            assert!((a1.sum - a2.sum).abs() < 1e-12);
+            assert!((a1.m2 - a2.m2).abs() < 1e-12);
+        }
+
+        // Also check unsigned integer nodata (u8) all-nodata chunk detection.
+        let tile0_u8 = vec![255u8; (tw * th) as usize];
+        let tile1_u8 = vec![9u8; (tw * th) as usize];
+        let f_u8 = write_raw_tiled_tiff(
+            (w, h),
+            (tw, th),
+            (1, 8),
+            Some("255"),
+            None,
+            &[tile0_u8, tile1_u8],
+        );
+        let t_u8 = TileDescriptor::new(
+            0,
+            GeoTiffStreamReader::open(f_u8.path()).unwrap(),
+            Some("EPSG:4326"),
+        )
+        .unwrap();
+        let mut cache_u8 = ChunkCache::default();
+        let nat_u8 = RowWindow::load(&t_u8, sel, 0..h, &mut cache_u8).unwrap();
+        assert!(matches!(
+            cache_u8.chunks.get(&0),
+            Some(CachedChunk::AllNoData { .. })
+        ));
+        assert!(!nat_u8.bbox_has_any_data(0.0, 16.0, 0.0, 8.0));
+        assert!(nat_u8.bbox_has_any_data(16.0, 32.0, 0.0, 8.0));
+        assert_eq!(nat_u8.get(4, 2), None);
+        assert_eq!(nat_u8.get(20, 2), Some(9.0));
     }
 }
