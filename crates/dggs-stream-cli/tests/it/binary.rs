@@ -223,6 +223,62 @@ fn limit_caps_rows_on_ipc_and_jsonl() {
 }
 
 #[test]
+fn worker_flags_and_ground_area_overlay_match_the_default_scan() {
+    let (_tmp, path) = gradient_tif();
+    let default = ipc_map(&run_ok(&["ipc", s(&path), "--transfer", "overlay"]).stdout);
+    let tuned = ipc_map(
+        &run_ok(&[
+            "ipc",
+            s(&path),
+            "--transfer",
+            "overlay",
+            "--decode-workers",
+            "3",
+            "--aggregation-workers",
+            "1",
+        ])
+        .stdout,
+    );
+    assert!(!default.is_empty());
+    assert_eq!(tuned, default);
+
+    // Ground-area overlay runs through the CLI and returns rows with data.
+    let ground = run_ok(&[
+        "jsonl",
+        s(&path),
+        "--ground-area",
+        "--transfer",
+        "overlay",
+        "--decode-workers",
+        "2",
+    ]);
+    let rows = jsonl_rows(&ground.stdout);
+    assert!(!rows.is_empty());
+    assert!(rows
+        .iter()
+        .all(|row| row["retained_area_m2"].as_f64().unwrap() > 0.0));
+}
+
+#[test]
+fn transfer_auto_runs_the_mode_it_selects() {
+    let (_tmp, path) = gradient_tif();
+    // 0.001 degree pixels are far smaller than H3 resolution 8 cells: overlay.
+    let auto = run_ok(&["ipc", s(&path), "--transfer", "auto", "-r", "8"]);
+    assert!(String::from_utf8_lossy(&auto.stderr).contains("selected overlay"));
+    let overlay = ipc_map(&run_ok(&["ipc", s(&path), "--transfer", "overlay", "-r", "8"]).stdout);
+    assert!(!overlay.is_empty());
+    assert_eq!(ipc_map(&auto.stdout), overlay);
+
+    // Resolution 12 cells are smaller than the pixels: interpolate.
+    let auto = run_ok(&["ipc", s(&path), "--transfer", "auto", "-r", "12"]);
+    assert!(String::from_utf8_lossy(&auto.stderr).contains("selected interpolate"));
+    let interpolate =
+        ipc_map(&run_ok(&["ipc", s(&path), "--transfer", "interpolate", "-r", "12"]).stdout);
+    assert!(!interpolate.is_empty());
+    assert_eq!(ipc_map(&auto.stdout), interpolate);
+}
+
+#[test]
 fn stdout_output_equals_file_output_and_core() {
     let (_tmp, path) = gradient_tif();
     let dir = tempfile::tempdir().unwrap();

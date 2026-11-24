@@ -1626,13 +1626,15 @@ fn parse_export_args(
     // `auto` resolution and transfer are measured on the raster, once path and CRS are known.
     if auto.is_some() || opts.transfer.is_auto() {
         let paths = resolve_raster_sources(&opts.input_path)?;
-        let mosaic = MosaicReader::open(
-            &paths,
-            opts.bbox,
-            opts.source_crs.as_deref(),
-            OverlapRule::default(),
-        )?;
         if let Some(spec) = auto {
+            // The resolution is measured on every tile, as before `--transfer auto`:
+            // a bbox must not move it to a coarser grid.
+            let mosaic = MosaicReader::open(
+                &paths,
+                None,
+                opts.source_crs.as_deref(),
+                OverlapRule::default(),
+            )?;
             opts.resolutions = spec.resolve(opts.grid, &mosaic)?;
             eprintln!(
                 "dggs-stream: -r {spec} selected {} resolution {}",
@@ -1641,16 +1643,29 @@ fn parse_export_args(
             );
         }
         if opts.transfer.is_auto() {
+            // The transfer mode is measured where the scan will read.
+            let mosaic = MosaicReader::open(
+                &paths,
+                opts.bbox,
+                opts.source_crs.as_deref(),
+                OverlapRule::default(),
+            );
             let mut cfg = opts.scan_config();
             cfg.partition = opts.partition.clone();
             cfg.histogram = opts.histogram.clone();
-            opts.transfer = if opts.ground_area {
-                opts.transfer.resolve_for_ground_area(&mosaic, &cfg)
-            } else if opts.bands.is_some() {
-                opts.transfer.resolve_for_multiband(&mosaic, &cfg)
-            } else {
-                opts.transfer
-                    .resolve_for_mosaic(&mosaic, &cfg, opts.categorical)
+            opts.transfer = match &mosaic {
+                Ok(mosaic) if opts.ground_area => {
+                    opts.transfer.resolve_for_ground_area(mosaic, &cfg)
+                }
+                Ok(mosaic) if opts.bands.is_some() => {
+                    opts.transfer.resolve_for_multiband(mosaic, &cfg)
+                }
+                Ok(mosaic) => opts
+                    .transfer
+                    .resolve_for_mosaic(mosaic, &cfg, opts.categorical),
+                // No tile meets the bbox (or the source cannot be opened): the scan
+                // reports its own error or returns no rows, so just pick the default.
+                Err(_) => TransferMode::AssignCenters,
             };
             eprintln!(
                 "dggs-stream: --transfer auto selected {}",

@@ -1395,6 +1395,11 @@ def scan_raster(
                         pushed = {k: v for k, v in pushed.items() if k != "min_count"}
                     options = _narrow_options(options, pushed)
                 allowed = pushed.get("resolutions")
+                # `transfer="auto"` picks its mode from the scanned resolutions, so a
+                # narrowed list could change the mode and with it the retained rows.
+                # Leave the resolution predicate to Polars then.
+                if str(options.get("transfer") or "").strip().lower() == "auto":
+                    allowed = None
                 if allowed is not None:
                     configured = _resolution_list(resolutions, GRIDS[grid])
                     if configured is not None:

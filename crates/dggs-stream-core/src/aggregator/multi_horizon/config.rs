@@ -265,9 +265,10 @@ pub struct MultiResolutionConfig {
     /// helper-thread spawn instead of running serially. That overhead grows as
     /// a small `aggregation_budget_bytes` shrinks windows and multiplies waves.
     ///
-    /// For overlay, `None` uses the caller's ambient Rayon pool (and stays
-    /// serial on a Rayon worker) while `Some(n)` uses a dedicated `n`-thread
-    /// pool (`Some(1)` runs serially).
+    /// For overlay, `None` uses the caller's ambient Rayon pool while `Some(n)`
+    /// uses a dedicated `n`-thread pool (`Some(1)` runs serially). Either way,
+    /// cell clipping stays serial when the scan is called from a Rayon worker,
+    /// because queuing it there could stall an unrelated query.
     pub aggregation_workers: Option<usize>,
     /// Concurrent HTTP range-request workers for remote tiles.
     pub fetch_workers: usize,
@@ -471,6 +472,20 @@ impl MultiResolutionConfig {
                         .into(),
                 ));
             }
+            // `auto` falls back to centre assignment for these options, which cannot
+            // enforce a coverage threshold: refuse instead of dropping the filter.
+            if self.transfer.is_auto()
+                && (self.should_compact_h3_children()
+                    || self.spectral_formula.is_some()
+                    || !self.sampling.is_single_point())
+            {
+                return Err(DggsStreamError::InvalidParameter(
+                    "valid_coverage_threshold needs overlay, but compaction, a spectral formula \
+                     and sub-pixel sampling force center assignment; use transfer 'overlay' \
+                     without them or drop the threshold"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -631,6 +646,19 @@ mod tests {
         assert_eq!(cfg.resolutions, vec![8]);
         assert_eq!(cfg.quantiles.len(), 0);
         assert!(cfg.spectral_formula.is_none());
+    }
+
+    #[test]
+    fn auto_transfer_refuses_a_coverage_threshold_it_cannot_enforce() {
+        let mut cfg = MultiResolutionConfig {
+            transfer: crate::transfer::TransferMode::Auto,
+            valid_coverage_threshold: Some(1.0),
+            ..Default::default()
+        };
+        cfg.validate().expect("auto can resolve to overlay");
+        cfg.sampling = SamplingPattern::nine_point();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("valid_coverage_threshold"), "{err}");
     }
 
     #[test]

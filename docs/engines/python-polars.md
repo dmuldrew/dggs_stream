@@ -82,7 +82,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `nodata_policy` | `str` | `None` (`"omit"`) | `"emit"` keeps cells whose samples are all NoData (`count` 0, null statistics) |
 | `emit_nodata_value` | `float` | `None` | Under `"emit"`, the value of those statistics instead of null |
 | `decimals` | `int` | `None` | Round floating-point statistics to 0–15 decimals |
-| `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"` or `"overlay"` ([Scan Options](../scan-options.md#transfer-modes)) |
+| `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"`, `"overlay"` or `"auto"`, which picks one from the cell-to-pixel size ratio ([Scan Options](../scan-options.md#transfer-modes)) |
 | `interpolation` | `str` | `None` (`"bilinear"`) | With `"interpolate"`: `nearest`, `bilinear`, `bicubic`, `lanczos` |
 | `overlay_weighted`, `mass_preserve` | `bool` | `None` | With `"overlay"`: count touched pixels once / keep the raster's total in `sum` |
 | `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. A spilled resolution may need to read the full input even with a small row limit. |

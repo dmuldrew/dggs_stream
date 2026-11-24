@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::aggregator::multi_horizon::partition::BoundaryClassifier;
 use crate::aggregator::multi_horizon::{
     encode_partial_state, MultiCategoricalHorizonStreamer, MultiCategoricalRecord,
     MultiContinuousRecord, MultiResolutionConfig, MultiScanHorizonStreamer, QuantileTarget,
@@ -79,7 +80,9 @@ enum Streamer {
         policy: OutputPolicy,
         minimum: f64,
         quantiles: Vec<QuantileTarget>,
-        count: u64,
+        classifier: Option<Box<BoundaryClassifier>>,
+        filters: Filters,
+        counts: (u64, u64),
     },
     Continuous {
         streamer: MultiScanHorizonStreamer,
@@ -122,7 +125,29 @@ impl PartitionedBatchReader {
         if config.transfer.is_auto() {
             config.transfer = config.transfer.resolve_for_mosaic(&mosaic, &config, false);
         }
-        if config.partition.is_some() && config.transfer == TransferMode::OVERLAY {
+        if let Some(partition) = config
+            .partition
+            .as_ref()
+            .filter(|_| config.transfer == TransferMode::OVERLAY)
+        {
+            // On WGS84 tiles the linear pixel-space clipping polygon stays inside
+            // the classifier's padded geographic envelope. Projected chords need
+            // a separate containment proof.
+            let classifier = (config.grid == GridKind::H3
+                && mosaic.tiles.iter().all(|tile| {
+                    matches!(
+                        tile.crs_transformer,
+                        crate::crs::transformer::CrsTransformer::Wgs84Identity
+                    )
+                }))
+            .then(|| {
+                Box::new(BoundaryClassifier::with_grid(
+                    &mosaic,
+                    partition,
+                    config.grid,
+                ))
+            });
+            let filters = overlay_filters(&config);
             let streamer = TransferStream::partitioned_overlay(mosaic, &config)?;
             return Ok(Self::new(
                 Streamer::Overlay {
@@ -131,7 +156,9 @@ impl PartitionedBatchReader {
                     policy: config.output_policy(),
                     minimum: config.valid_coverage_threshold.unwrap_or(0.0),
                     quantiles: config.quantiles,
-                    count: 0,
+                    classifier,
+                    filters,
+                    counts: (0, 0),
                 },
                 projection,
                 schema,
@@ -205,7 +232,7 @@ impl PartitionedBatchReader {
     /// `(interior, boundary)` cells so far; `None` for a scan without a partition.
     pub fn partition_cell_counts(&self) -> Option<(u64, u64)> {
         match &self.streamer {
-            Streamer::Overlay { count, .. } => Some((0, *count)),
+            Streamer::Overlay { counts, .. } => Some(*counts),
             Streamer::Continuous { streamer, .. } => streamer.partition_cell_counts(),
             Streamer::Categorical(streamer) => streamer.partition_cell_counts(),
         }
@@ -222,28 +249,46 @@ impl PartitionedBatchReader {
                 policy,
                 minimum,
                 quantiles,
-                count,
+                classifier,
+                filters,
+                counts,
             } => {
                 let mut records = Vec::new();
                 let mut states = Vec::new();
+                let mut validity = Vec::new();
                 let n =
                     streamer.drain_into(self.batch_size, |_, resolution, cell_id, partial| {
-                        states.push(partial.encode(*minimum));
+                        let interior = classifier.as_mut().is_some_and(|c| c.is_interior(cell_id));
+                        if interior {
+                            counts.0 += 1;
+                            if !keep_overlay(&partial, *minimum, policy.nodata, filters) {
+                                return;
+                            }
+                            states.push(Vec::new());
+                        } else {
+                            counts.1 += 1;
+                            states.push(partial.encode(*minimum));
+                        }
+                        validity.push(!interior);
                         records.push(MultiContinuousRecord {
                             resolution,
                             cell_id,
                             accumulator: partial.stats,
                         });
                     })?;
-                if n == 0 {
-                    self.finished = true;
-                    return Ok(());
+                self.finished = n == 0;
+                if !records.is_empty() {
+                    let batch = RecordBatch::from_continuous_records_with(
+                        *grid, policy, &records, quantiles, projection,
+                    )?;
+                    let states = ColumnArray::Binary {
+                        values: states,
+                        validity: Some(validity),
+                    };
+                    self.pending
+                        .push_back(append_column(batch, states, &schema)?);
                 }
-                *count += n as u64;
-                let batch = RecordBatch::from_continuous_records_with(
-                    *grid, policy, &records, quantiles, projection,
-                )?;
-                (None, Some((batch, states)))
+                return Ok(());
             }
             Streamer::Continuous {
                 streamer,
@@ -562,24 +607,30 @@ fn merge_overlay(
             cell.stats.merge(&partial.stats);
         }
     }
-    let filters = Filters {
-        min_count: config.min_count,
-        min_mean: config.min_mean,
-        max_mean: config.max_mean,
-        ..Filters::default()
-    };
+    let filters = overlay_filters(config);
     let minimum = minimum.unwrap_or(0.0);
     Ok(cells
         .into_iter()
-        .filter(|(_, p)| {
-            (p.stats.has_samples() || config.nodata_policy == NodataPolicy::Emit)
-                && p.stats.count >= minimum * p.covered
-                && p.stats.passes(&filters)
-        })
+        .filter(|(_, p)| keep_overlay(p, minimum, config.nodata_policy, &filters))
         .map(|((resolution, cell_id), p)| MultiContinuousRecord {
             resolution,
             cell_id,
             accumulator: p.stats,
         })
         .collect())
+}
+
+fn overlay_filters(config: &MultiResolutionConfig) -> Filters {
+    Filters {
+        min_count: config.min_count,
+        min_mean: config.min_mean,
+        max_mean: config.max_mean,
+        ..Filters::default()
+    }
+}
+
+fn keep_overlay(p: &OverlayPartial, minimum: f64, policy: NodataPolicy, filters: &Filters) -> bool {
+    (p.stats.has_samples() || policy == NodataPolicy::Emit)
+        && p.stats.count >= minimum * p.covered
+        && p.stats.passes(filters)
 }
