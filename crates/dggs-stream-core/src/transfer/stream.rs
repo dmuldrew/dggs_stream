@@ -27,7 +27,7 @@ use crate::raster::mosaic::{MosaicReader, TileDescriptor};
 use crate::raster::prefetch::PrefetchedChunkReader;
 use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError};
 
-use super::clip::{visit_overlap_spans_into, ClipScratch};
+use super::clip::{merge_overlapping_runs, visit_overlap_spans_into, ClipScratch, PixelRun};
 use super::interp::{interpolate, Interpolation};
 use super::window::{chunk_is_absent, BandSelection, ChunkCache, RowWindow};
 use super::TransferMode;
@@ -37,11 +37,14 @@ use super::TransferMode;
 const MAX_WINDOW_VALUES: usize = 4 << 20;
 /// Cells listed per block, so the cell list stays small next to the window.
 const TARGET_BLOCK_CELLS: f64 = 150_000.0;
-// Limit the speculative overlap lists to 128 × 1024 (pixel, area) pairs.
+// Limit the speculative overlap lists to 128 × 1024 `OverlapRun`s (16 bytes each).
 // Leave room for irregular shapes around the estimated mean cell area.
 const OVERLAP_BATCH_CELLS: usize = 128;
 const MAX_PREPARED_OVERLAPS: usize = 1024;
 const MAX_MEAN_PIXELS_PER_CELL: f64 = 512.0;
+/// Shortest unit-weight run routed through the vectorized slice accumulator;
+/// shorter runs are cheaper pixel by pixel.
+const MIN_SIMD_RUN: usize = 4;
 
 /// Widest rectangle handed to a polygon fill, in degrees of longitude: fills read a
 /// polygon's edges as the short way round, so wide boxes are cut into slices.
@@ -56,6 +59,14 @@ pub trait TransferAccumulator: Send + 'static {
     fn add(&mut self, value: f64, weight: f64);
     /// Accumulate a contiguous slice of unit-weight pixel values (`weight == 1.0`).
     /// Returns the number of finite (valid) observations in `slice`.
+    ///
+    /// Precondition: `slice` holds raw band samples that need no value mapping, so
+    /// callers must only use this when there are no histogram bins and, for
+    /// categorical accumulators, no category remapper (NaN marks NoData).
+    ///
+    /// Continuous implementations combine the slice with a two-pass reduction and a
+    /// parallel merge rather than per-sample Welford updates, so the variance can
+    /// differ from per-pixel accumulation in the last bits.
     fn add_band_unit_slice(&mut self, slot: usize, slice: &[f64]) -> usize {
         let mut valid = 0;
         for &value in slice {
@@ -147,12 +158,14 @@ impl TransferAccumulator for ContinuousAccumulator {
 
     fn add_band_unit_slice(&mut self, slot: usize, slice: &[f64]) -> usize {
         debug_assert_eq!(slot, 0);
-        if self.quantiles.is_some() {
-            let valid = slice.iter().filter(|v| v.is_finite()).count();
-            if valid > 0 {
-                self.update_slice(slice);
+        // `merge` never touches `self.quantiles` for a sketch-less span, so the
+        // sketch is fed here and the moments come from one vectorized reduction.
+        if let Some(sketch) = self.quantiles.as_mut() {
+            for &value in slice {
+                if value.is_finite() {
+                    sketch.update(value, 1.0);
+                }
             }
-            return valid;
         }
         let span = <f64 as SimdSpanAccumulate>::accumulate_span(slice, None);
         let valid = span.count as usize;
@@ -955,6 +968,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let bbox = self.bbox;
         let histogram_bins = self.histogram_bins.as_deref();
         let remapper = self.remapper.as_deref();
+        // `min_mean` and `max_mean` compare the rounded mean with an inclusive bound.
+        // Slice accumulation sums in a different order than per-pixel updates, so a
+        // mean that is exactly on the bound could land one ulp outside it. Keep the
+        // per-pixel order whenever such a filter is set.
+        let mean_filtered = self.filters.min_mean.is_some() || self.filters.max_mean.is_some();
         let mut contribute_run = |pending: &mut Pending<A>,
                                   mut coverage: Option<&mut BandCoverage>,
                                   run: OverlapRun,
@@ -969,40 +987,21 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 return;
             }
             let clipped_len = clipped_c1 - clipped_c0;
-            if clipped_len >= 4
-                && run.area == 1.0
-                && weight == 1.0
-                && selected.is_none()
-                && histogram_bins.is_none()
-                && (!A::CATEGORICAL || remapper.is_none())
-            {
-                pending.touched = true;
-                pending.acc.cover(clipped_len as f64);
-                if let Some(c) = coverage.as_mut() {
-                    c.covered_area += clipped_len as f64;
-                }
-                for slot in 0..bands.len() {
-                    let valid = window.accumulate_unit_span(
-                        slot,
-                        row_off,
-                        clipped_c0,
-                        clipped_c1,
-                        &mut pending.acc,
-                    );
-                    if let Some(c) = coverage.as_mut() {
-                        c.valid_area[slot] += valid as f64;
-                    }
-                }
-                return;
-            }
             let start = row_off * band_width + clipped_c0;
             let row = rows.0 + row_off as i64;
-            for offset in 0..clipped_len {
-                let index = start + offset;
-                let col = (clipped_c0 + offset) as i64;
-                if let Some(cache) = &mut selected {
-                    let inside = cache[index].get_or_insert_with(|| {
-                        let (x, y) = gt.pixel_to_coord(col as f64 + 0.5, row as f64 + 0.5);
+            // Whole, unit-weight pixels whose samples need no mapping can be
+            // accumulated as contiguous slices.
+            let unit = run.area == 1.0
+                && weight == 1.0
+                && !mean_filtered
+                && histogram_bins.is_none()
+                && (!A::CATEGORICAL || remapper.is_none());
+            // Whether a pixel centre lies in the bbox and, in a mosaic, this tile.
+            let mut is_selected = |offset: usize| {
+                selected.as_mut().is_none_or(|cache| {
+                    *cache[start + offset].get_or_insert_with(|| {
+                        let col = (clipped_c0 + offset) as f64;
+                        let (x, y) = gt.pixel_to_coord(col + 0.5, row as f64 + 0.5);
                         tile.crs_transformer
                             .transform_point(x, y)
                             .is_ok_and(|(lon, lat)| {
@@ -1010,26 +1009,64 @@ impl<A: TransferAccumulator> TransferStream<A> {
                                     && (!several_tiles
                                         || mosaic.is_point_owned_by(block.tile, lon, lat))
                             })
-                    });
-                    if !*inside {
-                        continue;
+                    })
+                })
+            };
+            let mut offset = 0;
+            while offset < clipped_len {
+                if !is_selected(offset) {
+                    offset += 1;
+                    continue;
+                }
+                // Extend over the following selected pixels when they can be
+                // accumulated together.
+                let mut end = offset + 1;
+                if unit {
+                    while end < clipped_len && is_selected(end) {
+                        end += 1;
                     }
                 }
+                let len = end - offset;
+                let index = start + offset;
                 pending.touched = true;
-                pending.acc.cover(run.area);
-                if let Some(c) = coverage.as_mut() {
-                    c.covered_area += run.area;
-                }
-                for slot in 0..bands.len() {
-                    if let Some(sample) = window.band_value_at(slot, row_off, clipped_c0 + offset) {
+                if len >= MIN_SIMD_RUN {
+                    pending.acc.cover(len as f64);
+                    if let Some(c) = coverage.as_mut() {
+                        c.covered_area += len as f64;
+                    }
+                    for slot in 0..bands.len() {
+                        let valid = window.accumulate_unit_span(
+                            slot,
+                            row_off,
+                            clipped_c0 + offset,
+                            clipped_c0 + offset + len,
+                            &mut pending.acc,
+                        );
                         if let Some(c) = coverage.as_mut() {
-                            c.valid_area[slot] += run.area;
+                            c.valid_area[slot] += valid as f64;
                         }
-                        if let Some(value) = Self::mapped(histogram_bins, remapper, sample) {
-                            pending.acc.add_band(slot, value, weight);
+                    }
+                } else {
+                    for index in index..index + len {
+                        let col = index - row_off * band_width;
+                        pending.acc.cover(run.area);
+                        if let Some(c) = coverage.as_mut() {
+                            c.covered_area += run.area;
+                        }
+                        for slot in 0..bands.len() {
+                            if let Some(sample) = window.band_value_at(slot, row_off, col) {
+                                if let Some(c) = coverage.as_mut() {
+                                    c.valid_area[slot] += run.area;
+                                }
+                                if let Some(value) = Self::mapped(histogram_bins, remapper, sample)
+                                {
+                                    pending.acc.add_band(slot, value, weight);
+                                }
+                            }
                         }
                     }
                 }
+                offset = end;
             }
         };
         let geometry = OverlayGeometry {
@@ -1098,11 +1135,21 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 let owners = pixel_cells.get_or_insert_with(&owners_of_block);
                 for (pixel, owner) in owners.iter().enumerate() {
                     if *owner == Some(cell) {
-                        overlaps.push(OverlapRun {
-                            pixel: pixel as u32,
-                            len: 1,
-                            area: 1.0,
-                        });
+                        // Extend the previous run along its row so whole-pixel
+                        // stretches reach the slice accumulator.
+                        match overlaps[before..].last_mut() {
+                            Some(last)
+                                if last.pixel as usize + last.len as usize == pixel
+                                    && pixel % band_width != 0 =>
+                            {
+                                last.len += 1;
+                            }
+                            _ => overlaps.push(OverlapRun {
+                                pixel: pixel as u32,
+                                len: 1,
+                                area: 1.0,
+                            }),
+                        }
                     }
                 }
             } else {
@@ -1159,7 +1206,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             for &run in &overlaps[start..end] {
                 let run_start = run.pixel as usize;
                 let run_len = run.len as usize;
-                if run_len >= 4
+                if run_len >= MIN_SIMD_RUN
+                    && !mean_filtered
                     && run.area == 1.0
                     && totals[run_start..run_start + run_len]
                         .iter()
@@ -1669,35 +1717,26 @@ struct OverlapRun {
     area: f64,
 }
 
-/// Two seam pieces can touch the same source pixel (e.g. a one-column
-/// global raster). Combine its weight before counting it or updating variance.
-fn merge_seam_overlaps(overlaps: &mut Vec<OverlapRun>, start: usize) {
-    let orig_len = overlaps.len();
-    for i in start..orig_len {
-        let run = overlaps[i];
-        if run.len > 1 {
-            overlaps[i].len = 1;
-            for offset in 1..run.len {
-                overlaps.push(OverlapRun {
-                    pixel: run.pixel + offset,
-                    len: 1,
-                    area: run.area,
-                });
-            }
+impl PixelRun for OverlapRun {
+    fn start(&self) -> u64 {
+        u64::from(self.pixel)
+    }
+    fn end(&self) -> u64 {
+        u64::from(self.pixel) + u64::from(self.len)
+    }
+    fn with_range(self, start: u64, end: u64) -> Self {
+        Self {
+            pixel: start as u32,
+            len: (end - start) as u32,
+            area: self.area,
         }
     }
-    overlaps[start..].sort_unstable_by_key(|run| run.pixel);
-    let mut end = start;
-    for i in start..overlaps.len() {
-        let entry = overlaps[i];
-        if end > start && overlaps[end - 1].pixel == entry.pixel {
-            overlaps[end - 1].area += entry.area;
-        } else {
-            overlaps[end] = entry;
-            end += 1;
+    fn add_payload(self, other: Self) -> Self {
+        Self {
+            area: self.area + other.area,
+            ..self
         }
     }
-    overlaps.truncate(end);
 }
 
 /// Geometry shared by workers processing different cells in one row window.
@@ -1720,6 +1759,11 @@ impl OverlayGeometry<'_> {
         scratch: &mut ClipScratch,
     ) -> Option<i64> {
         let start = overlaps.len();
+        // A bounded visit also bounds the clipper's edge events, which are buffered
+        // before any run is emitted. A cell with over twice `limit` events nearly
+        // always yields more than `limit` runs (each boundary pixel adds about one
+        // event and two runs). The rare exception costs only a serial retry.
+        scratch.set_event_limit((limit != usize::MAX).then(|| limit.saturating_mul(2)));
         let mut pieces = 0;
         let mut last_row = f64::NEG_INFINITY;
         let completed = visit_cell_polygons(
@@ -1759,7 +1803,10 @@ impl OverlayGeometry<'_> {
             return None;
         }
         if pieces > 1 {
-            merge_seam_overlaps(overlaps, start);
+            // Two seam pieces can touch the same source pixel (e.g. a one-column
+            // global raster). Combine its weight before counting it or updating
+            // variance. Merging splits runs only where they overlap.
+            merge_overlapping_runs(overlaps, start);
             if overlaps.len() > limit {
                 return None;
             }
@@ -2001,10 +2048,21 @@ mod tests {
         resolution: u8,
         workers: Option<usize>,
     ) -> (BTreeMap<u64, ContinuousAccumulator>, usize, usize) {
+        overlay_scan_in(file, grid, resolution, workers, None)
+    }
+
+    fn overlay_scan_in(
+        file: &tempfile::NamedTempFile,
+        grid: GridKind,
+        resolution: u8,
+        workers: Option<usize>,
+        bbox: Option<[f64; 4]>,
+    ) -> (BTreeMap<u64, ContinuousAccumulator>, usize, usize) {
         let mosaic = Arc::new(
             MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap(),
         );
         let mut config = MultiResolutionConfig::single(resolution).with_grid(grid);
+        config.bbox = bbox;
         config.transfer = TransferMode::Overlay {
             weighted: false,
             mass_preserve: false,
@@ -2038,7 +2096,8 @@ mod tests {
         assert_eq!(parallel, serial);
 
         // Narrow columns and tall rows: the mean cell area passes the worker
-        // gate, yet a cell crosses more than MAX_PREPARED_OVERLAPS pixels within one row.
+        // gate, yet a cell's boundary yields more than MAX_PREPARED_OVERLAPS runs
+        // (one per partially covered pixel), so workers hand it back.
         let narrow = geographic_raster(2048, 8, (-122.45, 37.80), (0.000002, 0.25), |c, r| {
             (1 + (c + 3 * r) % 31) as f32
         });
@@ -2243,5 +2302,56 @@ mod tests {
         let cat4 = drain_cat(&cat_multi);
         assert!(!cat1.is_empty());
         assert_eq!(cat1, cat4);
+    }
+
+    #[test]
+    fn bbox_selection_keeps_interior_runs_on_the_slice_path() {
+        // About 50 pixels across an H3 res-8 cell, so interiors form long runs.
+        let (west, north, step) = (-122.45, 37.80, 0.0002);
+        let value = |c: u32, r: u32| (1 + (7 * c + 3 * r) % 41) as f32;
+        let raster = geographic_raster(240, 160, (west, north), (step, step), value);
+        let (unbounded, _, _) = overlay_scan(&raster, GridKind::H3, 8, Some(1));
+        assert!(!unbounded.is_empty());
+
+        // A bbox enclosing the raster selects every pixel: identical results.
+        let all = [west - 1.0, north - 1.0, west + 1.0, north + 1.0];
+        let (enclosed, _, _) = overlay_scan_in(&raster, GridKind::H3, 8, Some(1), Some(all));
+        assert_eq!(enclosed, unbounded);
+
+        // A bbox cutting through cells must match NoData outside it.
+        let cut_col = 101;
+        let cut = [
+            west - 1.0,
+            north - 1.0,
+            west + cut_col as f64 * step,
+            north + 1.0,
+        ];
+        let (clipped, _, _) = overlay_scan_in(&raster, GridKind::H3, 8, Some(1), Some(cut));
+        let masked = geographic_raster(240, 160, (west, north), (step, step), |c, r| {
+            if c < cut_col {
+                value(c, r)
+            } else {
+                f32::NAN
+            }
+        });
+        let (expected, _, _) = overlay_scan(&masked, GridKind::H3, 8, Some(1));
+        let mut compared = 0;
+        for (id, got) in &clipped {
+            let Some(want) = expected.get(id) else {
+                continue;
+            };
+            compared += 1;
+            assert_eq!(got.count, want.count, "cell {id:x}");
+            assert_eq!((got.min, got.max), (want.min, want.max), "cell {id:x}");
+            assert!(
+                (got.sum - want.sum).abs() <= 1e-9 * want.sum.abs(),
+                "cell {id:x}"
+            );
+            assert!(
+                (got.m2 - want.m2).abs() <= 1e-9 * want.m2.abs().max(1.0),
+                "cell {id:x}"
+            );
+        }
+        assert!(compared > 10, "only {compared} cells compared");
     }
 }
