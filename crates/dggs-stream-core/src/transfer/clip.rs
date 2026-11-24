@@ -14,6 +14,12 @@ const AREA_EPS: f64 = 1e-14;
 /// Maximum rows or columns per packed `u64` `(rel_row << 32) | rel_col` chunk.
 const MAX_PACKED_DIM: i64 = u32::MAX as i64;
 
+/// Rows with at most this many events are ordered by insertion sort after bucketing.
+const INSERTION_SORT_MAX: usize = 16;
+
+/// Below this many events a single comparison sort beats bucketing by row.
+const ROW_BUCKET_MIN_EVENTS: usize = 256;
+
 /// Unsigned area of a polygon given by its vertices in order (shoelace formula).
 ///
 /// Shifts coordinates relative to the first vertex to avoid catastrophic
@@ -63,6 +69,68 @@ pub(super) struct ClipScratch {
     row_carry: Vec<f64>,
     ground_events: Vec<GroundCellEvent>,
     ground_row_carry: Vec<(f64, f64)>,
+    /// Destination of the row-bucketing pass; swapped with the event buffer.
+    sorted_events: Vec<CellEvent>,
+    sorted_ground_events: Vec<GroundCellEvent>,
+    row_offsets: Vec<usize>,
+}
+
+/// Order `events` by `(row, col)` key: a counting sort into row buckets, then a
+/// per-row sort. The DDA emits few events per row, so for large cells the per-row
+/// pass is a short insertion sort instead of a full `O(E log E)` comparison sort;
+/// small cells keep the single comparison sort, which is cheaper at their size.
+fn sort_events_by_key<E: DdaEvent>(
+    events: &mut Vec<E>,
+    sorted: &mut Vec<E>,
+    row_offsets: &mut Vec<usize>,
+    num_rows: usize,
+) {
+    if events.len() < ROW_BUCKET_MIN_EVENTS {
+        events.sort_unstable_by_key(|e| e.key());
+        return;
+    }
+    row_offsets.clear();
+    row_offsets.resize(num_rows + 1, 0);
+    for e in events.iter() {
+        row_offsets[(e.key() >> 32) as usize + 1] += 1;
+    }
+    for r in 0..num_rows {
+        row_offsets[r + 1] += row_offsets[r];
+    }
+    // `sorted` is fully overwritten below; seed its length with copies.
+    sorted.clear();
+    sorted.extend_from_slice(events);
+    for &e in events.iter() {
+        let slot = &mut row_offsets[(e.key() >> 32) as usize];
+        sorted[*slot] = e;
+        *slot += 1;
+    }
+    // `row_offsets[r]` now holds the end of row `r` (= start of row `r + 1`).
+    let mut start = 0;
+    for &end in &row_offsets[..num_rows] {
+        let row = &mut sorted[start..end];
+        if row.len() <= INSERTION_SORT_MAX {
+            insertion_sort_by_key(row);
+        } else {
+            row.sort_unstable_by_key(|e| e.key());
+        }
+        start = end;
+    }
+    std::mem::swap(events, sorted);
+}
+
+#[inline]
+fn insertion_sort_by_key<E: DdaEvent>(items: &mut [E]) {
+    for i in 1..items.len() {
+        let item = items[i];
+        let key = item.key();
+        let mut j = i;
+        while j > 0 && items[j - 1].key() > key {
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = item;
+    }
 }
 
 trait DdaEvent: Copy {
@@ -142,6 +210,9 @@ impl PreparedClip {
     }
 }
 
+/// Bounds of the pixel window `polygon` can touch, or `None` when nothing can be
+/// visited: fewer than three vertices, a non-finite vertex, zero signed area, or a
+/// polygon outside the window.
 fn prepare_clip(polygon: &[(f64, f64)], rows: (i64, i64), width: i64) -> Option<PreparedClip> {
     if polygon.len() < 3 || rows.0 >= rows.1 || width <= 0 {
         return None;
@@ -149,6 +220,12 @@ fn prepare_clip(polygon: &[(f64, f64)], rows: (i64, i64), width: i64) -> Option<
     let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
     for &(x, y) in polygon {
+        // Callers project cell boundaries through fallible transforms that already
+        // reject unrepresentable points; a non-finite vertex here is a caller bug.
+        debug_assert!(
+            x.is_finite() && y.is_finite(),
+            "non-finite polygon vertex ({x}, {y})"
+        );
         if !(x.is_finite() && y.is_finite()) {
             return None;
         }
@@ -179,6 +256,27 @@ fn prepare_clip(polygon: &[(f64, f64)], rows: (i64, i64), width: i64) -> Option<
         min_x,
         orient_sign: if twice_area > 0.0 { 1.0 } else { -1.0 },
     })
+}
+
+/// Run `f` on sub-windows of `prep` whose relative row and column indices fit the
+/// packed `u64` event key. Stream callers address rasters with `u32` dimensions and
+/// always get a single chunk; only the public [`pixel_overlaps`], which accepts any
+/// `i64` width, can need more than one.
+fn for_each_packed_chunk(prep: &PreparedClip, mut f: impl FnMut(&PreparedClip) -> bool) -> bool {
+    let mut r0 = prep.first_row;
+    while r0 < prep.last_row {
+        let r1 = r0.saturating_add(MAX_PACKED_DIM).min(prep.last_row);
+        let mut c0 = prep.first_col;
+        while c0 < prep.last_col {
+            let c1 = c0.saturating_add(MAX_PACKED_DIM).min(prep.last_col);
+            if !f(&prep.with_bounds(r0, r1, c0, c1)) {
+                return false;
+            }
+            c0 = c1;
+        }
+        r0 = r1;
+    }
+    true
 }
 
 #[inline(always)]
@@ -513,7 +611,12 @@ fn visit_overlap_spans_chunk(
         },
     );
 
-    scratch.events.sort_unstable_by_key(|e| e.key);
+    sort_events_by_key(
+        &mut scratch.events,
+        &mut scratch.sorted_events,
+        &mut scratch.row_offsets,
+        (prep.last_row - prep.first_row) as usize,
+    );
     sweep_dda_events(
         prep,
         &scratch.events,
@@ -545,26 +648,15 @@ pub(super) fn visit_overlap_spans_into(
     let Some(prep) = prepare_clip(polygon, rows, width) else {
         return true;
     };
-    let mut r0 = prep.first_row;
-    while r0 < prep.last_row {
-        let r1 = r0.saturating_add(MAX_PACKED_DIM).min(prep.last_row);
-        let mut c0 = prep.first_col;
-        while c0 < prep.last_col {
-            let c1 = c0.saturating_add(MAX_PACKED_DIM).min(prep.last_col);
-            let chunk = prep.with_bounds(r0, r1, c0, c1);
-            if !visit_overlap_spans_chunk(polygon, &chunk, scratch, &mut visit) {
-                return false;
-            }
-            c0 = c1;
-        }
-        r0 = r1;
-    }
-    true
+    for_each_packed_chunk(&prep, |chunk| {
+        visit_overlap_spans_chunk(polygon, chunk, scratch, &mut visit)
+    })
 }
 
 /// Visit every pixel overlapped by `polygon` with `rows.0 <= r < rows.1` and
-/// `0 <= c < width` and area `0 < area <= 1`. Returns `false` immediately when
-/// `visit` declines an overlap.
+/// `0 <= c < width` and area `0 < area <= 1`, as `visit(row, col, area)` (the same
+/// row-first order as the span visitors). Returns `false` immediately when `visit`
+/// declines an overlap.
 pub(super) fn visit_overlaps(
     polygon: &[(f64, f64)],
     rows: (i64, i64),
@@ -574,7 +666,7 @@ pub(super) fn visit_overlaps(
 ) -> bool {
     visit_overlap_spans_into(polygon, rows, width, scratch, |r, c0, c1, area| {
         for c in c0..c1 {
-            if !visit(c, r, area) {
+            if !visit(r, c, area) {
                 return false;
             }
         }
@@ -586,7 +678,8 @@ pub(super) fn visit_overlaps(
 /// `[c, c + 1] x [r, r + 1]`), call `visit(c, r, area)` for every pixel with
 /// `rows.0 <= r < rows.1` and `0 <= c < width` that the polygon overlaps, with the
 /// overlapped area (`0 < area <= 1`). The polygon may be convex or concave, in either
-/// orientation; it must not self-intersect.
+/// orientation; it must not self-intersect. Polygons with fewer than three vertices,
+/// a non-finite vertex, or zero area visit nothing.
 pub fn pixel_overlaps(
     polygon: &[(f64, f64)],
     rows: (i64, i64),
@@ -594,7 +687,7 @@ pub fn pixel_overlaps(
     mut visit: impl FnMut(i64, i64, f64),
 ) {
     let mut scratch = ClipScratch::default();
-    visit_overlaps(polygon, rows, width, &mut scratch, |c, r, area| {
+    visit_overlaps(polygon, rows, width, &mut scratch, |r, c, area| {
         visit(c, r, area);
         true
     });
@@ -653,7 +746,12 @@ fn visit_ground_area_spans_chunk(
         },
     );
 
-    scratch.ground_events.sort_unstable_by_key(|e| e.key);
+    sort_events_by_key(
+        &mut scratch.ground_events,
+        &mut scratch.sorted_ground_events,
+        &mut scratch.row_offsets,
+        (prep.last_row - prep.first_row) as usize,
+    );
     sweep_dda_events(
         prep,
         &scratch.ground_events,
@@ -688,29 +786,66 @@ pub(super) fn visit_ground_area_spans_into(
         return true;
     };
     debug_assert_eq!(row_areas.len(), (rows.1 - rows.0) as usize);
-    let mut r0 = prep.first_row;
-    while r0 < prep.last_row {
-        let r1 = r0.saturating_add(MAX_PACKED_DIM).min(prep.last_row);
-        let mut c0 = prep.first_col;
-        while c0 < prep.last_col {
-            let c1 = c0.saturating_add(MAX_PACKED_DIM).min(prep.last_col);
-            let chunk = prep.with_bounds(r0, r1, c0, c1);
-            if !visit_ground_area_spans_chunk(
-                polygon, &chunk, rows.0, gt, row_areas, scratch, &mut visit,
-            ) {
-                return false;
-            }
-            c0 = c1;
-        }
-        r0 = r1;
+    for_each_packed_chunk(&prep, |chunk| {
+        visit_ground_area_spans_chunk(polygon, chunk, rows.0, gt, row_areas, scratch, &mut visit)
+    })
+}
+
+/// A horizontal run of pixels `[start, end)` in a row-major linear pixel index,
+/// carrying an additive per-pixel payload (e.g. overlap area).
+pub(super) trait PixelRun: Copy {
+    fn start(&self) -> u64;
+    fn end(&self) -> u64;
+    /// The same payload over `[start, end)`.
+    fn with_range(self, start: u64, end: u64) -> Self;
+    /// Payload of a pixel covered by both `self` and `other`.
+    fn add_payload(self, other: Self) -> Self;
+}
+
+/// Make `runs[from..]` disjoint: wherever runs overlap (pieces of one cell split at
+/// the antimeridian can reach the same pixel), each pixel appears once with the
+/// summed payload. Runs are left sorted by start. Disjoint runs keep their full
+/// length, and nothing is expanded to single pixels, so the result holds at most
+/// `2 * n - 1` runs for `n` inputs.
+///
+/// Runs never span rows, so splitting at run endpoints never yields a cross-row run.
+pub(super) fn merge_overlapping_runs<R: PixelRun>(runs: &mut Vec<R>, from: usize) {
+    runs[from..].sort_by_key(PixelRun::start);
+    let mut max_end = 0;
+    let overlapping = runs[from..].iter().any(|run| {
+        let overlaps = run.start() < max_end;
+        max_end = max_end.max(run.end());
+        overlaps
+    });
+    if !overlapping {
+        return;
     }
-    true
+    let sorted: Vec<R> = runs.drain(from..).collect();
+    let mut bounds: Vec<u64> = sorted.iter().flat_map(|r| [r.start(), r.end()]).collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+    // Runs of one piece are disjoint, so at most `pieces` runs are active at once.
+    let mut active: Vec<R> = Vec::new();
+    let mut next = 0;
+    for window in bounds.windows(2) {
+        let (lo, hi) = (window[0], window[1]);
+        active.retain(|run| run.end() > lo);
+        while next < sorted.len() && sorted[next].start() == lo {
+            active.push(sorted[next]);
+            next += 1;
+        }
+        if let Some((&first, rest)) = active.split_first() {
+            let merged = rest.iter().fold(first, |acc, &run| acc.add_payload(run));
+            runs.push(merged.with_range(lo, hi));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::ground_area::{clipped_pixel_area, wgs84_pixel_area};
+    use crate::raster::ground_area::reference::clipped_pixel_area;
+    use crate::raster::ground_area::wgs84_pixel_area;
     use proptest::prelude::*;
 
     fn clip_half_plane_ref(
@@ -1153,5 +1288,54 @@ mod tests {
             }
             assert_matches_reference(&poly, (0, 18), 18, 1e-12);
         }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct TestRun(u64, u64, f64);
+
+    impl PixelRun for TestRun {
+        fn start(&self) -> u64 {
+            self.0
+        }
+        fn end(&self) -> u64 {
+            self.1
+        }
+        fn with_range(self, start: u64, end: u64) -> Self {
+            TestRun(start, end, self.2)
+        }
+        fn add_payload(self, other: Self) -> Self {
+            TestRun(self.0, self.1, self.2 + other.2)
+        }
+    }
+
+    #[test]
+    fn merging_runs_sums_only_shared_pixels_and_keeps_spans() {
+        // Disjoint runs are only sorted.
+        let mut runs = vec![TestRun(20, 30, 1.0), TestRun(0, 10, 0.5)];
+        merge_overlapping_runs(&mut runs, 0);
+        assert_eq!(runs, [TestRun(0, 10, 0.5), TestRun(20, 30, 1.0)]);
+
+        // Two seam pieces share pixels 8..12; a prefix before `from` is untouched.
+        let mut runs = vec![
+            TestRun(100, 101, 0.1),
+            TestRun(10, 20, 0.25),
+            TestRun(0, 12, 0.5),
+            TestRun(8, 9, 0.125),
+        ];
+        merge_overlapping_runs(&mut runs, 1);
+        assert_eq!(
+            runs,
+            [
+                TestRun(100, 101, 0.1),
+                TestRun(0, 8, 0.5),
+                TestRun(8, 9, 0.625),
+                TestRun(9, 10, 0.5),
+                TestRun(10, 12, 0.75),
+                TestRun(12, 20, 0.25),
+            ]
+        );
+        // Pixel totals are preserved.
+        let total: f64 = runs[1..].iter().map(|r| (r.1 - r.0) as f64 * r.2).sum();
+        assert!((total - (10.0 * 0.25 + 12.0 * 0.5 + 0.125)).abs() < 1e-12);
     }
 }
