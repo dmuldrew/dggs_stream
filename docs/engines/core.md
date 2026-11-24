@@ -136,6 +136,17 @@ Every adapter follows the same steps:
    it returns `Ok(0)` (end of stream) or an error. Errors latch: a failed stream keeps
    returning the error instead of reporting a clean EOF.
 
+### Custom transfer accumulators
+
+`transfer::TransferAccumulator` is the trait `TransferStream` fills, and it is public so you
+can aggregate overlay contributions your own way. `add` takes one weighted value. Overlay
+also offers `add_band_unit_slice(slot, slice)` for a contiguous run of whole pixels
+(weight 1.0), where `NaN` marks NoData; it returns how many finite values it consumed. The
+default implementation calls `add_band` per value. Override it only when a vectorized
+reduction applies. The stream calls it only for raw band samples, so a histogram or
+category remapper never reaches it. Slice accumulation can differ from per-pixel updates in
+the last bits of a variance, and the stream skips it when `min_mean` or `max_mean` is set.
+
 ### Spill diagnostics
 
 Both streamers report spilling after or during a stream: `spill_run_count()` is the

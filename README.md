@@ -349,6 +349,7 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
   Both stream the raster in bands of rows.
   Rust, CLI, DuckDB, and Python/Polars overlay scans can filter cells by the fraction of their selected overlap with valid data.
   In Rust, setting `aggregation_workers` to two or more also clips fine-resolution overlay cells in parallel ([details](docs/transfer-modes.md#parallel-overlap-calculation)).
+  Overlay walks each cell's edges once and accumulates runs of whole pixels as slices; Rust callers can hook that path with [`TransferAccumulator::add_band_unit_slice`](docs/engines/core.md#custom-transfer-accumulators).
   See [Scan Options](docs/scan-options.md).
 
 See [Core Engineering Architecture](#core-engineering-architecture) for how each step is
@@ -493,8 +494,10 @@ that each read a disjoint set of TIFF tiles, with results identical to a single 
 plan the partitions from metadata, scan each one, then merge the few cells that straddle
 a partition edge. Rows whose `partial_state` column is null are final; the others are
 merged per cell. A continuous weighted overlay scan (`transfer="overlay"`, Python and Spark)
-is the exception: it needs each cell's total covered area, so every touched cell is partial
-and goes through the merge (see [Partitioned weighted overlay](docs/engines/spark.md#partitioned-weighted-overlay)).
+differs in what is partial: a cell's coverage decision needs its total covered area, so
+a cell that another partition might also touch stays partial, and the rest are finalized
+by their worker on H3 and WGS84 tiles; projected overlay emits only partial rows (see
+[Partitioned weighted overlay](docs/engines/spark.md#partitioned-weighted-overlay)).
 
 ```python
 import pyarrow as pa, pyarrow.compute as pc, dggs_stream

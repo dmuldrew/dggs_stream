@@ -12,10 +12,12 @@ use crate::aggregator::{NodataPolicy, SamplingPattern};
 use crate::error::{DggsStreamError, Result};
 use crate::grid::wrap_lon_180;
 use crate::raster::geotiff::GeoTiffStreamReader;
-use crate::raster::ground_area::{clipped_pixel_area, wgs84_pixel_area};
+use crate::raster::ground_area::wgs84_pixel_area;
 use crate::raster::mosaic::TileDescriptor;
 use crate::run_profile::{Counter, Phase, PhaseTimer};
-use crate::transfer::clip::visit_pixel_shapes;
+use crate::transfer::clip::{
+    merge_overlapping_runs, visit_ground_area_spans_into, ClipScratch, PixelRun,
+};
 use crate::transfer::window::{BandSelection, ChunkCache, RowWindow};
 use crate::transfer::TransferMode;
 use std::collections::BTreeMap;
@@ -179,8 +181,10 @@ fn scan_block(
         .map(|r| wgs84_pixel_area(gt, 0, r as usize))
         .collect::<Result<_>>()?;
     let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
+    let width = u64::from(window.width());
     let longitude = periodic_longitude_bounds(tile);
-    let mut overlaps = Vec::new();
+    let mut overlaps: Vec<GroundRun> = Vec::new();
+    let mut clip_scratch = ClipScratch::default();
     let mut candidates = Vec::new();
     for cols in columns {
         let bbox = block_bbox(config.grid, block.resolution, tile, &block.rows, cols, true)
@@ -206,16 +210,23 @@ fn scan_block(
             for &(_, y) in polygon {
                 end = end.max(y.ceil() as i64);
             }
-            visit_pixel_shapes::<true>(polygon, rows, i64::from(window.width()), |c, r, shape| {
-                let (fraction, m2) = shape.map_or_else(
-                    || (1.0, row_areas[(r - rows.0) as usize]),
-                    |p| clipped_pixel_area(gt, p),
-                );
-                if fraction > 0.0 && m2 > 0.0 {
-                    overlaps.push(((r, c), fraction, m2));
-                }
-                true
-            })
+            visit_ground_area_spans_into(
+                polygon,
+                rows,
+                i64::from(window.width()),
+                gt,
+                &row_areas,
+                &mut clip_scratch,
+                |r, c0, c1, fraction, m2| {
+                    overlaps.push(GroundRun {
+                        pixel: (r - rows.0) as u64 * width + c0 as u64,
+                        len: (c1 - c0) as u64,
+                        fraction,
+                        m2,
+                    });
+                    true
+                },
+            )
         });
         if !completed {
             return Err(DggsStreamError::InvalidParameter(format!("ground-area overlay cannot represent the boundary of cell {id:x} in longitude/latitude")));
@@ -226,29 +237,29 @@ fn scan_block(
         // Longitude copies can intersect the same pixel. Count one observation
         // per pixel for the accumulator's squared weights.
         if pieces > 1 {
-            overlaps.sort_unstable_by_key(|p| p.0);
+            merge_overlapping_runs(&mut overlaps, 0);
         }
         let cell = pending.entry(id).or_default();
         cell.end_row = end;
-        let mut pixels = overlaps.drain(..).peekable();
-        while let Some(((r, c), mut fraction, mut m2)) = pixels.next() {
-            while let Some((_, f, a)) = pixels.next_if(|p| p.0 == (r, c)) {
-                fraction += f;
-                m2 += a;
-            }
-            if let Some(bbox) = config.bbox {
-                let (lon, lat) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
-                if !is_point_in_bbox(wrap_lon_180(lon), lat, Some(bbox)) {
-                    continue;
+        for run in overlaps.drain(..) {
+            let r = rows.0 + (run.pixel / width) as i64;
+            let c0 = (run.pixel % width) as i64;
+            for c in c0..c0 + run.len as i64 {
+                if let Some(bbox) = config.bbox {
+                    let (lon, lat) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
+                    if !is_point_in_bbox(wrap_lon_180(lon), lat, Some(bbox)) {
+                        continue;
+                    }
                 }
-            }
-            cell.covered_m2 += m2;
-            if let Some(value) = window.get(c, r) {
-                cell.stats.update_overlap(value, fraction.min(1.0), m2)?;
-                if !cell.stats.is_finite() {
-                    return Err(DggsStreamError::InvalidParameter(
-                        "overflow in ground-area overlay statistics".into(),
-                    ));
+                cell.covered_m2 += run.m2;
+                if let Some(value) = window.get(c, r) {
+                    cell.stats
+                        .update_overlap(value, run.fraction.min(1.0), run.m2)?;
+                    if !cell.stats.is_finite() {
+                        return Err(DggsStreamError::InvalidParameter(
+                            "overflow in ground-area overlay statistics".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -272,6 +283,39 @@ fn scan_block(
         false
     });
     Ok(ready)
+}
+
+/// A horizontal run of pixels, indexed row-major within the block, sharing one
+/// pixel fraction and ellipsoidal overlap area.
+#[derive(Clone, Copy)]
+struct GroundRun {
+    pixel: u64,
+    len: u64,
+    fraction: f64,
+    m2: f64,
+}
+
+impl PixelRun for GroundRun {
+    fn start(&self) -> u64 {
+        self.pixel
+    }
+    fn end(&self) -> u64 {
+        self.pixel + self.len
+    }
+    fn with_range(self, start: u64, end: u64) -> Self {
+        Self {
+            pixel: start,
+            len: end - start,
+            ..self
+        }
+    }
+    fn add_payload(self, other: Self) -> Self {
+        Self {
+            fraction: self.fraction + other.fraction,
+            m2: self.m2 + other.m2,
+            ..self
+        }
+    }
 }
 
 #[cfg(test)]

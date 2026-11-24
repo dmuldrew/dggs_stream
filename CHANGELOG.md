@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DuckDB continuous scans accept `ground_area := true, transfer := 'overlay'` to integrate valid partial-pixel areas and densities on all four grids.
 
-- Spark and Python partitioned scans support single-band continuous weighted overlay. The reducer applies valid coverage and statistics filters after merging all partitions touching a cell.
+- Spark and Python partitioned scans support single-band continuous weighted overlay. Workers finalize H3 cells whose WGS84 footprints are clear of other partitions. Boundary cells receive valid coverage and statistics filters after merging. With a caller-persisted Spark DataFrame, only partial rows enter the exchange.
 
 - Rust core `scan_ground_area_overlay` integrates densities over clipped pixel footprints on north-up, single-band WGS84 rasters.
 
@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HorizonStreamKernel::worker_bytes_per_sample`: the worst-case worker bytes one sample can add to one resolution's cell map (a new table entry, its owned accumulator state and its eviction key). Kernel worker windows are sized from it, so it must not understate. The default keeps the previous 1 KiB allowance, so custom kernels are unaffected. `inline_worker_bytes_per_sample::<A>()` gives the bound for accumulators that own no heap state.
 
 ### Changed
+
+- Overlay scans now use an Edge-DDA and Green's-theorem prefix-sum clipper with reusable per-worker scratch buffers, horizontal `OverlapRun` span encoding, and SIMD unit-slice accumulation for interior runs (including WGS84 ground-area overlay via ellipsoidal segment quadrature). Public APIs (`pixel_overlaps`, `polygon_area`) and output statistics are unchanged within floating-point tolerance (`< 1e-12`).
+
+- Overlay seam pieces (cells split at the antimeridian) are merged at run level, so worker memory stays bounded by `MAX_PREPARED_OVERLAPS` runs, and ground-area overlay keeps clipped spans as runs instead of per-pixel entries. Bbox-filtered and multi-tile overlays route selected interior stretches through the slice accumulator too. `pixel_overlaps` visits nothing for a polygon with a non-finite vertex or zero area.
+
+- Overlay keeps per-pixel accumulation when `min_mean` or `max_mean` is set, so a cell whose mean sits exactly on an inclusive bound still passes. `pixel_overlaps` and ground-area overlay skip overlaps of at most `1e-14` of a pixel (documented; previously only exact zeros were skipped). Parallel overlay workers also cap the clipper's buffered edge events and hand an over-limit cell to the serial path.
 
 - GeoTIFF CRS detection honours `GTModelTypeGeoKey`: a projected or geocentric raster that carries only a base geographic code now requires an explicit CRS.
 
