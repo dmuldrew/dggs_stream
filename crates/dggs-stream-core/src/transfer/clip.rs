@@ -522,10 +522,7 @@ fn sweep_single_row<E: DdaEvent>(
         }
         prev_col = col + 1;
     }
-    if prev_col < last_col && !emit_span(r, prev_col, last_col, cover) {
-        return false;
-    }
-    true
+    prev_col >= last_col || emit_span(r, prev_col, last_col, cover)
 }
 
 #[inline(always)]
