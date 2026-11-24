@@ -7,8 +7,11 @@
 use crate::raster::geotransform::GeoTransform;
 use crate::raster::ground_area::segment_ellipsoidal_integrals;
 
-/// Threshold filtering floating-point cancellation noise (~1e-16) while preserving
-/// genuine sub-pixel slivers (> 1e-12) and snapping full coverages near 1.0.
+/// Overlaps at or below this fraction of a pixel are not reported: the prefix-sum
+/// sweep cannot tell them from floating-point cancellation noise (a few ulps of 1.0
+/// per pixel crossed). Coverage within this much of 1.0 is snapped to a full pixel.
+/// The effect on any total is below `1e-14` of a pixel per boundary pixel, and
+/// ordinary overlay already ignores overlaps under `1e-12`.
 const AREA_EPS: f64 = 1e-14;
 
 /// Maximum rows or columns per packed `u64` `(rel_row << 32) | rel_col` chunk.
@@ -73,6 +76,18 @@ pub(super) struct ClipScratch {
     sorted_events: Vec<CellEvent>,
     sorted_ground_events: Vec<GroundCellEvent>,
     row_offsets: Vec<usize>,
+    /// Most edge events one visit may buffer; `None` is unbounded.
+    event_limit: Option<usize>,
+}
+
+impl ClipScratch {
+    /// Cap the edge events a visit buffers before sorting. A visit that would exceed
+    /// `limit` stops without calling the visitor and returns `false`, exactly as if
+    /// the visitor had declined, so callers that bound their own output also bound
+    /// this scratch. `None` removes the cap.
+    pub(super) fn set_event_limit(&mut self, limit: Option<usize>) {
+        self.event_limit = limit;
+    }
 }
 
 /// Order `events` by `(row, col)` key: a counting sort into row buckets, then a
@@ -316,13 +331,15 @@ struct ColPiece {
 
 /// Traverse every polygon edge across `[prep.first_row, prep.last_row) x [prep.first_col, prep.last_col)`
 /// using canonical bottom-to-top DDA stepping.
+///
+/// Returns `false` as soon as `on_col` returns `false`, abandoning the traversal.
 #[inline(always)]
 fn walk_polygon_dda(
     polygon: &[(f64, f64)],
     prep: &PreparedClip,
     mut on_left: impl FnMut(LeftPiece),
-    mut on_col: impl FnMut(ColPiece),
-) {
+    mut on_col: impl FnMut(ColPiece) -> bool,
+) -> bool {
     let first_row = prep.first_row;
     let last_row = prep.last_row;
     let first_col = prep.first_col;
@@ -398,7 +415,7 @@ fn walk_polygon_dda(
                 let c0 = x_lo.floor() as i64;
                 if c0 >= first_col && x_hi <= (c0 + 1) as f64 {
                     let cf = c0 as f64;
-                    on_col(ColPiece {
+                    if !on_col(ColPiece {
                         rel_row,
                         rel_col: (c0 - first_col) as usize,
                         r,
@@ -408,7 +425,9 @@ fn walk_polygon_dda(
                         rx_b: (x_next - cf).clamp(0.0, 1.0),
                         dir,
                         dh: row_h,
-                    });
+                    }) {
+                        return false;
+                    }
                 } else {
                     let x_span = x_hi - x_lo;
                     if x_span > 0.0 {
@@ -465,7 +484,7 @@ fn walk_polygon_dda(
                                         rx_prev,
                                     )
                                 };
-                                on_col(ColPiece {
+                                if !on_col(ColPiece {
                                     rel_row,
                                     rel_col: (c - first_col) as usize,
                                     r,
@@ -475,7 +494,9 @@ fn walk_polygon_dda(
                                     rx_b,
                                     dir,
                                     dh,
-                                });
+                                }) {
+                                    return false;
+                                }
                             }
                             x_prev = x_next_c;
                             h_prev = h_next;
@@ -488,6 +509,7 @@ fn walk_polygon_dda(
             x_cur = x_next;
         }
     }
+    true
 }
 
 #[inline(always)]
@@ -592,7 +614,8 @@ fn visit_overlap_spans_chunk(
 
     let row_carry = &mut scratch.row_carry;
     let events = &mut scratch.events;
-    walk_polygon_dda(
+    let event_limit = scratch.event_limit.unwrap_or(usize::MAX);
+    let walked = walk_polygon_dda(
         polygon,
         prep,
         |left| {
@@ -605,8 +628,12 @@ fn visit_overlap_spans_chunk(
                 local: (0.5 * (col.rx_a + col.rx_b) - 1.0) * dy,
                 carry: -dy,
             });
+            events.len() <= event_limit
         },
     );
+    if !walked {
+        return false;
+    }
 
     sort_events_by_key(
         &mut scratch.events,
@@ -651,7 +678,7 @@ pub(super) fn visit_overlap_spans_into(
 }
 
 /// Visit every pixel overlapped by `polygon` with `rows.0 <= r < rows.1` and
-/// `0 <= c < width` and area `0 < area <= 1`, as `visit(row, col, area)` (the same
+/// `0 <= c < width` and area `1e-14 < area <= 1`, as `visit(row, col, area)` (the same
 /// row-first order as the span visitors). Returns `false` immediately when `visit`
 /// declines an overlap.
 pub(super) fn visit_overlaps(
@@ -674,9 +701,12 @@ pub(super) fn visit_overlaps(
 /// For a polygon in pixel coordinates (pixel `(c, r)` is the unit square
 /// `[c, c + 1] x [r, r + 1]`), call `visit(c, r, area)` for every pixel with
 /// `rows.0 <= r < rows.1` and `0 <= c < width` that the polygon overlaps, with the
-/// overlapped area (`0 < area <= 1`). The polygon may be convex or concave, in either
-/// orientation; it must not self-intersect. Polygons with fewer than three vertices,
-/// a non-finite vertex, or zero area visit nothing.
+/// overlapped area. The polygon may be convex or concave, in either orientation; it
+/// must not self-intersect.
+///
+/// Reported areas satisfy `1e-14 < area <= 1`: an overlap of at most `1e-14` of a pixel
+/// is indistinguishable from rounding noise in the sweep and is skipped. Polygons with
+/// fewer than three vertices, a non-finite vertex, or zero area visit nothing.
 pub fn pixel_overlaps(
     polygon: &[(f64, f64)],
     rows: (i64, i64),
@@ -709,7 +739,8 @@ fn visit_ground_area_spans_chunk(
 
     let ground_row_carry = &mut scratch.ground_row_carry;
     let ground_events = &mut scratch.ground_events;
-    walk_polygon_dda(
+    let event_limit = scratch.event_limit.unwrap_or(usize::MAX);
+    let walked = walk_polygon_dda(
         polygon,
         prep,
         |left| {
@@ -740,8 +771,12 @@ fn visit_ground_area_spans_chunk(
                 local_m2: -col.dir * seg_local_m2,
                 carry_m2: -col.dir * seg_full_m2,
             });
+            ground_events.len() <= event_limit
         },
     );
+    if !walked {
+        return false;
+    }
 
     sort_events_by_key(
         &mut scratch.ground_events,
@@ -1016,6 +1051,68 @@ mod tests {
         ));
         assert_eq!(span_runs, 4);
         assert_eq!(covered_pixels, 4 * 4096);
+    }
+
+    #[test]
+    fn event_limit_stops_the_walk_before_buffering_the_whole_boundary() {
+        // A wide, thin diamond crosses many columns in each of a few rows.
+        let diamond = [(0.5, 20.5), (2000.5, 16.5), (4000.5, 20.5), (2000.5, 24.5)];
+        let mut scratch = ClipScratch::default();
+        let mut visits = 0;
+        scratch.set_event_limit(Some(10));
+        assert!(!visit_overlap_spans_into(
+            &diamond,
+            (0, 40),
+            4100,
+            &mut scratch,
+            |_, _, _, _| {
+                visits += 1;
+                true
+            }
+        ));
+        assert_eq!(visits, 0, "the visitor must not run on a truncated walk");
+        assert!(
+            scratch.events.len() <= 11,
+            "{} events",
+            scratch.events.len()
+        );
+
+        // Lifting the cap visits the same polygon in full.
+        scratch.set_event_limit(None);
+        let mut covered = 0.0;
+        assert!(visit_overlap_spans_into(
+            &diamond,
+            (0, 40),
+            4100,
+            &mut scratch,
+            |_, c0, c1, area| {
+                covered += area * (c1 - c0) as f64;
+                true
+            }
+        ));
+        assert!((covered - polygon_area(&diamond)).abs() < 1e-6);
+        assert!(scratch.events.len() > 1000);
+    }
+
+    #[test]
+    fn tiny_overlaps_above_the_documented_floor_are_reported() {
+        let square = |side: f64| {
+            [
+                (0.5, 0.5),
+                (0.5 + side, 0.5),
+                (0.5 + side, 0.5 + side),
+                (0.5, 0.5 + side),
+            ]
+        };
+        // 2^-40 of a pixel, far below the 1e-12 cutoff of ordinary overlay but above
+        // the clipper's floor.
+        let side = 2f64.powi(-20);
+        let got = overlaps(&square(side), (0, 2), 2);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!((got[0].0, got[0].1), (0, 0));
+        assert!((got[0].2 / (side * side) - 1.0).abs() < 1e-3, "{got:?}");
+        // 2^-48 is under the floor and is documented as skipped.
+        assert!(overlaps(&square(2f64.powi(-24)), (0, 2), 2).is_empty());
     }
 
     #[test]

@@ -753,6 +753,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let bbox = self.bbox;
         let histogram_bins = self.histogram_bins.as_deref();
         let remapper = self.remapper.as_deref();
+        // `min_mean` and `max_mean` compare the rounded mean with an inclusive bound.
+        // Slice accumulation sums in a different order than per-pixel updates, so a
+        // mean that is exactly on the bound could land one ulp outside it. Keep the
+        // per-pixel order whenever such a filter is set.
+        let mean_filtered = self.filters.min_mean.is_some() || self.filters.max_mean.is_some();
         let mut contribute_run = |pending: &mut Pending<A>,
                                   mut coverage: Option<&mut BandCoverage>,
                                   run: OverlapRun,
@@ -773,6 +778,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             // accumulated as contiguous slices.
             let unit = run.area == 1.0
                 && weight == 1.0
+                && !mean_filtered
                 && histogram_bins.is_none()
                 && (!A::CATEGORICAL || remapper.is_none());
             // Whether a pixel centre lies in the bbox and, in a mosaic, this tile.
@@ -981,6 +987,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 let run_start = run.pixel as usize;
                 let run_len = run.len as usize;
                 if run_len >= MIN_SIMD_RUN
+                    && !mean_filtered
                     && run.area == 1.0
                     && totals[run_start..run_start + run_len]
                         .iter()
@@ -1432,6 +1439,11 @@ impl OverlayGeometry<'_> {
         scratch: &mut ClipScratch,
     ) -> Option<i64> {
         let start = overlaps.len();
+        // A bounded visit also bounds the clipper's edge events, which are buffered
+        // before any run is emitted. A cell with over twice `limit` events nearly
+        // always yields more than `limit` runs (each boundary pixel adds about one
+        // event and two runs). The rare exception costs only a serial retry.
+        scratch.set_event_limit((limit != usize::MAX).then(|| limit.saturating_mul(2)));
         let mut pieces = 0;
         let mut last_row = f64::NEG_INFINITY;
         let completed = visit_cell_polygons(
