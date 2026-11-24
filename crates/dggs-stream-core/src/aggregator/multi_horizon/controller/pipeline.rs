@@ -1,11 +1,13 @@
 //! Worker windows and the pipeline that merges their map sets in window order.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use super::super::eviction_space::CellKeys;
-use super::super::sharded_map::ShardedResolutionMap;
+use super::super::sharded_map::{
+    get_shard, merge_into_shard, ShardMergeOutput, ShardedResolutionMap, NUM_SHARDS,
+};
 use super::super::spill::{SpillAccumulator, SpillRuns};
 use crate::aggregator::cell_hash::CellIdBuildHasher;
 use crate::error::{DggsStreamError, Result};
@@ -187,9 +189,36 @@ pub fn inline_worker_bytes_per_sample<A>() -> usize {
 /// New cells per eviction-key job sent to the workers.
 const KEY_CHUNK: usize = 256;
 
+/// Minimum entries across a wave before offloading per-shard merges to workers.
+const SHARD_PARTITION_THRESHOLD: usize = 512;
+
+/// Minimum active cells in a resolution before sorting spill shards in parallel.
+const PARALLEL_SORT_THRESHOLD: usize = 4096;
+
 /// Computed eviction keys of one key job: (job number, `(resolution index,
 /// cell)` pairs, their keys).
 pub(super) type KeyChunk = (usize, Vec<(usize, u64)>, Vec<CellKeys>);
+
+/// Per-window entries partitioned across the 32 horizon shards for each resolution.
+type ShardedWindow<A> = Vec<[Vec<(u64, A)>; NUM_SHARDS]>;
+
+/// Metadata carried alongside a finished window map set.
+type WindowMeta<A> = (Option<ShardedWindow<A>>, Vec<usize>, usize);
+
+/// Input item for a shard-merge worker task.
+type MergeShardJob<A> = (
+    usize,
+    HashMap<u64, A, CellIdBuildHasher>,
+    Vec<Vec<(u64, A)>>,
+);
+
+/// Result returned by a shard-merge worker task.
+type MergeShardResult<A> = (
+    usize,
+    HashMap<u64, A, CellIdBuildHasher>,
+    ShardMergeOutput,
+    Result<()>,
+);
 
 /// Work handed to a pipeline worker.
 enum Work<A, J> {
@@ -204,6 +233,16 @@ enum Work<A, J> {
         chunk: usize,
         cells: Vec<(usize, u64)>,
     },
+    /// Merge window-ordered entry buckets into disjoint horizon shards.
+    MergeStripe {
+        shards: Vec<MergeShardJob<A>>,
+        track_eviction: bool,
+        accumulator_limit: usize,
+    },
+    /// Flatten and sort a subset of disjoint shards for a spill run.
+    SortStripe {
+        shards: Vec<HashMap<u64, A, CellIdBuildHasher>>,
+    },
 }
 
 /// A pipeline worker's reply.
@@ -211,6 +250,9 @@ enum Done<A> {
     Window {
         index: usize,
         maps: CellMaps<A>,
+        sharded: Option<ShardedWindow<A>>,
+        res_bytes: Vec<usize>,
+        worker_bytes: usize,
         profile: super::super::profile::WorkerProfile,
         ns: u64,
     },
@@ -219,7 +261,146 @@ enum Done<A> {
         cells: Vec<(usize, u64)>,
         keys: Vec<CellKeys>,
     },
+    MergeStripe {
+        results: Vec<MergeShardResult<A>>,
+    },
+    SortStripe {
+        sorted: Vec<(u64, A)>,
+    },
     Panicked(Box<dyn std::any::Any + Send>),
+}
+
+/// Two-priority shared work queue so urgent shard-merge / spill-sort tasks run
+/// immediately ahead of queued raster windows and eviction-key chunks.
+struct WorkQueueState<A, J> {
+    urgent: VecDeque<Work<A, J>>,
+    normal: VecDeque<Work<A, J>>,
+    closed: bool,
+}
+
+struct WorkQueue<A, J> {
+    state: Mutex<WorkQueueState<A, J>>,
+    cv: Condvar,
+}
+
+impl<A, J> WorkQueue<A, J> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(WorkQueueState {
+                urgent: VecDeque::new(),
+                normal: VecDeque::new(),
+                closed: false,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn push_normal(&self, work: Work<A, J>) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.normal.push_back(work);
+        self.cv.notify_one();
+    }
+
+    fn push_urgent(&self, work: Work<A, J>) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.urgent.push_back(work);
+        self.cv.notify_one();
+    }
+
+    fn close(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.closed = true;
+        self.cv.notify_all();
+    }
+
+    fn pop(&self) -> Option<Work<A, J>> {
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(work) = guard.urgent.pop_front() {
+                return Some(work);
+            }
+            if let Some(work) = guard.normal.pop_front() {
+                return Some(work);
+            }
+            if guard.closed {
+                return None;
+            }
+            guard = self.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+struct CloseOnDrop<A, J>(Arc<WorkQueue<A, J>>);
+
+impl<A, J> Drop for CloseOnDrop<A, J> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+/// Zero-copy k-way merge iterator over pre-sorted disjoint shard stripes.
+struct KWayStripeMerge<A> {
+    iters: Vec<std::vec::IntoIter<(u64, A)>>,
+    heads: Vec<Option<(u64, A)>>,
+}
+
+impl<A> KWayStripeMerge<A> {
+    fn new(mut iters: Vec<std::vec::IntoIter<(u64, A)>>) -> Self {
+        let mut heads = Vec::with_capacity(iters.len());
+        for it in &mut iters {
+            heads.push(it.next());
+        }
+        Self { iters, heads }
+    }
+}
+
+impl<A> Iterator for KWayStripeMerge<A> {
+    type Item = (u64, A);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut best_idx = None;
+        let mut best_key = u64::MAX;
+        for (idx, head) in self.heads.iter().enumerate() {
+            if let Some((key, _)) = head {
+                if best_idx.is_none() || *key < best_key {
+                    best_key = *key;
+                    best_idx = Some(idx);
+                }
+            }
+        }
+        let idx = best_idx?;
+        let item = self.heads[idx].take();
+        self.heads[idx] = self.iters[idx].next();
+        item
+    }
+}
+
+fn compute_window_stats<A: SpillAccumulator>(maps: &CellMaps<A>) -> (Vec<usize>, usize, usize) {
+    let mut per_res = Vec::with_capacity(maps.len());
+    let mut total_bytes = 0usize;
+    let mut total_entries = 0usize;
+    for m in maps {
+        let b = super::super::spill::table_bytes::<u64, A>(m.capacity())
+            + m.values().map(|a| a.heap_bytes()).sum::<usize>();
+        per_res.push(b);
+        total_bytes = total_bytes.saturating_add(b);
+        total_entries += m.len();
+    }
+    (per_res, total_bytes, total_entries)
+}
+
+fn partition_maps_to_shards<A>(maps: &mut CellMaps<A>) -> ShardedWindow<A> {
+    let mut out = Vec::with_capacity(maps.len());
+    for map in maps.iter_mut() {
+        let per_shard = (map.len() / NUM_SHARDS).saturating_add(2);
+        let mut buckets: [Vec<(u64, A)>; NUM_SHARDS] =
+            std::array::from_fn(|_| Vec::with_capacity(per_shard));
+        for (key, acc) in map.drain() {
+            buckets[get_shard(key)].push((key, acc));
+        }
+        out.push(buckets);
+    }
+    out
 }
 
 /// Spill one resolution's horizon map to a sorted run; it is then finalized
@@ -270,15 +451,43 @@ impl<A: SpillAccumulator> MergeTarget<'_, A> {
         self.metrics.jobs += 1;
     }
 
+    fn total_shard_bytes(&self) -> usize {
+        self.shards.iter().map(|s| s.estimated_bytes()).sum()
+    }
+
+    #[inline]
+    fn merge_entry(
+        &mut self,
+        res_idx: usize,
+        key: u64,
+        acc: A,
+        other_res_bytes: usize,
+    ) -> Result<bool> {
+        if acc.memory_bytes() > self.accumulator_limit {
+            return Err(DggsStreamError::InvalidParameter(
+                "single accumulator exceeds aggregation budget; increase aggregation_budget_bytes"
+                    .into(),
+            ));
+        }
+        let (merged, new) = self.shards[res_idx].merge_owned_deferred(key, acc);
+        if new {
+            self.new_cells.push((res_idx, key));
+        }
+        if merged > self.accumulator_limit {
+            return Err(DggsStreamError::InvalidParameter(
+                "merged accumulator exceeds aggregation budget; increase aggregation_budget_bytes"
+                    .into(),
+            ));
+        }
+        let cur = self.shards[res_idx].estimated_bytes();
+        *self.peak_active_bytes =
+            (*self.peak_active_bytes).max(other_res_bytes + cur + self.compactor_bytes);
+        Ok(cur >= self.map_budget)
+    }
+
     /// Merge one job's map set into the horizon maps, leaving it empty.
     fn merge(&mut self, maps: &mut CellMaps<A>) -> Result<()> {
-        let bytes: usize = maps
-            .iter()
-            .map(|m| {
-                super::super::spill::table_bytes::<u64, A>(m.capacity())
-                    + m.values().map(|a| a.heap_bytes()).sum::<usize>()
-            })
-            .sum();
+        let (_, bytes, _) = compute_window_stats(maps);
         // Every set in flight is bounded like this one.
         self.metrics.peak_worker_bytes = self
             .metrics
@@ -297,29 +506,15 @@ impl<A: SpillAccumulator> MergeTarget<'_, A> {
     }
 
     fn merge_maps(&mut self, maps: &mut CellMaps<A>) -> Result<()> {
+        let mut total_shards = self.total_shard_bytes();
         for (i, map) in maps.iter_mut().enumerate() {
+            let other_res_bytes = total_shards - self.shards[i].estimated_bytes();
             for (key, acc) in map.drain() {
-                if acc.memory_bytes() > self.accumulator_limit {
-                    return Err(DggsStreamError::InvalidParameter("single accumulator exceeds aggregation budget; increase aggregation_budget_bytes".into()));
-                }
-                let (merged, new) = self.shards[i].merge_owned_deferred(key, acc);
-                if new {
-                    self.new_cells.push((i, key));
-                }
-                if merged > self.accumulator_limit {
-                    return Err(DggsStreamError::InvalidParameter("merged accumulator exceeds aggregation budget; increase aggregation_budget_bytes".into()));
-                }
-                *self.peak_active_bytes = (*self.peak_active_bytes).max(
-                    self.shards
-                        .iter()
-                        .map(|s| s.estimated_bytes())
-                        .sum::<usize>()
-                        + self.compactor_bytes,
-                );
-                if self.shards[i].estimated_bytes() >= self.map_budget {
+                if self.merge_entry(i, key, acc, other_res_bytes)? {
                     spill_resolution(self.shards, self.spill_runs, self.metrics, i)?;
                 }
             }
+            total_shards = other_res_bytes + self.shards[i].estimated_bytes();
         }
         Ok(())
     }
@@ -362,6 +557,293 @@ where
     Ok(())
 }
 
+struct ReadyWindow<A> {
+    maps: CellMaps<A>,
+    sharded: Option<ShardedWindow<A>>,
+    res_bytes: Vec<usize>,
+    worker_bytes: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_non_stripe_done<A: SpillAccumulator>(
+    reply: Done<A>,
+    slots: usize,
+    finished: &mut [Option<CellMaps<A>>],
+    finished_meta: &mut [Option<WindowMeta<A>>],
+    target: &mut MergeTarget<'_, A>,
+    keys_out: &mut usize,
+    panic: &mut Option<Box<dyn std::any::Any + Send>>,
+) -> bool {
+    match reply {
+        Done::Panicked(payload) => {
+            *panic = Some(payload);
+            true
+        }
+        Done::Keys { chunk, cells, keys } => {
+            *keys_out -= 1;
+            target.key_chunks.push((chunk, cells, keys));
+            false
+        }
+        Done::Window {
+            index,
+            maps,
+            sharded,
+            res_bytes,
+            worker_bytes,
+            profile,
+            ns,
+        } => {
+            target.record(profile, ns);
+            let slot = index % slots;
+            finished[slot] = Some(maps);
+            finished_meta[slot] = Some((sharded, res_bytes, worker_bytes));
+            false
+        }
+        Done::MergeStripe { .. } | Done::SortStripe { .. } => {
+            unreachable!("unexpected stripe reply")
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spill_resolution_adaptive<A: SpillAccumulator, J>(
+    res_idx: usize,
+    workers: usize,
+    work_queue: &WorkQueue<A, J>,
+    done_rx: &std::sync::mpsc::Receiver<Done<A>>,
+    slots: usize,
+    finished: &mut [Option<CellMaps<A>>],
+    finished_meta: &mut [Option<WindowMeta<A>>],
+    target: &mut MergeTarget<'_, A>,
+    keys_out: &mut usize,
+    panic: &mut Option<Box<dyn std::any::Any + Send>>,
+) -> Result<()> {
+    if workers <= 1 || target.shards[res_idx].active_cell_count() < PARALLEL_SORT_THRESHOLD {
+        return spill_resolution(target.shards, target.spill_runs, target.metrics, res_idx);
+    }
+    let started = std::time::Instant::now();
+    let mut shards = target.shards[res_idx].take_shards_and_clear();
+    let num_stripes = workers.min(NUM_SHARDS);
+    let mut buckets: Vec<Vec<HashMap<u64, A, CellIdBuildHasher>>> =
+        (0..num_stripes).map(|_| Vec::new()).collect();
+    for (s, shard) in shards.drain(..).enumerate() {
+        if !shard.is_empty() {
+            buckets[s % num_stripes].push(shard);
+        }
+    }
+    let active_stripes: Vec<_> = buckets.into_iter().filter(|b| !b.is_empty()).collect();
+    if active_stripes.is_empty() {
+        target.metrics.spill_ns += started.elapsed().as_nanos() as u64;
+        return Ok(());
+    }
+    let mut pending = active_stripes.len();
+    let mut sorted_stripes = Vec::with_capacity(pending);
+    for stripe in active_stripes {
+        work_queue.push_urgent(Work::SortStripe { shards: stripe });
+    }
+    while pending > 0 {
+        let Ok(reply) = done_rx.recv() else { break };
+        match reply {
+            Done::SortStripe { sorted } => {
+                pending -= 1;
+                if !sorted.is_empty() {
+                    sorted_stripes.push(sorted.into_iter());
+                }
+            }
+            other => {
+                if record_non_stripe_done(
+                    other,
+                    slots,
+                    finished,
+                    finished_meta,
+                    target,
+                    keys_out,
+                    panic,
+                ) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    if !sorted_stripes.is_empty() {
+        target.spill_runs[res_idx].push_sorted(KWayStripeMerge::new(sorted_stripes))?;
+        target.shards[res_idx].set_eviction_enabled(false);
+    }
+    target.metrics.spill_ns += started.elapsed().as_nanos() as u64;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_res_parallel_wave<A: SpillAccumulator, J>(
+    res_idx: usize,
+    ready_wave: &mut [ReadyWindow<A>],
+    other_res_bytes: usize,
+    workers: usize,
+    work_queue: &WorkQueue<A, J>,
+    done_rx: &std::sync::mpsc::Receiver<Done<A>>,
+    slots: usize,
+    finished: &mut [Option<CellMaps<A>>],
+    finished_meta: &mut [Option<WindowMeta<A>>],
+    target: &mut MergeTarget<'_, A>,
+    keys_out: &mut usize,
+    panic: &mut Option<Box<dyn std::any::Any + Send>>,
+) -> Result<()> {
+    let k = ready_wave.len();
+    let mut shard_buckets: Vec<Vec<Vec<(u64, A)>>> =
+        (0..NUM_SHARDS).map(|_| Vec::with_capacity(k)).collect();
+    for win in ready_wave.iter_mut() {
+        let sharded = win.sharded.as_mut().expect("sharded wave window");
+        for s in 0..NUM_SHARDS {
+            shard_buckets[s].push(std::mem::take(&mut sharded[res_idx][s]));
+        }
+    }
+
+    let mut shards = target.shards[res_idx].take_shards();
+    let track_eviction = target.shards[res_idx].tracks_eviction();
+    let accumulator_limit = target.accumulator_limit;
+
+    let mut restored: Vec<Option<HashMap<u64, A, CellIdBuildHasher>>> =
+        (0..NUM_SHARDS).map(|_| None).collect();
+    let mut outputs: Vec<Option<ShardMergeOutput>> = (0..NUM_SHARDS).map(|_| None).collect();
+    let mut errors: Vec<Option<DggsStreamError>> = (0..NUM_SHARDS).map(|_| None).collect();
+
+    let mut active = Vec::new();
+    for (s, (shard, buckets)) in shards.drain(..).zip(shard_buckets).enumerate() {
+        if buckets.iter().all(Vec::is_empty) {
+            restored[s] = Some(shard);
+        } else {
+            active.push((s, shard, buckets));
+        }
+    }
+
+    let num_stripes = workers.min(active.len()).max(1);
+    let mut stripes: Vec<Vec<MergeShardJob<A>>> = (0..num_stripes).map(|_| Vec::new()).collect();
+    for (idx, item) in active.into_iter().enumerate() {
+        stripes[idx % num_stripes].push(item);
+    }
+    let non_empty_stripes: Vec<_> = stripes.into_iter().filter(|s| !s.is_empty()).collect();
+    let mut pending = non_empty_stripes.len();
+    for stripe in non_empty_stripes {
+        work_queue.push_urgent(Work::MergeStripe {
+            shards: stripe,
+            track_eviction,
+            accumulator_limit,
+        });
+    }
+
+    while pending > 0 {
+        let Ok(reply) = done_rx.recv() else { break };
+        match reply {
+            Done::MergeStripe { results } => {
+                pending -= 1;
+                for (s, shard, out, res) in results {
+                    restored[s] = Some(shard);
+                    outputs[s] = Some(out);
+                    if let Err(e) = res {
+                        errors[s] = Some(e);
+                    }
+                }
+            }
+            other => {
+                if record_non_stripe_done(
+                    other,
+                    slots,
+                    finished,
+                    finished_meta,
+                    target,
+                    keys_out,
+                    panic,
+                ) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let final_shards: Vec<_> = restored
+        .into_iter()
+        .map(|s| s.expect("all 32 shards returned"))
+        .collect();
+    let total_delta: isize = outputs.iter().flatten().map(|o| o.dynamic_delta).sum();
+    target.shards[res_idx].restore_shards(final_shards, total_delta);
+
+    if let Some(err) = errors.into_iter().flatten().next() {
+        return Err(err);
+    }
+
+    if track_eviction {
+        for w in 0..k {
+            for out in outputs.iter().flatten() {
+                let range = out.window_offsets[w]..out.window_offsets[w + 1];
+                for &cell in &out.new_cells[range] {
+                    target.new_cells.push((res_idx, cell));
+                }
+            }
+        }
+    }
+
+    let cur = target.shards[res_idx].estimated_bytes();
+    *target.peak_active_bytes =
+        (*target.peak_active_bytes).max(other_res_bytes + cur + target.compactor_bytes);
+    if cur >= target.map_budget {
+        spill_resolution_adaptive(
+            res_idx,
+            workers,
+            work_queue,
+            done_rx,
+            slots,
+            finished,
+            finished_meta,
+            target,
+            keys_out,
+            panic,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_res_sharded_serial<A: SpillAccumulator, J>(
+    res_idx: usize,
+    ready_wave: &mut [ReadyWindow<A>],
+    other_res_bytes: usize,
+    workers: usize,
+    work_queue: &WorkQueue<A, J>,
+    done_rx: &std::sync::mpsc::Receiver<Done<A>>,
+    slots: usize,
+    finished: &mut [Option<CellMaps<A>>],
+    finished_meta: &mut [Option<WindowMeta<A>>],
+    target: &mut MergeTarget<'_, A>,
+    keys_out: &mut usize,
+    panic: &mut Option<Box<dyn std::any::Any + Send>>,
+) -> Result<()> {
+    for win in ready_wave.iter_mut() {
+        let sharded = win.sharded.as_mut().expect("sharded wave window");
+        for shard_vec in &mut sharded[res_idx] {
+            for (key, acc) in shard_vec.drain(..) {
+                if target.merge_entry(res_idx, key, acc, other_res_bytes)? {
+                    spill_resolution_adaptive(
+                        res_idx,
+                        workers,
+                        work_queue,
+                        done_rx,
+                        slots,
+                        finished,
+                        finished_meta,
+                        target,
+                        keys_out,
+                        panic,
+                    )?;
+                    if panic.is_some() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run a batch on `workers` tasks of a Rayon scope while the calling thread
 /// merges finished windows in window order (see `process_batch`).
 /// `finished` holds sets that finished out of order; it is reused across batches.
@@ -384,19 +866,17 @@ where
 {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::mpsc;
-    let (work_tx, work_rx) = mpsc::channel::<Work<A, J>>();
-    let work_rx = Arc::new(Mutex::new(work_rx));
+
+    let work_queue = Arc::new(WorkQueue::<A, J>::new());
+    let _close = CloseOnDrop(Arc::clone(&work_queue));
     let (done_tx, done_rx) = mpsc::channel::<Done<A>>();
+    let allow_partition = workers > 1;
+    let set_budget = target.set_budget;
+
     for _ in 0..workers.max(1) {
-        let (rx, tx) = (Arc::clone(&work_rx), done_tx.clone());
+        let (queue, tx) = (Arc::clone(&work_queue), done_tx.clone());
         scope.spawn(move |_| loop {
-            // Holding the lock while waiting lets one idle worker wait in
-            // `recv` and the rest on the lock; either way they wake in turn.
-            let message = match rx.lock() {
-                Ok(guard) => guard.recv(),
-                Err(_) => break,
-            };
-            let Ok(work) = message else { break };
+            let Some(work) = queue.pop() else { break };
             let reply = catch_unwind(AssertUnwindSafe(|| match work {
                 Work::Window {
                     index,
@@ -404,9 +884,27 @@ where
                     mut maps,
                 } => {
                     let (profile, ns) = run_window(job, &mut maps);
+                    let (res_bytes, worker_bytes, total_entries) = compute_window_stats(&maps);
+                    let sharded = if allow_partition
+                        && total_entries >= SHARD_PARTITION_THRESHOLD
+                        && total_entries.saturating_mul(size_of::<(u64, A)>()) <= set_budget
+                    {
+                        let partitioned = partition_maps_to_shards(&mut maps);
+                        if worker_bytes > set_budget {
+                            for map in &mut maps {
+                                map.shrink_to_fit();
+                            }
+                        }
+                        Some(partitioned)
+                    } else {
+                        None
+                    };
                     Done::Window {
                         index,
                         maps,
+                        sharded,
+                        res_bytes,
+                        worker_bytes,
                         profile,
                         ns,
                     }
@@ -414,6 +912,32 @@ where
                 Work::Keys { chunk, cells } => {
                     let keys = compute_keys(&cells);
                     Done::Keys { chunk, cells, keys }
+                }
+                Work::MergeStripe {
+                    shards,
+                    track_eviction,
+                    accumulator_limit,
+                } => {
+                    let mut results = Vec::with_capacity(shards.len());
+                    for (s, mut shard, buckets) in shards {
+                        let (out, res) = merge_into_shard(
+                            &mut shard,
+                            buckets,
+                            track_eviction,
+                            accumulator_limit,
+                        );
+                        results.push((s, shard, out, res));
+                    }
+                    Done::MergeStripe { results }
+                }
+                Work::SortStripe { shards } => {
+                    let total_len: usize = shards.iter().map(HashMap::len).sum();
+                    let mut sorted = Vec::with_capacity(total_len);
+                    for map in shards {
+                        sorted.extend(map);
+                    }
+                    sorted.sort_unstable_by_key(|(key, _)| *key);
+                    Done::SortStripe { sorted }
                 }
             }))
             .unwrap_or_else(Done::Panicked);
@@ -427,86 +951,303 @@ where
     finished.clear();
     let slots = free.len();
     finished.resize_with(slots, || None);
+    let mut finished_meta: Vec<Option<WindowMeta<A>>> = vec![None; slots];
+    let mut ready_wave: Vec<ReadyWindow<A>> = Vec::with_capacity(slots);
     let count = jobs.len();
     let (mut next, mut expected, mut end) = (0, 0, count);
     let (mut key_chunk, mut keys_out) = (0, 0);
     let mut result = Ok(());
     let mut panic = None;
+    let num_res = target.shards.len();
+
     while next < end {
         let Some(maps) = free.pop() else { break };
-        let _ = work_tx.send(Work::Window {
+        work_queue.push_normal(Work::Window {
             index: next,
             job: jobs.next().expect("window count"),
             maps,
         });
         next += 1;
     }
+
     while expected < end || keys_out > 0 {
-        let Ok(reply) = done_rx.recv() else { break };
-        match reply {
-            Done::Panicked(payload) => {
-                panic = Some(payload);
+        let already_ready = expected < end && finished[expected % slots].is_some();
+        if !already_ready {
+            let Ok(first_reply) = done_rx.recv() else {
+                break;
+            };
+            if record_non_stripe_done(
+                first_reply,
+                slots,
+                finished,
+                &mut finished_meta,
+                target,
+                &mut keys_out,
+                &mut panic,
+            ) {
                 break;
             }
-            Done::Keys { chunk, cells, keys } => {
-                keys_out -= 1;
-                target.key_chunks.push((chunk, cells, keys));
+        }
+        while let Ok(reply) = done_rx.try_recv() {
+            if record_non_stripe_done(
+                reply,
+                slots,
+                finished,
+                &mut finished_meta,
+                target,
+                &mut keys_out,
+                &mut panic,
+            ) {
+                break;
             }
-            Done::Window {
-                index,
+        }
+        if panic.is_some() {
+            break;
+        }
+
+        ready_wave.clear();
+        while expected < end {
+            let slot = expected % slots;
+            let Some(maps) = finished[slot].take() else {
+                break;
+            };
+            let (sharded, res_bytes, worker_bytes) = finished_meta[slot]
+                .take()
+                .expect("matching window metadata");
+            ready_wave.push(ReadyWindow {
                 maps,
-                profile,
-                ns,
-            } => {
-                target.record(profile, ns);
-                // A slot is reused only after its previous set is merged.
-                finished[index % slots] = Some(maps);
-                while expected < end {
-                    let Some(mut maps) = finished[expected % slots].take() else {
-                        break;
-                    };
-                    if result.is_ok() {
-                        result = target.merge(&mut maps);
+                sharded,
+                res_bytes,
+                worker_bytes,
+            });
+            expected += 1;
+        }
+
+        if !ready_wave.is_empty() {
+            if result.is_ok() {
+                for w in &ready_wave {
+                    target.metrics.peak_worker_bytes = target
+                        .metrics
+                        .peak_worker_bytes
+                        .max(w.worker_bytes.saturating_mul(target.map_sets));
+                }
+                let t = std::time::Instant::now();
+                let all_sharded = workers > 1 && ready_wave.iter().all(|w| w.sharded.is_some());
+                let mut wave_res = Ok(());
+                if all_sharded {
+                    let mut total_shards = target.total_shard_bytes();
+                    for i in 0..num_res {
+                        let other_res_bytes = total_shards - target.shards[i].estimated_bytes();
+                        let wave_entries: usize = ready_wave
+                            .iter()
+                            .map(|w| {
+                                w.sharded.as_ref().unwrap()[i]
+                                    .iter()
+                                    .map(Vec::len)
+                                    .sum::<usize>()
+                            })
+                            .sum();
+                        let wave_res_bytes: usize = ready_wave.iter().map(|w| w.res_bytes[i]).sum();
+                        let est = target.shards[i].estimated_bytes();
+                        let res_outcome = if wave_entries >= SHARD_PARTITION_THRESHOLD
+                            && est.saturating_add(wave_res_bytes.saturating_mul(2))
+                                < target.map_budget
+                        {
+                            merge_res_parallel_wave(
+                                i,
+                                &mut ready_wave,
+                                other_res_bytes,
+                                workers,
+                                &work_queue,
+                                &done_rx,
+                                slots,
+                                finished,
+                                &mut finished_meta,
+                                target,
+                                &mut keys_out,
+                                &mut panic,
+                            )
+                        } else {
+                            merge_res_sharded_serial(
+                                i,
+                                &mut ready_wave,
+                                other_res_bytes,
+                                workers,
+                                &work_queue,
+                                &done_rx,
+                                slots,
+                                finished,
+                                &mut finished_meta,
+                                target,
+                                &mut keys_out,
+                                &mut panic,
+                            )
+                        };
+                        if panic.is_some() {
+                            break;
+                        }
+                        if let Err(e) = res_outcome {
+                            wave_res = Err(e);
+                            break;
+                        }
+                        total_shards = other_res_bytes + target.shards[i].estimated_bytes();
                     }
-                    if result.is_err() {
-                        maps.iter_mut().for_each(HashMap::clear);
-                        // Stop dispatching; collect what is in flight.
-                        end = next;
-                    }
-                    free.push(maps);
-                    expected += 1;
-                    if next < end {
-                        let maps = free.pop().expect("a set was just returned");
-                        let _ = work_tx.send(Work::Window {
-                            index: next,
-                            job: jobs.next().expect("window count"),
-                            maps,
-                        });
-                        next += 1;
+                } else {
+                    for w in &mut ready_wave {
+                        if let Some(mut sharded) = w.sharded.take() {
+                            let mut total_shards = target.total_shard_bytes();
+                            for (i, shard_vecs) in sharded.iter_mut().enumerate() {
+                                let other_res_bytes =
+                                    total_shards - target.shards[i].estimated_bytes();
+                                for shard_vec in shard_vecs.iter_mut() {
+                                    for (key, acc) in shard_vec.drain(..) {
+                                        match target.merge_entry(i, key, acc, other_res_bytes) {
+                                            Ok(true) => {
+                                                if let Err(e) = spill_resolution_adaptive(
+                                                    i,
+                                                    workers,
+                                                    &work_queue,
+                                                    &done_rx,
+                                                    slots,
+                                                    finished,
+                                                    &mut finished_meta,
+                                                    target,
+                                                    &mut keys_out,
+                                                    &mut panic,
+                                                ) {
+                                                    wave_res = Err(e);
+                                                    break;
+                                                }
+                                                if panic.is_some() {
+                                                    break;
+                                                }
+                                            }
+                                            Ok(false) => {}
+                                            Err(e) => {
+                                                wave_res = Err(e);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if wave_res.is_err() || panic.is_some() {
+                                        break;
+                                    }
+                                }
+                                if wave_res.is_err() || panic.is_some() {
+                                    break;
+                                }
+                                total_shards = other_res_bytes + target.shards[i].estimated_bytes();
+                            }
+                        } else {
+                            let mut total_shards = target.total_shard_bytes();
+                            for (i, map) in w.maps.iter_mut().enumerate() {
+                                let other_res_bytes =
+                                    total_shards - target.shards[i].estimated_bytes();
+                                for (key, acc) in map.drain() {
+                                    match target.merge_entry(i, key, acc, other_res_bytes) {
+                                        Ok(true) => {
+                                            if let Err(e) = spill_resolution_adaptive(
+                                                i,
+                                                workers,
+                                                &work_queue,
+                                                &done_rx,
+                                                slots,
+                                                finished,
+                                                &mut finished_meta,
+                                                target,
+                                                &mut keys_out,
+                                                &mut panic,
+                                            ) {
+                                                wave_res = Err(e);
+                                                break;
+                                            }
+                                            if panic.is_some() {
+                                                break;
+                                            }
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            wave_res = Err(e);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if wave_res.is_err() || panic.is_some() {
+                                    break;
+                                }
+                                total_shards = other_res_bytes + target.shards[i].estimated_bytes();
+                            }
+                            if w.worker_bytes > target.set_budget {
+                                for map in w.maps.iter_mut() {
+                                    map.shrink_to_fit();
+                                }
+                            }
+                        }
+                        if wave_res.is_err() || panic.is_some() {
+                            break;
+                        }
                     }
                 }
-                let last = expected == count;
-                if result.is_ok()
-                    && (target.new_cells.len() >= KEY_CHUNK
-                        || (last && !target.new_cells.is_empty()))
-                {
-                    let cells = {
-                        let cells = target.new_cells.to_vec();
-                        target.new_cells.clear();
-                        cells
-                    };
-                    let _ = work_tx.send(Work::Keys {
+                target.metrics.merge_ns += t.elapsed().as_nanos() as u64;
+                if panic.is_some() {
+                    for mut w in ready_wave.drain(..) {
+                        w.maps.iter_mut().for_each(HashMap::clear);
+                        free.push(w.maps);
+                    }
+                    break;
+                }
+                if wave_res.is_err() {
+                    result = wave_res;
+                }
+            }
+
+            let err = result.is_err();
+            if err {
+                end = next;
+            }
+            for mut w in ready_wave.drain(..) {
+                if err {
+                    w.maps.iter_mut().for_each(HashMap::clear);
+                }
+                free.push(w.maps);
+                if next < end {
+                    let maps = free.pop().expect("a set was just returned");
+                    work_queue.push_normal(Work::Window {
+                        index: next,
+                        job: jobs.next().expect("window count"),
+                        maps,
+                    });
+                    next += 1;
+                }
+            }
+
+            let last = expected == count;
+            if result.is_ok()
+                && (target.new_cells.len() >= KEY_CHUNK || (last && !target.new_cells.is_empty()))
+            {
+                let cells = std::mem::take(&mut target.new_cells);
+                let chunk_size = if cells.len() <= KEY_CHUNK * 2 {
+                    cells.len()
+                } else {
+                    KEY_CHUNK.max(cells.len().div_ceil(workers.max(1)))
+                };
+                let mut rest = cells;
+                while !rest.is_empty() {
+                    let take = chunk_size.min(rest.len());
+                    let tail = rest.split_off(take);
+                    work_queue.push_normal(Work::Keys {
                         chunk: key_chunk,
-                        cells,
+                        cells: rest,
                     });
                     key_chunk += 1;
                     keys_out += 1;
+                    rest = tail;
                 }
             }
         }
     }
-    // Closing the queue lets idle workers exit; the scope joins them.
-    drop(work_tx);
+
+    work_queue.close();
     if let Some(payload) = panic {
         std::panic::resume_unwind(payload);
     }

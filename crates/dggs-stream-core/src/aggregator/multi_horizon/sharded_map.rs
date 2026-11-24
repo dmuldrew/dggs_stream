@@ -1,4 +1,5 @@
 use crate::aggregator::cell_hash::{mix_cell_id, CellIdBuildHasher};
+use rayon::slice::ParallelSliceMut;
 use std::collections::{BinaryHeap, HashMap};
 
 use super::eviction_space::CellKeys;
@@ -395,10 +396,56 @@ impl<A: super::spill::SpillAccumulator> ShardedResolutionMap<A> {
     /// A run is bounded by the active-map budget. Release buckets/heaps rather
     /// than retaining their high-water capacity during external merging.
     pub fn take_sorted(&mut self) -> Vec<(u64, A)> {
-        let mut records = Vec::with_capacity(self.active_cell_count());
-        for (map, heap) in self.shards.iter_mut().zip(&mut self.eviction) {
-            let owned = std::mem::replace(map, HashMap::with_hasher(CellIdBuildHasher));
-            records.extend(owned);
+        let shards = self.take_shards_and_clear();
+        let total_len: usize = shards.iter().map(HashMap::len).sum();
+        let mut records = Vec::with_capacity(total_len);
+        for map in shards {
+            records.extend(map);
+        }
+        // Only engage global Rayon sort when large and not already running
+        // inside a Rayon thread (avoids work-stealing lock inversion).
+        if records.len() >= 16_384 && rayon::current_thread_index().is_none() {
+            records.par_sort_unstable_by_key(|(key, _)| *key);
+        } else {
+            records.sort_unstable_by_key(|(key, _)| *key);
+        }
+        records
+    }
+
+    /// Extract the 32 independent shard hash maps for parallel wave merging,
+    /// replacing them temporarily with empty maps. Must be paired with
+    /// [`Self::restore_shards`].
+    pub(crate) fn take_shards(&mut self) -> Vec<HashMap<u64, A, CellIdBuildHasher>> {
+        let mut out = Vec::with_capacity(NUM_SHARDS);
+        for map in &mut self.shards {
+            out.push(std::mem::replace(
+                map,
+                HashMap::with_hasher(CellIdBuildHasher),
+            ));
+        }
+        out
+    }
+
+    /// Restore the 32 shard maps after parallel wave merging, applying the
+    /// net accumulator heap delta and recounting table structure bytes.
+    pub(crate) fn restore_shards(
+        &mut self,
+        shards: Vec<HashMap<u64, A, CellIdBuildHasher>>,
+        dynamic_delta: isize,
+    ) {
+        assert_eq!(shards.len(), NUM_SHARDS);
+        self.shards = shards;
+        self.dynamic_bytes = self
+            .dynamic_bytes
+            .checked_add_signed(dynamic_delta)
+            .expect("dynamic_bytes underflow");
+        self.recount_structure();
+    }
+
+    /// Take all 32 shards and clear eviction heaps, latitude histogram, and byte counters.
+    pub(crate) fn take_shards_and_clear(&mut self) -> Vec<HashMap<u64, A, CellIdBuildHasher>> {
+        let shards = self.take_shards();
+        for heap in &mut self.eviction {
             *heap = BinaryHeap::new();
         }
         if let Some(h) = &mut self.lat_histogram {
@@ -406,9 +453,92 @@ impl<A: super::spill::SpillAccumulator> ShardedResolutionMap<A> {
         }
         self.dynamic_bytes = 0;
         self.structure_bytes = 0;
-        records.sort_unstable_by_key(|(key, _)| *key);
-        records
+        shards
     }
+}
+
+/// Result of merging one shard's window-ordered buckets in parallel.
+pub(crate) struct ShardMergeOutput {
+    pub(crate) new_cells: Vec<u64>,
+    /// `window_offsets[w]..window_offsets[w + 1]` is the slice of `new_cells`
+    /// created during window `w` of the wave (`len == buckets.len() + 1`).
+    pub(crate) window_offsets: Vec<usize>,
+    pub(crate) dynamic_delta: isize,
+}
+
+/// Merge `buckets` (ordered earliest-window to latest-window) into one disjoint
+/// `shard`, enforcing `accumulator_limit` and recording created cell keys by window.
+/// Always returns the partial [`ShardMergeOutput`] alongside the merge `Result` so
+/// `dynamic_bytes` accounting stays exact even if a limit check trips mid-shard.
+pub(crate) fn merge_into_shard<A: super::spill::SpillAccumulator>(
+    shard: &mut HashMap<u64, A, CellIdBuildHasher>,
+    buckets: Vec<Vec<(u64, A)>>,
+    track_eviction: bool,
+    accumulator_limit: usize,
+) -> (ShardMergeOutput, crate::error::Result<()>) {
+    let mut new_cells = Vec::new();
+    let mut window_offsets = Vec::with_capacity(buckets.len() + 1);
+    window_offsets.push(0);
+    let mut dynamic_delta: isize = 0;
+
+    for window_bucket in buckets {
+        for (key, acc) in window_bucket {
+            if acc.memory_bytes() > accumulator_limit {
+                return (
+                    ShardMergeOutput {
+                        new_cells,
+                        window_offsets,
+                        dynamic_delta,
+                    },
+                    Err(crate::error::DggsStreamError::InvalidParameter(
+                        "single accumulator exceeds aggregation budget; increase aggregation_budget_bytes"
+                            .into(),
+                    )),
+                );
+            }
+            let merged_bytes = match shard.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    let before = existing.heap_bytes() as isize;
+                    existing.merge(&acc);
+                    dynamic_delta += existing.heap_bytes() as isize - before;
+                    existing.memory_bytes()
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let bytes = acc.memory_bytes();
+                    dynamic_delta += acc.heap_bytes() as isize;
+                    entry.insert(acc);
+                    if track_eviction {
+                        new_cells.push(key);
+                    }
+                    bytes
+                }
+            };
+            if merged_bytes > accumulator_limit {
+                return (
+                    ShardMergeOutput {
+                        new_cells,
+                        window_offsets,
+                        dynamic_delta,
+                    },
+                    Err(crate::error::DggsStreamError::InvalidParameter(
+                        "merged accumulator exceeds aggregation budget; increase aggregation_budget_bytes"
+                            .into(),
+                    )),
+                );
+            }
+        }
+        window_offsets.push(new_cells.len());
+    }
+
+    (
+        ShardMergeOutput {
+            new_cells,
+            window_offsets,
+            dynamic_delta,
+        },
+        Ok(()),
+    )
 }
 
 #[cfg(test)]
@@ -416,7 +546,7 @@ mod tests {
     use super::*;
     use h3o::{LatLng, Resolution};
 
-    fn recounted(map: &ShardedResolutionMap<ContinuousAccumulator>) -> usize {
+    fn recounted<A: AccumulatorMerge>(map: &ShardedResolutionMap<A>) -> usize {
         let dynamic: usize = map
             .shards
             .iter()
@@ -458,5 +588,142 @@ mod tests {
         assert_eq!(map.estimated_bytes(), recounted(&map));
         map.take_sorted();
         assert_eq!(map.estimated_bytes(), 0);
+    }
+
+    #[test]
+    fn shard_wave_merge_matches_serial_and_tracks_bytes() {
+        let res = Resolution::try_from(8).unwrap();
+        let mut windows_cont = Vec::new();
+        let mut windows_cat = Vec::new();
+        for w in 0..6usize {
+            let mut m_cont = HashMap::with_hasher(CellIdBuildHasher);
+            let mut m_cat = HashMap::with_hasher(CellIdBuildHasher);
+            for i in 0..400usize {
+                let idx = (w * 150 + i) % 900;
+                let ll = LatLng::new(
+                    45.0 - (idx / 30) as f64 * 0.02,
+                    -100.0 + (idx % 30) as f64 * 0.02,
+                )
+                .unwrap();
+                let cell = u64::from(ll.to_cell(res));
+                let mut acc = ContinuousAccumulator::with_quantiles();
+                acc.update((w * 1000 + i) as f64 * 0.37 - 50.0);
+                m_cont
+                    .entry(cell)
+                    .and_modify(|e: &mut ContinuousAccumulator| e.merge(&acc))
+                    .or_insert(acc);
+                let mut cacc = CategoricalAccumulator::new();
+                cacc.update(((i + w) % 25) as i64);
+                m_cat
+                    .entry(cell)
+                    .and_modify(|e: &mut CategoricalAccumulator| e.merge(&cacc))
+                    .or_insert(cacc);
+            }
+            windows_cont.push(m_cont);
+            windows_cat.push(m_cat);
+        }
+
+        // Continuous comparison
+        let mut serial_cont = ShardedResolutionMap::<ContinuousAccumulator>::new();
+        let mut serial_new_cont = Vec::new();
+        for w in &windows_cont {
+            for (&cell, acc) in w {
+                let (_, new) = serial_cont.merge_owned_deferred(cell, acc.clone());
+                if new {
+                    serial_new_cont.push(cell);
+                }
+            }
+        }
+        let mut wave_cont = ShardedResolutionMap::<ContinuousAccumulator>::new();
+        let mut per_shard_cont: Vec<Vec<Vec<(u64, ContinuousAccumulator)>>> =
+            (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+        for w in &windows_cont {
+            let mut buckets: [Vec<(u64, ContinuousAccumulator)>; NUM_SHARDS] =
+                std::array::from_fn(|_| Vec::new());
+            for (&cell, acc) in w {
+                buckets[get_shard(cell)].push((cell, acc.clone()));
+            }
+            for s in 0..NUM_SHARDS {
+                per_shard_cont[s].push(std::mem::take(&mut buckets[s]));
+            }
+        }
+        let mut shards = wave_cont.take_shards();
+        let mut outputs = Vec::with_capacity(NUM_SHARDS);
+        let mut delta = 0isize;
+        for (s, shard) in shards.iter_mut().enumerate() {
+            let (out, res) = merge_into_shard(
+                shard,
+                std::mem::take(&mut per_shard_cont[s]),
+                true,
+                usize::MAX,
+            );
+            res.unwrap();
+            delta += out.dynamic_delta;
+            outputs.push(out);
+        }
+        wave_cont.restore_shards(shards, delta);
+        assert_eq!(wave_cont.estimated_bytes(), recounted(&wave_cont));
+        let wave_sorted = wave_cont.take_sorted();
+        let serial_sorted = serial_cont.take_sorted();
+        assert_eq!(wave_sorted.len(), serial_sorted.len());
+        for ((wk, wv), (sk, sv)) in wave_sorted.iter().zip(&serial_sorted) {
+            assert_eq!(wk, sk);
+            assert_eq!(wv.sum.to_bits(), sv.sum.to_bits());
+            assert_eq!(wv.count.to_bits(), sv.count.to_bits());
+            assert_eq!(wv.m2.to_bits(), sv.m2.to_bits());
+            assert_eq!(wv.min.to_bits(), sv.min.to_bits());
+            assert_eq!(wv.max.to_bits(), sv.max.to_bits());
+            assert_eq!(wv.quantiles, sv.quantiles);
+        }
+        let wave_new_set: std::collections::HashSet<u64> = outputs
+            .iter()
+            .flat_map(|o| o.new_cells.iter().copied())
+            .collect();
+        let serial_new_set: std::collections::HashSet<u64> =
+            serial_new_cont.iter().copied().collect();
+        assert_eq!(wave_new_set, serial_new_set);
+
+        // Categorical comparison
+        let mut serial_cat = ShardedResolutionMap::<CategoricalAccumulator>::new();
+        for w in &windows_cat {
+            for (&cell, acc) in w {
+                serial_cat.merge_owned_deferred(cell, acc.clone());
+            }
+        }
+        let mut wave_cat = ShardedResolutionMap::<CategoricalAccumulator>::new();
+        let mut per_shard_cat: Vec<Vec<Vec<(u64, CategoricalAccumulator)>>> =
+            (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+        for w in &windows_cat {
+            let mut buckets: [Vec<(u64, CategoricalAccumulator)>; NUM_SHARDS] =
+                std::array::from_fn(|_| Vec::new());
+            for (&cell, acc) in w {
+                buckets[get_shard(cell)].push((cell, acc.clone()));
+            }
+            for s in 0..NUM_SHARDS {
+                per_shard_cat[s].push(std::mem::take(&mut buckets[s]));
+            }
+        }
+        let mut shards_cat = wave_cat.take_shards();
+        let mut delta_cat = 0isize;
+        for (s, shard) in shards_cat.iter_mut().enumerate() {
+            let (out, res) = merge_into_shard(
+                shard,
+                std::mem::take(&mut per_shard_cat[s]),
+                false,
+                usize::MAX,
+            );
+            res.unwrap();
+            delta_cat += out.dynamic_delta;
+        }
+        wave_cat.restore_shards(shards_cat, delta_cat);
+        assert_eq!(wave_cat.estimated_bytes(), recounted(&wave_cat));
+        let wave_cat_sorted = wave_cat.take_sorted();
+        let serial_cat_sorted = serial_cat.take_sorted();
+        assert_eq!(wave_cat_sorted.len(), serial_cat_sorted.len());
+        for ((wk, wv), (sk, sv)) in wave_cat_sorted.iter().zip(&serial_cat_sorted) {
+            assert_eq!(wk, sk);
+            assert_eq!(wv.total_count.to_bits(), sv.total_count.to_bits());
+            assert_eq!(wv.unique_classes(), sv.unique_classes());
+        }
     }
 }

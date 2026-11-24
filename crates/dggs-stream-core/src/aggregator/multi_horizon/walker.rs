@@ -9,7 +9,7 @@
 //! pattern and resolution count, not by row or raster size.
 
 use crate::aggregator::cell_hash::CellIdBuildHasher;
-use crate::grid::{A5Backend, GridBackend, GridKind, H3Backend, HealpixBackend, S2Backend};
+use crate::grid::{A5Backend, GridKind, H3Backend, HealpixBackend, RowBatchBackend, S2Backend};
 use h3o::Resolution;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -335,7 +335,7 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
     E: ScanlineEngine<T, Acc>,
     N: Fn(&[T]) -> bool,
     R: Fn(&'a [T]) -> Option<E::Sample>,
-    B: GridBackend,
+    B: RowBatchBackend,
 {
     let chunk = ctx.chunk;
     let width = chunk.width as usize;
@@ -348,6 +348,7 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
         _ => width * spp,
     };
     let num_res = res_u8s.len();
+    let max_res = res_u8s.iter().copied().max().unwrap_or(0);
     let combine = engine.combine_sample_weights();
     let pruner = RowPruner::new(ctx);
     let mut projector = SampleProjector::new(ctx);
@@ -379,18 +380,137 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
         // Invalid pixels may sit inside a span; the span kernels skip them.
         let mut span_start: Option<usize> = None;
 
-        if batch && ctx.owner.is_none() && ctx.bbox.is_none() {
+        if batch && ctx.owner.is_none() {
+            debug_assert_eq!(spp, 1);
             let sp = ctx.sampling.points[0];
             let col_offset = chunk.col_offset as usize;
+            if B::SUPPORTS_ROW_BATCH && !res_u8s.is_empty() {
+                if let Some((lat_deg, lon_col0, dlon)) =
+                    projector.constant_lat_affine_lon(ctx, col_offset, sp)
+                {
+                    if lat_deg.is_finite() && (-90.0..=90.0).contains(&lat_deg) {
+                        let active_cols = match ctx.bbox {
+                            None => {
+                                let last_c = cols.end.saturating_sub(1);
+                                let first_lon = lon_col0 + cols.start as f64 * dlon;
+                                let last_lon = lon_col0 + last_c as f64 * dlon;
+                                (first_lon.is_finite() && last_lon.is_finite())
+                                    .then_some(cols.clone())
+                            }
+                            Some([min_lon, min_lat, max_lon, max_lat]) => {
+                                if lat_deg < min_lat || lat_deg > max_lat {
+                                    continue;
+                                }
+                                if dlon > 0.0 && min_lon <= max_lon {
+                                    let last_c = cols.end.saturating_sub(1);
+                                    let row_west = lon_col0 + cols.start as f64 * dlon;
+                                    let row_east = lon_col0 + last_c as f64 * dlon;
+                                    if row_west.is_finite()
+                                        && row_east.is_finite()
+                                        && row_west >= -180.0
+                                        && row_east <= 180.0
+                                    {
+                                        let col_lon = |c: usize| {
+                                            projector.affine_lon(col_offset + c, row_idx, sp)
+                                        };
+                                        let mut lo = cols.start;
+                                        let mut lo_hi = cols.end;
+                                        while lo < lo_hi {
+                                            let m = lo + (lo_hi - lo) / 2;
+                                            if col_lon(m) < min_lon {
+                                                lo = m + 1;
+                                            } else {
+                                                lo_hi = m;
+                                            }
+                                        }
+                                        let mut hi = lo;
+                                        let mut hi_hi = cols.end;
+                                        while hi < hi_hi {
+                                            let m = hi + (hi_hi - hi) / 2;
+                                            if col_lon(m) <= max_lon {
+                                                hi = m + 1;
+                                            } else {
+                                                hi_hi = m;
+                                            }
+                                        }
+                                        if lo >= hi {
+                                            continue;
+                                        }
+                                        Some(lo..hi)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        if let Some(active_cols) = active_cols {
+                            if let Some(row_state) =
+                                B::prepare_row(lat_deg, lon_col0, dlon, max_res)
+                            {
+                                const BATCH: usize = 64;
+                                let mut fine_cells = [0u64; BATCH];
+                                let mut cur_fine: Option<u64> = None;
+                                let mut c = active_cols.start;
+                                while c < active_cols.end {
+                                    let n = (active_cols.end - c).min(BATCH);
+                                    if is_row_all_nodata(&row[c..c + n]) {
+                                        c += n;
+                                        continue;
+                                    }
+                                    B::index_row_batch(&row_state, c, &mut fine_cells[..n]);
+                                    for (k, &cell) in fine_cells[..n].iter().enumerate() {
+                                        if Some(cell) == cur_fine {
+                                            continue;
+                                        }
+                                        let col_c = c + k;
+                                        if read(&row[col_c..col_c + 1]).is_none() {
+                                            continue;
+                                        }
+                                        runs.advance_from_finest(
+                                            cell,
+                                            max_res,
+                                            res_u8s,
+                                            &row[..col_c],
+                                            &mut span_start,
+                                            engine,
+                                            maps,
+                                        );
+                                        cur_fine = Some(cell);
+                                    }
+                                    c += n;
+                                }
+                                if let Some(s) = span_start {
+                                    runs.add_span(&row[s..active_cols.end], engine);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
             for c in cols.clone() {
-                if read(&row[c * spp..(c + 1) * spp]).is_none() {
+                if read(&row[c..c + 1]).is_none() {
                     continue;
                 }
-                let Some(ll) = projector
+                let Some((lon, lat)) = projector
                     .project(col_offset + c, row_idx, 0, sp)
                     .filter(|&(_, lat)| (-90.0..=90.0).contains(&lat))
-                    .and_then(|(lon, lat)| B::make_point(lon, lat))
                 else {
+                    super::profile::transform_failed();
+                    if let Some(s) = span_start.take() {
+                        runs.add_span(&row[s..c], engine);
+                    }
+                    continue;
+                };
+                if !is_point_in_bbox(lon, lat, ctx.bbox) {
+                    if let Some(s) = span_start.take() {
+                        runs.add_span(&row[s..c], engine);
+                    }
+                    continue;
+                }
+                let Some(ll) = B::make_point(lon, lat) else {
                     super::profile::transform_failed();
                     if let Some(s) = span_start.take() {
                         runs.add_span(&row[s..c], engine);
@@ -615,18 +735,62 @@ impl<'a> SampleProjector<'a> {
             (lon.is_finite() && lat.is_finite()).then_some((lon, lat))
         })
     }
+
+    /// Extract row-constant latitude and affine longitude parameters `(lat_deg, lon_col0_deg, dlon_deg)`
+    /// for north-up/south-up WGS84 and Web Mercator center rows without shear.
+    #[inline(always)]
+    fn constant_lat_affine_lon(
+        &self,
+        ctx: &WalkContext<'_>,
+        col_offset: usize,
+        sp: SamplePoint,
+    ) -> Option<(f64, f64, f64)> {
+        if ctx.gt.b != 0.0 || ctx.gt.d != 0.0 {
+            return None;
+        }
+        match &self.cache {
+            RowCache::Wgs84(lats) => Some((
+                lats[0],
+                self.gt.c0 + (col_offset as f64 + sp.dx) * self.gt.a,
+                self.gt.a,
+            )),
+            RowCache::Mercator(lats) => {
+                let scale = RAD_TO_DEG / WGS84_A;
+                Some((
+                    lats[0],
+                    (self.gt.c0 + (col_offset as f64 + sp.dx) * self.gt.a) * scale,
+                    self.gt.a * scale,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Exact longitude for `col` matching [`Self::project`] on constant-latitude rows.
+    #[inline(always)]
+    fn affine_lon(&self, col: usize, row_idx: usize, sp: SamplePoint) -> f64 {
+        let x = self
+            .gt
+            .pixel_to_coord(col as f64 + sp.dx, row_idx as f64 + sp.dy)
+            .0;
+        match &self.cache {
+            RowCache::Wgs84(_) => x,
+            RowCache::Mercator(_) => web_mercator_lon(x),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Current cell (None before the first) and partial accumulator per
 /// resolution, and the indexer that remembers recent cells across samples.
-struct Runs<Acc, B: GridBackend> {
+struct Runs<Acc, B: RowBatchBackend> {
     cells: Vec<Option<u64>>,
     next_cells: Vec<u64>,
     accs: Vec<Acc>,
     indexer: B::Indexer,
 }
 
-impl<Acc: Clone, B: GridBackend> Runs<Acc, B> {
+impl<Acc: Clone, B: RowBatchBackend> Runs<Acc, B> {
     fn new<T, E: ScanlineEngine<T, Acc>>(num_res: usize, res_u8s: &[u8], engine: &E) -> Self {
         Self {
             cells: vec![None; num_res],
@@ -636,18 +800,15 @@ impl<Acc: Clone, B: GridBackend> Runs<Acc, B> {
         }
     }
 
-    /// Index every resolution and flush the preceding span before restarting any run.
+    /// Flush the preceding span if any resolution changed and restart changed runs.
     #[inline(always)]
-    fn advance_cells<T, E: ScanlineEngine<T, Acc>>(
+    fn commit_next_cells<T, E: ScanlineEngine<T, Acc>>(
         &mut self,
-        ll: B::Point,
-        resolutions: &[u8],
         preceding: &[T],
         span_start: &mut Option<usize>,
         engine: &E,
         maps: &mut [CellMap<Acc>],
     ) {
-        B::index_all(&mut self.indexer, ll, resolutions, &mut self.next_cells);
         let changed = self
             .next_cells
             .iter()
@@ -665,6 +826,39 @@ impl<Acc: Clone, B: GridBackend> Runs<Acc, B> {
             }
         }
         span_start.get_or_insert(preceding.len());
+    }
+
+    /// Index every resolution and flush the preceding span before restarting any run.
+    #[inline(always)]
+    fn advance_cells<T, E: ScanlineEngine<T, Acc>>(
+        &mut self,
+        ll: B::Point,
+        resolutions: &[u8],
+        preceding: &[T],
+        span_start: &mut Option<usize>,
+        engine: &E,
+        maps: &mut [CellMap<Acc>],
+    ) {
+        B::index_all(&mut self.indexer, ll, resolutions, &mut self.next_cells);
+        self.commit_next_cells(preceding, span_start, engine, maps);
+    }
+
+    /// Derive every requested resolution from a pre-indexed `finest_cell` at `max_res`
+    /// and flush/restart runs.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn advance_from_finest<T, E: ScanlineEngine<T, Acc>>(
+        &mut self,
+        finest_cell: u64,
+        max_res: u8,
+        resolutions: &[u8],
+        preceding: &[T],
+        span_start: &mut Option<usize>,
+        engine: &E,
+        maps: &mut [CellMap<Acc>],
+    ) {
+        B::parents_from_finest(finest_cell, max_res, resolutions, &mut self.next_cells);
+        self.commit_next_cells(preceding, span_start, engine, maps);
     }
 
     #[inline]
@@ -1275,5 +1469,258 @@ mod tests {
         let nine = SamplingPattern::nine_point();
         let cols = pruned(160.0, [170.0, -20.0, 171.0, -15.0], &nine).unwrap();
         assert!(cols.start <= 99 && cols.end >= 111);
+    }
+
+    #[derive(Clone, Default)]
+    struct OracleAcc {
+        count: usize,
+        sum: f64,
+        empty_seen: bool,
+    }
+
+    struct OracleEngine {
+        emit_nodata: bool,
+    }
+
+    impl ScanlineEngine<f32, OracleAcc> for OracleEngine {
+        type Sample = f64;
+
+        fn masked_sample(&self) -> Option<f64> {
+            self.emit_nodata.then_some(f64::NAN)
+        }
+
+        fn new_acc(&self) -> OracleAcc {
+            OracleAcc::default()
+        }
+
+        fn clear_acc(&self, acc: &mut OracleAcc) {
+            *acc = OracleAcc::default();
+        }
+
+        fn has_samples(&self, acc: &OracleAcc) -> bool {
+            acc.count > 0 || (self.emit_nodata && acc.empty_seen)
+        }
+
+        fn merge_acc(&self, dest: &mut OracleAcc, src: &OracleAcc) {
+            dest.count += src.count;
+            dest.sum += src.sum;
+            dest.empty_seen |= src.empty_seen;
+        }
+
+        fn accumulate_span(&self, acc: &mut OracleAcc, slice: &[f32]) {
+            if self.emit_nodata && !slice.is_empty() {
+                acc.empty_seen = true;
+            }
+            for &v in slice {
+                if v.is_finite() {
+                    acc.count += 1;
+                    acc.sum += f64::from(v);
+                }
+            }
+        }
+
+        fn accumulate_span_multi(&self, run_accs: &mut [OracleAcc], slice: &[f32]) {
+            for acc in run_accs {
+                self.accumulate_span(acc, slice);
+            }
+        }
+
+        fn get_sample(&self, pixel: f32) -> Option<f64> {
+            if pixel.is_finite() {
+                Some(f64::from(pixel))
+            } else if self.emit_nodata {
+                Some(f64::NAN)
+            } else {
+                None
+            }
+        }
+
+        fn update_sample(&self, acc: &mut OracleAcc, sample: f64, _weight: f64) {
+            if self.emit_nodata {
+                acc.empty_seen = true;
+            }
+            if sample.is_finite() {
+                acc.count += 1;
+                acc.sum += sample;
+            }
+        }
+    }
+
+    fn verify_walk_direct_against_oracle(
+        grid: GridKind,
+        res_u8s: &[u8],
+        crs: &CrsTransformer,
+        gt: &GeoTransform,
+        bbox: Option<[f64; 4]>,
+        emit_nodata: bool,
+    ) {
+        let width = 160usize;
+        let height = 10usize;
+        let chunk = RasterChunk {
+            col_offset: 5,
+            row_offset: 7,
+            width: width as u32,
+            height: height as u32,
+        };
+        let mut values = vec![0.0f32; width * height];
+        for r in 0..height {
+            for c in 0..width {
+                let idx = r * width + c;
+                values[idx] =
+                    if (r == 2) || ((70..136).contains(&c) && r % 3 == 1) || idx.is_multiple_of(17)
+                    {
+                        f32::NAN
+                    } else {
+                        ((c * 7 + r * 13) % 97) as f32 * 0.5 + 1.0
+                    };
+            }
+        }
+        let dummy_res = [Resolution::Seven];
+        let ctx = WalkContext {
+            chunk: &chunk,
+            grid,
+            resolutions: &dummy_res,
+            resolution_u8s: res_u8s,
+            crs,
+            gt,
+            sampling: &SamplingPattern::center(),
+            bbox,
+            stride: width as u32,
+            samples_per_pixel: 1,
+            owner: None,
+            band_scaling: &[],
+            mask: None,
+            band_presence: None,
+            alpha_sample: None,
+            emit_nodata,
+            histogram_bins: None,
+        };
+        let engine = OracleEngine { emit_nodata };
+        let mut actual: Vec<CellMap<OracleAcc>> =
+            (0..res_u8s.len()).map(|_| CellMap::default()).collect();
+        walk_direct(
+            &ctx,
+            &values,
+            |row| !emit_nodata && row.iter().all(|v| !v.is_finite()),
+            &engine,
+            &mut actual,
+        );
+
+        let mut expected: Vec<CellMap<OracleAcc>> =
+            (0..res_u8s.len()).map(|_| CellMap::default()).collect();
+        for r in 0..height {
+            let row_idx = chunk.row_offset as usize + r;
+            for c in 0..width {
+                let v = values[r * width + c];
+                if !emit_nodata && !v.is_finite() {
+                    continue;
+                }
+                let col_idx = chunk.col_offset as usize + c;
+                let (x, y) = gt.pixel_center_to_coord(col_idx, row_idx);
+                let Ok((lon, lat)) = crs.transform_point(x, y) else {
+                    continue;
+                };
+                if !(-90.0..=90.0).contains(&lat) || !is_point_in_bbox(lon, lat, bbox) {
+                    continue;
+                }
+                for (i, &res) in res_u8s.iter().enumerate() {
+                    let Some(cell) = grid.cell_at(lat, lon, res) else {
+                        continue;
+                    };
+                    let entry = expected[i].entry(cell).or_default();
+                    if emit_nodata {
+                        entry.empty_seen = true;
+                    }
+                    if v.is_finite() {
+                        entry.count += 1;
+                        entry.sum += f64::from(v);
+                    }
+                }
+            }
+        }
+        assert_eq!(actual.len(), expected.len());
+        for i in 0..res_u8s.len() {
+            assert_eq!(
+                actual[i].len(),
+                expected[i].len(),
+                "{grid:?} res={} bbox={bbox:?} emit={emit_nodata}",
+                res_u8s[i]
+            );
+            for (cell, exp) in &expected[i] {
+                let got = &actual[i][cell];
+                assert_eq!(got.count, exp.count, "{grid:?} cell={cell:#x}");
+                assert!(
+                    (got.sum - exp.sum).abs() <= 1e-12,
+                    "{grid:?} cell={cell:#x}: {} != {}",
+                    got.sum,
+                    exp.sum
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn walk_direct_row_batch_and_bbox_match_reference_oracle() {
+        let wgs84 = CrsTransformer::Wgs84Identity;
+        let wgs84_gt = GeoTransform {
+            c0: -101.2,
+            a: 0.005,
+            b: 0.0,
+            f0: 40.5,
+            d: 0.0,
+            e: -0.005,
+        };
+        let wgs84_wrap_gt = GeoTransform {
+            c0: 179.6,
+            a: 0.005,
+            b: 0.0,
+            f0: -17.0,
+            d: 0.0,
+            e: -0.005,
+        };
+        let mercator = CrsTransformer::WebMercatorFast;
+        let mercator_gt = GeoTransform {
+            c0: -11_200_000.0,
+            a: 500.0,
+            b: 0.0,
+            f0: 4_850_000.0,
+            d: 0.0,
+            e: -500.0,
+        };
+
+        for (grid, res_u8s) in [
+            (GridKind::H3, &[7u8, 9][..]),
+            (GridKind::A5, &[10u8, 13][..]),
+            (GridKind::S2, &[10u8, 14][..]),
+            (GridKind::Healpix, &[9u8, 12][..]),
+        ] {
+            for emit in [false, true] {
+                verify_walk_direct_against_oracle(grid, res_u8s, &wgs84, &wgs84_gt, None, emit);
+                verify_walk_direct_against_oracle(
+                    grid,
+                    res_u8s,
+                    &wgs84,
+                    &wgs84_gt,
+                    Some([-101.05, 40.42, -100.55, 40.48]),
+                    emit,
+                );
+                verify_walk_direct_against_oracle(
+                    grid,
+                    res_u8s,
+                    &wgs84,
+                    &wgs84_wrap_gt,
+                    Some([179.7, -17.2, -179.7, -16.9]),
+                    emit,
+                );
+                verify_walk_direct_against_oracle(
+                    grid,
+                    res_u8s,
+                    &mercator,
+                    &mercator_gt,
+                    Some([-100.55, 39.8, -100.1, 39.92]),
+                    emit,
+                );
+            }
+        }
     }
 }
