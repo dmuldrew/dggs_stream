@@ -12,10 +12,10 @@ use crate::aggregator::{NodataPolicy, SamplingPattern};
 use crate::error::{DggsStreamError, Result};
 use crate::grid::wrap_lon_180;
 use crate::raster::geotiff::GeoTiffStreamReader;
-use crate::raster::ground_area::{clipped_pixel_area, wgs84_pixel_area};
+use crate::raster::ground_area::wgs84_pixel_area;
 use crate::raster::mosaic::TileDescriptor;
 use crate::run_profile::{Counter, Phase, PhaseTimer};
-use crate::transfer::clip::visit_pixel_shapes;
+use crate::transfer::clip::{visit_ground_area_spans_into, ClipScratch};
 use crate::transfer::window::{BandSelection, ChunkCache, RowWindow};
 use crate::transfer::TransferMode;
 use std::collections::BTreeMap;
@@ -181,6 +181,7 @@ fn scan_block(
     let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
     let longitude = periodic_longitude_bounds(tile);
     let mut overlaps = Vec::new();
+    let mut clip_scratch = ClipScratch::default();
     let mut candidates = Vec::new();
     for cols in columns {
         let bbox = block_bbox(config.grid, block.resolution, tile, &block.rows, cols, true)
@@ -206,16 +207,20 @@ fn scan_block(
             for &(_, y) in polygon {
                 end = end.max(y.ceil() as i64);
             }
-            visit_pixel_shapes::<true>(polygon, rows, i64::from(window.width()), |c, r, shape| {
-                let (fraction, m2) = shape.map_or_else(
-                    || (1.0, row_areas[(r - rows.0) as usize]),
-                    |p| clipped_pixel_area(gt, p),
-                );
-                if fraction > 0.0 && m2 > 0.0 {
-                    overlaps.push(((r, c), fraction, m2));
-                }
-                true
-            })
+            visit_ground_area_spans_into(
+                polygon,
+                rows,
+                i64::from(window.width()),
+                gt,
+                &row_areas,
+                &mut clip_scratch,
+                |r, c0, c1, fraction, m2| {
+                    for c in c0..c1 {
+                        overlaps.push(((r, c), fraction, m2));
+                    }
+                    true
+                },
+            )
         });
         if !completed {
             return Err(DggsStreamError::InvalidParameter(format!("ground-area overlay cannot represent the boundary of cell {id:x} in longitude/latitude")));

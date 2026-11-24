@@ -271,6 +271,13 @@ impl RowWindow {
         let value = self.values[slot * self.rows as usize * self.width as usize + pixel];
         value.is_finite().then_some(value)
     }
+
+    /// Contiguous slice of `len` pixels in `slot` starting at `start` (NaN marks NoData).
+    #[inline]
+    pub(super) fn band_slice(&self, slot: usize, start: usize, len: usize) -> &[f64] {
+        let base = slot * self.rows as usize * self.width as usize + start;
+        &self.values[base..base + len]
+    }
 }
 
 /// Where a pixel's samples sit in an interleaved chunk.

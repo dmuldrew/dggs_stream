@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Overlay scans now use an Edge-DDA and Green's-theorem prefix-sum clipper with reusable per-worker scratch buffers, horizontal `OverlapRun` span encoding, and SIMD unit-slice accumulation for interior runs (including WGS84 ground-area overlay via ellipsoidal segment quadrature). Public APIs (`pixel_overlaps`, `polygon_area`) and output statistics are unchanged within floating-point tolerance (`< 1e-12`).
+
 - GeoTIFF CRS detection honours `GTModelTypeGeoKey`: a projected or geocentric raster that carries only a base geographic code now requires an explicit CRS.
 
 - Overlay skips polygon clipping for pixels wholly inside a full-height trapezoidal row slice. Boundary pixels retain their fractional weights.

@@ -25,6 +25,10 @@ impl TransferAccumulator for OverlayPartial {
     fn add(&mut self, value: f64, weight: f64) {
         self.stats.add(value, weight);
     }
+    fn add_band_unit_slice(&mut self, slot: usize, slice: &[f64]) -> usize {
+        debug_assert_eq!(slot, 0);
+        self.stats.add_band_unit_slice(0, slice)
+    }
     fn has_samples(&self) -> bool {
         self.covered > 0.0
     }

@@ -120,6 +120,7 @@ pub fn wgs84_pixel_area(gt: &GeoTransform, col: usize, row: usize) -> Result<f64
 /// pixel coordinates. The caller has validated a north-up EPSG:4326 transform.
 /// Green's theorem gives both areas as an edge integral of (x - origin) dy,
 /// with an additional latitude-dependent surface density for the physical area.
+#[cfg(test)]
 pub(crate) fn clipped_pixel_area(gt: &GeoTransform, polygon: &[(f64, f64)]) -> (f64, f64) {
     let Some(&(origin, _)) = polygon.first() else {
         return (0.0, 0.0);
@@ -157,6 +158,57 @@ pub(crate) fn clipped_pixel_area(gt: &GeoTransform, polygon: &[(f64, f64)]) -> (
     }
     let scale = WGS84_A.powi(2) * (1.0 - WGS84_E2) * gt.a.to_radians() * (-gt.e).to_radians();
     (fraction.abs().min(1.0), area.abs() * scale)
+}
+
+/// Ellipsoidal area integrals along a directed edge segment ascending from
+/// `y0` to `y1` (`y0 < y1`, in pixel-row coordinates) with local column coordinates
+/// `rx0` at `y0` and `rx1` at `y1` (in `[0, 1]` relative to pixel column `c`).
+///
+/// Returns `(local_m2, full_m2)` where:
+/// - `local_m2` is the ellipsoidal area inside `[c, c + 1] x [y0, y1]` to the
+///   right of the segment (`∫_{y0}^{y1} (1 - rx(y)) * w(y) dy`), and
+/// - `full_m2` is the ellipsoidal area of the unit-width strip `[c, c + 1] x [y0, y1]`
+///   (`∫_{y0}^{y1} w(y) dy`).
+pub(crate) fn segment_ellipsoidal_integrals(
+    gt: &GeoTransform,
+    rx0: f64,
+    y0: f64,
+    rx1: f64,
+    y1: f64,
+) -> (f64, f64) {
+    let dy = y1 - y0;
+    if dy <= 0.0 || !dy.is_finite() {
+        return (0.0, 0.0);
+    }
+    let drx = rx1 - rx0;
+    // Four-point Gauss-Legendre quadrature on segments of at most five degrees,
+    // matching `clipped_pixel_area`.
+    let n = ((dy * gt.e).abs() / 5.0).ceil().max(1.0) as usize;
+    let half = 0.5 / n as f64;
+    let mut local = 0.0;
+    let mut full = 0.0;
+    for i in 0..n {
+        let mid = (2 * i + 1) as f64 * half;
+        for (node, weight) in [
+            (0.3399810435848563, 0.6521451548625461),
+            (0.8611363115940526, 0.3478548451374538),
+        ] {
+            for t in [mid - half * node, mid + half * node] {
+                let lat =
+                    gt.e.mul_add(dy.mul_add(t, y0), gt.f0)
+                        .to_radians()
+                        .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+                let sin_lat = lat.sin();
+                let d = 1.0 - WGS84_E2 * sin_lat * sin_lat;
+                let w = dy * half * weight * lat.cos() / (d * d);
+                let rx = drx.mul_add(t, rx0).clamp(0.0, 1.0);
+                full += w;
+                local += (1.0 - rx) * w;
+            }
+        }
+    }
+    let scale = WGS84_A.powi(2) * (1.0 - WGS84_E2) * gt.a.to_radians() * (-gt.e).to_radians();
+    ((local * scale).max(0.0), (full * scale).max(0.0))
 }
 
 #[cfg(test)]
@@ -285,5 +337,30 @@ mod tests {
         let parts = wgs84_rectangle_area(-1.0, 10.0, 1.0, 11.0).unwrap()
             + wgs84_rectangle_area(-1.0, 11.0, 1.0, 12.0).unwrap();
         assert!((whole - parts).abs() < whole * 1e-14);
+    }
+
+    #[test]
+    fn segment_ellipsoidal_integrals_match_clipped_pixel_and_strip() {
+        for north in [5.0, 85.0] {
+            let gt = GeoTransform::from_gdal_array([179.0, 2.0, 0.0, north, 0.0, -10.0]);
+            let full = wgs84_pixel_area(&gt, 0, 0).unwrap();
+            // Triangle (0,0)-(1,0)-(0,1): only edge (1,0)->(0,1) slopes across the pixel,
+            // and the left edge (0,1)->(0,0) has rx=0 so right-of-segment area is `full` minus
+            // the area to the right of (1,0)->(0,1).
+            let (diag_local, strip) = segment_ellipsoidal_integrals(&gt, 1.0, 0.0, 0.0, 1.0);
+            assert!((strip / full - 1.0).abs() < 1e-12);
+            let triangle_m2 = strip - diag_local;
+            let (_, expected) = clipped_pixel_area(&gt, &[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]);
+            assert!((triangle_m2 / expected - 1.0).abs() < 1e-13);
+
+            // Sub-row segment with positive slope.
+            let (sub_local, sub_strip) = segment_ellipsoidal_integrals(&gt, 0.25, 0.2, 0.75, 0.8);
+            let (_, expected_right) =
+                clipped_pixel_area(&gt, &[(0.25, 0.2), (1.0, 0.2), (1.0, 0.8), (0.75, 0.8)]);
+            let (_, expected_left) =
+                clipped_pixel_area(&gt, &[(0.0, 0.2), (0.25, 0.2), (0.75, 0.8), (0.0, 0.8)]);
+            assert!((sub_local / expected_right - 1.0).abs() < 1e-13);
+            assert!(((sub_strip - sub_local) / expected_left - 1.0).abs() < 1e-13);
+        }
     }
 }
