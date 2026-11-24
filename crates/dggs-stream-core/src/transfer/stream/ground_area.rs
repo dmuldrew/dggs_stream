@@ -141,7 +141,10 @@ pub(crate) fn ground_area_overlay_tile(
                 let max_window_bytes = max_chunk_rows
                     .saturating_mul(layout.chunks_across as usize)
                     .saturating_mul(tile.reader.decoded_chunk_bytes());
-                if max_window_bytes <= config.decode_budget_bytes {
+                // Masked windows widen samples to f64, so the native-width estimate
+                // understates them: keep the byte-limited cache for those rasters.
+                let native_window = !tile.reader.metadata.has_internal_mask();
+                if native_window && max_window_bytes <= config.decode_budget_bytes {
                     cache = ChunkCache::default();
                     let misses = plan_full_width_chunk_misses(&tile, &blocks[next_block..run_end]);
                     if !misses.is_empty()

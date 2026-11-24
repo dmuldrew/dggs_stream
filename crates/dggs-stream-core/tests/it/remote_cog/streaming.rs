@@ -450,3 +450,65 @@ fn internal_mask_is_honored_over_http() {
         .count();
     assert_eq!(count, valid as f64);
 }
+
+/// Overlay and interpolate scans prefetch chunks over HTTP through worker pools and
+/// must match the local single-worker scan exactly.
+#[test]
+fn http_prefetched_transfer_scans_match_local_scans() {
+    use dggs_stream_core::aggregator::multi_horizon::{
+        MultiResolutionConfig, MultiScanHorizonStreamer,
+    };
+    use dggs_stream_core::transfer::{Interpolation, TransferMode};
+
+    if !MockHttpServer::is_networking_supported() {
+        return;
+    }
+    let (_tmp, path) = helpers::TestGeoTiffBuilder::new(160, 120)
+        .origin(-122.45, 37.80)
+        .pixel_size(0.001)
+        .create_tempfile::<f64, _>(|c, r| 1.0 + f64::from((3 * c + r) % 23) * 0.37);
+    let server = MockHttpServer::start(std::fs::read(&path).unwrap());
+    let url = format!("{}/transfer.tif", server.url_base);
+
+    let scan = |source: &str, workers: usize, transfer: TransferMode| {
+        let mut config = MultiResolutionConfig::single(10);
+        config.transfer = transfer;
+        config.decode_workers = workers;
+        config.fetch_workers = workers;
+        let reader = GeoTiffStreamReader::open(source).unwrap();
+        let mut streamer = MultiScanHorizonStreamer::new(reader, &config).unwrap();
+        let mut cells = std::collections::BTreeMap::new();
+        while streamer
+            .drain_completed_into(512, |_, rec| {
+                cells.insert(rec.cell_id, (rec.accumulator.count, rec.accumulator.sum));
+            })
+            .unwrap()
+            > 0
+        {}
+        cells
+    };
+    for transfer in [
+        TransferMode::Overlay {
+            weighted: true,
+            mass_preserve: false,
+        },
+        TransferMode::Interpolate(Interpolation::Bilinear),
+    ] {
+        let local = scan(path.to_str().unwrap(), 1, transfer);
+        let remote = scan(&url, 3, transfer);
+        assert!(local.len() > 4, "{transfer:?}");
+        assert_eq!(local.len(), remote.len(), "{transfer:?}");
+        for (id, (count, sum)) in &local {
+            let (rc, rs) = remote[id];
+            assert!(
+                (count - rc).abs() <= 1e-9 * count.max(1.0),
+                "{transfer:?} {id}"
+            );
+            assert!(
+                (sum - rs).abs() <= 1e-9 * sum.abs().max(1.0),
+                "{transfer:?} {id}"
+            );
+        }
+    }
+    assert!(server.request_count.load(Ordering::SeqCst) > 1);
+}

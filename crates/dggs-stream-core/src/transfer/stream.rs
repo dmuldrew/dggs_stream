@@ -86,19 +86,17 @@ pub trait TransferAccumulator: Send + 'static {
         nodata: Option<f64>,
         scaling: BandScaling,
     ) -> usize {
-        crate::dispatch_samples!(samples, nodata, |slice, nd| {
-            let mut valid = 0;
-            for &raw in slice {
-                if SimdSpanAccumulate::is_valid(raw, nd) {
-                    let val = scaling.apply(SimdSpanAccumulate::to_f64_val(raw));
-                    if val.is_finite() {
-                        self.add_band(slot, val, 1.0);
-                        valid += 1;
-                    }
-                }
-            }
-            valid
-        })
+        // Route through `add_band_unit_slice` so accumulators overriding it behave
+        // the same on native and dense windows.
+        let values: Vec<f64> = crate::dispatch_samples!(samples, nodata, |slice, nd| {
+            slice
+                .iter()
+                .filter(|&&raw| SimdSpanAccumulate::is_valid(raw, nd))
+                .map(|&raw| scaling.apply(SimdSpanAccumulate::to_f64_val(raw)))
+                .filter(|v| v.is_finite())
+                .collect()
+        });
+        self.add_band_unit_slice(slot, &values)
     }
     /// Record geometric overlap, including missing pixels, for partition merging.
     fn cover(&mut self, _area: f64) {}
@@ -205,7 +203,14 @@ impl TransferAccumulator for ContinuousAccumulator {
                 self.merge(&span);
                 return span.count as usize;
             }
-            if scaling.scale.is_finite()
+            // Calibrating the reduced span equals calibrating each sample unless the
+            // offset cancels most of the raw magnitude: the raw sums then cannot hold
+            // the small differences that calibrating first would keep. Losing at most
+            // three bits of the mean is accepted; anything more takes the per-sample path.
+            let raw_mean = scaling.scale * (span.sum / span.count);
+            let cancels = (raw_mean + scaling.offset).abs() * 8.0 < raw_mean.abs();
+            if !cancels
+                && scaling.scale.is_finite()
                 && scaling.offset.is_finite()
                 && (scaling.scale * scaling.scale).is_finite()
                 && scaling.apply(span.min).is_finite()
@@ -1918,6 +1923,31 @@ impl TransferStream<super::OverlayPartial> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Native samples reduced as a span and then calibrated must agree with
+    /// calibrating each sample first, even when the offset cancels the raw
+    /// magnitude: the raw sum of these four values cannot represent the +2.
+    #[test]
+    fn native_span_calibration_keeps_differences_the_offset_exposes() {
+        let samples = tiff::decoder::DecodingResult::F64(vec![1e16, 1e16, 1e16, 1e16 + 2.0]);
+        let scaling = BandScaling {
+            scale: 1.0,
+            offset: -1e16,
+        };
+        let mut native = ContinuousAccumulator::empty(false);
+        let valid =
+            native.add_band_native_unit_slice(0, BorrowedSamples::from(&samples), None, scaling);
+        let mut per_sample = ContinuousAccumulator::empty(false);
+        for raw in [1e16, 1e16, 1e16, 1e16 + 2.0] {
+            per_sample.update(scaling.apply(raw));
+        }
+        assert_eq!(valid, 4);
+        assert_eq!(per_sample.sum, 2.0, "the per-sample reference is exact");
+        assert_eq!(native.count, per_sample.count);
+        assert_eq!(native.sum, per_sample.sum);
+        assert_eq!((native.min, native.max), (per_sample.min, per_sample.max));
+        assert!((native.m2 - per_sample.m2).abs() <= 1e-12 * per_sample.m2.max(1.0));
+    }
     use crate::raster::mosaic::OverlapRule;
     use crate::raster::GeoTiffStreamReader;
     use std::collections::BTreeMap;
