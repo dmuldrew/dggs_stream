@@ -788,31 +788,57 @@ fn overlay_rows(batches: &[RecordBatch]) -> BTreeMap<(u8, u64), OverlayStats> {
     rows
 }
 
-/// Every partition of a plan scanned through the shipped JSON spec, then merged.
+/// Every partition of a plan scanned through the shipped JSON spec. Rows without a
+/// `partial_state` are final (an interior H3 cell finished on its worker); the rest
+/// are merged. Returns the cells, the number of partitions and of final rows.
 fn partitioned_overlay(
     paths: &[PathBuf],
     config: &MultiResolutionConfig,
     target_chunks: usize,
-) -> (BTreeMap<(u8, u64), OverlayStats>, usize) {
+) -> (BTreeMap<(u8, u64), OverlayStats>, usize, usize) {
     let plan = plan_partitions(&open(paths, OverlapRule::Cutline), target_chunks).unwrap();
-    let mut partials = Vec::new();
+    let (mut finals, mut partials) = (Vec::new(), Vec::new());
     for partition in &plan {
         let mut cfg = config.clone();
         cfg.partition = Some(ScanPartition::from_json(&partition.to_json()).unwrap());
         let reader = PartitionedBatchReader::open_continuous(paths, &cfg, None, 512).unwrap();
         for batch in reader {
             let batch = batch.unwrap();
-            // Overlay partitions hand every touched cell on, none as a final row.
             let state = batch.schema.index_of(PARTIAL_STATE_COLUMN).unwrap();
             let ColumnArray::Binary { validity, .. } = &batch.columns[state] else {
                 panic!("partial states");
             };
-            assert!(validity.is_none(), "a final row in an overlay partition");
-            partials.push(batch);
+            // Split into runs of final (null state) and partial rows.
+            let partial: Vec<bool> = validity
+                .clone()
+                .unwrap_or_else(|| vec![true; batch.num_rows]);
+            let mut start = 0;
+            while start < partial.len() {
+                let end = (start..partial.len())
+                    .find(|&i| partial[i] != partial[start])
+                    .unwrap_or(partial.len());
+                let run = batch.slice(start, end - start);
+                if partial[start] {
+                    partials.push(run);
+                } else {
+                    finals.push(run);
+                }
+                start = end;
+            }
         }
     }
-    let (_, merged) = merge_partial_batches(&partials, false, config, None, 512).unwrap();
-    (overlay_rows(&merged), plan.len())
+    let final_rows = overlay_rows(&finals);
+    let mut cells = final_rows.clone();
+    if !partials.is_empty() {
+        let (_, merged) = merge_partial_batches(&partials, false, config, None, 512).unwrap();
+        for (key, stats) in overlay_rows(&merged) {
+            assert!(
+                cells.insert(key, stats).is_none(),
+                "cell {key:?} both final and merged"
+            );
+        }
+    }
+    (cells, plan.len(), final_rows.len())
 }
 
 #[test]
@@ -847,7 +873,11 @@ fn weighted_overlay_partitions_match_single_scan() {
 
         let mut prev = 0;
         for target in [20, 7, 3] {
-            let (merged, partitions) = partitioned_overlay(&paths, &config, target);
+            let (merged, partitions, finals) = partitioned_overlay(&paths, &config, target);
+            if target == 3 {
+                // Large partitions have interior cells, finished on their workers.
+                assert!(finals > 0, "no cell was finalized on a worker");
+            }
             assert!(
                 partitions > prev,
                 "target {target}: {partitions} partitions"

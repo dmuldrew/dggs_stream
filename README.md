@@ -492,8 +492,10 @@ that each read a disjoint set of TIFF tiles, with results identical to a single 
 plan the partitions from metadata, scan each one, then merge the few cells that straddle
 a partition edge. Rows whose `partial_state` column is null are final; the others are
 merged per cell. A continuous weighted overlay scan (`transfer="overlay"`, Python and Spark)
-is the exception: it needs each cell's total covered area, so every touched cell is partial
-and goes through the merge (see [Partitioned weighted overlay](docs/engines/spark.md#partitioned-weighted-overlay)).
+differs in what is partial: a cell's coverage decision needs its total covered area, so
+a cell that another partition might also touch stays partial, and the rest are finalized
+by their worker on H3 and WGS84 tiles; projected overlay emits only partial rows (see
+[Partitioned weighted overlay](docs/engines/spark.md#partitioned-weighted-overlay)).
 
 ```python
 import pyarrow as pa, pyarrow.compute as pc, dggs_stream
