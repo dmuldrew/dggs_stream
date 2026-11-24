@@ -1,8 +1,8 @@
 //! Physical-area overlay for a single north-up WGS84 raster.
 use super::{
-    block_bbox, cells_in_bbox, periodic_longitude_bounds, plan_tile, project_cell_polygons, Block,
-    ContainmentMode, OverlapParallelism, ProjectedCell, ProjectedRings, COARSE_CELL_DIAMETER_KM,
-    DIRECT_BATCH_CELLS, MIN_PARALLEL_DIRECT_CELLS,
+    cells_in_bbox, pad_block_extent, periodic_longitude_bounds, plan_tile, project_cell_polygons,
+    raw_block_extent, Block, ContainmentMode, OverlapParallelism, ProjectedCell, ProjectedRings,
+    RawBlockExtent, COARSE_CELL_DIAMETER_KM, DIRECT_BATCH_CELLS, MIN_PARALLEL_DIRECT_CELLS,
 };
 use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::area_accumulator::AreaAccumulator;
@@ -89,40 +89,59 @@ pub(crate) fn ground_area_overlay_tile(
     }
     let parallelism = OverlapParallelism::from_workers(config.aggregation_workers)?;
     let layout = tile.reader.chunk_layout;
-    let one_row_native_bytes =
-        (layout.chunks_across as usize).saturating_mul(tile.reader.decoded_chunk_bytes());
+    let chunk_cols_across = if columns.len() == 1 {
+        let c = &columns[0];
+        if c.is_empty() {
+            0
+        } else {
+            (c.end.div_ceil(layout.chunk_width) - c.start / layout.chunk_width) as usize
+        }
+    } else {
+        layout.chunks_across as usize
+    };
+    let one_row_native_bytes = chunk_cols_across.saturating_mul(tile.reader.decoded_chunk_bytes());
     let allow_chunk_row_window = one_row_native_bytes <= config.decode_budget_bytes;
-    let mut blocks = Vec::new();
     for &res in &config.resolutions {
         if config.grid.spec().max_cell_diameter_km(res) > COARSE_CELL_DIAMETER_KM {
             return Err(DggsStreamError::InvalidParameter("ground-area overlay requires a valid resolution with polygon clipping (cell diameter bound at most 500 km)".into()));
         }
-        if !rows.is_empty() && !columns.is_empty() {
-            let mut bands = Vec::new();
-            plan_tile(
-                config.grid,
-                config.transfer,
-                res,
-                0,
-                &tile,
-                1,
-                allow_chunk_row_window,
-                &mut bands,
-            );
-            for mut block in bands {
-                block.rows = block.rows.start.max(rows.start)..block.rows.end.min(rows.end);
-                if !block.rows.is_empty() {
-                    block.last_of_tile = block.rows.end == rows.end;
-                    blocks.push(block);
-                }
+    }
+    let mut blocks = Vec::new();
+    if !config.resolutions.is_empty() && !rows.is_empty() && !columns.is_empty() {
+        let finest_res = config.resolutions.iter().copied().max().unwrap_or(0);
+        let mut bands = Vec::new();
+        plan_tile(
+            config.grid,
+            config.transfer,
+            finest_res,
+            false,
+            0,
+            &tile,
+            1,
+            allow_chunk_row_window,
+            &mut bands,
+        );
+        for mut block in bands {
+            block.rows = block.rows.start.max(rows.start)..block.rows.end.min(rows.end);
+            if columns.len() == 1 {
+                block.cols = columns[0].clone();
             }
+            block.last_of_tile = false;
+            if !block.rows.is_empty() && !block.cols.is_empty() {
+                blocks.push(block);
+            }
+        }
+        if let Some(last) = blocks.last_mut() {
+            last.last_of_tile = true;
         }
     }
     let config = config.clone();
     let mut cache = ChunkCache::default();
     let mut prefetcher: Option<PrefetchedChunkReader> = None;
-    let mut current_resolution: Option<u8> = None;
-    let mut pending = BTreeMap::new();
+    let mut prefetch_initialized = false;
+    let mut pending: Vec<BTreeMap<u64, Cell>> = (0..config.resolutions.len())
+        .map(|_| BTreeMap::new())
+        .collect();
     let mut ready = Vec::new().into_iter();
     let mut next_block = 0usize;
     let mut failed = false;
@@ -132,18 +151,11 @@ pub(crate) fn ground_area_overlay_tile(
                 return Some(Ok(row));
             }
             let block = blocks.get(next_block)?.clone();
-            if current_resolution != Some(block.resolution) {
-                cache.clear_and_recycle(prefetcher.as_ref());
-                prefetcher = None;
-                current_resolution = Some(block.resolution);
-                let run_end = next_block
-                    + blocks[next_block..]
-                        .iter()
-                        .take_while(|b| b.resolution == block.resolution)
-                        .count();
+            if !prefetch_initialized {
+                prefetch_initialized = true;
                 let layout = tile.reader.chunk_layout;
                 let height = tile.reader.metadata.height;
-                let max_chunk_rows = blocks[next_block..run_end]
+                let max_chunk_rows = blocks
                     .iter()
                     .filter_map(|b| {
                         let r = b.rows.start.min(height)..b.rows.end.min(height);
@@ -155,21 +167,21 @@ pub(crate) fn ground_area_overlay_tile(
                     .max()
                     .unwrap_or(0);
                 let max_window_bytes = max_chunk_rows
-                    .saturating_mul(layout.chunks_across as usize)
+                    .saturating_mul(chunk_cols_across)
                     .saturating_mul(tile.reader.decoded_chunk_bytes());
                 // Masked windows widen samples to f64, so the native-width estimate
                 // understates them: keep the byte-limited cache for those rasters.
                 let native_window = !tile.reader.metadata.has_internal_mask();
                 if native_window && max_window_bytes <= config.decode_budget_bytes {
                     cache = ChunkCache::default();
-                    let misses = plan_full_width_chunk_misses(&tile, &blocks[next_block..run_end]);
+                    let misses = plan_chunk_misses(&tile, &blocks);
                     if !misses.is_empty()
                         && (tile.reader.is_remote()
                             || (config.decode_workers > 1 && misses.len() > 2))
                     {
                         let chunk_bytes = tile.reader.decoded_chunk_bytes().max(1);
                         let budget_chunks = (config.decode_budget_bytes / chunk_bytes).max(16);
-                        let target_lookahead = (layout.chunks_across as usize)
+                        let target_lookahead = chunk_cols_across
                             .max(config.prefetch_chunks)
                             .max(config.decode_workers * 4)
                             .min(512);
@@ -226,7 +238,7 @@ pub(crate) fn ground_area_overlay_tile(
     }))
 }
 
-fn plan_full_width_chunk_misses(tile: &TileDescriptor, run_blocks: &[Block]) -> Vec<u32> {
+fn plan_chunk_misses(tile: &TileDescriptor, run_blocks: &[Block]) -> Vec<u32> {
     let meta = &tile.reader.metadata;
     let (width, height) = (meta.width, meta.height);
     let layout = tile.reader.chunk_layout;
@@ -238,13 +250,19 @@ fn plan_full_width_chunk_misses(tile: &TileDescriptor, run_blocks: &[Block]) -> 
     let mut misses = Vec::new();
     for block in run_blocks {
         let rows = block.rows.start.min(height)..block.rows.end.min(height);
-        if rows.is_empty() || width == 0 {
+        let cols = block.cols.start.min(width)..block.cols.end.min(width);
+        if rows.is_empty() || cols.is_empty() || width == 0 {
             continue;
         }
         let chunk_rows = rows.start / layout.chunk_height..=(rows.end - 1) / layout.chunk_height;
-        cached.retain(|&index| chunk_rows.contains(&(index / layout.chunks_across)));
+        let chunk_cols = cols.start / layout.chunk_width..cols.end.div_ceil(layout.chunk_width);
+        cached.retain(|&index| {
+            let chunk_row = index / layout.chunks_across;
+            let chunk_col = index % layout.chunks_across;
+            chunk_rows.contains(&chunk_row) && chunk_cols.contains(&chunk_col)
+        });
         for chunk_row in chunk_rows {
-            for chunk_col in 0..layout.chunks_across {
+            for chunk_col in chunk_cols.clone() {
                 let index = chunk_row * layout.chunks_across + chunk_col;
                 let bounds = layout.get_chunk_bounds(index, width, height);
                 if bounds.width == 0 || bounds.height == 0 {
@@ -505,7 +523,7 @@ fn scan_block(
     columns: &[Range<u32>],
     cache: &mut ChunkCache,
     prefetcher: Option<&PrefetchedChunkReader>,
-    pending: &mut BTreeMap<u64, Cell>,
+    pending_by_res: &mut [BTreeMap<u64, Cell>],
     parallelism: &OverlapParallelism,
 ) -> Result<Vec<(u8, u64, AreaAccumulator)>> {
     let decode = prefetcher
@@ -521,9 +539,7 @@ fn scan_block(
             apply_scale_offset: config.apply_scale_offset,
         },
         block.rows.clone(),
-        // Not a partitioned scan: decode the tile's full width, as before windows
-        // could be limited to a partition's columns.
-        0..tile.reader.metadata.width,
+        block.cols.clone(),
         cache,
         prefetcher,
         config.profile.as_deref(),
@@ -539,23 +555,14 @@ fn scan_block(
         .collect::<Result<_>>()?;
     let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
     let longitude = periodic_longitude_bounds(tile);
-    let mut candidates = Vec::new();
-    for cols in columns {
-        let bbox = block_bbox(config.grid, block.resolution, tile, &block.rows, cols, true)
-            .ok_or_else(|| {
+    let raw_extents: Vec<RawBlockExtent> = columns
+        .iter()
+        .map(|cols| {
+            raw_block_extent(tile, &block.rows, cols).ok_or_else(|| {
                 DggsStreamError::InvalidParameter("invalid WGS84 overlay extent".into())
-            })?;
-        candidates.extend(cells_in_bbox(
-            config.grid,
-            bbox,
-            block.resolution,
-            ContainmentMode::Covers,
-        )?);
-    }
-    if columns.len() > 1 {
-        candidates.sort_unstable();
-        candidates.dedup();
-    }
+            })
+        })
+        .collect::<Result<_>>()?;
 
     let ctx = GroundAreaCtx {
         grid: config.grid,
@@ -571,78 +578,96 @@ fn scan_block(
         need_coverage: config.valid_coverage_threshold.is_some_and(|t| t > 0.0),
     };
 
-    let mut apply_outcome = |id: u64, outcome: GroundAreaOutcome| -> Result<()> {
-        match outcome {
-            GroundAreaOutcome::Empty => {}
-            GroundAreaOutcome::NoDataOnly { end_row } => {
-                if let Some(cell) = pending.get_mut(&id) {
-                    cell.end_row = end_row;
-                }
-            }
-            GroundAreaOutcome::Invalid(err) => return Err(err),
-            GroundAreaOutcome::Accumulated {
-                end_row,
-                stats,
-                covered_m2,
-            } => {
-                let cell = pending.entry(id).or_default();
-                cell.end_row = end_row;
-                cell.covered_m2 += covered_m2;
-                cell.stats.merge(&stats);
-                if !cell.stats.is_finite() {
-                    return Err(DggsStreamError::InvalidParameter(
-                        "overflow in ground-area overlay statistics".into(),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    };
-
-    if parallelism.should_run_parallel(candidates.len(), MIN_PARALLEL_DIRECT_CELLS) {
-        let mut outcomes: Vec<GroundAreaOutcome> = Vec::new();
-        for batch in candidates.chunks(DIRECT_BATCH_CELLS) {
-            outcomes.resize_with(batch.len(), GroundAreaOutcome::default);
-            parallelism.install(|| {
-                outcomes.par_iter_mut().zip(batch).for_each_init(
-                    GroundAreaWorkerScratch::default,
-                    |scratch, (out, &id)| {
-                        *out = clip_and_accumulate_ground_area_cell(id, &ctx, scratch);
-                    },
-                );
-            });
-            for (&id, outcome) in batch.iter().zip(outcomes.drain(..)) {
-                apply_outcome(id, outcome)?;
-            }
-        }
-    } else {
-        let mut scratch = GroundAreaWorkerScratch::default();
-        for &id in &candidates {
-            apply_outcome(
-                id,
-                clip_and_accumulate_ground_area_cell(id, &ctx, &mut scratch),
-            )?;
-        }
-    }
-
     let mut ready = Vec::new();
-    pending.retain(|id, cell| {
-        if cell.end_row > rows.1 && !block.last_of_tile {
-            return true;
+    let mut outcomes: Vec<GroundAreaOutcome> = Vec::new();
+    for (res_idx, &resolution) in config.resolutions.iter().enumerate() {
+        let mut candidates = Vec::new();
+        for ext in &raw_extents {
+            let bbox = pad_block_extent(ext, config.grid, resolution, true);
+            candidates.extend(cells_in_bbox(
+                config.grid,
+                bbox,
+                resolution,
+                ContainmentMode::Covers,
+            )?);
         }
-        let a = &cell.stats;
-        if a.retained_area_m2() > 0.0
-            && config
-                .valid_coverage_threshold
-                .is_none_or(|t| a.retained_area_m2() >= t * cell.covered_m2)
-            && config.min_count.is_none_or(|n| a.pixel_count() >= n)
-            && config.min_mean.is_none_or(|n| a.area_stats().mean() >= n)
-            && config.max_mean.is_none_or(|n| a.area_stats().mean() <= n)
-        {
-            ready.push((block.resolution, *id, std::mem::take(&mut cell.stats)));
+        if raw_extents.len() > 1 {
+            candidates.sort_unstable();
+            candidates.dedup();
         }
-        false
-    });
+
+        let pending = &mut pending_by_res[res_idx];
+        let mut apply_outcome = |id: u64, outcome: GroundAreaOutcome| -> Result<()> {
+            match outcome {
+                GroundAreaOutcome::Empty => {}
+                GroundAreaOutcome::NoDataOnly { end_row } => {
+                    if let Some(cell) = pending.get_mut(&id) {
+                        cell.end_row = end_row;
+                    }
+                }
+                GroundAreaOutcome::Invalid(err) => return Err(err),
+                GroundAreaOutcome::Accumulated {
+                    end_row,
+                    stats,
+                    covered_m2,
+                } => {
+                    let cell = pending.entry(id).or_default();
+                    cell.end_row = end_row;
+                    cell.covered_m2 += covered_m2;
+                    cell.stats.merge(&stats);
+                    if !cell.stats.is_finite() {
+                        return Err(DggsStreamError::InvalidParameter(
+                            "overflow in ground-area overlay statistics".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        if parallelism.should_run_parallel(candidates.len(), MIN_PARALLEL_DIRECT_CELLS) {
+            for batch in candidates.chunks(DIRECT_BATCH_CELLS) {
+                outcomes.resize_with(batch.len(), GroundAreaOutcome::default);
+                parallelism.install(|| {
+                    outcomes.par_iter_mut().zip(batch).for_each_init(
+                        GroundAreaWorkerScratch::default,
+                        |scratch, (out, &id)| {
+                            *out = clip_and_accumulate_ground_area_cell(id, &ctx, scratch);
+                        },
+                    );
+                });
+                for (&id, outcome) in batch.iter().zip(outcomes.drain(..)) {
+                    apply_outcome(id, outcome)?;
+                }
+            }
+        } else {
+            let mut scratch = GroundAreaWorkerScratch::default();
+            for &id in &candidates {
+                apply_outcome(
+                    id,
+                    clip_and_accumulate_ground_area_cell(id, &ctx, &mut scratch),
+                )?;
+            }
+        }
+
+        pending.retain(|id, cell| {
+            if cell.end_row > rows.1 && !block.last_of_tile {
+                return true;
+            }
+            let a = &cell.stats;
+            if a.retained_area_m2() > 0.0
+                && config
+                    .valid_coverage_threshold
+                    .is_none_or(|t| a.retained_area_m2() >= t * cell.covered_m2)
+                && config.min_count.is_none_or(|n| a.pixel_count() >= n)
+                && config.min_mean.is_none_or(|n| a.area_stats().mean() >= n)
+                && config.max_mean.is_none_or(|n| a.area_stats().mean() <= n)
+            {
+                ready.push((resolution, *id, std::mem::take(&mut cell.stats)));
+            }
+            false
+        });
+    }
     Ok(ready)
 }
 
@@ -661,16 +686,17 @@ mod tests {
         let height = tile.reader.metadata.height;
         let run = |ends: &[u32]| {
             let mut cells = BTreeMap::new();
-            let mut pending = BTreeMap::new();
+            let mut pending = vec![BTreeMap::new()];
             let mut cache = ChunkCache::with_budget(256);
             let mut start = 0;
             for &end in ends {
+                let rows = start..end;
+                let cols = 0..width;
                 let block = Block {
-                    resolution: 10,
                     tile: 0,
-                    rows: start..end,
-                    cols: 0..width,
-                    bbox: None,
+                    rows: rows.clone(),
+                    cols: cols.clone(),
+                    extent: raw_block_extent(&tile, &rows, &cols),
                     last_of_tile: end == height,
                 };
                 for (_, id, stats) in scan_block(
@@ -688,11 +714,11 @@ mod tests {
                     assert!(cells.insert(id, stats).is_none());
                 }
                 if end < height {
-                    assert!(!pending.is_empty());
+                    assert!(!pending[0].is_empty());
                 }
                 start = end;
             }
-            assert!(pending.is_empty());
+            assert!(pending[0].is_empty());
             cells
         };
         let split = run(&[8, height]);

@@ -161,29 +161,36 @@ impl MultiScanHorizonStreamer {
 
     /// Initialize a new MultiScanHorizonStreamer from a single GeoTIFF reader
     pub fn new(reader: GeoTiffStreamReader, config: &MultiResolutionConfig) -> Result<Self> {
-        let kernel = ContinuousKernel::from_config(config);
-        let track_quantiles = kernel.track_quantiles;
-        let mut inner = MultiHorizonStreamer::new(reader, config, kernel)?;
-        let (transfer, transfer_mode) = transfer_stream(&mut inner, config)?;
-        Ok(Self {
-            inner,
-            track_quantiles,
-            transfer,
-            transfer_mode,
-        })
+        let mosaic = Arc::new(MosaicReader::from_single_reader(
+            reader,
+            config.bbox,
+            config.custom_crs.as_deref(),
+        )?);
+        Self::new_mosaic(mosaic, config)
     }
 
     /// Initialize a new MultiScanHorizonStreamer from a multi-file MosaicReader
     pub fn new_mosaic(mosaic: Arc<MosaicReader>, config: &MultiResolutionConfig) -> Result<Self> {
         let kernel = ContinuousKernel::from_config(config);
         let track_quantiles = kernel.track_quantiles;
-        let mut inner = MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?;
-        let (transfer, transfer_mode) = transfer_stream(&mut inner, config)?;
+        let resolved = config
+            .transfer
+            .resolve_for_mosaic(mosaic.as_ref(), config, false);
+        let (inner, transfer) = if resolved.is_assign_centers() {
+            (
+                MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?,
+                None,
+            )
+        } else {
+            let inner = MultiHorizonStreamer::new_mosaic_without_prefetch(mosaic, config, kernel)?;
+            let stream = open_transfer_stream(inner.mosaic_arc(), config, resolved)?;
+            (inner, Some(Box::new(stream)))
+        };
         Ok(Self {
             inner,
             track_quantiles,
             transfer,
-            transfer_mode,
+            transfer_mode: resolved,
         })
     }
 
@@ -440,23 +447,12 @@ impl Drop for MultiScanHorizonStreamer {
     }
 }
 
-/// The transfer stream of a non-default `config.transfer`, with the horizon kernel's
-/// prefetch stopped: the transfer modes read the raster themselves. Returns both the
-/// stream (when non-default) and the resolved concrete [`TransferMode`].
-fn transfer_stream<K: HorizonStreamKernel>(
-    inner: &mut MultiHorizonStreamer<K>,
+/// Build a `TransferStream` using `resolved` when `config.transfer` differs (e.g. `Auto`).
+pub(super) fn open_transfer_stream<A: crate::transfer::TransferAccumulator>(
+    mosaic: Arc<MosaicReader>,
     config: &MultiResolutionConfig,
-) -> Result<(
-    Option<Box<crate::transfer::TransferStream<ContinuousAccumulator>>>,
-    crate::transfer::TransferMode,
-)> {
-    let resolved = config
-        .transfer
-        .resolve_for_mosaic(inner.mosaic_arc().as_ref(), config, false);
-    if resolved.is_assign_centers() {
-        return Ok((None, resolved));
-    }
-    inner.stop_prefetch();
+    resolved: crate::transfer::TransferMode,
+) -> Result<crate::transfer::TransferStream<A>> {
     let mut resolved_cfg;
     let cfg = if resolved == config.transfer {
         config
@@ -465,6 +461,5 @@ fn transfer_stream<K: HorizonStreamKernel>(
         resolved_cfg.transfer = resolved;
         &resolved_cfg
     };
-    let stream = crate::transfer::TransferStream::new(inner.mosaic_arc(), cfg)?;
-    Ok((Some(Box::new(stream)), resolved))
+    crate::transfer::TransferStream::new(mosaic, cfg)
 }
