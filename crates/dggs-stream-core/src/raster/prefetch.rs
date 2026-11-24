@@ -586,8 +586,33 @@ impl PrefetchedChunkReader {
         buffer_capacity: usize,
         num_workers: usize,
     ) -> Self {
+        Self::spawn_with_profile(
+            reader,
+            chunk_indices,
+            buffer_capacity,
+            num_workers,
+            crate::raster::remote_prefetch::DEFAULT_PREFETCH_WORKERS,
+            None,
+        )
+    }
+
+    /// [`Self::spawn_with_workers`] with an explicit remote-fetch worker count and
+    /// optional [`RunProfile`](crate::run_profile::RunProfile) telemetry per chunk.
+    pub fn spawn_with_profile(
+        reader: GeoTiffStreamReader,
+        chunk_indices: Vec<u32>,
+        buffer_capacity: usize,
+        num_workers: usize,
+        fetch_workers: usize,
+        profile: Option<Arc<crate::run_profile::RunProfile>>,
+    ) -> Self {
         let remote_queue = if reader.is_remote() {
-            RemoteChunkPrefetchQueue::spawn_single(&reader, &chunk_indices, None).map(Arc::new)
+            let remote_config = crate::raster::remote_prefetch::RemotePrefetchConfig {
+                num_workers: fetch_workers,
+                ..Default::default()
+            };
+            RemoteChunkPrefetchQueue::spawn_single(&reader, &chunk_indices, Some(remote_config))
+                .map(Arc::new)
         } else {
             None
         };
@@ -620,6 +645,7 @@ impl PrefetchedChunkReader {
             let worker_queue = Arc::clone(&queue);
             let worker_buffer_pool = Arc::clone(&buffer_pool);
             let worker_remote_queue = remote_queue.clone();
+            let worker_profile = profile.clone();
 
             let handle = thread::spawn(move || {
                 let q = Arc::clone(&worker_queue);
@@ -650,12 +676,24 @@ impl PrefetchedChunkReader {
                         }
                         let chunk_idx = worker_indices[job_id];
                         let recycled_buf = worker_buffer_pool.pop();
+                        let timer = worker_profile
+                            .as_ref()
+                            .map(|_| crate::run_profile::PhaseTimer::start());
                         let prefetched_bytes = worker_remote_queue
                             .as_ref()
                             .filter(|_| !worker_reader.is_planar())
                             .map(|q| q.get_chunk_payload(0, chunk_idx))
                             .transpose()
                             .map(Option::flatten);
+                        let timer = match (worker_profile.as_deref(), timer) {
+                            (Some(profile), Some(timer)) => {
+                                if worker_remote_queue.is_some() {
+                                    timer.stop(profile, crate::run_profile::Phase::Fetch);
+                                }
+                                Some(crate::run_profile::PhaseTimer::start())
+                            }
+                            _ => None,
+                        };
 
                         let item = prefetched_bytes
                             .and_then(|payload| {
@@ -667,6 +705,20 @@ impl PrefetchedChunkReader {
                                 )
                             })
                             .map(|(bounds, data)| (chunk_idx, bounds, data));
+                        if let (Some(profile), Some(timer)) = (worker_profile.as_deref(), timer) {
+                            use crate::run_profile::{Counter, Phase};
+                            timer.stop(profile, Phase::Decode);
+                            profile.count(
+                                Counter::Chunks,
+                                worker_reader.physical_chunks_present(chunk_idx),
+                            );
+                            if let Ok((_, _, ref data)) = item {
+                                profile.count(
+                                    Counter::DecodedBytes,
+                                    decoded_buffer_bytes(data) as u64,
+                                );
+                            }
+                        }
 
                         if !worker_queue.push(job_id, item) {
                             break;
@@ -690,6 +742,11 @@ impl PrefetchedChunkReader {
             _remote_queue: remote_queue,
             _worker_handles: handles,
         }
+    }
+
+    /// Return a single decoded buffer back to the worker pool for zero-allocation reuse.
+    pub fn recycle(&self, buf: DecodingResult) {
+        self.buffer_pool.push(buf);
     }
 
     /// Return processed decoding buffers back to the worker pool for zero-allocation reuse

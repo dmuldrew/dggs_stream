@@ -14,12 +14,14 @@ use crate::grid::wrap_lon_180;
 use crate::raster::geotiff::GeoTiffStreamReader;
 use crate::raster::ground_area::wgs84_pixel_area;
 use crate::raster::mosaic::TileDescriptor;
+use crate::raster::prefetch::PrefetchedChunkReader;
 use crate::run_profile::{Counter, Phase, PhaseTimer};
 use crate::transfer::clip::{
     merge_overlapping_runs, visit_ground_area_spans_into, ClipScratch, PixelRun,
 };
-use crate::transfer::window::{BandSelection, ChunkCache, RowWindow};
+use crate::transfer::window::{chunk_is_absent, BandSelection, ChunkCache, RowWindow};
 use crate::transfer::TransferMode;
+use rustc_hash::FxHashSet;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -101,18 +103,89 @@ pub(crate) fn ground_area_overlay_tile(
         }
     }
     let config = config.clone();
-    let mut cache = ChunkCache::with_budget(config.decode_budget_bytes);
+    let mut cache = ChunkCache::default();
+    let mut prefetcher: Option<PrefetchedChunkReader> = None;
+    let mut current_resolution: Option<u8> = None;
     let mut pending = BTreeMap::new();
     let mut ready = Vec::new().into_iter();
-    let mut blocks = blocks.into_iter();
+    let mut next_block = 0usize;
     let mut failed = false;
     Ok(std::iter::from_fn(move || {
         while !failed {
             if let Some(row) = ready.next() {
                 return Some(Ok(row));
             }
-            let block = blocks.next()?;
-            let mut run = || scan_block(&tile, &config, &block, &columns, &mut cache, &mut pending);
+            let block = blocks.get(next_block)?.clone();
+            if current_resolution != Some(block.resolution) {
+                cache.clear_and_recycle(prefetcher.as_ref());
+                prefetcher = None;
+                current_resolution = Some(block.resolution);
+                let run_end = next_block
+                    + blocks[next_block..]
+                        .iter()
+                        .take_while(|b| b.resolution == block.resolution)
+                        .count();
+                let layout = tile.reader.chunk_layout;
+                let height = tile.reader.metadata.height;
+                let max_chunk_rows = blocks[next_block..run_end]
+                    .iter()
+                    .filter_map(|b| {
+                        let r = b.rows.start.min(height)..b.rows.end.min(height);
+                        (!r.is_empty()).then(|| {
+                            ((r.end - 1) / layout.chunk_height - r.start / layout.chunk_height + 1)
+                                as usize
+                        })
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let max_window_bytes = max_chunk_rows
+                    .saturating_mul(layout.chunks_across as usize)
+                    .saturating_mul(tile.reader.decoded_chunk_bytes());
+                // Masked windows widen samples to f64, so the native-width estimate
+                // understates them: keep the byte-limited cache for those rasters.
+                let native_window = !tile.reader.metadata.has_internal_mask();
+                if native_window && max_window_bytes <= config.decode_budget_bytes {
+                    cache = ChunkCache::default();
+                    let misses = plan_full_width_chunk_misses(&tile, &blocks[next_block..run_end]);
+                    if !misses.is_empty()
+                        && (tile.reader.is_remote()
+                            || (config.decode_workers > 1 && misses.len() > 2))
+                    {
+                        let chunk_bytes = tile.reader.decoded_chunk_bytes().max(1);
+                        let budget_chunks = (config.decode_budget_bytes / chunk_bytes).max(16);
+                        let target_lookahead = (layout.chunks_across as usize)
+                            .max(config.prefetch_chunks)
+                            .max(config.decode_workers * 4)
+                            .min(512);
+                        let queue_cap = target_lookahead
+                            .min(budget_chunks)
+                            .min(misses.len())
+                            .max(16);
+                        prefetcher = Some(PrefetchedChunkReader::spawn_with_profile(
+                            tile.reader.clone(),
+                            misses,
+                            queue_cap,
+                            config.decode_workers,
+                            config.fetch_workers,
+                            config.profile.clone(),
+                        ));
+                    }
+                } else {
+                    cache = ChunkCache::with_budget(config.decode_budget_bytes);
+                }
+            }
+            next_block += 1;
+            let mut run = || {
+                scan_block(
+                    &tile,
+                    &config,
+                    &block,
+                    &columns,
+                    &mut cache,
+                    prefetcher.as_ref(),
+                    &mut pending,
+                )
+            };
             let result = match &config.profile {
                 Some(profile) => {
                     profile.count(Counter::Windows, 1);
@@ -136,6 +209,42 @@ pub(crate) fn ground_area_overlay_tile(
     }))
 }
 
+fn plan_full_width_chunk_misses(tile: &TileDescriptor, run_blocks: &[Block]) -> Vec<u32> {
+    let meta = &tile.reader.metadata;
+    let (width, height) = (meta.width, meta.height);
+    let layout = tile.reader.chunk_layout;
+    let alpha_index = meta
+        .alpha_sample
+        .map(usize::from)
+        .filter(|&a| a < usize::from(meta.samples_per_pixel.max(1)));
+    let mut cached: FxHashSet<u32> = FxHashSet::default();
+    let mut misses = Vec::new();
+    for block in run_blocks {
+        let rows = block.rows.start.min(height)..block.rows.end.min(height);
+        if rows.is_empty() || width == 0 {
+            continue;
+        }
+        let chunk_rows = rows.start / layout.chunk_height..=(rows.end - 1) / layout.chunk_height;
+        cached.retain(|&index| chunk_rows.contains(&(index / layout.chunks_across)));
+        for chunk_row in chunk_rows {
+            for chunk_col in 0..layout.chunks_across {
+                let index = chunk_row * layout.chunks_across + chunk_col;
+                let bounds = layout.get_chunk_bounds(index, width, height);
+                if bounds.width == 0 || bounds.height == 0 {
+                    continue;
+                }
+                if chunk_is_absent(&tile.reader, index, &[0], alpha_index) {
+                    continue;
+                }
+                if cached.insert(index) {
+                    misses.push(index);
+                }
+            }
+        }
+    }
+    misses
+}
+
 #[derive(Default)]
 struct Cell {
     stats: AreaAccumulator,
@@ -149,9 +258,13 @@ fn scan_block(
     block: &Block,
     columns: &[Range<u32>],
     cache: &mut ChunkCache,
+    prefetcher: Option<&PrefetchedChunkReader>,
     pending: &mut BTreeMap<u64, Cell>,
 ) -> Result<Vec<(u8, u64, AreaAccumulator)>> {
-    let decode = config.profile.as_ref().map(|_| PhaseTimer::start());
+    let decode = prefetcher
+        .is_none()
+        .then(|| config.profile.as_ref().map(|_| PhaseTimer::start()))
+        .flatten();
     let window = RowWindow::load_bands(
         tile,
         &[1],
@@ -165,14 +278,11 @@ fn scan_block(
         // could be limited to a partition's columns.
         0..tile.reader.metadata.width,
         cache,
+        prefetcher,
         config.profile.as_deref(),
     )?;
     if let (Some(profile), Some(timer)) = (&config.profile, decode) {
         timer.stop(profile, Phase::Decode);
-        profile.count(
-            Counter::DecodedBytes,
-            block.rows.len() as u64 * u64::from(window.width()) * 8,
-        );
     }
     let gt = &tile.reader.metadata.geotransform;
     let row_areas: Vec<_> = block
@@ -351,6 +461,7 @@ mod tests {
                     &block,
                     std::slice::from_ref(&(0..width)),
                     &mut cache,
+                    None,
                     &mut pending,
                 )
                 .unwrap()

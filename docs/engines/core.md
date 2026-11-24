@@ -588,6 +588,15 @@ but only from an ordinary thread: called from a Rayon worker, its cell clipping
 stays serial, because queuing it there could stall an unrelated query that waits
 on the caller's engine lock. Output is identical either way.
 
+Transfer scans (`interpolate` and `overlay`, including WGS84 ground-area overlay)
+decode and fetch chunks asynchronously, as the horizon scans do. `decode_workers`
+and `fetch_workers` size the pools, `prefetch_chunks` the lookahead, and
+`decode_budget_bytes` bounds the decoded buffers in flight. A single-band raster
+without an internal mask keeps each row window in its native sample type, so
+interior spans are summed without widening to `f64`; masked or multi-band rasters
+use the widened window and a byte-limited chunk cache. Results match the
+single-worker scan.
+
 ### Partitioned scans
 
 A mosaic can be split across independent workers (for example Spark tasks) that each

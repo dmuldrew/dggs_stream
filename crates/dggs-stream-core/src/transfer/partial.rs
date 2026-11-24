@@ -29,6 +29,17 @@ impl TransferAccumulator for OverlayPartial {
         debug_assert_eq!(slot, 0);
         self.stats.add_band_unit_slice(0, slice)
     }
+    fn add_band_native_unit_slice(
+        &mut self,
+        slot: usize,
+        samples: crate::aggregator::multi_horizon::borrowed::BorrowedSamples<'_>,
+        nodata: Option<f64>,
+        scaling: crate::raster::metadata::BandScaling,
+    ) -> usize {
+        debug_assert_eq!(slot, 0);
+        self.stats
+            .add_band_native_unit_slice(0, samples, nodata, scaling)
+    }
     fn has_samples(&self) -> bool {
         self.covered > 0.0
     }
