@@ -1,5 +1,6 @@
 //! The streaming driver of the `interpolate` and `overlay` transfer modes.
 
+mod edges;
 mod ground_area;
 pub(crate) use ground_area::ground_area_overlay_tile;
 pub use ground_area::scan_ground_area_overlay;
@@ -2114,10 +2115,10 @@ fn clip_and_accumulate_cell<A: TransferAccumulator>(
     ctx: &OverlayBlockCtx<'_>,
     scratch: &mut CellWorkerScratch,
 ) -> CellOutcome<A> {
-    let mut rings = [[(0.0, 0.0); 10]; 3];
-    let (copies, len) =
+    let mut rings = ProjectedRings::default();
+    let copies =
         match project_cell_polygons(ctx.grid, cell, ctx.tile, ctx.longitude_bounds, &mut rings) {
-            ProjectedCell::Polygons { count, len } => (count, len),
+            ProjectedCell::Polygons { count } => count,
             ProjectedCell::Pole => return CellOutcome::Pole,
             ProjectedCell::Failed => return CellOutcome::Failed,
         };
@@ -2127,12 +2128,13 @@ fn clip_and_accumulate_cell<A: TransferAccumulator>(
     let mut last_row = f64::NEG_INFINITY;
     let mut any_data = false;
     let check_data = !ctx.emit_nodata && !ctx.need_coverage && !A::NEEDS_COVER;
-    for poly in &rings[..copies] {
+    for copy in 0..copies {
+        let poly = rings.ring(copy);
         let mut min_x = f64::INFINITY;
         let mut max_x = f64::NEG_INFINITY;
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
-        for &(x, y) in &poly[..len] {
+        for &(x, y) in poly {
             min_x = min_x.min(x);
             max_x = max_x.max(x);
             min_y = min_y.min(y);
@@ -2168,7 +2170,7 @@ fn clip_and_accumulate_cell<A: TransferAccumulator>(
 
     if copies == 1 {
         let completed = visit_overlap_spans_into(
-            &rings[0][..len],
+            rings.ring(0),
             ctx.rows,
             ctx.width,
             &mut scratch.clip,
@@ -2185,9 +2187,9 @@ fn clip_and_accumulate_cell<A: TransferAccumulator>(
         }
     } else {
         scratch.seam_runs.clear();
-        for poly in &rings[..copies] {
+        for copy in 0..copies {
             let completed = visit_overlap_spans_into(
-                &poly[..len],
+                rings.ring(copy),
                 ctx.rows,
                 ctx.width,
                 &mut scratch.clip,
@@ -2326,9 +2328,38 @@ fn periodic_longitude_bounds(tile: &TileDescriptor) -> Option<(f64, f64)> {
 }
 
 enum ProjectedCell {
-    Polygons { count: usize, len: usize },
+    Polygons { count: usize },
     Pole,
     Failed,
+}
+
+/// Pixel-space rings of one cell, one per longitude copy. Rings of up to ten points
+/// (the corners of a cell) live inline; traced rings spill to the heap.
+#[derive(Default)]
+struct ProjectedRings {
+    inline: [[(f64, f64); 10]; 3],
+    spill: [Vec<(f64, f64)>; 3],
+    len: usize,
+}
+
+impl ProjectedRings {
+    fn ring(&self, copy: usize) -> &[(f64, f64)] {
+        if self.len <= 10 {
+            &self.inline[copy][..self.len]
+        } else {
+            &self.spill[copy][..self.len]
+        }
+    }
+
+    fn prepare(&mut self, copy: usize, len: usize) -> &mut [(f64, f64)] {
+        self.len = len;
+        if len <= 10 {
+            &mut self.inline[copy][..len]
+        } else {
+            self.spill[copy].resize(len, (0.0, 0.0));
+            &mut self.spill[copy][..len]
+        }
+    }
 }
 
 fn project_cell_polygons(
@@ -2336,7 +2367,7 @@ fn project_cell_polygons(
     cell: u64,
     tile: &TileDescriptor,
     longitude_bounds: Option<(f64, f64)>,
-    rings: &mut [[(f64, f64); 10]; 3],
+    rings: &mut ProjectedRings,
 ) -> ProjectedCell {
     let mut ring = [(0.0, 0.0); 10];
     let n = grid.boundary_lng_lat(cell, &mut ring);
@@ -2347,7 +2378,28 @@ fn project_cell_polygons(
             ProjectedCell::Failed
         };
     }
-    let ring = &mut ring[..n];
+    // A pole vertex has been expanded into a longitude cap. `trace` keeps the sides
+    // touching the pole straight and traces the rest, so a polar cell follows the
+    // same curve as its neighbour along a shared side.
+    let mut traced;
+    let ring = if edges::corners_suffice(grid, &ring[..n], tile) {
+        &mut ring[..n]
+    } else {
+        match edges::trace(grid, cell, &ring[..n], tile, longitude_bounds) {
+            None => {
+                return if grid.interior_pole(cell).is_some() {
+                    ProjectedCell::Pole
+                } else {
+                    ProjectedCell::Failed
+                }
+            }
+            Some(edges::Traced::Corners) => &mut ring[..n],
+            Some(edges::Traced::Ring(points)) => {
+                traced = points;
+                traced.as_mut_slice()
+            }
+        }
+    };
     let mut shifts = [0.0; 3];
     let mut copies = 1;
     if let Some((west, east)) = longitude_bounds {
@@ -2370,8 +2422,10 @@ fn project_cell_polygons(
             }
         }
     }
+    let len = ring.len();
     for (copy_idx, &shift) in shifts[..copies].iter().enumerate() {
-        for (point, &(lon, lat)) in rings[copy_idx][..n].iter_mut().zip(ring.iter()) {
+        let points = rings.prepare(copy_idx, len);
+        for (point, &(lon, lat)) in points.iter_mut().zip(ring.iter()) {
             let Some(pixel) = to_pixel_raw(tile, lon + shift, lat) else {
                 return if grid.interior_pole(cell).is_some() {
                     ProjectedCell::Pole
@@ -2382,10 +2436,7 @@ fn project_cell_polygons(
             *point = pixel;
         }
     }
-    ProjectedCell::Polygons {
-        count: copies,
-        len: n,
-    }
+    ProjectedCell::Polygons { count: copies }
 }
 
 /// Visit the cell polygon on each longitude branch touching the raster. A
@@ -2397,14 +2448,14 @@ fn visit_cell_polygons(
     longitude_bounds: Option<(f64, f64)>,
     mut visit: impl FnMut(&[(f64, f64)]) -> bool,
 ) -> bool {
-    let mut rings = [[(0.0, 0.0); 10]; 3];
-    let ProjectedCell::Polygons { count, len } =
+    let mut rings = ProjectedRings::default();
+    let ProjectedCell::Polygons { count } =
         project_cell_polygons(grid, cell, tile, longitude_bounds, &mut rings)
     else {
         return false;
     };
-    for ring in &rings[..count] {
-        if !visit(&ring[..len]) {
+    for copy in 0..count {
+        if !visit(rings.ring(copy)) {
             return false;
         }
     }

@@ -88,10 +88,10 @@ pixels by center. `valid_coverage_threshold` divides valid square metres by all
 selected raster-overlap square metres for the completed cell, including masked
 and NoData pixels in the denominator.
 
-The geometry uses straight segments between the grid boundary vertices in
-longitude/latitude. Partial-pixel integration accounts for the change in area
-with latitude along those segments. Curved grid edges can introduce a separate
-boundary approximation. The scan returns an error for resolutions with a maximum
+The geometry adaptively traces grid edges in raster pixel coordinates using a
+sampled tolerance of 1/64 pixel. Partial-pixel integration accounts for the change
+in ellipsoidal area with latitude along the resulting segments. See the
+[overlay geometry](../transfer-modes.md#overlay-area-weighted-aggregation). The scan returns an error for resolutions with a maximum
 cell diameter above 500 km or a candidate cell enclosing a pole. It processes
 row windows serially and supports weighted overlay with omitted NoData.
 

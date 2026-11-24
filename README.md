@@ -309,7 +309,7 @@ A web map needs tiles at every zoom level — from hemispheric overview down to 
 | **Cloud-Native Streaming** | HTTP/S3 COG range prefetching — no local copies needed |
 | **Sub-Pixel Super-Sampling** | RGSS, Hex, Gaussian, 8-Rooks boundary anti-aliasing |
 | **Four Grids, One Pipeline** | H3, A5, S2 and HEALPix behind one `GridSpec` table, in every engine ([Grids](docs/grids.md)) |
-| **Choice of Pixel Transfer** | Pixel-centre assignment, interpolation at cell centres for fine cells, or exact area overlay; per-cell histograms, NoData emission, rounding and an opt-in runtime profile ([Scan Options](docs/scan-options.md)) |
+| **Choice of Pixel Transfer** | Pixel-centre assignment, interpolation at cell centres for fine cells, or area-weighted overlay (curved cell edges traced to a 1/64-pixel tolerance); per-cell histograms, NoData emission, rounding and an opt-in runtime profile ([Scan Options](docs/scan-options.md)) |
 
 Built-in HTTP/S3 reads pin strong ETags per URL and use `If-Match`, failing if the
 object changes during a scan. Rust `HttpTransport` clones share each URL's pin:
@@ -343,8 +343,10 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
   requested resolution, which is how a multi-zoom PMTiles pyramid comes from a
   single read.
 - **Fine cells and partial pixels.** For cells finer than the pixels, `transfer=interpolate`
-  interpolates a value at each cell's centre; for exact area weighting, `transfer=overlay`
-  splits each pixel across the cells it overlaps. Both stream the raster in bands of rows.
+  interpolates a value at each cell's centre; for area weighting, `transfer=overlay`
+  splits each pixel across the cells it overlaps, tracing curved cell edges to a sampled
+  tolerance of 1/64 of a pixel ([details](docs/transfer-modes.md#overlay-area-weighted-aggregation)).
+  Both stream the raster in bands of rows.
   Rust, CLI, DuckDB, and Python/Polars overlay scans can filter cells by the fraction of their selected overlap with valid data.
   In Rust, overlay scans clip fine-resolution cells in parallel by default (`aggregation_workers: Some(1)` keeps them serial) ([details](docs/transfer-modes.md#parallel-overlap-calculation)).
   Interpolate and overlay scans decode and fetch chunks ahead of the scan on `decode_workers` / `fetch_workers` threads (Rust `MultiResolutionConfig`, bounded by `decode_budget_bytes`); single-band unmasked rasters are summed straight from the native-typed decoded chunks.
@@ -598,7 +600,7 @@ flowchart TD
         end
 
         subgraph TRANSFER ["transfer = interpolate / overlay"]
-            BANDS["TransferStream: bands of rows, interpolation or exact pixel overlap"]
+            BANDS["TransferStream: bands of rows, interpolation or area-weighted pixel overlap"]
             OPEN["Cells open across band edges"]
             CHUNK -.->|"instead of the horizon kernel"| BANDS
             BANDS --> OPEN
