@@ -1339,19 +1339,21 @@ fn visit_cell_polygons(
     if n < 3 || (longitude_bounds.is_some() && grid.interior_pole(cell).is_some()) {
         return false;
     }
-    // Pole vertices have already been expanded into a longitude cap. Preserve
-    // that representation until the pole topology has its own traced model.
+    // A pole vertex has been expanded into a longitude cap. `trace` keeps the sides
+    // touching the pole straight and traces the rest, so a polar cell follows the
+    // same curve as its neighbour along a shared side.
     let mut traced;
-    let ring = if ring[..n].iter().any(|p| p.1.abs() >= 90.0 - 1e-9)
-        || edges::corners_suffice(grid, &ring[..n], tile)
-    {
+    let ring = if edges::corners_suffice(grid, &ring[..n], tile) {
         &mut ring[..n]
     } else {
-        let Some(points) = edges::trace(grid, cell, &ring[..n], tile, longitude_bounds) else {
-            return false;
-        };
-        traced = points;
-        traced.as_mut_slice()
+        match edges::trace(grid, cell, &ring[..n], tile, longitude_bounds) {
+            None => return false,
+            Some(edges::Traced::Corners) => &mut ring[..n],
+            Some(edges::Traced::Ring(points)) => {
+                traced = points;
+                traced.as_mut_slice()
+            }
+        }
     };
     let mut shifts = [0.0; 3];
     let mut copies = 1;

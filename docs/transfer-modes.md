@@ -74,8 +74,9 @@ Notes:
 - Before clipping, overlay traces H3 and S2 great-circle edges and the native A5 and HEALPix face edges.
   It subdivides a segment when a quarter-, half-, or three-quarter-point sample lies more than
   1/64 of a raster pixel from the projected chord. This is a sampled tolerance. The depth limit
-  is 12 successive bisections (at most 4,096 segments per side). Cells touching a pole retain their existing
-  pole-cap geometry.
+  is 12 successive bisections (at most 4,096 segments per side). Cells touching a pole keep the
+  straight sides that meet the pole and the cap along it; their other sides are traced like any
+  cell's, so a polar cell and its neighbour follow the same curve along a shared side.
 - Cells whose diameter bound is above 500 km (the coarsest two or three resolutions of each grid)
   take whole pixels by centre: their edges bend too far from straight lines for exact clipping,
   and a single pixel is negligible next to such a cell.

@@ -39,15 +39,52 @@ pub(super) fn corners_suffice(grid: GridKind, corners: &[Point], tile: &TileDesc
     bound.to_degrees() * (2.0 / (m.cos() * gt.a)).hypot(1.0 / gt.e) < TOLERANCE
 }
 
+/// The outcome of tracing a ring.
+pub(super) enum Traced {
+    /// No side deviates from its chord: use the corners as they are, without a copy.
+    Corners,
+    /// The corners with extra vertices where sides curve.
+    Ring(Vec<Point>),
+}
+
+/// A ring vertex on a pole. `write_lng_lat_ring` expands a pole vertex into two
+/// ring points on the pole at the neighbouring vertices' meridians.
+fn at_pole(p: Point) -> bool {
+    p.1.abs() >= 90.0 - 1e-9
+}
+
+/// The native vertex each ring point comes from, and the native vertex count. The
+/// two ring points of an expanded pole vertex share one index.
+fn native_indices(ring: &[Point]) -> ([usize; 10], usize) {
+    let mut index = [0; 10];
+    let (mut native, mut i) = (0, 0);
+    while i < ring.len() {
+        index[i] = native;
+        if at_pole(ring[i]) && ring.get(i + 1).is_some_and(|&p| at_pole(p)) {
+            index[i + 1] = native;
+            i += 1;
+        }
+        native += 1;
+        i += 1;
+    }
+    (index, native)
+}
+
 /// Emit unclosed longitude/latitude vertices. Periodic rasters measure error
 /// on the continuous longitude branch nearest the tile, before seam splitting.
+///
+/// Sides that touch a pole stay straight: a side from a vertex to the pole is a
+/// meridian and the cap between the two pole points runs along the pole, so both
+/// are straight in a north-up raster, and a neighbour across them is polar too and
+/// keeps the same line. Every other side is traced, so a polar cell and its
+/// non-polar neighbour follow the same curve along their shared side.
 pub(super) fn trace(
     grid: GridKind,
     cell: u64,
     corners: &[Point],
     tile: &TileDescriptor,
     longitude_bounds: Option<(f64, f64)>,
-) -> Option<Vec<Point>> {
+) -> Option<Traced> {
     let anchor = corners[0].0;
     let shift = longitude_bounds.map(|(w, e)| (((w + e) * 0.5 - anchor) / 360.0).round() * 360.0);
     let project = |(lon, lat): Point| {
@@ -57,37 +94,57 @@ pub(super) fn trace(
         );
         to_pixel_raw(tile, lon, lat)
     };
-    let mut result = Vec::with_capacity(corners.len());
+    let n = corners.len();
+    let (native_of, native_count) = native_indices(corners);
+    // Stays unallocated until a side needs extra vertices. The sides before it were
+    // straight and each contributed its start corner, which is backfilled.
+    let mut result: Option<Vec<Point>> = None;
     let mut side = |i: usize, sample: &mut dyn FnMut(f64) -> Option<Point>| -> Option<()> {
-        let a = corners[i];
-        let b = corners[(i + 1) % corners.len()];
-        refine(
-            &mut result,
-            &project,
-            sample,
-            Sample {
-                t: 0.0,
-                lng_lat: a,
-                pixel: project(a)?,
-            },
-            Sample {
-                t: 1.0,
-                lng_lat: b,
-                pixel: project(b)?,
-            },
-            0,
-        )
+        let (start, end) = (corners[i], corners[(i + 1) % n]);
+        if at_pole(start) || at_pole(end) {
+            if let Some(out) = result.as_mut() {
+                out.push(start);
+            }
+            return Some(());
+        }
+        let a = Sample {
+            t: 0.0,
+            lng_lat: start,
+            pixel: project(start)?,
+        };
+        let b = Sample {
+            t: 1.0,
+            lng_lat: end,
+            pixel: project(end)?,
+        };
+        match split_point(&project, sample, a, b, 0)? {
+            None => {
+                if let Some(out) = result.as_mut() {
+                    out.push(start);
+                }
+            }
+            Some(mid) => {
+                let out = result.get_or_insert_with(|| {
+                    let mut out = Vec::with_capacity(2 * n);
+                    out.extend_from_slice(&corners[..i]);
+                    out
+                });
+                refine(out, &project, sample, a, mid, 1)?;
+                refine(out, &project, sample, mid, b, 1)?;
+            }
+        }
+        Some(())
     };
     match grid {
         GridKind::H3 | GridKind::S2 => {
-            for i in 0..corners.len() {
+            for i in 0..n {
                 let vector = |(lon, lat): Point| {
                     let (s, c) = lat.to_radians().sin_cos();
                     let (y, x) = lon.to_radians().sin_cos();
                     [c * x, c * y, s]
                 };
                 let a = vector(corners[i]);
-                let b = vector(corners[(i + 1) % corners.len()]);
+                let b = vector(corners[(i + 1) % n]);
                 side(i, &mut |t| {
                     let [x, y, z] = std::array::from_fn(|k| a[k] + t * (b[k] - a[k]));
                     Some((y.atan2(x).to_degrees(), z.atan2(x.hypot(y)).to_degrees()))
@@ -97,8 +154,11 @@ pub(super) fn trace(
         GridKind::Healpix => {
             let (depth, pixel) = healpix_decode(cell)?;
             let vertices = healpix::get(depth).projected_vertices(pixel);
-            for i in 0..4 {
-                let (a, b) = (vertices[i], vertices[(i + 1) % 4]);
+            if native_count != vertices.len() {
+                return None;
+            }
+            for i in 0..n {
+                let (a, b) = (vertices[native_of[i]], vertices[native_of[(i + 1) % n]]);
                 side(i, &mut |t| {
                     let p = healpix::proj::unproj(
                         (a.0 + t * (b.0 - a.0)).rem_euclid(8.0),
@@ -120,14 +180,14 @@ pub(super) fn trace(
             let id = deserialize(cell).ok()?;
             let pentagon = get_pentagon(&id).ok()?;
             let vertices = pentagon.get_vertices_vec();
-            let n = vertices.len();
-            if n != corners.len() {
+            let m = vertices.len();
+            if native_count != m {
                 return None;
             }
             for i in 0..n {
                 // cell_to_boundary reverses the face winding on output.
-                let a = vertices[n - 1 - i];
-                let b = vertices[n - 1 - (i + 1) % n];
+                let a = vertices[m - 1 - native_of[i]];
+                let b = vertices[m - 1 - native_of[(i + 1) % n]];
                 side(i, &mut |t| {
                     let face = Face::new(a.x() + t * (b.x() - a.x()), a.y() + t * (b.y() - a.y()));
                     let p = to_lon_lat(
@@ -140,10 +200,13 @@ pub(super) fn trace(
             }
         }
     }
-    for point in &mut result {
+    let Some(mut ring) = result else {
+        return Some(Traced::Corners);
+    };
+    for point in &mut ring {
         point.0 = wrap_lon_180(point.0);
     }
-    Some(result)
+    Some(Traced::Ring(ring))
 }
 
 #[derive(Clone, Copy)]
@@ -153,14 +216,16 @@ struct Sample {
     pixel: Point,
 }
 
-fn refine(
-    out: &mut Vec<Point>,
+/// The midpoint sample of side `a`-`b` when the side must be split because the chord
+/// misses the curve by more than the tolerance, `None` when the chord is close enough.
+/// The outer `None` reports a sample that can't be projected.
+fn split_point(
     project: &impl Fn(Point) -> Option<Point>,
     sample: &mut dyn FnMut(f64) -> Option<Point>,
     a: Sample,
     b: Sample,
     depth: u8,
-) -> Option<()> {
+) -> Option<Option<Sample>> {
     let parameter = |fraction: f64| a.t + fraction * (b.t - a.t);
     let mid = parameter(0.5);
     let p = sample(mid)?;
@@ -177,20 +242,30 @@ fn refine(
         (x - t * dx).hypot(y - t * dy) > TOLERANCE
     };
     // Quarter points also catch an inflection whose midpoint lies on the chord.
-    if depth < MAX_DEPTH
+    let split = depth < MAX_DEPTH
         && (deviates(pixel)
             || deviates(project(sample(parameter(0.25))?)?)
-            || deviates(project(sample(parameter(0.75))?)?))
-    {
-        let m = Sample {
-            t: mid,
-            lng_lat: p,
-            pixel,
-        };
+            || deviates(project(sample(parameter(0.75))?)?));
+    Some(split.then_some(Sample {
+        t: mid,
+        lng_lat: p,
+        pixel,
+    }))
+}
+
+fn refine(
+    out: &mut Vec<Point>,
+    project: &impl Fn(Point) -> Option<Point>,
+    sample: &mut dyn FnMut(f64) -> Option<Point>,
+    a: Sample,
+    b: Sample,
+    depth: u8,
+) -> Option<()> {
+    if let Some(m) = split_point(project, sample, a, b, depth)? {
         refine(out, project, sample, a, m, depth + 1)?;
-        refine(out, project, sample, m, b, depth + 1)?;
+        refine(out, project, sample, m, b, depth + 1)
     } else {
         out.push(a.lng_lat);
+        Some(())
     }
-    Some(())
 }

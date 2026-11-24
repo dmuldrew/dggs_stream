@@ -1380,3 +1380,83 @@ fn adaptive_overlay_per_cell_area_matches_dense_edges() {
         }
     }
 }
+
+/// Total weighted pixel count and total retained ground area of every cell a scan
+/// emits for the raster at `path`, with the raster's own footprint area.
+fn overlay_totals(
+    path: &Path,
+    grid: GridKind,
+    res: u8,
+    footprint: [f64; 4],
+) -> (f64, f64, f64, usize) {
+    use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    let cells = scan(path, &config(grid, res, TransferMode::OVERLAY));
+    let pixels: f64 = cells.values().map(|a| a.count).sum();
+    let retained: f64 = scan_ground_area_overlay(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &config(grid, res, TransferMode::OVERLAY),
+    )
+    .unwrap()
+    .map(|row| row.unwrap().2.retained_area_m2())
+    .sum();
+    let [west, south, east, north] = footprint;
+    let area = wgs84_rectangle_area(west, south, east, north).unwrap();
+    (pixels, retained, area, cells.len())
+}
+
+#[test]
+fn polar_cells_follow_the_curve_they_share_with_a_non_polar_neighbour() {
+    // At HEALPix depth 6 the polar cell of the 0-90°E quadrant shares an edge with a
+    // non-polar cell whose native boundary bows away from the chord between its end
+    // vertices (at 60°E the chord is at 88.78°N, the edge at 88.90°N). A raster in
+    // the strip between them was counted by both cells while the polar cell kept
+    // the chord.
+    const SIZE: u32 = 40;
+    let (west, north, dx, dy) = (59.5, 88.88, 0.025, 0.002);
+    let (_tmp, path) = TestGeoTiffBuilder::new(SIZE, SIZE)
+        .origin(west, north)
+        .pixel_size_xy(dx, dy)
+        .create_f32_tempfile(|_, _| 1.0);
+    let footprint = [
+        west,
+        north - f64::from(SIZE) * dy,
+        west + f64::from(SIZE) * dx,
+        north,
+    ];
+    let (pixels, retained, area, cells) = overlay_totals(&path, GridKind::Healpix, 6, footprint);
+    assert!(cells >= 1);
+    // Every pixel is shared out exactly once across the cells.
+    assert!((pixels - f64::from(SIZE * SIZE)).abs() < 1e-6, "{pixels}");
+    assert!((retained / area - 1.0).abs() < 1e-6, "{retained} vs {area}");
+}
+
+#[test]
+fn rasters_along_a_pole_are_shared_out_exactly_once_on_grids_with_a_pole_vertex() {
+    // A band of rows just south of the north pole crosses the polar cells and
+    // their non-polar neighbours. Pole sides stay straight; every other side is
+    // traced identically from both cells.
+    let (width, height, west, north, dx, dy) = (180u32, 100u32, 0.0, 89.5, 0.5, 0.005);
+    let (_tmp, path) = TestGeoTiffBuilder::new(width, height)
+        .origin(west, north)
+        .pixel_size_xy(dx, dy)
+        .create_f32_tempfile(|c, r| 1.0 + ((c + r) % 7) as f32);
+    let footprint = [
+        west,
+        north - f64::from(height) * dy,
+        west + f64::from(width) * dx,
+        north,
+    ];
+    for (grid, res) in [(GridKind::Healpix, 6), (GridKind::S2, 8)] {
+        let (pixels, retained, area, cells) = overlay_totals(&path, grid, res, footprint);
+        assert!(cells > 2, "{grid}");
+        assert!(
+            (pixels - f64::from(width * height)).abs() < 1e-5,
+            "{grid}: {pixels}"
+        );
+        assert!(
+            (retained / area - 1.0).abs() < 1e-6,
+            "{grid}: {retained} vs {area}"
+        );
+    }
+}

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Ordinary and ground-area overlay adaptively trace native grid edges in raster pixel coordinates before clipping on all four grids.
+- Ordinary and ground-area overlay adaptively trace native grid edges in raster pixel coordinates before clipping on all four grids. Cells with a pole vertex keep their straight pole sides but trace the rest, so a polar cell no longer counts pixels between its chord and the curve its non-polar neighbour follows.
 
 - Python and Polars scans accept `ground_area=True, transfer="overlay"` for partial-pixel ellipsoidal areas and density totals on all four grids.
 
