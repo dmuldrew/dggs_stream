@@ -116,50 +116,6 @@ pub fn wgs84_pixel_area(gt: &GeoTransform, col: usize, row: usize) -> Result<f64
     wgs84_rectangle_area(west, south, east, north)
 }
 
-/// Pixel fraction and ellipsoidal area of a clipped, straight-edged polygon in
-/// pixel coordinates. The caller has validated a north-up EPSG:4326 transform.
-/// Green's theorem gives both areas as an edge integral of (x - origin) dy,
-/// with an additional latitude-dependent surface density for the physical area.
-#[cfg(test)]
-pub(crate) fn clipped_pixel_area(gt: &GeoTransform, polygon: &[(f64, f64)]) -> (f64, f64) {
-    let Some(&(origin, _)) = polygon.first() else {
-        return (0.0, 0.0);
-    };
-    let mut previous = polygon[polygon.len() - 1];
-    let mut fraction = 0.0;
-    let mut area = 0.0;
-    for &(x1, y1) in polygon {
-        let (x0, y0) = previous;
-        previous = (x1, y1);
-        let dy = y1 - y0;
-        if dy == 0.0 {
-            continue;
-        }
-        let left = x0 - origin;
-        let dx = x1 - x0;
-        fraction += (left + 0.5 * dx) * dy;
-        // Four-point Gauss-Legendre quadrature on segments of at most five
-        // degrees. Longitude varies linearly along each clipped edge.
-        let n = ((dy * gt.e).abs() / 5.0).ceil().max(1.0) as usize;
-        let half = 0.5 / n as f64;
-        for i in 0..n {
-            let mid = (2 * i + 1) as f64 * half;
-            for (node, weight) in [
-                (0.3399810435848563, 0.6521451548625461),
-                (0.8611363115940526, 0.3478548451374538),
-            ] {
-                for t in [mid - half * node, mid + half * node] {
-                    let lat = gt.e.mul_add(dy.mul_add(t, y0), gt.f0).to_radians();
-                    let d = 1.0 - WGS84_E2 * lat.sin().powi(2);
-                    area += dy * half * weight * dx.mul_add(t, left) * lat.cos() / (d * d);
-                }
-            }
-        }
-    }
-    let scale = WGS84_A.powi(2) * (1.0 - WGS84_E2) * gt.a.to_radians() * (-gt.e).to_radians();
-    (fraction.abs().min(1.0), area.abs() * scale)
-}
-
 /// Ellipsoidal area integrals along a directed edge segment ascending from
 /// `y0` to `y1` (`y0 < y1`, in pixel-row coordinates) with local column coordinates
 /// `rx0` at `y0` and `rx1` at `y1` (in `[0, 1]` relative to pixel column `c`).
@@ -182,7 +138,7 @@ pub(crate) fn segment_ellipsoidal_integrals(
     }
     let drx = rx1 - rx0;
     // Four-point Gauss-Legendre quadrature on segments of at most five degrees,
-    // matching `clipped_pixel_area`.
+    // matching the per-polygon reference used in tests.
     let n = ((dy * gt.e).abs() / 5.0).ceil().max(1.0) as usize;
     let half = 0.5 / n as f64;
     let mut local = 0.0;
@@ -211,8 +167,59 @@ pub(crate) fn segment_ellipsoidal_integrals(
     ((local * scale).max(0.0), (full * scale).max(0.0))
 }
 
+/// Test-only reference: per-polygon Green's-theorem areas the span clipper is
+/// checked against.
+#[cfg(test)]
+pub(crate) mod reference {
+    use super::{GeoTransform, WGS84_A, WGS84_E2};
+
+    /// Pixel fraction and ellipsoidal area of a clipped, straight-edged polygon in
+    /// pixel coordinates. The caller has validated a north-up EPSG:4326 transform.
+    /// Green's theorem gives both areas as an edge integral of (x - origin) dy,
+    /// with an additional latitude-dependent surface density for the physical area.
+    pub(crate) fn clipped_pixel_area(gt: &GeoTransform, polygon: &[(f64, f64)]) -> (f64, f64) {
+        let Some(&(origin, _)) = polygon.first() else {
+            return (0.0, 0.0);
+        };
+        let mut previous = polygon[polygon.len() - 1];
+        let mut fraction = 0.0;
+        let mut area = 0.0;
+        for &(x1, y1) in polygon {
+            let (x0, y0) = previous;
+            previous = (x1, y1);
+            let dy = y1 - y0;
+            if dy == 0.0 {
+                continue;
+            }
+            let left = x0 - origin;
+            let dx = x1 - x0;
+            fraction += (left + 0.5 * dx) * dy;
+            // Four-point Gauss-Legendre quadrature on segments of at most five
+            // degrees. Longitude varies linearly along each clipped edge.
+            let n = ((dy * gt.e).abs() / 5.0).ceil().max(1.0) as usize;
+            let half = 0.5 / n as f64;
+            for i in 0..n {
+                let mid = (2 * i + 1) as f64 * half;
+                for (node, weight) in [
+                    (0.3399810435848563, 0.6521451548625461),
+                    (0.8611363115940526, 0.3478548451374538),
+                ] {
+                    for t in [mid - half * node, mid + half * node] {
+                        let lat = gt.e.mul_add(dy.mul_add(t, y0), gt.f0).to_radians();
+                        let d = 1.0 - WGS84_E2 * lat.sin().powi(2);
+                        area += dy * half * weight * dx.mul_add(t, left) * lat.cos() / (d * d);
+                    }
+                }
+            }
+        }
+        let scale = WGS84_A.powi(2) * (1.0 - WGS84_E2) * gt.a.to_radians() * (-gt.e).to_radians();
+        (fraction.abs().min(1.0), area.abs() * scale)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::reference::clipped_pixel_area;
     use super::*;
 
     #[test]

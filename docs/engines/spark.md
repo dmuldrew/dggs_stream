@@ -45,14 +45,32 @@ flowchart LR
 
 Use `dggs_stream.spark.read(spark, path, resolutions=[8], transfer="overlay",
 valid_coverage_threshold=0.75)` for a continuous single-band scan. Each task reads
-its assigned TIFF chunks. Every touched cell goes through the shuffle, including
-cells touched by only one partition. Choose `target_chunks` with that shuffle
-cost in mind.
+its assigned TIFF chunks. For H3 on WGS84 tiles, a worker can finalize a cell
+when its padded footprint is clear of every other partition's chunks. The final
+row has a null `partial_state`. Uncertain and projected footprints produce
+partial rows and receive their coverage and value filters at the reducer.
 
 A partial carries both valid pixel area (the weighted count) and total covered
 pixel area, including NoData. The reducer applies the coverage threshold and
 statistics filters after combining all contributions. In the example a cell
 qualifies when valid pixels account for at least 75% of its covered area.
+
+For a large overlay, caching the partitioned scan lets the DataFrame merge
+shuffle only the remaining partial rows. Keep the cache through the action.
+
+```python
+dggs_stream.spark.register(spark)
+parts = (spark.read.format("dggs_stream").option("resolutions", 11)
+         .option("transfer", "overlay").option("target_chunks", 16).load(path).persist())
+try:
+    cells = dggs_stream.spark.merge_partials(parts)
+    cells.write.parquet(output_path)
+finally:
+    parts.unpersist()
+```
+
+The [overlay shuffle benchmark](../../examples/sedona_spark/cluster/overlay-shuffle.md)
+measures how this tradeoff varies with partition size and cell resolution.
 
 ## Setup
 
@@ -108,7 +126,8 @@ SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20')
 - **Schema.** The scan's columns with Spark's signed types (`h3_index` `bigint`,
   `resolution` `smallint`) plus `partial_state` (`binary`).
 - **`merge_partials(df, ...)`** shuffles the rows by `h3_index` once, passes final rows
-  through and merges the partial ones with `dggs_stream.merge_partials`; the raster is scanned
+  through and merges the partial ones with `dggs_stream.merge_partials`. For an explicitly
+  cached input DataFrame, final rows bypass the exchange and only partial rows shuffle. The raster is scanned
   once. Pass the scan's `categorical`, `columns`, `quantiles` and filters; `read` does this
   for you. Merge each raster's DataFrame on its own.
 - **`dggs_stream_merge(TABLE(t) [, 'name=value, ...'])`** is the same merge as a SQL table

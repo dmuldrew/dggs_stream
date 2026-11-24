@@ -16,7 +16,9 @@ use crate::raster::ground_area::wgs84_pixel_area;
 use crate::raster::mosaic::TileDescriptor;
 use crate::raster::prefetch::PrefetchedChunkReader;
 use crate::run_profile::{Counter, Phase, PhaseTimer};
-use crate::transfer::clip::{visit_ground_area_spans_into, ClipScratch};
+use crate::transfer::clip::{
+    merge_overlapping_runs, visit_ground_area_spans_into, ClipScratch, PixelRun,
+};
 use crate::transfer::window::{chunk_is_absent, BandSelection, ChunkCache, RowWindow};
 use crate::transfer::TransferMode;
 use rustc_hash::FxHashSet;
@@ -86,7 +88,15 @@ pub(crate) fn ground_area_overlay_tile(
     let layout = tile.reader.chunk_layout;
     let one_row_native_bytes =
         (layout.chunks_across as usize).saturating_mul(tile.reader.decoded_chunk_bytes());
-    let allow_chunk_row_window = one_row_native_bytes <= config.decode_budget_bytes;
+    // `scan_block` expands each overlapped pixel into a 32-byte tuple before filtering,
+    // so a chunk-row window must also fit that scratch in the budget.
+    let overlap_scratch_bytes = u64::from(meta.width)
+        .saturating_mul(u64::from(
+            layout.chunk_height.min(super::MAX_NATIVE_CHUNK_ROW_WINDOW),
+        ))
+        .saturating_mul(32);
+    let allow_chunk_row_window = one_row_native_bytes <= config.decode_budget_bytes
+        && overlap_scratch_bytes <= config.decode_budget_bytes as u64;
     let mut blocks = Vec::new();
     for &res in &config.resolutions {
         if config.grid.spec().max_cell_diameter_km(res) > COARSE_CELL_DIAMETER_KM {
@@ -152,7 +162,10 @@ pub(crate) fn ground_area_overlay_tile(
                 let max_window_bytes = max_chunk_rows
                     .saturating_mul(layout.chunks_across as usize)
                     .saturating_mul(tile.reader.decoded_chunk_bytes());
-                if max_window_bytes <= config.decode_budget_bytes {
+                // Masked windows widen samples to f64, so the native-width estimate
+                // understates them: keep the byte-limited cache for those rasters.
+                let native_window = !tile.reader.metadata.has_internal_mask();
+                if native_window && max_window_bytes <= config.decode_budget_bytes {
                     cache = ChunkCache::default();
                     let misses = plan_full_width_chunk_misses(&tile, &blocks[next_block..run_end]);
                     if !misses.is_empty()
@@ -299,8 +312,9 @@ fn scan_block(
         .map(|r| wgs84_pixel_area(gt, 0, r as usize))
         .collect::<Result<_>>()?;
     let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
+    let width = u64::from(window.width());
     let longitude = periodic_longitude_bounds(tile);
-    let mut overlaps = Vec::new();
+    let mut overlaps: Vec<GroundRun> = Vec::new();
     let mut clip_scratch = ClipScratch::default();
     let mut candidates = Vec::new();
     for cols in columns {
@@ -335,9 +349,12 @@ fn scan_block(
                 &row_areas,
                 &mut clip_scratch,
                 |r, c0, c1, fraction, m2| {
-                    for c in c0..c1 {
-                        overlaps.push(((r, c), fraction, m2));
-                    }
+                    overlaps.push(GroundRun {
+                        pixel: (r - rows.0) as u64 * width + c0 as u64,
+                        len: (c1 - c0) as u64,
+                        fraction,
+                        m2,
+                    });
                     true
                 },
             )
@@ -351,29 +368,29 @@ fn scan_block(
         // Longitude copies can intersect the same pixel. Count one observation
         // per pixel for the accumulator's squared weights.
         if pieces > 1 {
-            overlaps.sort_unstable_by_key(|p| p.0);
+            merge_overlapping_runs(&mut overlaps, 0);
         }
         let cell = pending.entry(id).or_default();
         cell.end_row = end;
-        let mut pixels = overlaps.drain(..).peekable();
-        while let Some(((r, c), mut fraction, mut m2)) = pixels.next() {
-            while let Some((_, f, a)) = pixels.next_if(|p| p.0 == (r, c)) {
-                fraction += f;
-                m2 += a;
-            }
-            if let Some(bbox) = config.bbox {
-                let (lon, lat) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
-                if !is_point_in_bbox(wrap_lon_180(lon), lat, Some(bbox)) {
-                    continue;
+        for run in overlaps.drain(..) {
+            let r = rows.0 + (run.pixel / width) as i64;
+            let c0 = (run.pixel % width) as i64;
+            for c in c0..c0 + run.len as i64 {
+                if let Some(bbox) = config.bbox {
+                    let (lon, lat) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
+                    if !is_point_in_bbox(wrap_lon_180(lon), lat, Some(bbox)) {
+                        continue;
+                    }
                 }
-            }
-            cell.covered_m2 += m2;
-            if let Some(value) = window.get(c, r) {
-                cell.stats.update_overlap(value, fraction.min(1.0), m2)?;
-                if !cell.stats.is_finite() {
-                    return Err(DggsStreamError::InvalidParameter(
-                        "overflow in ground-area overlay statistics".into(),
-                    ));
+                cell.covered_m2 += run.m2;
+                if let Some(value) = window.get(c, r) {
+                    cell.stats
+                        .update_overlap(value, run.fraction.min(1.0), run.m2)?;
+                    if !cell.stats.is_finite() {
+                        return Err(DggsStreamError::InvalidParameter(
+                            "overflow in ground-area overlay statistics".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -397,6 +414,39 @@ fn scan_block(
         false
     });
     Ok(ready)
+}
+
+/// A horizontal run of pixels, indexed row-major within the block, sharing one
+/// pixel fraction and ellipsoidal overlap area.
+#[derive(Clone, Copy)]
+struct GroundRun {
+    pixel: u64,
+    len: u64,
+    fraction: f64,
+    m2: f64,
+}
+
+impl PixelRun for GroundRun {
+    fn start(&self) -> u64 {
+        self.pixel
+    }
+    fn end(&self) -> u64 {
+        self.pixel + self.len
+    }
+    fn with_range(self, start: u64, end: u64) -> Self {
+        Self {
+            pixel: start,
+            len: end - start,
+            ..self
+        }
+    }
+    fn add_payload(self, other: Self) -> Self {
+        Self {
+            fraction: self.fraction + other.fraction,
+            m2: self.m2 + other.m2,
+            ..self
+        }
+    }
 }
 
 #[cfg(test)]

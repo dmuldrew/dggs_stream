@@ -75,6 +75,14 @@ Notes:
   take whole pixels by centre: their edges bend too far from straight lines for exact clipping,
   and a single pixel is negligible next to such a cell.
 - Zero-alpha pixels and pixels marked invalid by an internal TIFF mask count as NoData.
+- Cell polygons are clipped to pixels with an edge-walking sweep (Edge-DDA with Green's-theorem
+  prefix sums), not by clipping each pixel separately. Overlaps of at most `1e-14` of a pixel
+  can't be told from rounding noise and are skipped; ordinary overlay already ignores overlaps
+  below `1e-12`, so this only affects ground-area overlay, where the loss is below `1e-14` of a
+  pixel per boundary pixel.
+- Runs of whole pixels inside a cell are accumulated as contiguous slices, whose variance can
+  differ from per-pixel accumulation in the last bits. When `min_mean` or `max_mean` is set,
+  pixels are accumulated one at a time so a mean exactly on an inclusive bound passes.
 
 ## Categorical rasters
 
@@ -229,13 +237,16 @@ resolution 9 on the smaller raster, cells are mostly smaller than one pixel.
 
 ### Parallel overlap calculation
 
-Setting Rust's `MultiResolutionConfig::aggregation_workers` to
-two or more enables parallel projection and clipping for eligible overlay
-blocks. Each worker prepares intersections for individual cells. The caller
-applies them in the original cell and pixel order, including mass-preserving
-normalization and per-band coverage filtering. The default stays serial.
+Eligible overlay blocks project and clip cells in parallel. Rust's
+`MultiResolutionConfig::aggregation_workers` selects the pool: `None` (the
+default) uses the caller's ambient Rayon pool, `Some(n)` a dedicated `n`-thread
+pool and `Some(1)` runs serially. Ordinary overlay without `mass_preserve`
+clips and accumulates each cell on a worker; mass-preserving overlay has workers
+prepare intersections that the caller applies in the original cell and pixel
+order, including normalization and per-band coverage filtering. Results are
+identical either way.
 
-The overlay scan uses the shared aggregation pool for blocks with at least 64
+The mass-preserving path uses the pool for blocks with at least 64
 candidate cells and at most 512 estimated source pixels per cell. Coarse-cell
 fallbacks and callers already on a Rayon worker use the serial path.
 Prepared lists hold at most 128 × 1,024 pixel–area pairs (2 MiB of entries).

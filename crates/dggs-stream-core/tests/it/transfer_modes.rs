@@ -1213,3 +1213,112 @@ fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
     }
     assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
 }
+
+/// Mean of `n` unit-weight observations of `value`, accumulated one pixel at a time.
+fn sequential_mean(value: f64, n: f64) -> f64 {
+    let mut sum = 0.0;
+    for _ in 0..n as u64 {
+        sum += value;
+    }
+    sum / n
+}
+
+#[test]
+fn mean_filter_bounds_are_inclusive_for_fully_covered_runs() {
+    // 0.99 is inexact in binary, so summing a run in several lanes can round its
+    // mean one ulp away from per-pixel accumulation. A cell whose mean is exactly
+    // the bound must still pass `min_mean` and `max_mean`.
+    const VALUE: f64 = 0.99;
+    let (_tmp, path) = TestGeoTiffBuilder::new(160, 120)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_tempfile::<f64, _>(|_, _| VALUE);
+    let mut cfg = config(
+        GridKind::H3,
+        matched(GridKind::H3, -2),
+        TransferMode::Overlay {
+            weighted: false,
+            mass_preserve: false,
+        },
+    );
+    let unfiltered = scan(&path, &cfg);
+    let expected: Vec<u64> = unfiltered
+        .iter()
+        .filter(|(_, acc)| sequential_mean(VALUE, acc.count) == VALUE)
+        .map(|(&id, _)| id)
+        .collect();
+    assert!(
+        expected.len() > 4 && expected.len() < unfiltered.len(),
+        "{} of {} cells sit exactly on the bound",
+        expected.len(),
+        unfiltered.len()
+    );
+    for (min_mean, max_mean) in [
+        (Some(VALUE), None),
+        (None, Some(VALUE)),
+        (Some(VALUE), Some(VALUE)),
+    ] {
+        cfg.min_mean = min_mean;
+        cfg.max_mean = max_mean;
+        let kept: Vec<u64> = scan(&path, &cfg).keys().copied().collect();
+        if min_mean.is_some() && max_mean.is_some() {
+            assert_eq!(kept, expected);
+        } else {
+            // One-sided bounds keep every cell whose mean is on the right side.
+            assert!(
+                expected.iter().all(|id| kept.contains(id)),
+                "{min_mean:?} {max_mean:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn overlay_slice_accumulation_matches_per_pixel_accumulation_on_all_grids() {
+    // An always-true mean filter makes the scan accumulate pixel by pixel, which
+    // is the reference for the span path used when no mean filter is set.
+    let (_tmp, path) = TestGeoTiffBuilder::new(160, 120)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_tempfile::<f64, _>(|c, r| {
+            1.0 + f64::from((3 * c + r) % 23) * 0.37 + f64::from(c) * 0.001
+        });
+    for grid in GridKind::ALL {
+        for (weighted, mass_preserve) in [(false, false), (true, false), (true, true)] {
+            let mut cfg = config(
+                grid,
+                matched(grid, -2),
+                TransferMode::Overlay {
+                    weighted,
+                    mass_preserve,
+                },
+            );
+            let spans = scan(&path, &cfg);
+            cfg.min_mean = Some(-1.0e300);
+            let per_pixel = scan(&path, &cfg);
+            let label = format!("{grid} weighted={weighted} mass_preserve={mass_preserve}");
+            assert!(spans.len() > 4, "{label}");
+            assert_eq!(
+                spans.keys().collect::<Vec<_>>(),
+                per_pixel.keys().collect::<Vec<_>>(),
+                "{label}"
+            );
+            for (id, a) in &spans {
+                let b = &per_pixel[id];
+                assert_eq!((a.min, a.max), (b.min, b.max), "{label} cell {id}");
+                assert!(
+                    (a.count - b.count).abs() <= 1e-9 * b.count.max(1.0),
+                    "{label} {id}"
+                );
+                assert!(
+                    (a.sum - b.sum).abs() <= 1e-9 * b.sum.abs().max(1.0),
+                    "{label} {id}"
+                );
+                assert!(
+                    (a.m2 - b.m2).abs() <= 1e-8 * b.m2.abs().max(1.0),
+                    "{label} {id}"
+                );
+            }
+        }
+    }
+}
