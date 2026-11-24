@@ -21,16 +21,19 @@ use crate::aggregator::remap::CategoryRemapper;
 use crate::aggregator::simd::SimdSpanAccumulate;
 use crate::crs::transformer::CrsTransformer;
 use crate::error::{DggsStreamError, Result};
-use crate::grid::{wrap_lon_180, GridKind};
+use crate::grid::{wrap_lon_180, GridKind, PolygonFill};
 use crate::raster::metadata::BandScaling;
 use crate::raster::mosaic::{MosaicReader, TileDescriptor};
 use crate::raster::prefetch::PrefetchedChunkReader;
-use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError};
+use crate::scalar_ops::{
+    grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError,
+    H3_POLYGON_TO_CELLS_MAX_CELLS,
+};
 
 use super::clip::{visit_overlap_spans_into, ClipScratch};
 use super::interp::{interpolate, Interpolation};
 use super::window::{chunk_is_absent, BandSelection, ChunkCache, RowWindow};
-use super::TransferMode;
+use super::{TransferMode, COARSE_CELL_DIAMETER_KM};
 
 /// Values of one window: enough for wide rasters without holding much more than a
 /// chunk band.
@@ -568,6 +571,9 @@ impl<A: TransferAccumulator> TransferStream<A> {
             TransferMode::AssignCenters => {
                 return invalid("is the default scan, not a transfer stream")
             }
+            TransferMode::Auto => {
+                return invalid("must be resolved before opening a transfer stream")
+            }
             TransferMode::Interpolate(method)
                 if A::CATEGORICAL && method != Interpolation::Nearest =>
             {
@@ -883,7 +889,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     weighted,
                     mass_preserve,
                 } => self.overlay_block(block, bbox, weighted, mass_preserve)?,
-                TransferMode::AssignCenters => {}
+                TransferMode::AssignCenters | TransferMode::Auto => {}
             },
         }
         self.finish_cells(block);
@@ -1656,7 +1662,7 @@ fn plan_run_chunk_misses(
                 0..width,
             ),
             TransferMode::Overlay { .. } => (block.rows.clone(), block.cols.clone()),
-            TransferMode::AssignCenters => unreachable!(),
+            TransferMode::AssignCenters | TransferMode::Auto => unreachable!(),
         };
         let rows = raw_rows.start.min(height)..raw_rows.end.min(height);
         let cols = raw_cols.start.min(width)..raw_cols.end.min(width);
@@ -1803,11 +1809,32 @@ fn block_bbox(
     ])
 }
 
-/// Above this cell diameter bound (`GridSpec::max_cell_diameter_km`, about four times a
-/// typical edge) `overlay` assigns whole pixels to cells by centre: the edges of such
-/// cells bend by more than a kilometre from the straight lines the polygon clipping
-/// assumes, and a pixel is negligible next to the cell.
-const COARSE_CELL_DIAMETER_KM: f64 = 500.0;
+/// Widest slice handed to A5's spherical great-circle polygon fill, in degrees of
+/// longitude: shorter slices limit inward chord bowing along parallels.
+const MAX_A5_FILL_LON_SPAN: f64 = 10.0;
+/// Conservative upper bound (degrees / deg²) on the latitude sagitta of a great-circle
+/// chord spanning `d_deg` degrees of longitude (`pi / 1440`, ~2x the small-angle
+/// maximum `pi / 2880`).
+const A5_CHORD_SAGITTA_COEFF: f64 = std::f64::consts::PI / 1440.0;
+
+/// Maximum longitude slice width (degrees) for `PolygonFill::A5Native`, kept short
+/// enough that both chord bowing and `check_a5_fill_budget`'s circular spherical cap
+/// stay bounded on wide, thin raster strips.
+fn a5_fill_lon_span(grid: GridKind, south: f64, north: f64, resolution: u8) -> f64 {
+    const EARTH_RADIUS_M: f64 = 6_371_007.2;
+    let budget_cells = (H3_POLYGON_TO_CELLS_MAX_CELLS / 4) as f64;
+    let max_cap_area_m2 = budget_cells * grid.area_m2(resolution);
+    let max_cap_diam_m = 2.0 * (max_cap_area_m2 / std::f64::consts::PI).sqrt() * 0.7;
+    let min_abs_lat = if south <= 0.0 && north >= 0.0 {
+        0.0
+    } else {
+        south.abs().min(north.abs())
+    };
+    let cos_lat = min_abs_lat.min(89.9).to_radians().cos().max(0.05);
+    let cap_lon_span = (max_cap_diam_m / (EARTH_RADIUS_M * cos_lat)).to_degrees();
+    let min_lon_span = (north - south).clamp(0.05, MAX_A5_FILL_LON_SPAN);
+    cap_lon_span.clamp(min_lon_span, MAX_A5_FILL_LON_SPAN)
+}
 
 /// The cells of `grid` at `resolution` selected by `mode` against the lon/lat box
 /// `[west, south, east, north]` (`west > east` across the antimeridian), sorted and
@@ -1824,12 +1851,24 @@ fn cells_in_bbox(
     } else {
         vec![(west, 180.0), (-180.0, east)]
     };
+    let a5_native = grid.spec().polygon_fill == PolygonFill::A5Native;
+    let max_lon_span = if a5_native {
+        a5_fill_lon_span(grid, south, north, resolution)
+    } else {
+        MAX_FILL_LON_SPAN
+    };
+    let max_seg_deg = if a5_native {
+        let tol = (0.05 * (north - south))
+            .min(0.05 * grid.spec().max_cell_radius_deg(resolution))
+            .max(1e-5);
+        (tol / A5_CHORD_SAGITTA_COEFF).sqrt()
+    } else {
+        0.0
+    };
     let mut cells = Vec::new();
     let mut part = Vec::new();
     for (span_west, span_east) in spans {
-        let slices = ((span_east - span_west) / MAX_FILL_LON_SPAN)
-            .ceil()
-            .max(1.0) as u32;
+        let slices = ((span_east - span_west) / max_lon_span).ceil().max(1.0) as u32;
         for slice in 0..slices {
             let w = span_west + (span_east - span_west) * f64::from(slice) / f64::from(slices);
             let e = span_west + (span_east - span_west) * f64::from(slice + 1) / f64::from(slices);
@@ -1843,7 +1882,22 @@ fn cells_in_bbox(
                     cells.extend(grid.cell_at(lat, lon, resolution));
                 }
             }
-            let wkb = rectangle_wkb(w, south, e, north);
+            // A5 connects polygon vertices along great-circle arcs rather than parallels.
+            // Densify and slightly pad north/south by the residual chord sagitta so wide,
+            // thin strips do not bow inside the target parallel band.
+            let (wkb_south, wkb_north, lon_segments) = if a5_native {
+                let lon_segments = ((e - w) / max_seg_deg).ceil().clamp(1.0, 256.0) as usize;
+                let actual_seg_deg = (e - w) / (lon_segments as f64);
+                let sagitta = A5_CHORD_SAGITTA_COEFF * actual_seg_deg * actual_seg_deg;
+                (
+                    (south - sagitta).max(-90.0),
+                    (north + sagitta).min(90.0),
+                    lon_segments,
+                )
+            } else {
+                (south, north, 1)
+            };
+            let wkb = densified_rectangle_wkb(w, wkb_south, e, wkb_north, lon_segments);
             match grid_polygon_to_cells_wkb_into(grid, &wkb, i64::from(resolution), mode, &mut part)
             {
                 Ok(()) => cells.extend_from_slice(&part),
@@ -1866,24 +1920,44 @@ fn cells_in_bbox(
     Ok(cells)
 }
 
-/// WKB of the lon/lat rectangle `[west, south, east, north]`, counter-clockwise.
-fn rectangle_wkb(west: f64, south: f64, east: f64, north: f64) -> Vec<u8> {
-    let ring = [
-        (west, south),
-        (east, south),
-        (east, north),
-        (west, north),
-        (west, south),
-    ];
-    let mut wkb = Vec::with_capacity(13 + 16 * ring.len());
+/// WKB of the lon/lat rectangle `[west, south, east, north]`, counter-clockwise, with
+/// `lon_segments` equal steps along the south and north edges.
+fn densified_rectangle_wkb(
+    west: f64,
+    south: f64,
+    east: f64,
+    north: f64,
+    lon_segments: usize,
+) -> Vec<u8> {
+    let segs = lon_segments.max(1);
+    let point_count = 2 * segs + 3;
+    let mut wkb = Vec::with_capacity(13 + 16 * point_count);
     wkb.push(1u8);
     wkb.extend(3u32.to_le_bytes());
     wkb.extend(1u32.to_le_bytes());
-    wkb.extend((ring.len() as u32).to_le_bytes());
-    for (x, y) in ring {
-        wkb.extend(x.to_le_bytes());
-        wkb.extend(y.to_le_bytes());
+    wkb.extend((point_count as u32).to_le_bytes());
+    let span = east - west;
+    let inv_segs = 1.0 / (segs as f64);
+    for i in 0..=segs {
+        let lon = if i == segs {
+            east
+        } else {
+            west + span * (i as f64) * inv_segs
+        };
+        wkb.extend(lon.to_le_bytes());
+        wkb.extend(south.to_le_bytes());
     }
+    for i in 0..=segs {
+        let lon = if i == segs {
+            west
+        } else {
+            east - span * (i as f64) * inv_segs
+        };
+        wkb.extend(lon.to_le_bytes());
+        wkb.extend(north.to_le_bytes());
+    }
+    wkb.extend(west.to_le_bytes());
+    wkb.extend(south.to_le_bytes());
     wkb
 }
 
@@ -3063,5 +3137,75 @@ mod tests {
         assert!(!c1.is_empty());
         assert_eq!(c4, c1);
         assert_eq!(camb, c1);
+    }
+
+    #[test]
+    fn a5_cells_in_bbox_covers_wide_thin_strip() {
+        let res = 10;
+        for bbox in [
+            [-125.0, 39.8, -67.0, 40.0],
+            [-125.0, -40.0, -67.0, -39.8],
+            [175.0, 39.8, -175.0, 40.0],
+        ] {
+            let covered = cells_in_bbox(GridKind::A5, bbox, res, ContainmentMode::Covers).unwrap();
+            let set: FxHashSet<u64> = covered.iter().copied().collect();
+            assert!(!set.is_empty(), "empty cover for {bbox:?}");
+
+            let [west, south, east, north] = bbox;
+            let spans = if west <= east {
+                vec![(west, east)]
+            } else {
+                vec![(west, 180.0), (-180.0, east)]
+            };
+            let mut sampled = 0usize;
+            for (sw, se) in spans {
+                for i in 0..=200 {
+                    let lon = sw + (se - sw) * f64::from(i) / 200.0;
+                    for j in 0..=10 {
+                        let lat = south + (north - south) * f64::from(j) / 10.0;
+                        let cell = GridKind::A5.cell_at(lat, lon, res).unwrap();
+                        assert!(
+                            set.contains(&cell),
+                            "missing A5 cell {cell:#x} at ({lon}, {lat}) for bbox {bbox:?}"
+                        );
+                        sampled += 1;
+                    }
+                }
+            }
+            assert!(sampled > 2000);
+        }
+
+        // ContainsCentroid must also retain cells along the full width of a thin strip,
+        // without bowing past the strip's southern chord.
+        let wide_strip = [-125.0, 39.8, -67.0, 40.0];
+        let centered = cells_in_bbox(
+            GridKind::A5,
+            wide_strip,
+            res,
+            ContainmentMode::ContainsCentroid,
+        )
+        .unwrap();
+        let center_set: FxHashSet<u64> = centered.iter().copied().collect();
+        let cover_all =
+            cells_in_bbox(GridKind::A5, wide_strip, res, ContainmentMode::Covers).unwrap();
+        let mut checked_in = 0usize;
+        for cell in cover_all {
+            if let Some((lat, lon)) = GridKind::A5.center_lat_lng(cell) {
+                let lon = wrap_lon_180(lon);
+                if (wide_strip[0]..=wide_strip[2]).contains(&lon)
+                    && (wide_strip[1]..=wide_strip[3]).contains(&lat)
+                {
+                    assert!(
+                        center_set.contains(&cell),
+                        "ContainsCentroid missed interior cell {cell:#x} at ({lon}, {lat})"
+                    );
+                    checked_in += 1;
+                }
+            }
+        }
+        assert!(
+            checked_in > 50,
+            "expected >50 interior CONUS cells, got {checked_in}"
+        );
     }
 }

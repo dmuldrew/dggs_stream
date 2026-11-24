@@ -513,12 +513,14 @@ fn partitioned_scan(
     batch_size: usize,
 ) -> Result<Box<dyn RasterScanExec>> {
     // SedonaDB's SQL aggregate accepts center-assignment states only.
-    if config.transfer != TransferMode::AssignCenters {
+    let mut config = config.clone();
+    if config.transfer.is_auto() {
+        config.transfer = TransferMode::AssignCenters;
+    } else if config.transfer != TransferMode::AssignCenters {
         return Err(DggsStreamError::InvalidParameter(
             "SedonaDB partitioned scans require transfer 'assign_centers'".into(),
         ));
     }
-    let mut config = config.clone();
     let mut empty = false;
     for f in filters {
         if let FilterPredicate::Resolution(_) = f {

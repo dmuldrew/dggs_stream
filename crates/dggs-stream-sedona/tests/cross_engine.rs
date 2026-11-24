@@ -266,6 +266,7 @@ async fn engines_agree_on_every_grid_and_transfer_mode() {
                     }
                     assert!(interior > 100, "{what}: {interior} interior cells");
                 }
+                TransferMode::Auto => unreachable!("resolved before execution"),
             }
         }
     }

@@ -238,13 +238,70 @@ pub fn pixel_ground_area_m2(tile: &TileDescriptor) -> Result<f64> {
     }
 }
 
+/// Ground pixel area of `tile` at the centre of `bbox` (or at the tile's own centre
+/// when `bbox` is `None` or lies outside the tile's valid coordinate mapping).
+pub fn tile_pixel_ground_area_m2_in_bbox(
+    tile: &TileDescriptor,
+    bbox: Option<[f64; 4]>,
+) -> Result<f64> {
+    if let Some([west, south, east, north]) = bbox {
+        let lat = 0.5 * (south + north);
+        let lon = if west <= east {
+            0.5 * (west + east)
+        } else {
+            crate::grid::wrap_lon_180(west + 0.5 * ((east + 360.0) - west))
+        };
+        let meta = &tile.reader.metadata;
+        if let Ok((x, y)) = tile.crs_transformer.wgs84_to_source(lon, lat) {
+            if let Some((col_f, row_f)) = meta.geotransform.coord_to_pixel(x, y) {
+                if col_f.is_finite() && row_f.is_finite() && meta.width > 0 && meta.height > 0 {
+                    let col = col_f.floor().clamp(0.0, f64::from(meta.width - 1));
+                    let row = row_f.floor().clamp(0.0, f64::from(meta.height - 1));
+                    let mut corners = [(0.0, 0.0); 4];
+                    let mut ok = true;
+                    for (corner, (dc, dr)) in
+                        corners
+                            .iter_mut()
+                            .zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+                    {
+                        let (px, py) = meta.geotransform.pixel_to_coord(col + dc, row + dr);
+                        match tile.crs_transformer.transform_point(px, py) {
+                            Ok(pt) => *corner = pt,
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        let area = lnglat_quad_area_m2(&corners);
+                        if area.is_finite() && area > 0.0 {
+                            return Ok(area);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pixel_ground_area_m2(tile)
+}
+
 /// Ground pixel area of a mosaic, in square metres: that of its finest tile, so `auto`
 /// keeps the detail of the highest-resolution source.
 pub fn mosaic_pixel_ground_area_m2(mosaic: &MosaicReader) -> Result<f64> {
+    mosaic_pixel_ground_area_m2_in_bbox(mosaic, None)
+}
+
+/// [`mosaic_pixel_ground_area_m2`] sampled near the centre of `bbox` when provided, so
+/// regional scans over projected rasters see local pixel sizes.
+pub fn mosaic_pixel_ground_area_m2_in_bbox(
+    mosaic: &MosaicReader,
+    bbox: Option<[f64; 4]>,
+) -> Result<f64> {
     let mut finest: Option<f64> = None;
     let mut first_error = None;
     for tile in &mosaic.tiles {
-        match pixel_ground_area_m2(tile) {
+        match tile_pixel_ground_area_m2_in_bbox(tile, bbox) {
             Ok(area) => finest = Some(finest.map_or(area, |f| f.min(area))),
             Err(e) => {
                 first_error.get_or_insert(e);

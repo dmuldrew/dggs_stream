@@ -460,7 +460,11 @@ impl MultiResolutionConfig {
     pub(crate) fn validate_coverage_threshold(&self) -> Result<()> {
         if let Some(t) = self.valid_coverage_threshold {
             if !(0.0..=1.0).contains(&t)
-                || !matches!(self.transfer, crate::transfer::TransferMode::Overlay { .. })
+                || !matches!(
+                    self.transfer,
+                    crate::transfer::TransferMode::Overlay { .. }
+                        | crate::transfer::TransferMode::Auto
+                )
             {
                 return Err(DggsStreamError::InvalidParameter(
                     "valid_coverage_threshold requires overlay and a finite fraction in [0, 1]"

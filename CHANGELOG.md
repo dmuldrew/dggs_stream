@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in `transfer = "auto"` (`TransferMode::Auto` in core, `--transfer auto` in CLI, `transfer="auto"` in Python/Polars/DuckDB/Sedona): inspects local ground pixel size against requested cell areas (choosing `interpolate` below 1:1 with `nearest` for categorical and `bilinear` for continuous, `assign_centers` near 1:1, and weighted `overlay` at >= 16:1 or mixed fine/coarse scans) while respecting incompatible scan options (`compact`, `spectral_formula`, sub-pixel sampling, partitioning, `valid_coverage_threshold`, `histogram_weight="area"`, `ground_area`, and `bands`).
+
 - Python and Polars scans accept `ground_area=True, transfer="overlay"` for partial-pixel ellipsoidal areas and density totals on all four grids.
 
 - DuckDB continuous scans accept `ground_area := true, transfer := 'overlay'` to integrate valid partial-pixel areas and densities on all four grids.
@@ -126,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The free functions `pmtiles::tiler::evict_and_write_tiles` and `pmtiles::tiler::flush_all_tiles`, which had no callers; use the `TilePyramidAccumulator` methods `evict_and_write_tiles` and `flush_all` instead.
 
 ### Fixed
+
+- A5 `cells_in_bbox` polygon fills now slice wide longitude spans (`MAX_A5_FILL_LON_SPAN = 10.0`, shrunk further at fine resolutions to fit `check_a5_fill_budget`'s spherical cap), densify north/south edges, and pad by the chord sagitta so `overlay`, `ground_area` overlay, and `interpolate` retain every cell across wide, thin raster strips.
 
 - DuckDB `COUNT(*)` over a `bands` scan no longer fails on DuckDB 1.2.0, which projects only its synthetic row-ID column for row counts.
 

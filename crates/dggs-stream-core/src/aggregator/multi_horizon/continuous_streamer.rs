@@ -164,12 +164,12 @@ impl MultiScanHorizonStreamer {
         let kernel = ContinuousKernel::from_config(config);
         let track_quantiles = kernel.track_quantiles;
         let mut inner = MultiHorizonStreamer::new(reader, config, kernel)?;
-        let transfer = transfer_stream(&mut inner, config)?;
+        let (transfer, transfer_mode) = transfer_stream(&mut inner, config)?;
         Ok(Self {
             inner,
             track_quantiles,
             transfer,
-            transfer_mode: config.transfer,
+            transfer_mode,
         })
     }
 
@@ -178,12 +178,12 @@ impl MultiScanHorizonStreamer {
         let kernel = ContinuousKernel::from_config(config);
         let track_quantiles = kernel.track_quantiles;
         let mut inner = MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?;
-        let transfer = transfer_stream(&mut inner, config)?;
+        let (transfer, transfer_mode) = transfer_stream(&mut inner, config)?;
         Ok(Self {
             inner,
             track_quantiles,
             transfer,
-            transfer_mode: config.transfer,
+            transfer_mode,
         })
     }
 
@@ -441,15 +441,30 @@ impl Drop for MultiScanHorizonStreamer {
 }
 
 /// The transfer stream of a non-default `config.transfer`, with the horizon kernel's
-/// prefetch stopped: the transfer modes read the raster themselves.
+/// prefetch stopped: the transfer modes read the raster themselves. Returns both the
+/// stream (when non-default) and the resolved concrete [`TransferMode`].
 fn transfer_stream<K: HorizonStreamKernel>(
     inner: &mut MultiHorizonStreamer<K>,
     config: &MultiResolutionConfig,
-) -> Result<Option<Box<crate::transfer::TransferStream<ContinuousAccumulator>>>> {
-    if config.transfer.is_assign_centers() {
-        return Ok(None);
+) -> Result<(
+    Option<Box<crate::transfer::TransferStream<ContinuousAccumulator>>>,
+    crate::transfer::TransferMode,
+)> {
+    let resolved = config
+        .transfer
+        .resolve_for_mosaic(inner.mosaic_arc().as_ref(), config, false);
+    if resolved.is_assign_centers() {
+        return Ok((None, resolved));
     }
     inner.stop_prefetch();
-    let stream = crate::transfer::TransferStream::new(inner.mosaic_arc(), config)?;
-    Ok(Some(Box::new(stream)))
+    let mut resolved_cfg;
+    let cfg = if resolved == config.transfer {
+        config
+    } else {
+        resolved_cfg = config.clone();
+        resolved_cfg.transfer = resolved;
+        &resolved_cfg
+    };
+    let stream = crate::transfer::TransferStream::new(inner.mosaic_arc(), cfg)?;
+    Ok((Some(Box::new(stream)), resolved))
 }

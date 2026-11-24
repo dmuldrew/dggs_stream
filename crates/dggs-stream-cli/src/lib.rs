@@ -83,7 +83,8 @@ pub struct CliStreamOptions {
     /// cells are output and with what value, and the decimal rounding of statistics.
     pub output: OutputPolicy,
     /// `--transfer`, `--interpolation`, `--overlay-weighted` and `--mass-preserve`: how
-    /// pixels map onto cells (default: each pixel into the cell holding its centre).
+    /// pixels map onto cells (default: each pixel into the cell holding its centre;
+    /// `auto` chooses from the cell-to-pixel area ratio and scan options).
     pub transfer: TransferMode,
     /// Minimum valid fraction of selected raster overlap.
     pub valid_coverage_threshold: Option<f64>,
@@ -1613,16 +1614,6 @@ fn parse_export_args(
             "Missing required input raster path".into(),
         ));
     }
-    // `auto` is measured on the raster, so it is resolved once the path and CRS are known.
-    if let Some(spec) = auto {
-        let paths = resolve_raster_sources(&opts.input_path)?;
-        opts.resolutions = spec.resolve_paths(opts.grid, &paths, opts.source_crs.as_deref())?;
-        eprintln!(
-            "dggs-stream: -r {spec} selected {} resolution {}",
-            opts.grid.label(),
-            opts.resolutions[0]
-        );
-    }
     match (partition_spec, partition_index) {
         (Some(spec), index) => opts.partition = Some(read_partition_spec(&spec, index)?),
         (None, Some(_)) => {
@@ -1631,6 +1622,41 @@ fn parse_export_args(
             ))
         }
         (None, None) => {}
+    }
+    // `auto` resolution and transfer are measured on the raster, once path and CRS are known.
+    if auto.is_some() || opts.transfer.is_auto() {
+        let paths = resolve_raster_sources(&opts.input_path)?;
+        let mosaic = MosaicReader::open(
+            &paths,
+            opts.bbox,
+            opts.source_crs.as_deref(),
+            OverlapRule::default(),
+        )?;
+        if let Some(spec) = auto {
+            opts.resolutions = spec.resolve(opts.grid, &mosaic)?;
+            eprintln!(
+                "dggs-stream: -r {spec} selected {} resolution {}",
+                opts.grid.label(),
+                opts.resolutions[0]
+            );
+        }
+        if opts.transfer.is_auto() {
+            let mut cfg = opts.scan_config();
+            cfg.partition = opts.partition.clone();
+            cfg.histogram = opts.histogram.clone();
+            opts.transfer = if opts.ground_area {
+                opts.transfer.resolve_for_ground_area(&mosaic, &cfg)
+            } else if opts.bands.is_some() {
+                opts.transfer.resolve_for_multiband(&mosaic, &cfg)
+            } else {
+                opts.transfer
+                    .resolve_for_mosaic(&mosaic, &cfg, opts.categorical)
+            };
+            eprintln!(
+                "dggs-stream: --transfer auto selected {}",
+                opts.transfer.as_str()
+            );
+        }
     }
 
     Ok((opts, output_file))
@@ -2545,12 +2571,93 @@ mod tests {
         }
         for bad in [
             &["--transfer", "smear"][..],
+            &["--transfer", "auto", "--interpolation", "bilinear"],
+            &["--transfer", "auto", "--mass-preserve"],
             &["--interpolation", "bilinear"],
             &["--mass-preserve"],
             &["--transfer", "overlay", "--overlay-weighted", "maybe"],
             &["--transfer", "interpolate", "--interpolation", "cubic9"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_cli_transfer_auto_picks_mode_by_scale() {
+        let tif = write_test_tif(24, 24, 2.5);
+        let input = tif.path().to_str().unwrap();
+        let mosaic = MosaicReader::open(
+            &[tif.path().to_path_buf()],
+            None,
+            Some("EPSG:4326"),
+            OverlapRule::default(),
+        )
+        .unwrap();
+        let pixel_m2 = dggs_stream_core::resolution::mosaic_pixel_ground_area_m2(&mosaic).unwrap();
+
+        for grid in GridKind::ALL {
+            let fine_res = (0..=grid.max_resolution())
+                .find(|&r| grid.area_m2(r) < pixel_m2)
+                .unwrap();
+            let near_res = (0..=grid.max_resolution())
+                .rev()
+                .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+                .unwrap();
+            let overlay_res = (0..=grid.max_resolution())
+                .rev()
+                .find(|&r| grid.area_m2(r) >= 16.0 * pixel_m2)
+                .unwrap();
+
+            let parse = |extra: &[&str]| {
+                let mut args: Vec<String> = [input, "--crs", "EPSG:4326", "--grid", grid.as_str()]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                args.extend(extra.iter().map(|s| s.to_string()));
+                parse_stream_args(&args, StreamOutputFormat::Jsonl)
+                    .unwrap()
+                    .0
+                    .transfer
+            };
+
+            let r_fine = fine_res.to_string();
+            let r_near = near_res.to_string();
+            let r_over = overlay_res.to_string();
+            assert_eq!(
+                parse(&["-r", &r_fine, "--transfer", "auto"]),
+                TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Bilinear)
+            );
+            assert_eq!(
+                parse(&["-r", &r_fine, "-c", "--transfer", "auto"]),
+                TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Nearest)
+            );
+            assert_eq!(
+                parse(&["-r", &r_near, "--transfer", "auto"]),
+                TransferMode::AssignCenters
+            );
+            assert_eq!(
+                parse(&["-r", &r_over, "--transfer", "auto"]),
+                TransferMode::OVERLAY
+            );
+            assert_eq!(
+                parse(&[
+                    "-r",
+                    &r_near,
+                    "--transfer",
+                    "auto",
+                    "--valid-coverage-threshold",
+                    "0.5",
+                ]),
+                TransferMode::OVERLAY
+            );
+            assert_eq!(
+                parse(&["-r", &r_over, "--transfer", "auto", "--ground-area"]),
+                TransferMode::OVERLAY
+            );
+            assert_eq!(
+                parse(&["-r", &r_fine, "--transfer", "auto", "--ground-area"]),
+                TransferMode::AssignCenters
+            );
         }
     }
 

@@ -119,6 +119,9 @@ impl PartitionedBatchReader {
             config.quantiles.clear();
         }
         let mosaic = open_mosaic(paths, &config)?;
+        if config.transfer.is_auto() {
+            config.transfer = config.transfer.resolve_for_mosaic(&mosaic, &config, false);
+        }
         if config.partition.is_some() && config.transfer == TransferMode::OVERLAY {
             let streamer = TransferStream::partitioned_overlay(mosaic, &config)?;
             return Ok(Self::new(

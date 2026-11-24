@@ -71,6 +71,14 @@ impl GroundAreaBatchReader {
         batch_size: usize,
         limit: Option<usize>,
     ) -> Result<Self> {
+        if config.transfer.is_auto() {
+            let mosaic = Arc::new(MosaicReader::from_single_reader(
+                reader,
+                config.bbox,
+                config.custom_crs.as_deref(),
+            )?);
+            return Self::open_mosaic(mosaic, config, projection, batch_size, limit);
+        }
         Self::open_with(
             || {
                 Ok(GroundAreaScan::Center(Box::new(scan_ground_area(
@@ -85,7 +93,7 @@ impl GroundAreaBatchReader {
     }
 
     /// Use a single-raster mosaic prepared with this scan's bbox and source CRS.
-    /// Supports center assignment and weighted ground-area overlay.
+    /// Supports center assignment, weighted ground-area overlay, and `transfer = "auto"`.
     pub fn open_mosaic(
         mosaic: Arc<MosaicReader>,
         config: &MultiResolutionConfig,
@@ -100,12 +108,18 @@ impl GroundAreaBatchReader {
                         "ground_area requires one raster".into(),
                     ));
                 };
-                if matches!(
-                    config.transfer,
-                    crate::transfer::TransferMode::Overlay { .. }
-                ) {
-                    let rows = crate::transfer::ground_area_overlay_tile(tile.clone(), config)?
-                        .map(|row| {
+                let resolved = config.transfer.resolve_for_ground_area(&mosaic, config);
+                let mut resolved_cfg;
+                let cfg = if resolved == config.transfer {
+                    config
+                } else {
+                    resolved_cfg = config.clone();
+                    resolved_cfg.transfer = resolved;
+                    &resolved_cfg
+                };
+                if matches!(cfg.transfer, crate::transfer::TransferMode::Overlay { .. }) {
+                    let rows =
+                        crate::transfer::ground_area_overlay_tile(tile.clone(), cfg)?.map(|row| {
                             row.map(|(resolution, cell_id, accumulator)| GroundAreaRecord {
                                 resolution,
                                 cell_id,
@@ -114,9 +128,9 @@ impl GroundAreaBatchReader {
                         });
                     return Ok(GroundAreaScan::Overlay(Box::new(rows)));
                 }
-                let kernel = GroundAreaKernel::for_reader(&tile.reader, config)?;
+                let kernel = GroundAreaKernel::for_reader(&tile.reader, cfg)?;
                 Ok(GroundAreaScan::Center(Box::new(
-                    MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?,
+                    MultiHorizonStreamer::new_mosaic(mosaic, cfg, kernel)?,
                 )))
             },
             config,
