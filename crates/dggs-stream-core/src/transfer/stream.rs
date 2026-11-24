@@ -5,26 +5,31 @@ pub(crate) use ground_area::ground_area_overlay_tile;
 pub use ground_area::scan_ground_area_overlay;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::aggregator::accumulator::ContinuousAccumulator;
-use crate::aggregator::categorical::CategoricalAccumulator;
+use crate::aggregator::categorical::{CategoricalAccumulator, CategoricalUniformity};
+use crate::aggregator::multi_horizon::borrowed::BorrowedSamples;
 use crate::aggregator::multi_horizon::coordinates::is_point_in_bbox;
 use crate::aggregator::multi_horizon::MultiResolutionConfig;
 use crate::aggregator::output_policy::NodataPolicy;
 use crate::aggregator::remap::CategoryRemapper;
+use crate::aggregator::simd::SimdSpanAccumulate;
 use crate::crs::transformer::CrsTransformer;
 use crate::error::{DggsStreamError, Result};
 use crate::grid::{wrap_lon_180, GridKind};
+use crate::raster::metadata::BandScaling;
 use crate::raster::mosaic::{MosaicReader, TileDescriptor};
+use crate::raster::prefetch::PrefetchedChunkReader;
 use crate::scalar_ops::{grid_polygon_to_cells_wkb_into, ContainmentMode, PolygonToCellsError};
 
 use super::clip::{visit_overlap_spans_into, ClipScratch};
 use super::interp::{interpolate, Interpolation};
-use super::window::{BandSelection, ChunkCache, RowWindow};
+use super::window::{chunk_is_absent, BandSelection, ChunkCache, RowWindow};
 use super::TransferMode;
 
 /// Values of one window: enough for wide rasters without holding much more than a
@@ -60,6 +65,29 @@ pub trait TransferAccumulator: Send + 'static {
             }
         }
         valid
+    }
+    /// Accumulate a contiguous native-typed slice of unit-weight pixel values (`weight == 1.0`).
+    /// Returns the number of valid observations accumulated.
+    fn add_band_native_unit_slice(
+        &mut self,
+        slot: usize,
+        samples: BorrowedSamples<'_>,
+        nodata: Option<f64>,
+        scaling: BandScaling,
+    ) -> usize {
+        crate::dispatch_samples!(samples, nodata, |slice, nd| {
+            let mut valid = 0;
+            for &raw in slice {
+                if SimdSpanAccumulate::is_valid(raw, nd) {
+                    let val = scaling.apply(SimdSpanAccumulate::to_f64_val(raw));
+                    if val.is_finite() {
+                        self.add_band(slot, val, 1.0);
+                        valid += 1;
+                    }
+                }
+            }
+            valid
+        })
     }
     /// Record geometric overlap, including missing pixels, for partition merging.
     fn cover(&mut self, _area: f64) {}
@@ -126,13 +154,68 @@ impl TransferAccumulator for ContinuousAccumulator {
             }
             return valid;
         }
-        let span =
-            <f64 as crate::aggregator::simd::SimdSpanAccumulate>::accumulate_span(slice, None);
+        let span = <f64 as SimdSpanAccumulate>::accumulate_span(slice, None);
         let valid = span.count as usize;
         if valid > 0 {
             self.merge(&span);
         }
         valid
+    }
+
+    fn add_band_native_unit_slice(
+        &mut self,
+        slot: usize,
+        samples: BorrowedSamples<'_>,
+        nodata: Option<f64>,
+        scaling: BandScaling,
+    ) -> usize {
+        debug_assert_eq!(slot, 0);
+        crate::dispatch_samples!(samples, nodata, |slice, nd| {
+            if self.quantiles.is_some() {
+                let mut valid = 0;
+                for &raw in slice {
+                    if SimdSpanAccumulate::is_valid(raw, nd) {
+                        let val = scaling.apply(SimdSpanAccumulate::to_f64_val(raw));
+                        if val.is_finite() {
+                            self.update(val);
+                            valid += 1;
+                        }
+                    }
+                }
+                return valid;
+            }
+            let mut span = <_ as SimdSpanAccumulate>::accumulate_span(slice, nd);
+            if span.count == 0.0 {
+                return 0;
+            }
+            if scaling.is_identity() {
+                self.merge(&span);
+                return span.count as usize;
+            }
+            if scaling.scale.is_finite()
+                && scaling.offset.is_finite()
+                && (scaling.scale * scaling.scale).is_finite()
+                && scaling.apply(span.min).is_finite()
+                && scaling.apply(span.max).is_finite()
+            {
+                span.apply_affine(scaling.scale, scaling.offset);
+                if span.sum.is_finite() && span.m2.is_finite() {
+                    self.merge(&span);
+                    return span.count as usize;
+                }
+            }
+            let mut valid = 0;
+            for &raw in slice {
+                if SimdSpanAccumulate::is_valid(raw, nd) {
+                    let val = scaling.apply(SimdSpanAccumulate::to_f64_val(raw));
+                    if val.is_finite() {
+                        self.update(val);
+                        valid += 1;
+                    }
+                }
+            }
+            valid
+        })
     }
 
     fn has_samples(&self) -> bool {
@@ -168,6 +251,15 @@ impl TransferAccumulator for Vec<ContinuousAccumulator> {
     }
     fn add_band_unit_slice(&mut self, slot: usize, slice: &[f64]) -> usize {
         self[slot].add_band_unit_slice(0, slice)
+    }
+    fn add_band_native_unit_slice(
+        &mut self,
+        slot: usize,
+        samples: BorrowedSamples<'_>,
+        nodata: Option<f64>,
+        scaling: BandScaling,
+    ) -> usize {
+        self[slot].add_band_native_unit_slice(0, samples, nodata, scaling)
     }
     fn has_samples(&self) -> bool {
         self.iter().any(TransferAccumulator::has_samples)
@@ -211,6 +303,33 @@ impl TransferAccumulator for CategoricalAccumulator {
         valid
     }
 
+    fn add_band_native_unit_slice(
+        &mut self,
+        slot: usize,
+        samples: BorrowedSamples<'_>,
+        nodata: Option<f64>,
+        scaling: BandScaling,
+    ) -> usize {
+        debug_assert_eq!(slot, 0);
+        crate::dispatch_samples!(samples, nodata, |slice, nd| {
+            if scaling.is_identity() {
+                accumulate_categorical_native(self, slice, nd)
+            } else {
+                let mut valid = 0;
+                for &raw in slice {
+                    if SimdSpanAccumulate::is_valid(raw, nd) {
+                        let val = scaling.apply(SimdSpanAccumulate::to_f64_val(raw));
+                        if val.is_finite() {
+                            self.update(val.round() as i64);
+                            valid += 1;
+                        }
+                    }
+                }
+                valid
+            }
+        })
+    }
+
     fn has_samples(&self) -> bool {
         self.total_count > 0.0
     }
@@ -224,6 +343,51 @@ impl TransferAccumulator for CategoricalAccumulator {
                 .min_majority_fraction
                 .is_none_or(|f| self.majority().2 >= f)
     }
+}
+
+fn accumulate_categorical_native<T: SimdSpanAccumulate + CategoricalUniformity>(
+    acc: &mut CategoricalAccumulator,
+    slice: &[T],
+    nd: Option<T>,
+) -> usize {
+    if slice.is_empty() {
+        return 0;
+    }
+    if T::is_uniform(slice) {
+        let first = slice[0];
+        if first.is_valid(nd) {
+            if let Some(cat) = first.to_category() {
+                acc.update_weighted(cat, slice.len() as f64);
+                return slice.len();
+            }
+        }
+        return 0;
+    }
+    let mut valid = 0usize;
+    let mut curr_cat: Option<i64> = None;
+    let mut curr_count = 0usize;
+    for &raw in slice {
+        if !raw.is_valid(nd) {
+            continue;
+        }
+        let Some(cat) = raw.to_category() else {
+            continue;
+        };
+        valid += 1;
+        if Some(cat) == curr_cat {
+            curr_count += 1;
+        } else {
+            if let Some(prev) = curr_cat {
+                acc.update_weighted(prev, curr_count as f64);
+            }
+            curr_cat = Some(cat);
+            curr_count = 1;
+        }
+    }
+    if let Some(last) = curr_cat {
+        acc.update_weighted(last, curr_count as f64);
+    }
+    valid
 }
 
 /// A rectangle of pixels of one tile at one resolution, processed as a unit.
@@ -282,6 +446,12 @@ pub struct TransferStream<A: TransferAccumulator> {
     /// `horizon[i]`: the northernmost latitude any cell of blocks `i..` can reach.
     horizon: Vec<f64>,
     next_block: usize,
+    decode_workers: usize,
+    fetch_workers: usize,
+    prefetch_chunks: usize,
+    decode_budget_bytes: usize,
+    prefetcher: Option<PrefetchedChunkReader>,
+    prefetch_run_end: usize,
     cache: ChunkCache,
     cache_tile: usize,
     pending: HashMap<u64, Pending<A>>,
@@ -445,6 +615,12 @@ impl<A: TransferAccumulator> TransferStream<A> {
             blocks,
             horizon,
             next_block: 0,
+            decode_workers: config.decode_workers,
+            fetch_workers: config.fetch_workers,
+            prefetch_chunks: config.prefetch_chunks,
+            decode_budget_bytes: config.decode_budget_bytes,
+            prefetcher: None,
+            prefetch_run_end: 0,
             cache: ChunkCache::default(),
             cache_tile: usize::MAX,
             pending: HashMap::new(),
@@ -522,9 +698,10 @@ impl<A: TransferAccumulator> TransferStream<A> {
     /// Process the next block. A failure is latched: the block is already passed, so
     /// resuming would silently drop its contribution.
     fn process_next(&mut self) -> Result<()> {
-        let block = self.blocks[self.next_block].clone();
+        let block_idx = self.next_block;
+        let block = self.blocks[block_idx].clone();
         self.next_block += 1;
-        let result = self.process(&block);
+        let result = self.process(block_idx, &block);
         if let Err(e) = &result {
             self.failure = Some(e.to_string());
         }
@@ -548,16 +725,19 @@ impl<A: TransferAccumulator> TransferStream<A> {
         Ok(())
     }
 
-    /// Read a window of `tile`, timed as decoding when a profile is attached.
+    /// Read a window of `tile`, timed as decoding when no background prefetcher is running.
     fn load_window(
         &mut self,
         tile: &TileDescriptor,
         rows: Range<u32>,
         cols: Range<u32>,
     ) -> Result<RowWindow> {
-        use crate::run_profile::{Counter, Phase, PhaseTimer};
-        let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
-        let read_width = cols.len() as u64;
+        use crate::run_profile::{Phase, PhaseTimer};
+        let timer = self
+            .prefetcher
+            .is_none()
+            .then(|| self.profile.as_ref().map(|_| PhaseTimer::start()))
+            .flatten();
         let window = RowWindow::load_bands(
             tile,
             &self.bands,
@@ -565,20 +745,19 @@ impl<A: TransferAccumulator> TransferStream<A> {
             rows,
             cols,
             &mut self.cache,
+            self.prefetcher.as_ref(),
             self.profile.as_deref(),
         )?;
         if let (Some(profile), Some(timer)) = (&self.profile, timer) {
             timer.stop(profile, Phase::Decode);
-            let pixels = read_width * window.rows().len() as u64;
-            profile.count(Counter::DecodedBytes, pixels * 8 * self.bands.len() as u64);
         }
         Ok(window)
     }
 
-    fn process(&mut self, block: &Block) -> Result<()> {
+    fn process(&mut self, block_idx: usize, block: &Block) -> Result<()> {
         use crate::run_profile::{Counter, Phase, PhaseTimer};
         let timer = self.profile.as_ref().map(|_| PhaseTimer::start());
-        let outcome = self.process_block(block);
+        let outcome = self.process_block(block_idx, block);
         if let (Some(profile), Some(timer)) = (&self.profile, timer) {
             // The block's time, window reading included, is the transfer kernel's.
             timer.stop(profile, Phase::Kernel);
@@ -591,10 +770,46 @@ impl<A: TransferAccumulator> TransferStream<A> {
         outcome
     }
 
-    fn process_block(&mut self, block: &Block) -> Result<()> {
-        if self.cache_tile != block.tile {
-            self.cache.clear();
+    fn process_block(&mut self, block_idx: usize, block: &Block) -> Result<()> {
+        if block_idx >= self.prefetch_run_end || self.cache_tile != block.tile {
+            self.cache.clear_and_recycle(self.prefetcher.as_ref());
+            self.prefetcher = None;
             self.cache_tile = block.tile;
+            let run_end = block_idx
+                + self.blocks[block_idx..]
+                    .iter()
+                    .take_while(|b| b.tile == block.tile && b.resolution == block.resolution)
+                    .count();
+            let tile = &self.mosaic.tiles[block.tile];
+            let (misses, blocks_covered) = plan_run_chunk_misses(
+                tile,
+                &self.blocks[block_idx..run_end],
+                &self.bands,
+                self.mode,
+            );
+            self.prefetch_run_end = block_idx + blocks_covered;
+            if !misses.is_empty()
+                && (tile.reader.is_remote() || (self.decode_workers > 1 && misses.len() > 2))
+            {
+                let chunk_bytes = tile.reader.decoded_chunk_bytes().max(1);
+                let budget_chunks = (self.decode_budget_bytes / chunk_bytes).max(16);
+                let target_lookahead = (tile.reader.chunk_layout.chunks_across as usize)
+                    .max(self.prefetch_chunks)
+                    .max(self.decode_workers * 4)
+                    .min(512);
+                let queue_cap = target_lookahead
+                    .min(budget_chunks)
+                    .min(misses.len())
+                    .max(16);
+                self.prefetcher = Some(PrefetchedChunkReader::spawn_with_profile(
+                    tile.reader.clone(),
+                    misses,
+                    queue_cap,
+                    self.decode_workers,
+                    self.fetch_workers,
+                    self.profile.clone(),
+                ));
+            }
         }
         match block.bbox {
             None => self.record_failures(1)?,
@@ -754,7 +969,6 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 return;
             }
             let clipped_len = clipped_c1 - clipped_c0;
-            let start = row_off * band_width + clipped_c0;
             if clipped_len >= 4
                 && run.area == 1.0
                 && weight == 1.0
@@ -768,15 +982,20 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     c.covered_area += clipped_len as f64;
                 }
                 for slot in 0..bands.len() {
-                    let valid = pending
-                        .acc
-                        .add_band_unit_slice(slot, window.band_slice(slot, start, clipped_len));
+                    let valid = window.accumulate_unit_span(
+                        slot,
+                        row_off,
+                        clipped_c0,
+                        clipped_c1,
+                        &mut pending.acc,
+                    );
                     if let Some(c) = coverage.as_mut() {
                         c.valid_area[slot] += valid as f64;
                     }
                 }
                 return;
             }
+            let start = row_off * band_width + clipped_c0;
             let row = rows.0 + row_off as i64;
             for offset in 0..clipped_len {
                 let index = start + offset;
@@ -802,7 +1021,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     c.covered_area += run.area;
                 }
                 for slot in 0..bands.len() {
-                    if let Some(sample) = window.band_value(slot, index) {
+                    if let Some(sample) = window.band_value_at(slot, row_off, clipped_c0 + offset) {
                         if let Some(c) = coverage.as_mut() {
                             c.valid_area[slot] += run.area;
                         }
@@ -1117,7 +1336,12 @@ fn plan_tile(
     let first = blocks.len();
     let mut row = 0;
     while row < height {
-        let row_end = (row + rows).min(height);
+        let row_end = if overlay && rows < chunk_height {
+            let next_chunk_row = ((row / chunk_height) + 1).saturating_mul(chunk_height);
+            (row + rows).min(next_chunk_row).min(height)
+        } else {
+            (row + rows).min(height)
+        };
         let mut col = 0;
         while col < width {
             let col_end = (col + cols).min(width);
@@ -1138,6 +1362,101 @@ fn plan_tile(
     if let Some(last) = blocks[first..].last_mut() {
         last.last_of_tile = true;
     }
+}
+
+/// Simulate chunk cache retention across `run_blocks` and return `(misses, blocks_covered)`
+/// in exact `RowWindow::load_bands` iteration order, stopping early if a later block would
+/// re-miss an already scheduled chunk.
+fn plan_run_chunk_misses(
+    tile: &TileDescriptor,
+    run_blocks: &[Block],
+    bands: &[usize],
+    mode: TransferMode,
+) -> (Vec<u32>, usize) {
+    let meta = &tile.reader.metadata;
+    let (width, height) = (meta.width, meta.height);
+    let layout = tile.reader.chunk_layout;
+    let spp = usize::from(meta.samples_per_pixel.max(1));
+    let alpha_index = meta.alpha_sample.map(usize::from).filter(|&a| a < spp);
+    let band_indices: Vec<_> = bands
+        .iter()
+        .map(|&band| band.saturating_sub(1).min(spp - 1))
+        .collect();
+    let margin = match mode {
+        TransferMode::Interpolate(method) => method.margin(),
+        _ => 0,
+    };
+
+    let mut misses = Vec::new();
+    let mut cached: FxHashSet<u32> = FxHashSet::default();
+    let mut seen_misses: FxHashSet<u32> = FxHashSet::default();
+    let mut blocks_covered = 0;
+
+    for block in run_blocks {
+        if block.bbox.is_none() || matches!(mode, TransferMode::AssignCenters) {
+            blocks_covered += 1;
+            continue;
+        }
+        let (raw_rows, raw_cols) = match mode {
+            TransferMode::Interpolate(_) => (
+                block.rows.start.saturating_sub(margin)..block.rows.end.saturating_add(margin),
+                0..width,
+            ),
+            TransferMode::Overlay { .. } => (block.rows.clone(), block.cols.clone()),
+            TransferMode::AssignCenters => unreachable!(),
+        };
+        let rows = raw_rows.start.min(height)..raw_rows.end.min(height);
+        let cols = raw_cols.start.min(width)..raw_cols.end.min(width);
+        if rows.is_empty() || cols.is_empty() || width == 0 {
+            blocks_covered += 1;
+            continue;
+        }
+
+        let chunk_rows = rows.start / layout.chunk_height..=(rows.end - 1) / layout.chunk_height;
+        let chunk_cols = cols.start / layout.chunk_width..cols.end.div_ceil(layout.chunk_width);
+
+        let mut block_misses = Vec::new();
+        let mut collision = false;
+        for chunk_row in chunk_rows.clone() {
+            for chunk_col in chunk_cols.clone() {
+                let index = chunk_row * layout.chunks_across + chunk_col;
+                let bounds = layout.get_chunk_bounds(index, width, height);
+                if bounds.width == 0 || bounds.height == 0 {
+                    continue;
+                }
+                if chunk_is_absent(&tile.reader, index, &band_indices, alpha_index) {
+                    continue;
+                }
+                if cached.contains(&index) {
+                    continue;
+                }
+                if seen_misses.contains(&index) {
+                    collision = true;
+                    break;
+                }
+                block_misses.push(index);
+            }
+            if collision {
+                break;
+            }
+        }
+        if collision && blocks_covered > 0 {
+            break;
+        }
+        cached.retain(|&index| {
+            let chunk_row = index / layout.chunks_across;
+            let chunk_col = index % layout.chunks_across;
+            chunk_rows.contains(&chunk_row) && chunk_cols.contains(&chunk_col)
+        });
+        for &index in &block_misses {
+            cached.insert(index);
+            seen_misses.insert(index);
+        }
+        misses.extend_from_slice(&block_misses);
+        blocks_covered += 1;
+    }
+
+    (misses, blocks_covered.max(1))
 }
 
 /// The WGS84 box `[west, south, east, north]` of a block of pixels, padded so that it
@@ -1553,6 +1872,7 @@ impl TransferStream<super::OverlayPartial> {
 mod tests {
     use super::*;
     use crate::raster::mosaic::OverlapRule;
+    use crate::raster::GeoTiffStreamReader;
     use std::collections::BTreeMap;
 
     #[test]
@@ -1730,5 +2050,198 @@ mod tests {
         assert!(batches > 0, "four workers never prepared a batch");
         assert!(retries > 0, "no oversized cell was handed back");
         assert_eq!(parallel, serial);
+    }
+
+    fn geographic_multi_strip_raster(
+        width: u32,
+        height: u32,
+        rows_per_strip: u32,
+        nodata: f32,
+        sparse_strips: &[usize],
+    ) -> tempfile::NamedTempFile {
+        use tiff::encoder::{colortype, TiffEncoder};
+        use tiff::tags::Tag;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = TiffEncoder::new(file.as_file()).unwrap();
+        let mut image = encoder
+            .new_image::<colortype::Gray32Float>(width, height)
+            .unwrap();
+        image.rows_per_strip(rows_per_strip).unwrap();
+        let tags = image.encoder();
+        tags.write_tag(
+            Tag::GeoKeyDirectoryTag,
+            &[1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326][..],
+        )
+        .unwrap();
+        tags.write_tag(Tag::ModelPixelScaleTag, &[0.002f64, 0.002, 0.0][..])
+            .unwrap();
+        tags.write_tag(
+            Tag::ModelTiepointTag,
+            &[0.0f64, 0.0, 0.0, -122.5, 37.85, 0.0][..],
+        )
+        .unwrap();
+        tags.write_tag(Tag::Unknown(42113), &format!("{nodata}")[..])
+            .unwrap();
+        let pixels: Vec<f32> = (0..height)
+            .flat_map(|r| {
+                let strip = (r / rows_per_strip) as usize;
+                let is_sparse = sparse_strips.contains(&strip);
+                (0..width).map(move |c| {
+                    if is_sparse || (r + c) % 19 == 0 {
+                        nodata
+                    } else {
+                        ((r * 3 + c) % 17 + 1) as f32
+                    }
+                })
+            })
+            .collect();
+        image.write_data(&pixels).unwrap();
+        file
+    }
+
+    #[test]
+    fn plan_run_chunk_misses_skips_sparse_and_deduplicates_overlaps() {
+        let file = geographic_multi_strip_raster(16, 24, 2, -9999.0, &[1, 4]);
+        let mut reader = GeoTiffStreamReader::open(file.path()).unwrap();
+        let info = Arc::make_mut(reader.chunk_info.as_mut().unwrap());
+        for s in [1usize, 4] {
+            Arc::make_mut(&mut info.chunk_offsets)[s] = 0;
+            Arc::make_mut(&mut info.chunk_bytes)[s] = 0;
+        }
+        let tile = TileDescriptor::new(0, reader, None).unwrap();
+        let bbox = Some([-122.5, 37.8, -122.4, 37.85]);
+
+        // Adjacent overlay blocks within strip 0 (0..1, 1..2) followed by strip 1 (sparse),
+        // strip 2 (4..6), plus None bbox block.
+        let blocks = vec![
+            Block {
+                resolution: 8,
+                tile: 0,
+                rows: 0..1,
+                cols: 0..16,
+                bbox,
+                last_of_tile: false,
+            },
+            Block {
+                resolution: 8,
+                tile: 0,
+                rows: 1..2,
+                cols: 0..16,
+                bbox,
+                last_of_tile: false,
+            },
+            Block {
+                resolution: 8,
+                tile: 0,
+                rows: 2..4,
+                cols: 0..16,
+                bbox,
+                last_of_tile: false,
+            },
+            Block {
+                resolution: 8,
+                tile: 0,
+                rows: 4..6,
+                cols: 0..16,
+                bbox: None,
+                last_of_tile: false,
+            },
+            Block {
+                resolution: 8,
+                tile: 0,
+                rows: 6..10,
+                cols: 0..16,
+                bbox,
+                last_of_tile: true,
+            },
+        ];
+        let (misses, covered) = plan_run_chunk_misses(&tile, &blocks, &[1], TransferMode::OVERLAY);
+        assert_eq!(covered, 5);
+        // Strip 0 missed once on block 0, hit on block 1; strip 1 sparse; strip 2 skipped (bbox None);
+        // strips 3 and 4 missed on block 4, with strip 4 sparse -> [0, 3].
+        assert_eq!(misses, vec![0, 3]);
+    }
+
+    #[test]
+    fn prefetched_overlay_and_interpolate_match_single_worker() {
+        let file = geographic_multi_strip_raster(48, 64, 2, -9999.0, &[3, 11]);
+        let mut reader = GeoTiffStreamReader::open(file.path()).unwrap();
+        let info = Arc::make_mut(reader.chunk_info.as_mut().unwrap());
+        for s in [3usize, 11] {
+            Arc::make_mut(&mut info.chunk_offsets)[s] = 0;
+            Arc::make_mut(&mut info.chunk_bytes)[s] = 0;
+        }
+        let mosaic = Arc::new(MosaicReader::from_single_reader(reader, None, None).unwrap());
+
+        for mode in [
+            TransferMode::OVERLAY,
+            TransferMode::Overlay {
+                weighted: true,
+                mass_preserve: true,
+            },
+            TransferMode::Interpolate(Interpolation::Bilinear),
+        ] {
+            let mut single_cfg = MultiResolutionConfig::new(vec![6, 7]);
+            single_cfg.transfer = mode;
+            single_cfg.decode_workers = 1;
+
+            let mut multi_cfg = single_cfg.clone();
+            multi_cfg.decode_workers = 4;
+
+            let drain_cont = |cfg: &MultiResolutionConfig| {
+                let mut stream =
+                    TransferStream::<ContinuousAccumulator>::new(mosaic.clone(), cfg).unwrap();
+                let mut out = BTreeMap::new();
+                while stream
+                    .drain_into(128, |_, res, id, acc| {
+                        assert!(out.insert((res, id), acc).is_none());
+                    })
+                    .unwrap()
+                    > 0
+                {}
+                out
+            };
+            let single = drain_cont(&single_cfg);
+            let multi = drain_cont(&multi_cfg);
+            assert!(!single.is_empty());
+            assert_eq!(
+                single.keys().collect::<Vec<_>>(),
+                multi.keys().collect::<Vec<_>>()
+            );
+            for (k, a) in single {
+                let b = &multi[&k];
+                assert!((a.count - b.count).abs() < 1e-12, "{mode:?} {k:?}");
+                assert!((a.sum - b.sum).abs() < 1e-12, "{mode:?} {k:?}");
+                assert!((a.m2 - b.m2).abs() < 1e-12, "{mode:?} {k:?}");
+            }
+        }
+
+        // Categorical overlay across multiple chunks and resolutions.
+        let mut cat_single = MultiResolutionConfig::new(vec![6, 7]);
+        cat_single.transfer = TransferMode::Overlay {
+            weighted: false,
+            mass_preserve: false,
+        };
+        cat_single.decode_workers = 1;
+        let mut cat_multi = cat_single.clone();
+        cat_multi.decode_workers = 4;
+        let drain_cat = |cfg: &MultiResolutionConfig| {
+            let mut stream =
+                TransferStream::<CategoricalAccumulator>::new(mosaic.clone(), cfg).unwrap();
+            let mut out = BTreeMap::new();
+            while stream
+                .drain_into(128, |_, res, id, acc| {
+                    assert!(out.insert((res, id), acc).is_none());
+                })
+                .unwrap()
+                > 0
+            {}
+            out
+        };
+        let cat1 = drain_cat(&cat_single);
+        let cat4 = drain_cat(&cat_multi);
+        assert!(!cat1.is_empty());
+        assert_eq!(cat1, cat4);
     }
 }

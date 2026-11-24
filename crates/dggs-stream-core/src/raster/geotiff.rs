@@ -76,6 +76,12 @@ impl GeoTiffMetadata {
             .copied()
             .unwrap_or(BandScaling::IDENTITY)
     }
+
+    /// Whether this image carries a full-resolution internal TIFF transparency mask.
+    #[inline]
+    pub fn has_internal_mask(&self) -> bool {
+        self.internal_mask.is_some()
+    }
 }
 
 /// Chunk layout information (tiled vs striped)
