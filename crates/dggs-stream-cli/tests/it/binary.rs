@@ -254,7 +254,9 @@ fn worker_flags_and_ground_area_overlay_match_the_default_scan() {
     ]);
     let rows = jsonl_rows(&ground.stdout);
     assert!(!rows.is_empty());
-    assert!(rows.iter().all(|row| row["retained_area_m2"].as_f64().unwrap() > 0.0));
+    assert!(rows
+        .iter()
+        .all(|row| row["retained_area_m2"].as_f64().unwrap() > 0.0));
 }
 
 #[test]

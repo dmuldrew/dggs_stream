@@ -1214,6 +1214,173 @@ fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
     assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
 }
 
+/// Fixed, dense native-grid references, independent of the overlay subdivision.
+fn reference_ring(
+    grid: GridKind,
+    cell: u64,
+    corners: &[(f64, f64)],
+    steps: u32,
+) -> Vec<(f64, f64)> {
+    match grid {
+        GridKind::A5 => a5::cell_to_boundary(
+            cell,
+            Some(a5::CellToBoundaryOptions {
+                closed_ring: false,
+                segments: Some(steps as i32),
+            }),
+        )
+        .unwrap()
+        .iter()
+        .map(|v| (v.longitude(), v.latitude()))
+        .collect(),
+        GridKind::Healpix => {
+            let (depth, id) = dggs_stream_core::grid::healpix_decode(cell).unwrap();
+            healpix::get(depth)
+                .path_along_cell_edge(id, healpix::dir::Cardinal::S, false, steps)
+                .iter()
+                .map(|v| (v.lon.to_degrees(), v.lat.to_degrees()))
+                .collect()
+        }
+        GridKind::S2 | GridKind::H3 => {
+            use s2::{latlng::LatLng, point::Point};
+            let points: Vec<_> = corners
+                .iter()
+                .map(|&(lon, lat)| Point::from(LatLng::from_degrees(lat, lon)))
+                .collect();
+            let mut out = Vec::new();
+            for (i, a) in points.iter().enumerate() {
+                let b = &points[(i + 1) % points.len()];
+                for j in 0..steps {
+                    let p = LatLng::from(s2::edgeutil::interpolate(
+                        f64::from(j) / f64::from(steps),
+                        a,
+                        b,
+                    ));
+                    out.push((p.lng.deg(), p.lat.deg()));
+                }
+            }
+            out
+        }
+    }
+}
+
+#[test]
+fn adaptive_overlay_per_cell_area_matches_dense_edges() {
+    const STEPS: u32 = 1024;
+    const SIZE: u32 = 96;
+    const METRES_PER_RADIAN: f64 = 6_378_137.0;
+    for grid in GridKind::ALL {
+        let res = (0..=grid.max_resolution())
+            .find(|&r| grid.spec().max_cell_diameter_km(r) <= 500.0)
+            .unwrap();
+        for (lon, lat, epsg) in [
+            (-37.0, 76.0, 4326),
+            (180.0, 54.125, 4326),
+            (-37.0, 76.0, 3857),
+        ] {
+            let id = grid.cell_at(lat, lon, res).unwrap();
+            let mut vertices = [(0., 0.); 10];
+            let n = grid.boundary_lng_lat(id, &mut vertices);
+            let corners = &vertices[..n];
+            let dense = reference_ring(grid, id, corners, STEPS);
+            let wrap = |x: f64| (x + 180.0).rem_euclid(360.0) - 180.0;
+            // Place a small raster astride a real edge. At the seam, S2 and
+            // HEALPix can have an entire edge on the meridian: sample near
+            // its endpoint so the footprint also contains a curved edge.
+            let center = if lon == 180.0 {
+                let nearest = dense
+                    .iter()
+                    .min_by(|a, b| wrap(a.0 - lon).abs().total_cmp(&wrap(b.0 - lon).abs()))
+                    .unwrap();
+                (lon, nearest.1)
+            } else {
+                dense[STEPS as usize / 2]
+            };
+            let project = |lon: f64, lat: f64| {
+                let x = center.0 + wrap(lon - center.0);
+                if epsg == 3857 {
+                    (
+                        METRES_PER_RADIAN * x.to_radians(),
+                        METRES_PER_RADIAN * lat.to_radians().tan().asinh(),
+                    )
+                } else {
+                    (x, lat)
+                }
+            };
+            let pixel = if epsg == 3857 { 25.0 } else { 0.00025 };
+            let span = f64::from(SIZE) * pixel;
+            let (x, y) = project(center.0, center.1);
+            let west = x - span * 0.5;
+            let north = y + span * 0.5;
+            let fraction = |ring: &[(f64, f64)]| {
+                let unit: Vec<_> = ring
+                    .iter()
+                    .map(|&(lon, lat)| {
+                        let (x, y) = project(lon, lat);
+                        ((x - west) / span, (north - y) / span)
+                    })
+                    .collect();
+                let mut area = 0.0;
+                dggs_stream_core::transfer::pixel_overlaps(&unit, (0, 1), 1, |_, _, v| area += v);
+                area
+            };
+            let expected = fraction(&dense);
+            let baseline = (fraction(corners) - expected).abs();
+            let (_dir, path) = TestGeoTiffBuilder::new(SIZE, SIZE)
+                .origin(west, north)
+                .epsg(epsg)
+                .pixel_size(pixel)
+                .create_f32_tempfile(|_, _| 1.0);
+            let result = scan(&path, &config(grid, res, TransferMode::OVERLAY));
+            let actual = result.get(&id).map_or(0., |a| a.count) / f64::from(SIZE).powi(2);
+            let error = (actual - expected).abs();
+            eprintln!("{grid} {lat} EPSG:{epsg} res={res} expected={expected:.8} corner_error={baseline:.8} adaptive_error={error:.8}");
+            if epsg == 4326 {
+                // Independent physical-area oracle: clip the dense ring to narrow
+                // latitude strips and weight each fraction by its WGS84 rectangle area.
+                use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
+                use dggs_stream_core::transfer::{pixel_overlaps, scan_ground_area_overlay};
+                const STRIPS: i64 = 128;
+                let strip_height = span / STRIPS as f64;
+                let strips: Vec<_> = dense
+                    .iter()
+                    .map(|&(lon, lat)| {
+                        (
+                            0.5 + wrap(lon - center.0) / span,
+                            (north - lat) / strip_height,
+                        )
+                    })
+                    .collect();
+                let mut expected_m2 = 0.0;
+                pixel_overlaps(&strips, (0, STRIPS), 1, |_, row, frac| {
+                    let top = north - row as f64 * strip_height;
+                    expected_m2 +=
+                        frac * wgs84_rectangle_area(0.0, top - strip_height, span, top).unwrap();
+                });
+                let records = scan_ground_area_overlay(
+                    GeoTiffStreamReader::open(&path).unwrap(),
+                    &config(grid, res, TransferMode::OVERLAY),
+                )
+                .unwrap();
+                let areas: BTreeMap<_, _> = records
+                    .map(|row| {
+                        let (_, cell, stats) = row.unwrap();
+                        (cell, stats.retained_area_m2())
+                    })
+                    .collect();
+                let raster_area = wgs84_rectangle_area(0.0, north - span, span, north).unwrap();
+                assert!((areas[&id] - expected_m2).abs() / raster_area < 0.0005);
+            }
+            assert!(expected > 0.0 && expected < 1.0);
+            assert!(error < 0.0005, "{grid} {lat}: {error}");
+            assert!(
+                error < baseline * 0.1,
+                "{grid} {lat}: {error} vs {baseline}"
+            );
+        }
+    }
+}
+
 /// Mean of `n` unit-weight observations of `value`, accumulated one pixel at a time.
 fn sequential_mean(value: f64, n: f64) -> f64 {
     let mut sum = 0.0;
@@ -1270,6 +1437,86 @@ fn mean_filter_bounds_are_inclusive_for_fully_covered_runs() {
                 "{min_mean:?} {max_mean:?}"
             );
         }
+    }
+}
+
+/// Total weighted pixel count and total retained ground area of every cell a scan
+/// emits for the raster at `path`, with the raster's own footprint area.
+fn overlay_totals(
+    path: &Path,
+    grid: GridKind,
+    res: u8,
+    footprint: [f64; 4],
+) -> (f64, f64, f64, usize) {
+    use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    let cells = scan(path, &config(grid, res, TransferMode::OVERLAY));
+    let pixels: f64 = cells.values().map(|a| a.count).sum();
+    let retained: f64 = scan_ground_area_overlay(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &config(grid, res, TransferMode::OVERLAY),
+    )
+    .unwrap()
+    .map(|row| row.unwrap().2.retained_area_m2())
+    .sum();
+    let [west, south, east, north] = footprint;
+    let area = wgs84_rectangle_area(west, south, east, north).unwrap();
+    (pixels, retained, area, cells.len())
+}
+
+#[test]
+fn polar_cells_follow_the_curve_they_share_with_a_non_polar_neighbour() {
+    // At HEALPix depth 6 the polar cell of the 0-90°E quadrant shares an edge with a
+    // non-polar cell whose native boundary bows away from the chord between its end
+    // vertices (at 60°E the chord is at 88.78°N, the edge at 88.90°N). A raster in
+    // the strip between them was counted by both cells while the polar cell kept
+    // the chord.
+    const SIZE: u32 = 40;
+    let (west, north, dx, dy) = (59.5, 88.88, 0.025, 0.002);
+    let (_tmp, path) = TestGeoTiffBuilder::new(SIZE, SIZE)
+        .origin(west, north)
+        .pixel_size_xy(dx, dy)
+        .create_f32_tempfile(|_, _| 1.0);
+    let footprint = [
+        west,
+        north - f64::from(SIZE) * dy,
+        west + f64::from(SIZE) * dx,
+        north,
+    ];
+    let (pixels, retained, area, cells) = overlay_totals(&path, GridKind::Healpix, 6, footprint);
+    assert!(cells >= 1);
+    // Every pixel is shared out exactly once across the cells.
+    assert!((pixels - f64::from(SIZE * SIZE)).abs() < 1e-6, "{pixels}");
+    assert!((retained / area - 1.0).abs() < 1e-6, "{retained} vs {area}");
+}
+
+#[test]
+fn rasters_along_a_pole_are_shared_out_exactly_once_on_grids_with_a_pole_vertex() {
+    // A band of rows just south of the north pole crosses the polar cells and
+    // their non-polar neighbours. Pole sides stay straight; every other side is
+    // traced identically from both cells.
+    let (width, height, west, north, dx, dy) = (180u32, 100u32, 0.0, 89.5, 0.5, 0.005);
+    let (_tmp, path) = TestGeoTiffBuilder::new(width, height)
+        .origin(west, north)
+        .pixel_size_xy(dx, dy)
+        .create_f32_tempfile(|c, r| 1.0 + ((c + r) % 7) as f32);
+    let footprint = [
+        west,
+        north - f64::from(height) * dy,
+        west + f64::from(width) * dx,
+        north,
+    ];
+    for (grid, res) in [(GridKind::Healpix, 6), (GridKind::S2, 8)] {
+        let (pixels, retained, area, cells) = overlay_totals(&path, grid, res, footprint);
+        assert!(cells > 2, "{grid}");
+        assert!(
+            (pixels - f64::from(width * height)).abs() < 1e-5,
+            "{grid}: {pixels}"
+        );
+        assert!(
+            (retained / area - 1.0).abs() < 1e-6,
+            "{grid}: {retained} vs {area}"
+        );
     }
 }
 

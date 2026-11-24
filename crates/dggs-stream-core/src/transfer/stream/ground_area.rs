@@ -1,7 +1,7 @@
 //! Physical-area overlay for a single north-up WGS84 raster.
 use super::{
     block_bbox, cells_in_bbox, periodic_longitude_bounds, plan_tile, project_cell_polygons, Block,
-    ContainmentMode, OverlapParallelism, ProjectedCell, COARSE_CELL_DIAMETER_KM,
+    ContainmentMode, OverlapParallelism, ProjectedCell, ProjectedRings, COARSE_CELL_DIAMETER_KM,
     DIRECT_BATCH_CELLS, MIN_PARALLEL_DIRECT_CELLS,
 };
 use crate::aggregator::accumulator::ContinuousAccumulator;
@@ -27,7 +27,7 @@ use rustc_hash::FxHashSet;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-/// Stream (resolution, cell ID, statistics) from the straight-edged cell
+/// Stream (resolution, cell ID, statistics) from the adaptively traced cell
 /// polygons used by weighted overlay. Set `config.transfer = TransferMode::OVERLAY`.
 /// Pixel count is the sum of planar pixel fractions. Retained area and the
 /// coverage threshold use ellipsoidal square metres. For densities per m² the
@@ -309,15 +309,9 @@ fn clip_and_accumulate_ground_area_cell(
     ctx: &GroundAreaCtx<'_>,
     scratch: &mut GroundAreaWorkerScratch,
 ) -> GroundAreaOutcome {
-    let mut rings = [[(0.0, 0.0); 10]; 3];
-    let (copies, len) = match project_cell_polygons(
-        ctx.grid,
-        id,
-        ctx.tile,
-        ctx.longitude,
-        &mut rings,
-    ) {
-        ProjectedCell::Polygons { count, len } => (count, len),
+    let mut rings = ProjectedRings::default();
+    let copies = match project_cell_polygons(ctx.grid, id, ctx.tile, ctx.longitude, &mut rings) {
+        ProjectedCell::Polygons { count } => count,
         ProjectedCell::Pole | ProjectedCell::Failed => {
             return GroundAreaOutcome::Invalid(DggsStreamError::InvalidParameter(format!(
                     "ground-area overlay cannot represent the boundary of cell {id:x} in longitude/latitude"
@@ -331,12 +325,13 @@ fn clip_and_accumulate_ground_area_cell(
     let mut last_row = f64::NEG_INFINITY;
     let mut any_data = false;
     let check_data = !ctx.need_coverage;
-    for poly in &rings[..copies] {
+    for copy in 0..copies {
+        let poly = rings.ring(copy);
         let mut min_x = f64::INFINITY;
         let mut max_x = f64::NEG_INFINITY;
         let mut min_y = f64::INFINITY;
         let mut max_y = f64::NEG_INFINITY;
-        for &(x, y) in &poly[..len] {
+        for &(x, y) in poly {
             min_x = min_x.min(x);
             max_x = max_x.max(x);
             min_y = min_y.min(y);
@@ -368,7 +363,7 @@ fn clip_and_accumulate_ground_area_cell(
     if copies == 1 {
         let mut span_error: Option<DggsStreamError> = None;
         let completed = visit_ground_area_spans_into(
-            &rings[0][..len],
+            rings.ring(0),
             ctx.rows,
             ctx.width,
             ctx.gt,
@@ -440,9 +435,9 @@ fn clip_and_accumulate_ground_area_cell(
         }
     } else {
         scratch.seam_pixels.clear();
-        for poly in &rings[..copies] {
+        for copy in 0..copies {
             let completed = visit_ground_area_spans_into(
-                &poly[..len],
+                rings.ring(copy),
                 ctx.rows,
                 ctx.width,
                 ctx.gt,
