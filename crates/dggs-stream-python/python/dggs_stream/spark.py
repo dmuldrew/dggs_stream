@@ -20,7 +20,7 @@ Each Spark partition scans one partition planned by `dggs_stream.plan_partitions
 set of TIFF tiles or strips), so executors read one raster in parallel and no pixel is read
 twice. The data source returns the scan's columns with Spark's signed types plus
 `partial_state`: rows where it is null are final cells, the others are shares of cells that
-several partitions reach. Weighted overlay emits a partial for every touched cell. `merge_partials` shuffles those by `h3_index` and merges them, so
+several partitions reach. Weighted H3 overlay on WGS84 tiles can finalize cells inside a partition. `merge_partials` shuffles those by `h3_index` and merges them, so
 the result equals one unpartitioned scan (up to floating-point summation order).
 
 Options (all optional except the path), with the names and meanings of
@@ -435,9 +435,12 @@ def merge_partials(
             for batch in merged.to_batches():
                 yield _to_schema(batch, arrow_out)
 
-    # One scan, one shuffle: every share of a cell lands in the same task (an H3 index fixes
-    # its resolution); final rows pass through. Splitting final and partial rows into two
-    # branches instead would scan the raster twice unless the DataFrame were cached.
+    # A caller-owned cache lets both branches share a single raster scan. Without
+    # a cache, keep the one-branch plan so Spark reads each raster partition once.
+    if df.is_cached:
+        finals = df.filter(df[state].isNull()).drop(state)
+        edges = df.filter(df[state].isNotNull())
+        return finals.unionByName(edges.repartition("h3_index").mapInArrow(merge, out_schema))
     return df.repartition("h3_index").mapInArrow(merge, out_schema)
 
 

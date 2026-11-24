@@ -127,3 +127,24 @@ def test_partitioned_weighted_overlay(spark, terrain):
         return {(r["resolution"], r["h3_index"], False): [r] for r in table.to_pylist()}
     assert distributed.num_rows == serial.num_rows > 0
     assert_same_rows(keyed(distributed), keyed(serial))
+
+
+def test_cached_overlay_merges_only_boundaries(spark, terrain):
+    spark_ds.register(spark)
+    columns = ["h3_index", "resolution", "count", "sum", "mean"]
+    cached = (spark.read.format("dggs_stream").option("resolutions", 9)
+              .option("transfer", "overlay").option("target_chunks", 8)
+              .option("columns", ",".join(columns)).load(terrain).persist())
+    try:
+        assert cached.filter("partial_state IS NULL").count() > 0
+        assert cached.filter("partial_state IS NOT NULL").count() > 0
+        result = spark_ds.merge_partials(cached, columns=columns)
+        assert "Union" in plan(result)
+        actual = result.toArrow()
+        serial = pa.table(dggs_stream.RasterArrowStream(terrain, 9, transfer="overlay", columns=columns))
+        assert actual.num_rows == serial.num_rows
+        def keyed(table):
+            return {(r["resolution"], r["h3_index"], False): [r] for r in table.to_pylist()}
+        assert_same_rows(keyed(actual), keyed(serial))
+    finally:
+        cached.unpersist(blocking=True)

@@ -50,10 +50,12 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--histogram <values\|N:min:max\|e0,e1,...>` | `ipc`, `jsonl` | Structured per-cell histogram (implies `-c`) |
 | `--histogram-weight <count\|area>` | with `--histogram` | `area` weights by overlap and runs `--transfer overlay` |
 | `--histogram-normalize <none\|fraction\|density>` | with `--histogram` | `density` needs bins |
+| `--decode-workers <N>` | all | Chunk decode threads (default `(cpus - 2)` clamped to 4–12) |
+| `--aggregation-workers <N>` | `--transfer overlay`, `--transfer interpolate` | Threads clipping and accumulating cells; `1` runs serially, the default uses the ambient Rayon pool |
 | `--profile` | all | Print a runtime profile on stderr ([Scan Options](../scan-options.md#runtime-profile)) |
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
-| `--ground-area` | `ipc`, `jsonl` | Compute area-weighted continuous statistics for one single-band, north-up EPSG:4326 raster. |
+| `--ground-area` | `ipc`, `jsonl` | Compute area-weighted continuous statistics for one single-band, north-up EPSG:4326 raster. With `--transfer overlay`, integrate over partial pixels. |
 | `--bands <list or all>` | `ipc`, `jsonl`, `parquet` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,wkb,band_3_mean,band_1_count`. |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl`, multi-band `parquet` | Column projection, in the given order. Include `wkb` when projecting GeoParquet. |
 | `--limit <N>` | `ipc`, `jsonl`, multi-band `parquet` | Maximum rows |

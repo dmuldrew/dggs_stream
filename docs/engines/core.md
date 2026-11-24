@@ -136,6 +136,17 @@ Every adapter follows the same steps:
    it returns `Ok(0)` (end of stream) or an error. Errors latch: a failed stream keeps
    returning the error instead of reporting a clean EOF.
 
+### Custom transfer accumulators
+
+`transfer::TransferAccumulator` is the trait `TransferStream` fills, and it is public so you
+can aggregate overlay contributions your own way. `add` takes one weighted value. Overlay
+also offers `add_band_unit_slice(slot, slice)` for a contiguous run of whole pixels
+(weight 1.0), where `NaN` marks NoData; it returns how many finite values it consumed. The
+default implementation calls `add_band` per value. Override it only when a vectorized
+reduction applies. The stream calls it only for raw band samples, so a histogram or
+category remapper never reaches it. Slice accumulation can differ from per-pixel updates in
+the last bits of a variance, and the stream skips it when `min_mean` or `max_mean` is set.
+
 ### Spill diagnostics
 
 Both streamers report spilling after or during a stream: `spill_run_count()` is the
@@ -570,12 +581,21 @@ So when calling from inside a Rayon pool, set `aggregation_workers` and keep the
 aggregation budget at its default or larger. Calls from ordinary threads,
 including DuckDB's scan threads, are unaffected.
 
-Overlay scans are the exception to the second bullet. With two or more
-`aggregation_workers`, an overlay scan also clips fine-resolution cells on the
+Overlay scans are the exception to the second bullet. Unless
+`aggregation_workers` is `Some(1)`, an overlay scan also clips fine-resolution cells on the
 shared pool ([Parallel overlap calculation](../transfer-modes.md#parallel-overlap-calculation)),
 but only from an ordinary thread: called from a Rayon worker, its cell clipping
 stays serial, because queuing it there could stall an unrelated query that waits
 on the caller's engine lock. Output is identical either way.
+
+Transfer scans (`interpolate` and `overlay`, including WGS84 ground-area overlay)
+decode and fetch chunks asynchronously, as the horizon scans do. `decode_workers`
+and `fetch_workers` size the pools, `prefetch_chunks` the lookahead, and
+`decode_budget_bytes` bounds the decoded buffers in flight. A single-band raster
+without an internal mask keeps each row window in its native sample type, so
+interior spans are summed without widening to `f64`; masked or multi-band rasters
+use the widened window and a byte-limited chunk cache. Results match the
+single-worker scan.
 
 ### Partitioned scans
 
