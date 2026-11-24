@@ -13,11 +13,17 @@ pub(crate) struct OverlayPartial {
 
 impl TransferAccumulator for OverlayPartial {
     const CATEGORICAL: bool = false;
+    const SUPPORTS_MERGE: bool = true;
+    const NEEDS_COVER: bool = true;
     fn empty(quantiles: bool) -> Self {
         Self {
             stats: ContinuousAccumulator::empty(quantiles),
             covered: 0.0,
         }
+    }
+    fn merge_from(&mut self, other: &Self) {
+        self.covered += other.covered;
+        self.stats.merge(&other.stats);
     }
     fn cover(&mut self, area: f64) {
         self.covered += area;

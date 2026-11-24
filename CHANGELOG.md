@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `TransferStream` (`transfer = 'overlay'` with `mass_preserve = false`) now runs end-to-end cell clipping and accumulation in parallel across Rayon workers — using the ambient Rayon pool by default when `aggregation_workers` is `None` (`Some(1)` runs serial; `Some(n)` uses a dedicated pool) — eliminating intermediate `OverlapRun` buffers, serial oversized-cell retries, and full-block selection mask allocations. Single-band native overlay windows (`RowWindow`) also expand up to full chunk rows (capped at 1024 rows) and cache all-NoData chunks without retaining buffers so cells whose bounding boxes touch only NoData/sparse chunks skip polygon clipping cleanly.
+
 - `TransferStream` (`transfer = 'overlay'` and `'interpolate'`) and WGS84 ground-area overlay now decode and prefetch chunks asynchronously across `decode_workers` / `fetch_workers` via `PrefetchedChunkReader` with buffer recycling, align small overlay blocks to chunk-row boundaries, and back single-band unmasked `RowWindow`s directly with native `DecodingResult` tile slices for zero-copy SIMD and RLE span accumulation without `f64` widening.
 
 - Overlay scans now use an Edge-DDA and Green's-theorem prefix-sum clipper with reusable per-worker scratch buffers, horizontal `OverlapRun` span encoding, and SIMD unit-slice accumulation for interior runs (including WGS84 ground-area overlay via ellipsoidal segment quadrature). Public APIs (`pixel_overlaps`, `polygon_area`) and output statistics are unchanged within floating-point tolerance (`< 1e-12`).

@@ -85,6 +85,18 @@ pub(crate) fn ground_area_overlay_tile(
     } else {
         columns.push(0..meta.width);
     }
+    let layout = tile.reader.chunk_layout;
+    let one_row_native_bytes =
+        (layout.chunks_across as usize).saturating_mul(tile.reader.decoded_chunk_bytes());
+    // `scan_block` expands each overlapped pixel into a 32-byte tuple before filtering,
+    // so a chunk-row window must also fit that scratch in the budget.
+    let overlap_scratch_bytes = u64::from(meta.width)
+        .saturating_mul(u64::from(
+            layout.chunk_height.min(super::MAX_NATIVE_CHUNK_ROW_WINDOW),
+        ))
+        .saturating_mul(32);
+    let allow_chunk_row_window = one_row_native_bytes <= config.decode_budget_bytes
+        && overlap_scratch_bytes <= config.decode_budget_bytes as u64;
     let mut blocks = Vec::new();
     for &res in &config.resolutions {
         if config.grid.spec().max_cell_diameter_km(res) > COARSE_CELL_DIAMETER_KM {
@@ -92,7 +104,16 @@ pub(crate) fn ground_area_overlay_tile(
         }
         if !rows.is_empty() && !columns.is_empty() {
             let mut bands = Vec::new();
-            plan_tile(config.grid, config.transfer, res, 0, &tile, 1, &mut bands);
+            plan_tile(
+                config.grid,
+                config.transfer,
+                res,
+                0,
+                &tile,
+                1,
+                allow_chunk_row_window,
+                &mut bands,
+            );
             for mut block in bands {
                 block.rows = block.rows.start.max(rows.start)..block.rows.end.min(rows.end);
                 if !block.rows.is_empty() {

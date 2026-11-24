@@ -348,7 +348,7 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
   tolerance of 1/64 of a pixel ([details](docs/transfer-modes.md#overlay-area-weighted-aggregation)).
   Both stream the raster in bands of rows.
   Rust, CLI, DuckDB, and Python/Polars overlay scans can filter cells by the fraction of their selected overlap with valid data.
-  In Rust, setting `aggregation_workers` to two or more also clips fine-resolution overlay cells in parallel ([details](docs/transfer-modes.md#parallel-overlap-calculation)).
+  In Rust, overlay scans clip fine-resolution cells in parallel by default (`aggregation_workers: Some(1)` keeps them serial) ([details](docs/transfer-modes.md#parallel-overlap-calculation)).
   Interpolate and overlay scans decode and fetch chunks ahead of the scan on `decode_workers` / `fetch_workers` threads (Rust `MultiResolutionConfig`, bounded by `decode_budget_bytes`); single-band unmasked rasters are summed straight from the native-typed decoded chunks.
   Overlay walks each cell's edges once and accumulates runs of whole pixels as slices; Rust callers can hook that path with [`TransferAccumulator::add_band_unit_slice`](docs/engines/core.md#custom-transfer-accumulators).
   See [Scan Options](docs/scan-options.md).

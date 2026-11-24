@@ -581,8 +581,8 @@ So when calling from inside a Rayon pool, set `aggregation_workers` and keep the
 aggregation budget at its default or larger. Calls from ordinary threads,
 including DuckDB's scan threads, are unaffected.
 
-Overlay scans are the exception to the second bullet. With two or more
-`aggregation_workers`, an overlay scan also clips fine-resolution cells on the
+Overlay scans are the exception to the second bullet. Unless
+`aggregation_workers` is `Some(1)`, an overlay scan also clips fine-resolution cells on the
 shared pool ([Parallel overlap calculation](../transfer-modes.md#parallel-overlap-calculation)),
 but only from an ordinary thread: called from a Rayon worker, its cell clipping
 stays serial, because queuing it there could stall an unrelated query that waits
