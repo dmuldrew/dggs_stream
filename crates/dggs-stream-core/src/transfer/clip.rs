@@ -235,12 +235,7 @@ fn prepare_clip(polygon: &[(f64, f64)], rows: (i64, i64), width: i64) -> Option<
     let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
     for &(x, y) in polygon {
-        // Callers project cell boundaries through fallible transforms that already
-        // reject unrepresentable points; a non-finite vertex here is a caller bug.
-        debug_assert!(
-            x.is_finite() && y.is_finite(),
-            "non-finite polygon vertex ({x}, {y})"
-        );
+        // The public contract is to visit nothing, in every build profile.
         if !(x.is_finite() && y.is_finite()) {
             return None;
         }
@@ -1092,6 +1087,33 @@ mod tests {
         ));
         assert!((covered - polygon_area(&diamond)).abs() < 1e-6);
         assert!(scratch.events.len() > 1000);
+    }
+
+    #[test]
+    fn non_finite_vertices_visit_nothing_in_every_build_profile() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for polygon in [
+                [(0.0, 0.0), (1.0, 0.0), (bad, 1.0)],
+                [(0.0, 0.0), (1.0, 0.0), (1.0, bad)],
+                [(bad, bad), (1.0, 0.0), (0.0, 1.0)],
+            ] {
+                let mut visits = 0;
+                pixel_overlaps(&polygon, (0, 1), 1, |_, _, _| visits += 1);
+                assert_eq!(visits, 0, "{polygon:?}");
+                let mut scratch = ClipScratch::default();
+                assert!(visit_overlap_spans_into(
+                    &polygon,
+                    (0, 1),
+                    1,
+                    &mut scratch,
+                    |_, _, _, _| {
+                        visits += 1;
+                        true
+                    }
+                ));
+                assert_eq!(visits, 0, "{polygon:?}");
+            }
+        }
     }
 
     #[test]
