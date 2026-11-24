@@ -1795,6 +1795,123 @@ fn multi_resolution_overlay_and_interpolate_decode_single_pass() {
 }
 
 #[test]
+fn wrapped_bbox_decodes_each_chunk_of_a_tile_row_once() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::run_profile::RunProfile;
+    use std::sync::Arc;
+
+    // 64 x 16 pixels of 5.625 degrees cover -180..180 and 45..-45, in 16 x 1 tiles of
+    // 4 x 16 pixels.
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("globe_tiled.tif");
+    let strip_path = dir.path().join("globe_strip.tif");
+    let crs = Crs::Geographic {
+        lon: -180.0,
+        lat: 45.0,
+        pixel_deg: 5.625,
+    };
+    let pixel = |x: u32, y: u32| -> f32 { 100.0 + ((x * 7 + y * 3) % 61) as f32 };
+    write_geotiff(
+        &tiled_path,
+        (64, 16),
+        Layout::Tiles(4, 16),
+        crs,
+        "-9999",
+        pixel,
+    );
+    write_geotiff(
+        &strip_path,
+        (64, 16),
+        Layout::Strips(16),
+        crs,
+        "-9999",
+        pixel,
+    );
+
+    let profile = RunProfile::new();
+    // H3 resolution 5 cells are far smaller than the pixels, so interpolation plans
+    // one-row bands: every band of the one chunk row would otherwise reload both edges.
+    let mut cfg = config(
+        GridKind::H3,
+        5,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
+    cfg.bbox = Some([170.0, -45.0, -170.0, 45.0]);
+    let mut oracle_cfg = cfg.clone();
+    cfg.profile = Some(Arc::clone(&profile));
+    oracle_cfg.profile = None;
+
+    let tiled_cells = collect_multi_scan(&tiled_path, &cfg);
+    let oracle_cells = collect_multi_scan(&strip_path, &oracle_cfg);
+    assert!(tiled_cells.len() > 500, "{} cells", tiled_cells.len());
+    assert_eq!(
+        tiled_cells.keys().collect::<Vec<_>>(),
+        oracle_cells.keys().collect::<Vec<_>>()
+    );
+    for (k, a) in &tiled_cells {
+        assert_continuous_close(a, &oracle_cells[k], &format!("key={k:?}"));
+    }
+    let chunks = profile.report().chunks;
+    assert!(
+        chunks <= 16,
+        "{chunks} chunk decodes for a raster of 16 chunks"
+    );
+}
+
+#[test]
+fn bbox_ending_at_180_keeps_the_seam_chunk_for_interpolation() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+
+    // A tiled globe whose first chunk column starts at -180. The S2 face centre at
+    // longitude 180, latitude 0 lies in a bbox ending at 180 and reads that chunk.
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("seam_tiled.tif");
+    let strip_path = dir.path().join("seam_strip.tif");
+    let crs = Crs::Geographic {
+        lon: -180.0,
+        lat: 45.0,
+        pixel_deg: 5.625,
+    };
+    let pixel = |x: u32, y: u32| -> f32 { 100.0 + ((x * 7 + y * 3) % 61) as f32 };
+    write_geotiff(
+        &tiled_path,
+        (64, 16),
+        Layout::Tiles(4, 16),
+        crs,
+        "-9999",
+        pixel,
+    );
+    write_geotiff(
+        &strip_path,
+        (64, 16),
+        Layout::Strips(16),
+        crs,
+        "-9999",
+        pixel,
+    );
+
+    let mut cfg = config(
+        GridKind::S2,
+        0,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
+    cfg.bbox = Some([179.0, -1.0, 180.0, 1.0]);
+    let tiled_cells = collect_multi_scan(&tiled_path, &cfg);
+    let strip_cells = collect_multi_scan(&strip_path, &cfg);
+    assert!(
+        !strip_cells.is_empty(),
+        "the full-width scan finds the seam cell"
+    );
+    assert_eq!(
+        tiled_cells.keys().collect::<Vec<_>>(),
+        strip_cells.keys().collect::<Vec<_>>()
+    );
+    for (k, a) in &tiled_cells {
+        assert_continuous_close(a, &strip_cells[k], &format!("key={k:?}"));
+    }
+}
+
+#[test]
 fn bbox_prunes_transfer_chunks_and_matches_full_scan() {
     use crate::helpers::{write_geotiff, Crs, Layout};
     use dggs_stream_core::run_profile::RunProfile;

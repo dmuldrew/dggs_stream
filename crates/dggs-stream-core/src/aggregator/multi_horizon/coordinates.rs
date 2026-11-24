@@ -89,7 +89,10 @@ pub fn rect_intersects_bbox(rect: &[f64; 4], bbox: &[f64; 4]) -> bool {
         return false;
     }
     if b_min_lon <= b_max_lon {
-        r_min_lon <= b_max_lon && r_max_lon >= b_min_lon
+        (r_min_lon <= b_max_lon && r_max_lon >= b_min_lon)
+            // `is_point_in_bbox` takes -180 as part of a box that ends at 180, so a
+            // rectangle reaching -180 holds such points.
+            || (r_min_lon <= -180.0 && b_min_lon <= 180.0 && b_max_lon >= 180.0)
     } else {
         // [b_min_lon, 180] or [-180, b_max_lon]
         r_max_lon >= b_min_lon || r_min_lon <= b_max_lon
@@ -215,5 +218,26 @@ pub fn eviction_north_bound(chunk: &RasterChunk, gt: &GeoTransform, crs: &CrsTra
         // degrees-per-meter margin is invalid for arbitrary scales and units.
         // Keep cells until EOF (or spill them) rather than evict irreversibly.
         CrsTransformer::Proj4 { .. } => f64::INFINITY,
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+
+    #[test]
+    fn a_box_ending_at_180_reaches_the_rectangle_that_starts_at_minus_180() {
+        let bbox = [179.0, -1.0, 180.0, 1.0];
+        // The point filter accepts longitude -180 in this box, so rectangles must agree.
+        assert!(is_point_in_bbox(-180.0, 0.0, Some(bbox)));
+        assert!(rect_intersects_bbox(&[-180.0, -1.0, -170.0, 1.0], &bbox));
+        assert!(!rect_intersects_bbox(&[-170.0, -1.0, -160.0, 1.0], &bbox));
+        // Latitude still has to overlap.
+        assert!(!rect_intersects_bbox(&[-180.0, 5.0, -170.0, 6.0], &bbox));
+        // A box that stops short of 180 is unaffected.
+        assert!(!rect_intersects_bbox(
+            &[-180.0, -1.0, -170.0, 1.0],
+            &[170.0, -1.0, 179.0, 1.0]
+        ));
     }
 }

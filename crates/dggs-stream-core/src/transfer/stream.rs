@@ -1694,6 +1694,18 @@ fn filter_blocks_by_chunks(
 ) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut row_runs: Vec<Range<u32>> = Vec::new();
+    // How many planned blocks touch each chunk row of each tile.
+    let mut bands_per_chunk_row = HashMap::<(usize, u32), usize>::new();
+    if coalesce_rows {
+        for block in &blocks {
+            let layout = mosaic.tiles[block.tile].reader.chunk_layout;
+            let first = block.rows.start / layout.chunk_height;
+            let last = block.rows.end.div_ceil(layout.chunk_height);
+            for row in first..last {
+                *bands_per_chunk_row.entry((block.tile, row)).or_default() += 1;
+            }
+        }
+    }
     for block in blocks {
         let tile = &mosaic.tiles[block.tile];
         let layout = tile.reader.chunk_layout;
@@ -1718,6 +1730,28 @@ fn filter_blocks_by_chunks(
                     .min(block.cols.end);
                 if c0 < c1 {
                     row_runs.push(c0..c1);
+                }
+            }
+            // A box across the antimeridian selects chunks at both raster edges. Separate
+            // windows would evict one edge each time the other is loaded and decode both
+            // again for every band of the chunk row. One window over the gap decodes each
+            // chunk of the row once.
+            if coalesce_rows && row_runs.len() > 1 {
+                let chunk_cols = |range: &Range<u32>| {
+                    (range.end.div_ceil(layout.chunk_width) - range.start / layout.chunk_width)
+                        as usize
+                };
+                let selected: usize = row_runs.iter().map(chunk_cols).sum();
+                let span = row_runs[0].start..row_runs[row_runs.len() - 1].end;
+                // Reloading the selected chunks for every band of the row costs
+                // `selected * bands`; one window over the gap costs its width once.
+                let bands = bands_per_chunk_row
+                    .get(&(block.tile, row))
+                    .copied()
+                    .unwrap_or(1);
+                if chunk_cols(&span) < selected.saturating_mul(bands) {
+                    row_runs.clear();
+                    row_runs.push(span);
                 }
             }
             if coalesce_rows && can_coalesce && row_runs.len() == 1 {
