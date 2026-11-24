@@ -1,5 +1,6 @@
 //! The streaming driver of the `interpolate` and `overlay` transfer modes.
 
+mod edges;
 mod ground_area;
 pub(crate) use ground_area::ground_area_overlay_tile;
 pub use ground_area::scan_ground_area_overlay;
@@ -1338,7 +1339,20 @@ fn visit_cell_polygons(
     if n < 3 || (longitude_bounds.is_some() && grid.interior_pole(cell).is_some()) {
         return false;
     }
-    let ring = &mut ring[..n];
+    // Pole vertices have already been expanded into a longitude cap. Preserve
+    // that representation until the pole topology has its own traced model.
+    let mut traced;
+    let ring = if ring[..n].iter().any(|p| p.1.abs() >= 90.0 - 1e-9)
+        || edges::corners_suffice(grid, &ring[..n], tile)
+    {
+        &mut ring[..n]
+    } else {
+        let Some(points) = edges::trace(grid, cell, &ring[..n], tile, longitude_bounds) else {
+            return false;
+        };
+        traced = points;
+        traced.as_mut_slice()
+    };
     let mut shifts = [0.0; 3];
     let mut copies = 1;
     if let Some((west, east)) = longitude_bounds {
@@ -1361,7 +1375,14 @@ fn visit_cell_polygons(
             }
         }
     }
-    let mut pixels = [(0.0, 0.0); 10];
+    let mut inline = [(0.0, 0.0); 10];
+    let mut extra;
+    let pixels = if ring.len() <= inline.len() {
+        &mut inline[..ring.len()]
+    } else {
+        extra = vec![(0.0, 0.0); ring.len()];
+        extra.as_mut_slice()
+    };
     for &shift in &shifts[..copies] {
         for (point, &(lon, lat)) in pixels.iter_mut().zip(ring.iter()) {
             let Some(pixel) = to_pixel_raw(tile, lon + shift, lat) else {
@@ -1369,7 +1390,7 @@ fn visit_cell_polygons(
             };
             *point = pixel;
         }
-        if !visit(&pixels[..n]) {
+        if !visit(pixels) {
             return false;
         }
     }

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ordinary and ground-area overlay adaptively trace native grid edges in raster pixel coordinates before clipping on all four grids.
+
 - Python and Polars scans accept `ground_area=True, transfer="overlay"` for partial-pixel ellipsoidal areas and density totals on all four grids.
 
 - DuckDB continuous scans accept `ground_area := true, transfer := 'overlay'` to integrate valid partial-pixel areas and densities on all four grids.

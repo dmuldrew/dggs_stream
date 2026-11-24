@@ -71,6 +71,11 @@ Notes:
   box are kept with the pixels inside it.
 - On a full-width WGS84 geographic or Web Mercator raster, a cell crossing the longitude seam
   receives pixel contributions from both edges, including when the raster uses 0–360° longitudes.
+- Before clipping, overlay traces H3 and S2 great-circle edges and the native A5 and HEALPix face edges.
+  It subdivides a segment when a quarter-, half-, or three-quarter-point sample lies more than
+  1/64 of a raster pixel from the projected chord. This is a sampled tolerance. The depth limit
+  is 12 successive bisections (at most 4,096 segments per side). Cells touching a pole retain their existing
+  pole-cap geometry.
 - Cells whose diameter bound is above 500 km (the coarsest two or three resolutions of each grid)
   take whole pixels by centre: their edges bend too far from straight lines for exact clipping,
   and a single pixel is negligible next to such a cell.

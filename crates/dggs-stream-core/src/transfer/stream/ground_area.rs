@@ -21,7 +21,7 @@ use crate::transfer::TransferMode;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-/// Stream (resolution, cell ID, statistics) from the straight-edged cell
+/// Stream (resolution, cell ID, statistics) from the adaptively traced cell
 /// polygons used by weighted overlay. Set `config.transfer = TransferMode::OVERLAY`.
 /// Pixel count is the sum of planar pixel fractions. Retained area and the
 /// coverage threshold use ellipsoidal square metres. For densities per m² the
