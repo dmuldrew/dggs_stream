@@ -159,7 +159,7 @@ pub struct ContinuousRowGroupBuffer {
     policy: OutputPolicy,
     compact: bool,
     geoparquet: bool,
-    h3_indices: Vec<i64>,
+    cell_ids: Vec<i64>,
     geometries: Vec<ByteArray>,
     /// `[min_x, min_y, max_x, max_y]` of the geometries pushed since `clear`.
     geometry_bounds: [f64; 4],
@@ -168,7 +168,7 @@ pub struct ContinuousRowGroupBuffer {
     sum_values: Vec<f64>,
     avg_values: Vec<f64>,
     pixel_counts: Vec<f64>,
-    h3_hexes: Vec<ByteArray>,
+    cell_hexes: Vec<ByteArray>,
     lats: Vec<f64>,
     lngs: Vec<f64>,
 }
@@ -191,7 +191,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
             policy: OutputPolicy::default(),
             compact,
             geoparquet,
-            h3_indices: Vec::with_capacity(capacity),
+            cell_ids: Vec::with_capacity(capacity),
             geometries: if geoparquet {
                 Vec::with_capacity(capacity)
             } else {
@@ -203,7 +203,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
             sum_values: Vec::with_capacity(capacity),
             avg_values: Vec::with_capacity(capacity),
             pixel_counts: Vec::with_capacity(capacity),
-            h3_hexes: if compact {
+            cell_hexes: if compact {
                 Vec::new()
             } else {
                 Vec::with_capacity(capacity)
@@ -229,7 +229,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
     fn push_record(&mut self, record: Self::Record) {
         let cell_u64 = record.cell_id;
         let acc = record.accumulator;
-        self.h3_indices.push(cell_u64 as i64);
+        self.cell_ids.push(cell_u64 as i64);
 
         if self.geoparquet {
             let mut wkb_buf: WkbBuf = [0u8; WKB_BUF_LEN];
@@ -252,7 +252,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
         if !self.compact {
             let mut hex_buf = [0u8; 16];
             let hex_slice = fast_hex_u64(cell_u64, &mut hex_buf);
-            self.h3_hexes.push(ByteArray::from(hex_slice));
+            self.cell_hexes.push(ByteArray::from(hex_slice));
 
             if let Some((lat, lng)) = self.grid.center_lat_lng(cell_u64) {
                 self.lats.push(lat);
@@ -266,7 +266,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
 
     #[inline(always)]
     fn len(&self) -> usize {
-        self.h3_indices.len()
+        self.cell_ids.len()
     }
 
     fn geometry_bounds(&self) -> Option<[f64; 4]> {
@@ -274,7 +274,7 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
     }
 
     fn clear(&mut self) {
-        self.h3_indices.clear();
+        self.cell_ids.clear();
         if self.geoparquet {
             self.geometries.clear();
             self.geometry_bounds = EMPTY_BOUNDS;
@@ -285,24 +285,24 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
         self.avg_values.clear();
         self.pixel_counts.clear();
         if !self.compact {
-            self.h3_hexes.clear();
+            self.cell_hexes.clear();
             self.lats.clear();
             self.lngs.clear();
         }
     }
 
-    fn sort_by_h3_index(&mut self) {
-        let perm = match compute_sort_permutation(&self.h3_indices) {
+    fn sort_by_cell_id(&mut self) {
+        let perm = match compute_sort_permutation(&self.cell_ids) {
             Some(p) => p,
             None => return,
         };
 
-        reorder_by_perm(&mut self.h3_indices, &perm);
+        reorder_by_perm(&mut self.cell_ids, &perm);
         if self.geoparquet {
             reorder_by_perm_take(&mut self.geometries, &perm);
         }
         if !self.compact {
-            reorder_by_perm_take(&mut self.h3_hexes, &perm);
+            reorder_by_perm_take(&mut self.cell_hexes, &perm);
         }
         reorder_by_perm(&mut self.min_values, &perm);
         reorder_by_perm(&mut self.max_values, &perm);
@@ -321,9 +321,9 @@ impl ParquetRowGroupBuffer for ContinuousRowGroupBuffer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut row_group_writer = writer.next_row_group()?;
 
-        write_i64_column(&mut row_group_writer, &self.h3_indices)?;
+        write_i64_column(&mut row_group_writer, &self.cell_ids)?;
         if !self.compact {
-            write_byte_array_column(&mut row_group_writer, &self.h3_hexes)?;
+            write_byte_array_column(&mut row_group_writer, &self.cell_hexes)?;
         }
         if self.geoparquet {
             write_byte_array_column(&mut row_group_writer, &self.geometries)?;
@@ -366,7 +366,7 @@ pub struct CategoricalRowGroupBuffer {
     policy: OutputPolicy,
     compact: bool,
     geoparquet: bool,
-    h3_indices: Vec<i64>,
+    cell_ids: Vec<i64>,
     geometries: Vec<ByteArray>,
     /// `[min_x, min_y, max_x, max_y]` of the geometries pushed since `clear`.
     geometry_bounds: [f64; 4],
@@ -375,7 +375,7 @@ pub struct CategoricalRowGroupBuffer {
     pixel_counts: Vec<f64>,
     distinct_classes: Vec<i64>,
     entropies: Vec<f64>,
-    h3_hexes: Vec<ByteArray>,
+    cell_hexes: Vec<ByteArray>,
     lats: Vec<f64>,
     lngs: Vec<f64>,
 }
@@ -398,7 +398,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
             policy: OutputPolicy::default(),
             compact,
             geoparquet,
-            h3_indices: Vec::with_capacity(capacity),
+            cell_ids: Vec::with_capacity(capacity),
             geometries: if geoparquet {
                 Vec::with_capacity(capacity)
             } else {
@@ -410,7 +410,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
             pixel_counts: Vec::with_capacity(capacity),
             distinct_classes: Vec::with_capacity(capacity),
             entropies: Vec::with_capacity(capacity),
-            h3_hexes: if compact {
+            cell_hexes: if compact {
                 Vec::new()
             } else {
                 Vec::with_capacity(capacity)
@@ -448,7 +448,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
         let cell_u64 = record.cell_id;
         let acc = record.accumulator;
         let stats = self.policy.categorical(&acc);
-        self.h3_indices.push(cell_u64 as i64);
+        self.cell_ids.push(cell_u64 as i64);
 
         if self.geoparquet {
             let mut wkb_buf: WkbBuf = [0u8; WKB_BUF_LEN];
@@ -470,7 +470,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
         if !self.compact {
             let mut hex_buf = [0u8; 16];
             let hex_slice = fast_hex_u64(cell_u64, &mut hex_buf);
-            self.h3_hexes.push(ByteArray::from(hex_slice));
+            self.cell_hexes.push(ByteArray::from(hex_slice));
 
             if let Some((lat, lng)) = self.grid.center_lat_lng(cell_u64) {
                 self.lats.push(lat);
@@ -484,7 +484,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
 
     #[inline(always)]
     fn len(&self) -> usize {
-        self.h3_indices.len()
+        self.cell_ids.len()
     }
 
     fn geometry_bounds(&self) -> Option<[f64; 4]> {
@@ -492,7 +492,7 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
     }
 
     fn clear(&mut self) {
-        self.h3_indices.clear();
+        self.cell_ids.clear();
         if self.geoparquet {
             self.geometries.clear();
             self.geometry_bounds = EMPTY_BOUNDS;
@@ -503,24 +503,24 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
         self.distinct_classes.clear();
         self.entropies.clear();
         if !self.compact {
-            self.h3_hexes.clear();
+            self.cell_hexes.clear();
             self.lats.clear();
             self.lngs.clear();
         }
     }
 
-    fn sort_by_h3_index(&mut self) {
-        let perm = match compute_sort_permutation(&self.h3_indices) {
+    fn sort_by_cell_id(&mut self) {
+        let perm = match compute_sort_permutation(&self.cell_ids) {
             Some(p) => p,
             None => return,
         };
 
-        reorder_by_perm(&mut self.h3_indices, &perm);
+        reorder_by_perm(&mut self.cell_ids, &perm);
         if self.geoparquet {
             reorder_by_perm_take(&mut self.geometries, &perm);
         }
         if !self.compact {
-            reorder_by_perm_take(&mut self.h3_hexes, &perm);
+            reorder_by_perm_take(&mut self.cell_hexes, &perm);
         }
         reorder_by_perm(&mut self.majorities, &perm);
         reorder_by_perm(&mut self.fractions, &perm);
@@ -539,9 +539,9 @@ impl ParquetRowGroupBuffer for CategoricalRowGroupBuffer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut row_group_writer = writer.next_row_group()?;
 
-        write_i64_column(&mut row_group_writer, &self.h3_indices)?;
+        write_i64_column(&mut row_group_writer, &self.cell_ids)?;
         if !self.compact {
-            write_byte_array_column(&mut row_group_writer, &self.h3_hexes)?;
+            write_byte_array_column(&mut row_group_writer, &self.cell_hexes)?;
         }
         if self.geoparquet {
             write_byte_array_column(&mut row_group_writer, &self.geometries)?;

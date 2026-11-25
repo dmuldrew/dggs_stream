@@ -14,8 +14,8 @@ static CAPSULE_GET_NAME: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static CAPSULE_GET_POINTER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 /// Register the interpreter's `PyCapsule_GetName` and `PyCapsule_GetPointer`, which
-/// [`raster_h3_py_stream_capsule_destructor`] and
-/// [`raster_h3_py_schema_capsule_destructor`] need to reach a capsule's payload.
+/// [`dggs_stream_py_stream_capsule_destructor`] and
+/// [`dggs_stream_py_schema_capsule_destructor`] need to reach a capsule's payload.
 ///
 /// This library never links libpython, so the Python package passes the two addresses
 /// once after loading it. A null address leaves the destructors inert.
@@ -24,7 +24,7 @@ static CAPSULE_GET_POINTER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 /// Each non-null argument must be the address of the named CPython function of the
 /// interpreter that will destroy the capsules.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_set_capsule_api(
+pub unsafe extern "C" fn dggs_stream_py_set_capsule_api(
     get_name: *const c_void,
     get_pointer: *const c_void,
 ) {
@@ -42,7 +42,7 @@ unsafe fn capsule_payload(capsule: *mut c_void) -> *mut c_void {
     if capsule.is_null() || get_name.is_null() || get_pointer.is_null() {
         return ptr::null_mut();
     }
-    // SAFETY: both addresses were registered through `raster_h3_py_set_capsule_api`,
+    // SAFETY: both addresses were registered through `dggs_stream_py_set_capsule_api`,
     // whose contract makes them the CPython functions of these signatures; `capsule`
     // is live and the GIL is held (caller contract).
     unsafe {
@@ -68,10 +68,10 @@ unsafe fn capsule_payload(capsule: *mut c_void) -> *mut c_void {
 ///
 /// # Safety
 /// Must only be installed as the destructor of a capsule whose payload came from one
-/// of the `raster_h3_py_create_arrow_stream*` functions or
-/// `raster_h3_py_batch_reader_next`. CPython calls it with the GIL held.
+/// of the `dggs_stream_py_create_arrow_stream*` functions or
+/// `dggs_stream_py_batch_reader_next`. CPython calls it with the GIL held.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_stream_capsule_destructor(capsule: *mut c_void) {
+pub unsafe extern "C" fn dggs_stream_py_stream_capsule_destructor(capsule: *mut c_void) {
     // SAFETY: the capsule is live and the GIL is held (caller contract); its payload
     // is an unfreed boxed stream, freed here exactly once.
     unsafe {
@@ -84,15 +84,15 @@ pub unsafe extern "C" fn raster_h3_py_stream_capsule_destructor(capsule: *mut c_
 }
 
 /// `PyCapsule` destructor for an `ArrowSchema` capsule. See
-/// [`raster_h3_py_stream_capsule_destructor`].
+/// [`dggs_stream_py_stream_capsule_destructor`].
 ///
 /// # Safety
 /// Must only be installed as the destructor of a capsule whose payload came from one
-/// of the `raster_h3_py_create_arrow_schema*` functions. CPython calls it with the GIL
+/// of the `dggs_stream_py_create_arrow_schema*` functions. CPython calls it with the GIL
 /// held.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_schema_capsule_destructor(capsule: *mut c_void) {
-    // SAFETY: as in `raster_h3_py_stream_capsule_destructor`, for a boxed schema.
+pub unsafe extern "C" fn dggs_stream_py_schema_capsule_destructor(capsule: *mut c_void) {
+    // SAFETY: as in `dggs_stream_py_stream_capsule_destructor`, for a boxed schema.
     unsafe {
         let payload = capsule_payload(capsule) as *mut ArrowSchema;
         if !payload.is_null() {

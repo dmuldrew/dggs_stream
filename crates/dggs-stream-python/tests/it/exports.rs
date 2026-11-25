@@ -1,4 +1,4 @@
-//! `raster_h3_py_export_parquet` / `raster_h3_py_export_pmtiles`: error paths return `-1`
+//! `dggs_stream_py_export_parquet` / `dggs_stream_py_export_pmtiles`: error paths return `-1`
 //! with `out_err` set and leave no output; successful exports equal the core exporters.
 
 use std::ffi::{c_char, CString};
@@ -8,8 +8,8 @@ use std::ptr;
 use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::pmtiles::PmtilesTiler;
 use dggs_stream_python::{
-    raster_h3_py_export_parquet, raster_h3_py_export_parquet_with_stats,
-    raster_h3_py_export_pmtiles, raster_h3_py_export_pmtiles_with_stats,
+    dggs_stream_py_export_parquet, dggs_stream_py_export_parquet_with_stats,
+    dggs_stream_py_export_pmtiles, dggs_stream_py_export_pmtiles_with_stats,
 };
 
 use crate::c_abi::{classes_tif, core_rows, gradient_tif, take_err, Scan};
@@ -35,7 +35,7 @@ fn parquet(
     // is a writable out-pointer whose string `take_err` frees.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let n = raster_h3_py_export_parquet(
+        let n = dggs_stream_py_export_parquet(
             p(&i),
             p(&o),
             p(&r),
@@ -66,7 +66,7 @@ fn pmtiles(
     // is a writable out-pointer whose string `take_err` frees.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let n = raster_h3_py_export_pmtiles(
+        let n = dggs_stream_py_export_pmtiles(
             p(&i),
             p(&o),
             p(&r),
@@ -138,7 +138,7 @@ fn export_error_paths_return_minus_one_with_a_message() {
     // SAFETY: every pointer is null, which the function accepts, including a null
     // `out_err`.
     let n = unsafe {
-        raster_h3_py_export_parquet(
+        dggs_stream_py_export_parquet(
             ptr::null(),
             ptr::null(),
             ptr::null(),
@@ -152,7 +152,7 @@ fn export_error_paths_return_minus_one_with_a_message() {
     // SAFETY: every pointer is null, which the function accepts, including a null
     // `out_err`.
     let n = unsafe {
-        raster_h3_py_export_pmtiles(
+        dggs_stream_py_export_pmtiles(
             ptr::null(),
             ptr::null(),
             ptr::null(),
@@ -181,7 +181,7 @@ fn exports_report_transform_failures() {
         // `err` are writable out-pointers, and `take_err` frees any error string.
         let n = unsafe {
             if pm {
-                raster_h3_py_export_pmtiles_with_stats(
+                dggs_stream_py_export_pmtiles_with_stats(
                     p(&i),
                     p(&o),
                     p(&r),
@@ -191,7 +191,7 @@ fn exports_report_transform_failures() {
                     &mut err,
                 )
             } else {
-                raster_h3_py_export_parquet_with_stats(
+                dggs_stream_py_export_parquet_with_stats(
                     p(&i),
                     p(&o),
                     p(&r),

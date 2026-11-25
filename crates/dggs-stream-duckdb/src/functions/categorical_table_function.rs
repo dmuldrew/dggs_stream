@@ -26,7 +26,7 @@ pub enum CategoricalOutputFormat {
     Long,
 }
 
-pub struct RasterH3CategoricalBindData {
+pub struct CategoricalRasterBindData {
     pub common: CommonRasterParams,
     pub format: CategoricalOutputFormat,
     pub min_count: Option<f64>,
@@ -39,7 +39,7 @@ pub struct RasterH3CategoricalBindData {
     pub partition: Option<ScanPartition>,
 }
 
-pub struct RasterH3CategoricalGlobalData {
+pub struct CategoricalRasterGlobalData {
     pub grid: GridKind,
     pub streamer: Mutex<MultiCategoricalHorizonStreamer>,
     pub record_queue: ConcurrentRecordQueue<ScanRow<MultiCategoricalRecord>>,
@@ -56,15 +56,15 @@ pub struct RasterH3CategoricalGlobalData {
     pub histogram: Option<dggs_stream_core::histogram::HistogramSpec>,
 }
 
-pub type RasterH3CategoricalLocalData = TableFunctionLocalData;
+pub type CategoricalRasterLocalData = TableFunctionLocalData;
 
 /// `h3_raster_categorical_aggregate`: per-cell class histograms, majority and
 /// entropy over a categorical raster, in wide or long format.
 pub(crate) struct CategoricalTable;
 
 impl RasterTable for CategoricalTable {
-    type Bind = RasterH3CategoricalBindData;
-    type Global = RasterH3CategoricalGlobalData;
+    type Bind = CategoricalRasterBindData;
+    type Global = CategoricalRasterGlobalData;
 
     const NAMES: &'static [&'static str] =
         &["h3_raster_categorical_aggregate", "h3_raster_categorical"];
@@ -92,7 +92,7 @@ impl RasterTable for CategoricalTable {
     unsafe fn bind(
         bind: &BindHelper,
         common: CommonRasterParams,
-    ) -> Option<RasterH3CategoricalBindData> {
+    ) -> Option<CategoricalRasterBindData> {
         let mut format = CategoricalOutputFormat::Wide;
         if let Some(s) = bind.get_named_string("format") {
             if s.trim().eq_ignore_ascii_case("long") {
@@ -179,7 +179,7 @@ impl RasterTable for CategoricalTable {
             bind.add_result_column(PARTIAL_STATE_COLUMN, DuckDBType::Blob);
         }
 
-        Some(RasterH3CategoricalBindData {
+        Some(CategoricalRasterBindData {
             common,
             format,
             min_count,
@@ -190,16 +190,16 @@ impl RasterTable for CategoricalTable {
         })
     }
 
-    fn common(bind: &RasterH3CategoricalBindData) -> &CommonRasterParams {
+    fn common(bind: &CategoricalRasterBindData) -> &CommonRasterParams {
         &bind.common
     }
 
     fn init(
-        bind: &RasterH3CategoricalBindData,
+        bind: &CategoricalRasterBindData,
         mosaic: Arc<MosaicReader>,
         projected_columns: Vec<usize>,
         mut config: MultiResolutionConfig,
-    ) -> Result<RasterH3CategoricalGlobalData, String> {
+    ) -> Result<CategoricalRasterGlobalData, String> {
         config.min_count = bind.min_count;
         config.min_majority_fraction = bind.min_majority_fraction;
         config.remapper = bind.remapper.clone();
@@ -216,7 +216,7 @@ impl RasterTable for CategoricalTable {
 
         // Long-format columns 7/8 are the entropy aliases.
         let with_entropy = projected_columns.iter().any(|&c| c == 7 || c == 8);
-        Ok(RasterH3CategoricalGlobalData {
+        Ok(CategoricalRasterGlobalData {
             policy,
             histogram: bind.histogram.clone(),
             grid: bind.common.grid,
@@ -234,7 +234,7 @@ impl RasterTable for CategoricalTable {
         })
     }
 
-    unsafe fn scan(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContext<'_>) {
+    unsafe fn scan(global: &CategoricalRasterGlobalData, ctx: &mut ScanContext<'_>) {
         // SAFETY: `ctx` carries the live scan handles (caller contract).
         unsafe {
             match global.format {
@@ -250,7 +250,7 @@ impl RasterTable for CategoricalTable {
 /// # Safety
 /// `ctx` must carry the live scan handles, with `output` laid out as the wide
 /// columns declared at bind time.
-unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContext<'_>) {
+unsafe fn scan_wide(global: &CategoricalRasterGlobalData, ctx: &mut ScanContext<'_>) {
     // SAFETY: `ctx` carries the live scan handles (caller contract). `writer` wraps the
     // output chunk, whose columns follow `projected_columns` in order, and each arm
     // writes values of exactly the physical type that column was declared with at bind
@@ -401,7 +401,7 @@ unsafe fn scan_wide(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
 /// # Safety
 /// `ctx` must carry the live scan handles, with `output` laid out as the long
 /// columns declared at bind time.
-unsafe fn scan_long(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContext<'_>) {
+unsafe fn scan_long(global: &CategoricalRasterGlobalData, ctx: &mut ScanContext<'_>) {
     // SAFETY: as for `scan_wide`, with the long-format column map.
     unsafe {
         let proj_cols = &global.projected_columns;
@@ -518,8 +518,8 @@ unsafe fn scan_long(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContex
 pub(crate) struct A5CategoricalTable;
 
 impl RasterTable for A5CategoricalTable {
-    type Bind = RasterH3CategoricalBindData;
-    type Global = RasterH3CategoricalGlobalData;
+    type Bind = CategoricalRasterBindData;
+    type Global = CategoricalRasterGlobalData;
 
     const NAMES: &'static [&'static str] = &[
         "a5_raster_categorical_aggregate",
@@ -540,25 +540,25 @@ impl RasterTable for A5CategoricalTable {
     unsafe fn bind(
         bind: &BindHelper,
         common: CommonRasterParams,
-    ) -> Option<RasterH3CategoricalBindData> {
+    ) -> Option<CategoricalRasterBindData> {
         // SAFETY: forwarded with the same contract.
         unsafe { CategoricalTable::bind(bind, common) }
     }
 
-    fn common(bind: &RasterH3CategoricalBindData) -> &CommonRasterParams {
+    fn common(bind: &CategoricalRasterBindData) -> &CommonRasterParams {
         CategoricalTable::common(bind)
     }
 
     fn init(
-        bind: &RasterH3CategoricalBindData,
+        bind: &CategoricalRasterBindData,
         mosaic: Arc<MosaicReader>,
         projected_columns: Vec<usize>,
         config: MultiResolutionConfig,
-    ) -> Result<RasterH3CategoricalGlobalData, String> {
+    ) -> Result<CategoricalRasterGlobalData, String> {
         CategoricalTable::init(bind, mosaic, projected_columns, config)
     }
 
-    unsafe fn scan(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContext<'_>) {
+    unsafe fn scan(global: &CategoricalRasterGlobalData, ctx: &mut ScanContext<'_>) {
         // SAFETY: forwarded with the same contract.
         unsafe { CategoricalTable::scan(global, ctx) }
     }
@@ -571,8 +571,8 @@ macro_rules! grid_categorical_table {
         pub(crate) struct $table;
 
         impl RasterTable for $table {
-            type Bind = RasterH3CategoricalBindData;
-            type Global = RasterH3CategoricalGlobalData;
+            type Bind = CategoricalRasterBindData;
+            type Global = CategoricalRasterGlobalData;
 
             const NAMES: &'static [&'static str] = &[$function, $($alias),+];
             const FUNCTION: &'static str = $function;
@@ -584,25 +584,25 @@ macro_rules! grid_categorical_table {
                 unsafe { CategoricalTable::register_named_parameters(tf) }
             }
 
-            unsafe fn bind(bind: &BindHelper, common: CommonRasterParams) -> Option<RasterH3CategoricalBindData> {
+            unsafe fn bind(bind: &BindHelper, common: CommonRasterParams) -> Option<CategoricalRasterBindData> {
                 // SAFETY: forwarded with the same contract.
                 unsafe { CategoricalTable::bind(bind, common) }
             }
 
-            fn common(bind: &RasterH3CategoricalBindData) -> &CommonRasterParams {
+            fn common(bind: &CategoricalRasterBindData) -> &CommonRasterParams {
                 CategoricalTable::common(bind)
             }
 
             fn init(
-                bind: &RasterH3CategoricalBindData,
+                bind: &CategoricalRasterBindData,
                 mosaic: Arc<MosaicReader>,
                 projected_columns: Vec<usize>,
                 config: MultiResolutionConfig,
-            ) -> Result<RasterH3CategoricalGlobalData, String> {
+            ) -> Result<CategoricalRasterGlobalData, String> {
                 CategoricalTable::init(bind, mosaic, projected_columns, config)
             }
 
-            unsafe fn scan(global: &RasterH3CategoricalGlobalData, ctx: &mut ScanContext<'_>) {
+            unsafe fn scan(global: &CategoricalRasterGlobalData, ctx: &mut ScanContext<'_>) {
                 // SAFETY: forwarded with the same contract.
                 unsafe { CategoricalTable::scan(global, ctx) }
             }

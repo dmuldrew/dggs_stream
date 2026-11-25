@@ -10,7 +10,8 @@ use dggs_stream_duckdb::functions::categorical_table_function::{
     raster_h3_categorical_scan,
 };
 use dggs_stream_duckdb::functions::table_function::{
-    raster_h3_bind, raster_h3_init, raster_h3_init_local, raster_h3_scan, RasterH3GlobalData,
+    raster_h3_bind, raster_h3_init, raster_h3_init_local, raster_h3_scan,
+    ContinuousRasterGlobalData,
 };
 
 use super::mock_api::install_mock_api;
@@ -181,10 +182,10 @@ fn test_continuous_quantile_pushdown_and_batched_columns() {
             raster_h3_init(&mut init as *mut MockInitContext as duckdb_init_info);
         }
         assert!(init.error.is_none(), "Init failed: {:?}", init.error);
-        // SAFETY: init installed a `RasterH3GlobalData` as `init_data`; it stays alive
+        // SAFETY: init installed a `ContinuousRasterGlobalData` as `init_data`; it stays alive
         // until `init` is dropped below, after the guard is released.
-        let global = unsafe { &*(init.init_data as *const RasterH3GlobalData) };
-        let RasterH3GlobalData::Single(global) = global else {
+        let global = unsafe { &*(init.init_data as *const ContinuousRasterGlobalData) };
+        let ContinuousRasterGlobalData::Single(global) = global else {
             panic!("expected single band")
         };
         let tracked = global.streamer.lock().unwrap().track_quantiles();

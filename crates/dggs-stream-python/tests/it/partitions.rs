@@ -1,5 +1,5 @@
-//! Partitioned scans through the C ABI: `raster_h3_py_plan_partitions`, the
-//! `_partitioned` stream, and `raster_h3_py_merge_partials`, compared with an unpartitioned
+//! Partitioned scans through the C ABI: `dggs_stream_py_plan_partitions`, the
+//! `_partitioned` stream, and `dggs_stream_py_merge_partials`, compared with an unpartitioned
 //! core scan.
 
 use std::collections::BTreeMap;
@@ -13,9 +13,9 @@ use dggs_stream_core::columnar::{
     PARTIAL_STATE_COLUMN,
 };
 use dggs_stream_python::{
-    raster_h3_py_create_arrow_schema_partitioned, raster_h3_py_create_arrow_stream_partitioned,
-    raster_h3_py_free_arrow_schema, raster_h3_py_free_string, raster_h3_py_merge_partials,
-    raster_h3_py_plan_partitions,
+    dggs_stream_py_create_arrow_schema_partitioned, dggs_stream_py_create_arrow_stream_partitioned,
+    dggs_stream_py_free_arrow_schema, dggs_stream_py_free_string, dggs_stream_py_merge_partials,
+    dggs_stream_py_plan_partitions,
 };
 
 use crate::c_abi::{take_err, Scan};
@@ -53,7 +53,7 @@ fn plan(path: &Path, target: i64) -> Result<Vec<String>, String> {
     let mut err: *mut c_char = ptr::null_mut();
     // SAFETY: valid C strings or NULL, and a writable error pointer.
     let json = unsafe {
-        raster_h3_py_plan_partitions(path.as_ptr(), ptr::null(), ptr::null(), target, &mut err)
+        dggs_stream_py_plan_partitions(path.as_ptr(), ptr::null(), ptr::null(), target, &mut err)
     };
     // SAFETY: `err` was set by the library or left NULL.
     if let Some(msg) = unsafe { take_err(err) } {
@@ -65,7 +65,7 @@ fn plan(path: &Path, target: i64) -> Result<Vec<String>, String> {
         .unwrap()
         .to_owned();
     // SAFETY: `json` came from this library and is freed exactly once.
-    unsafe { raster_h3_py_free_string(json) };
+    unsafe { dggs_stream_py_free_string(json) };
     let plan: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
     Ok(plan.iter().map(|p| p.to_string()).collect())
 }
@@ -77,7 +77,7 @@ fn scan_partition(scan: &Scan, partition: &str) -> Result<Vec<RecordBatch>, Stri
     let mut err: *mut c_char = ptr::null_mut();
     // SAFETY: valid C strings or NULL, and a writable error pointer.
     let stream = unsafe {
-        raster_h3_py_create_arrow_stream_partitioned(
+        dggs_stream_py_create_arrow_stream_partitioned(
             args.ptr(0),
             args.ptr(1),
             i32::from(scan.categorical),
@@ -115,7 +115,7 @@ fn merge(
     let mut err: *mut c_char = ptr::null_mut();
     // SAFETY: `input` is a valid stream; the call moves it out.
     let out = unsafe {
-        raster_h3_py_merge_partials(&mut input, i32::from(categorical), ptr::null(), &mut err)
+        dggs_stream_py_merge_partials(&mut input, i32::from(categorical), ptr::null(), &mut err)
     };
     assert!(
         input.release.is_none(),
@@ -305,7 +305,7 @@ fn categorical_partitions_match_a_single_scan() {
 
 #[test]
 fn plan_partitions_rejects_options_a_partitioned_scan_cannot_honour() {
-    use dggs_stream_python::raster_h3_py_plan_partitions_v2;
+    use dggs_stream_python::dggs_stream_py_plan_partitions_v2;
     let dir = tempfile::tempdir().unwrap();
     let path = CString::new(gradient(dir.path()).to_str().unwrap()).unwrap();
     let plan_with = |options: Option<&str>| -> Result<usize, String> {
@@ -313,7 +313,7 @@ fn plan_partitions_rejects_options_a_partitioned_scan_cannot_honour() {
         let mut err: *mut c_char = ptr::null_mut();
         // SAFETY: valid C strings or NULL, and a writable error pointer.
         let json = unsafe {
-            raster_h3_py_plan_partitions_v2(
+            dggs_stream_py_plan_partitions_v2(
                 path.as_ptr(),
                 ptr::null(),
                 ptr::null(),
@@ -332,7 +332,7 @@ fn plan_partitions_rejects_options_a_partitioned_scan_cannot_honour() {
             .unwrap()
             .to_owned();
         // SAFETY: `json` came from this library and is freed exactly once.
-        unsafe { raster_h3_py_free_string(json) };
+        unsafe { dggs_stream_py_free_string(json) };
         Ok(serde_json::from_str::<Vec<serde_json::Value>>(&text)
             .unwrap()
             .len())
@@ -410,7 +410,7 @@ fn partitioned_scans_reject_unsupported_options() {
     let mut err: *mut c_char = ptr::null_mut();
     // SAFETY: NULL strings and a writable error pointer.
     let schema = unsafe {
-        raster_h3_py_create_arrow_schema_partitioned(0, ptr::null(), ptr::null(), &mut err)
+        dggs_stream_py_create_arrow_schema_partitioned(0, ptr::null(), ptr::null(), &mut err)
     };
     // SAFETY: `err` was set by the library or left NULL.
     assert!(unsafe { take_err(err) }.is_none());
@@ -422,7 +422,7 @@ fn partitioned_scans_reject_unsupported_options() {
         .map(|f| f.name)
         .collect();
     // SAFETY: `schema` came from this library and is freed exactly once.
-    unsafe { raster_h3_py_free_arrow_schema(schema) };
+    unsafe { dggs_stream_py_free_arrow_schema(schema) };
     assert_eq!(names.last().map(String::as_str), Some(PARTIAL_STATE_COLUMN));
 }
 
@@ -449,7 +449,7 @@ fn merge_accepts_the_scans_projection_including_partial_state() {
     let cols = CString::new(columns).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     // SAFETY: `input` is a valid stream (moved by the call) and `cols` a valid C string.
-    let out = unsafe { raster_h3_py_merge_partials(&mut input, 0, cols.as_ptr(), &mut err) };
+    let out = unsafe { dggs_stream_py_merge_partials(&mut input, 0, cols.as_ptr(), &mut err) };
     // SAFETY: `err` was set by the library or left NULL.
     if let Some(msg) = unsafe { take_err(err) } {
         panic!("merge with the scan's projection failed: {msg}");

@@ -670,7 +670,7 @@ sequenceDiagram
     participant L as init_local
     participant S as scan (per thread)
     D->>B: positional + named parameters
-    B->>B: parse into RasterH3BindData, resolve sources
+    B->>B: parse into ContinuousRasterBindData, resolve sources
     B->>D: output columns + estimate_raster_cardinality
     D->>I: projected column ids
     I->>I: MosaicReader::open + MultiScanHorizonStreamer::new_mosaic

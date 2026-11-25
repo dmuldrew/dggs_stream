@@ -9,12 +9,13 @@ use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::columnar::{ColumnArray, ContinuousBatchReader};
 use dggs_stream_core::GridKind;
 use dggs_stream_python::{
-    raster_h3_py_export_parquet_v2, raster_h3_py_export_pmtiles_v2, raster_h3_py_free_cells,
-    raster_h3_py_free_string, raster_h3_py_grid_cell_to_parent, raster_h3_py_grid_code,
-    raster_h3_py_grid_get_resolution, raster_h3_py_grid_is_valid, raster_h3_py_grid_lonlat_to_cell,
-    raster_h3_py_grid_max_resolution, raster_h3_py_grid_polygon_to_cells, raster_h3_py_grid_to_lat,
-    raster_h3_py_grid_to_lng, raster_h3_py_grid_to_wkb, raster_h3_py_parquet_to_pmtiles_v2,
-    raster_h3_py_scan_json_v2, raster_h3_py_wkb_buf_len,
+    dggs_stream_py_export_parquet_v2, dggs_stream_py_export_pmtiles_v2, dggs_stream_py_free_cells,
+    dggs_stream_py_free_string, dggs_stream_py_grid_cell_to_parent, dggs_stream_py_grid_code,
+    dggs_stream_py_grid_get_resolution, dggs_stream_py_grid_is_valid,
+    dggs_stream_py_grid_lonlat_to_cell, dggs_stream_py_grid_max_resolution,
+    dggs_stream_py_grid_polygon_to_cells, dggs_stream_py_grid_to_lat, dggs_stream_py_grid_to_lng,
+    dggs_stream_py_grid_to_wkb, dggs_stream_py_parquet_to_pmtiles_v2, dggs_stream_py_scan_json_v2,
+    dggs_stream_py_wkb_buf_len,
 };
 
 use crate::c_abi::{gradient_tif, take_err};
@@ -32,7 +33,7 @@ fn options(grid: GridKind) -> CString {
     CString::new(format!("{{\"grid\": \"{grid}\"}}")).unwrap()
 }
 
-/// `raster_h3_py_scan_json_v2` of `tif` at `res` with an `options` JSON object.
+/// `dggs_stream_py_scan_json_v2` of `tif` at `res` with an `options` JSON object.
 fn scan_json(
     tif: &Path,
     res: &str,
@@ -44,7 +45,7 @@ fn scan_json(
     // returned JSON string is copied and freed once, and `take_err` frees the error.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let out = raster_h3_py_scan_json_v2(
+        let out = dggs_stream_py_scan_json_v2(
             path.as_ptr(),
             res.as_ptr(),
             0,
@@ -64,7 +65,7 @@ fn scan_json(
             return Err(take_err(err).expect("NULL result must set out_err"));
         }
         let text = CStr::from_ptr(out).to_str().unwrap().to_string();
-        raster_h3_py_free_string(out);
+        dggs_stream_py_free_string(out);
         match serde_json::from_str(&text).unwrap() {
             serde_json::Value::Object(m) => Ok(m),
             other => panic!("scan_json must return an object, got {other}"),
@@ -180,7 +181,7 @@ fn exports_write_the_requested_grid() {
         unsafe {
             let mut err: *mut c_char = ptr::null_mut();
             let mut failures = u64::MAX;
-            let n = raster_h3_py_export_parquet_v2(
+            let n = dggs_stream_py_export_parquet_v2(
                 input.as_ptr(),
                 c_parquet.as_ptr(),
                 res.as_ptr(),
@@ -192,7 +193,7 @@ fn exports_write_the_requested_grid() {
                 &mut err,
             );
             assert_eq!((n, failures), (expected, 0), "{grid}: {:?}", take_err(err));
-            let n = raster_h3_py_export_pmtiles_v2(
+            let n = dggs_stream_py_export_pmtiles_v2(
                 input.as_ptr(),
                 c_pmtiles.as_ptr(),
                 res.as_ptr(),
@@ -205,7 +206,7 @@ fn exports_write_the_requested_grid() {
             assert_eq!(n, expected, "{grid}: {:?}", take_err(err));
             // Auto-detected from the `{grid}_index` column, and with the grid named.
             for grid_arg in [ptr::null(), name.as_ptr()] {
-                let n = raster_h3_py_parquet_to_pmtiles_v2(
+                let n = dggs_stream_py_parquet_to_pmtiles_v2(
                     c_parquet.as_ptr(),
                     c_renamed.as_ptr(),
                     ptr::null(),
@@ -214,7 +215,7 @@ fn exports_write_the_requested_grid() {
                 );
                 assert_eq!(n, expected, "{grid}: {:?}", take_err(err));
             }
-            let n = raster_h3_py_parquet_to_pmtiles_v2(
+            let n = dggs_stream_py_parquet_to_pmtiles_v2(
                 c_parquet.as_ptr(),
                 c_renamed.as_ptr(),
                 ptr::null(),
@@ -230,58 +231,64 @@ fn exports_write_the_requested_grid() {
 
 #[test]
 fn grid_scalars_match_core() {
-    // SAFETY: `raster_h3_py_grid_code` takes NUL-terminated literals or null.
+    // SAFETY: `dggs_stream_py_grid_code` takes NUL-terminated literals or null.
     unsafe {
-        assert_eq!(raster_h3_py_grid_code(c"H3".as_ptr()), 0);
-        assert_eq!(raster_h3_py_grid_code(c"healpix".as_ptr()), 3);
-        assert_eq!(raster_h3_py_grid_code(c"s9".as_ptr()), -1);
-        assert_eq!(raster_h3_py_grid_code(ptr::null()), -1);
+        assert_eq!(dggs_stream_py_grid_code(c"H3".as_ptr()), 0);
+        assert_eq!(dggs_stream_py_grid_code(c"healpix".as_ptr()), 3);
+        assert_eq!(dggs_stream_py_grid_code(c"s9".as_ptr()), -1);
+        assert_eq!(dggs_stream_py_grid_code(ptr::null()), -1);
     }
-    assert_eq!(raster_h3_py_grid_max_resolution(9), -1);
-    assert_eq!(raster_h3_py_grid_lonlat_to_cell(9, 0.0, 0.0, 3), 0);
-    let cap = raster_h3_py_wkb_buf_len();
+    assert_eq!(dggs_stream_py_grid_max_resolution(9), -1);
+    assert_eq!(dggs_stream_py_grid_lonlat_to_cell(9, 0.0, 0.0, 3), 0);
+    let cap = dggs_stream_py_wkb_buf_len();
     for grid in GridKind::ALL {
         let code = grid as i32;
         assert_eq!(
-            raster_h3_py_grid_max_resolution(code),
+            dggs_stream_py_grid_max_resolution(code),
             i32::from(grid.max_resolution())
         );
         // South of -45° at lon 0 an S2 cell is on face 5, whose ids set bit 63.
         for (lon, lat) in [(-122.4194, 37.7749), (179.99, -0.01), (0.0, -89.5)] {
             for res in [0u8, 6, grid.max_resolution() - 1] {
-                let cell = raster_h3_py_grid_lonlat_to_cell(code, lon, lat, i64::from(res));
+                let cell = dggs_stream_py_grid_lonlat_to_cell(code, lon, lat, i64::from(res));
                 assert_eq!(Some(cell), grid.cell_at(lat, lon, res), "{grid}");
-                assert_eq!(raster_h3_py_grid_is_valid(code, cell), 1);
-                assert_eq!(raster_h3_py_grid_get_resolution(code, cell), i64::from(res));
+                assert_eq!(dggs_stream_py_grid_is_valid(code, cell), 1);
+                assert_eq!(
+                    dggs_stream_py_grid_get_resolution(code, cell),
+                    i64::from(res)
+                );
                 let (c_lat, c_lng) = grid.center_lat_lng(cell).unwrap();
-                assert_eq!(raster_h3_py_grid_to_lat(code, cell), c_lat);
-                assert_eq!(raster_h3_py_grid_to_lng(code, cell), c_lng);
-                let parent = raster_h3_py_grid_cell_to_parent(code, cell, 0);
+                assert_eq!(dggs_stream_py_grid_to_lat(code, cell), c_lat);
+                assert_eq!(dggs_stream_py_grid_to_lng(code, cell), c_lng);
+                let parent = dggs_stream_py_grid_cell_to_parent(code, cell, 0);
                 assert_eq!(Some(parent), grid.parent(cell, 0));
                 assert_eq!(
-                    raster_h3_py_grid_cell_to_parent(code, cell, i64::from(res) + 1),
+                    dggs_stream_py_grid_cell_to_parent(code, cell, i64::from(res) + 1),
                     0
                 );
                 let mut buf = vec![0u8; cap];
                 // SAFETY: `buf` holds `cap` writable bytes.
-                let n = unsafe { raster_h3_py_grid_to_wkb(code, cell, buf.as_mut_ptr(), cap) };
+                let n = unsafe { dggs_stream_py_grid_to_wkb(code, cell, buf.as_mut_ptr(), cap) };
                 let wkb = dggs_stream_core::scalar_ops::grid_to_wkb_u64(grid, cell).unwrap();
                 assert_eq!(&buf[..n], &wkb[..]);
                 // SAFETY: a too-small or null buffer is reported as 0 bytes written.
                 unsafe {
-                    assert_eq!(raster_h3_py_grid_to_wkb(code, cell, buf.as_mut_ptr(), 8), 0);
                     assert_eq!(
-                        raster_h3_py_grid_to_wkb(code, cell, ptr::null_mut(), cap),
+                        dggs_stream_py_grid_to_wkb(code, cell, buf.as_mut_ptr(), 8),
+                        0
+                    );
+                    assert_eq!(
+                        dggs_stream_py_grid_to_wkb(code, cell, ptr::null_mut(), cap),
                         0
                     );
                 }
             }
         }
-        assert_eq!(raster_h3_py_grid_is_valid(code, 0), 0);
-        assert!(raster_h3_py_grid_to_lat(code, 0).is_nan());
-        assert_eq!(raster_h3_py_grid_get_resolution(code, 0), -1);
+        assert_eq!(dggs_stream_py_grid_is_valid(code, 0), 0);
+        assert!(dggs_stream_py_grid_to_lat(code, 0).is_nan());
+        assert_eq!(dggs_stream_py_grid_get_resolution(code, 0), -1);
     }
-    let s2_south = raster_h3_py_grid_lonlat_to_cell(GridKind::S2 as i32, 0.0, -89.5, 10);
+    let s2_south = dggs_stream_py_grid_lonlat_to_cell(GridKind::S2 as i32, 0.0, -89.5, 10);
     assert!(s2_south >> 63 == 1, "face 5 ids use the top bit");
 }
 
@@ -320,7 +327,7 @@ fn grid_polygon_fill_matches_core() {
             // SAFETY: `wkb` is readable for its length, `mode` is null or a literal, and
             // the out-pointers are writable; a returned array is copied and freed once.
             unsafe {
-                let status = raster_h3_py_grid_polygon_to_cells(
+                let status = dggs_stream_py_grid_polygon_to_cells(
                     grid as i32,
                     wkb.as_ptr(),
                     wkb.len(),
@@ -334,7 +341,7 @@ fn grid_polygon_fill_matches_core() {
                     return (status, Vec::new());
                 }
                 let out = std::slice::from_raw_parts(cells, len).to_vec();
-                raster_h3_py_free_cells(cells, len);
+                dggs_stream_py_free_cells(cells, len);
                 (status, out)
             }
         };
@@ -346,7 +353,7 @@ fn grid_polygon_fill_matches_core() {
     let mut len = 0usize;
     // SAFETY: as above; grid code 9 is rejected before the outputs are written.
     let status = unsafe {
-        raster_h3_py_grid_polygon_to_cells(
+        dggs_stream_py_grid_polygon_to_cells(
             9,
             wkb.as_ptr(),
             wkb.len(),

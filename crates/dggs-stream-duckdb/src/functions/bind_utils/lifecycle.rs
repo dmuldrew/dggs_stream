@@ -245,9 +245,9 @@ const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}
     fn assert_send<T: Send>() {}
 
-    let _ = assert_send_sync::<crate::functions::table_function::RasterH3GlobalData>;
+    let _ = assert_send_sync::<crate::functions::table_function::ContinuousRasterGlobalData>;
     let _ = assert_send_sync::<
-        crate::functions::categorical_table_function::RasterH3CategoricalGlobalData,
+        crate::functions::categorical_table_function::CategoricalRasterGlobalData,
     >;
     let _ = assert_send_sync::<crate::functions::parquet_table_function::ParquetGlobalData>;
     let _ = assert_send_sync::<crate::functions::pmtiles_table_function::PmtilesGlobalData>;

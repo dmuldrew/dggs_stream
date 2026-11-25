@@ -125,7 +125,7 @@ def test_sql_and_sedona_geometry(sedona, terrain):
 )
 def test_bad_options_are_rejected(options, message):
     with pytest.raises(ValueError, match=message):
-        spark_ds.RasterH3DataSource(options)
+        spark_ds.RasterDataSource(options)
 
 
 def test_scan_errors_reach_spark(sedona, terrain):
