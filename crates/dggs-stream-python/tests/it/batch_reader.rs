@@ -1,4 +1,4 @@
-//! `raster_h3_py_open_batch_reader` / `_batch_reader_next` / `_free_batch_reader`:
+//! `dggs_stream_py_open_batch_reader` / `_batch_reader_next` / `_free_batch_reader`:
 //! incremental single-batch Arrow streams compared with core readers.
 
 use std::ffi::c_char;
@@ -6,8 +6,8 @@ use std::ptr;
 
 use dggs_stream_core::columnar::RecordBatch;
 use dggs_stream_python::{
-    raster_h3_py_batch_reader_next, raster_h3_py_free_arrow_stream, raster_h3_py_free_batch_reader,
-    raster_h3_py_open_batch_reader, PyBatchReader,
+    dggs_stream_py_batch_reader_next, dggs_stream_py_free_arrow_stream,
+    dggs_stream_py_free_batch_reader, dggs_stream_py_open_batch_reader, PyBatchReader,
 };
 
 use crate::c_abi::{classes_tif, core_rows, gradient_tif, take_err, Scan};
@@ -19,7 +19,7 @@ fn open(scan: &Scan, batch_size: i64) -> Result<*mut PyBatchReader, String> {
     // is a writable out-pointer whose string `take_err` frees.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let reader = raster_h3_py_open_batch_reader(
+        let reader = dggs_stream_py_open_batch_reader(
             a.ptr(0),
             a.ptr(1),
             i32::from(scan.categorical),
@@ -51,7 +51,7 @@ fn drain(reader: *mut PyBatchReader) -> Result<Vec<RecordBatch>, String> {
     unsafe {
         loop {
             let mut err: *mut c_char = ptr::null_mut();
-            let stream = raster_h3_py_batch_reader_next(reader, &mut err);
+            let stream = dggs_stream_py_batch_reader_next(reader, &mut err);
             if stream.is_null() {
                 return match take_err(err) {
                     Some(msg) => Err(msg),
@@ -59,7 +59,7 @@ fn drain(reader: *mut PyBatchReader) -> Result<Vec<RecordBatch>, String> {
                 };
             }
             let (_schema, batches) = (*stream).collect_batches().unwrap();
-            raster_h3_py_free_arrow_stream(stream);
+            dggs_stream_py_free_arrow_stream(stream);
             assert_eq!(batches.len(), 1, "each next() stream carries one batch");
             out.extend(batches);
         }
@@ -84,7 +84,7 @@ fn batches_are_bounded_and_match_core() {
     // Draining past the end keeps returning NULL without an error.
     assert!(drain(reader).unwrap().is_empty());
     // SAFETY: `reader` came from `open` and is freed exactly once, after its last use.
-    unsafe { raster_h3_py_free_batch_reader(reader) };
+    unsafe { dggs_stream_py_free_batch_reader(reader) };
 
     assert!(batches.len() > 1);
     assert!(batches.iter().all(|b| b.num_rows > 0 && b.num_rows <= 7));
@@ -94,7 +94,7 @@ fn batches_are_bounded_and_match_core() {
     let reader = open(&scan, 0).unwrap();
     let batches = drain(reader).unwrap();
     // SAFETY: `reader` came from `open` and is freed exactly once, after its last use.
-    unsafe { raster_h3_py_free_batch_reader(reader) };
+    unsafe { dggs_stream_py_free_batch_reader(reader) };
     assert_eq!(batches.len(), 1);
     assert_eq!(core_rows(&batches, &cols), expected);
 }
@@ -112,7 +112,7 @@ fn projection_limit_and_categorical_long() {
     let reader = open(&scan, 2).unwrap();
     let batches = drain(reader).unwrap();
     // SAFETY: `reader` came from `open` and is freed exactly once, after its last use.
-    unsafe { raster_h3_py_free_batch_reader(reader) };
+    unsafe { dggs_stream_py_free_batch_reader(reader) };
 
     let names: Vec<&str> = batches[0]
         .schema
@@ -153,9 +153,9 @@ fn open_and_next_errors() {
     // freeing null is a no-op.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        assert!(raster_h3_py_batch_reader_next(ptr::null_mut(), &mut err).is_null());
+        assert!(dggs_stream_py_batch_reader_next(ptr::null_mut(), &mut err).is_null());
         assert_eq!(take_err(err).as_deref(), Some("batch reader is NULL"));
-        raster_h3_py_free_batch_reader(ptr::null_mut());
+        dggs_stream_py_free_batch_reader(ptr::null_mut());
     }
 
     // A decode failure part-way through surfaces from next() as an error.
@@ -163,7 +163,7 @@ fn open_and_next_errors() {
     let reader = open(&Scan::of(corrupt.path()), 1).unwrap();
     let failed = drain(reader);
     // SAFETY: `reader` came from `open` and is freed exactly once, after its last use.
-    unsafe { raster_h3_py_free_batch_reader(reader) };
+    unsafe { dggs_stream_py_free_batch_reader(reader) };
     assert!(failed.is_err(), "corrupt strip must not end as a clean EOF");
 
     // Freeing a reader before draining it releases it without hanging.
@@ -173,9 +173,9 @@ fn open_and_next_errors() {
     // `take_err` frees any error string.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let first = raster_h3_py_batch_reader_next(reader, &mut err);
+        let first = dggs_stream_py_batch_reader_next(reader, &mut err);
         assert!(!first.is_null());
-        raster_h3_py_free_arrow_stream(first);
-        raster_h3_py_free_batch_reader(reader);
+        dggs_stream_py_free_arrow_stream(first);
+        dggs_stream_py_free_batch_reader(reader);
     }
 }

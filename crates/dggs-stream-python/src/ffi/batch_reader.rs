@@ -14,12 +14,12 @@ use crate::ffi::set_c_err;
 use crate::scanner::{PyBatchReader, PyRasterScanner};
 
 /// Open a [`PyBatchReader`] for incremental consumption (`batch_size` <= 0 uses the default).
-/// Free with `raster_h3_py_free_batch_reader`.
+/// Free with `dggs_stream_py_free_batch_reader`.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_open_batch_reader(
+pub unsafe extern "C" fn dggs_stream_py_open_batch_reader(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -35,7 +35,7 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader(
 ) -> *mut PyBatchReader {
     // SAFETY: forwards the caller's arguments, which meet the `_ex` contract.
     unsafe {
-        raster_h3_py_open_batch_reader_ex(
+        dggs_stream_py_open_batch_reader_ex(
             path,
             resolutions,
             categorical,
@@ -53,13 +53,13 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader(
     }
 }
 
-/// [`raster_h3_py_open_batch_reader`] with `strict_transforms`: when non-zero, the
+/// [`dggs_stream_py_open_batch_reader`] with `strict_transforms`: when non-zero, the
 /// reader fails as soon as a valid sample point cannot be transformed to WGS84.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_open_batch_reader_ex(
+pub unsafe extern "C" fn dggs_stream_py_open_batch_reader_ex(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -76,8 +76,8 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_ex(
 ) -> *mut PyBatchReader {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract), as
     // `opt_cstr` requires; `out_err` is null or a writable `char **` (as `set_c_err`
-    // requires), and error strings are freed by the caller with `raster_h3_py_free_string`.
-    // The returned box is freed by `raster_h3_py_free_batch_reader`.
+    // requires), and error strings are freed by the caller with `dggs_stream_py_free_string`.
+    // The returned box is freed by `dggs_stream_py_free_batch_reader`.
     unsafe {
         let res =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<PyBatchReader> {
@@ -127,16 +127,16 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_ex(
 /// stream, or NULL with `out_err` set on failure.
 ///
 /// # Safety
-/// `reader` must be a live pointer returned by `raster_h3_py_open_batch_reader`.
+/// `reader` must be a live pointer returned by `dggs_stream_py_open_batch_reader`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_batch_reader_next(
+pub unsafe extern "C" fn dggs_stream_py_batch_reader_next(
     reader: *mut PyBatchReader,
     out_err: *mut *mut c_char,
 ) -> *mut ArrowArrayStream {
-    // SAFETY: non-null `reader` is a live box from `raster_h3_py_open_batch_reader`, not
+    // SAFETY: non-null `reader` is a live box from `dggs_stream_py_open_batch_reader`, not
     // used concurrently (caller contract), so a unique borrow is valid for this call;
     // `out_err` is null or a writable `char **` (as `set_c_err` requires), and error
-    // strings are freed by the caller with `raster_h3_py_free_string`.
+    // strings are freed by the caller with `dggs_stream_py_free_string`.
     unsafe {
         if reader.is_null() {
             set_c_err(out_err, "batch reader is NULL");
@@ -167,24 +167,24 @@ pub unsafe extern "C" fn raster_h3_py_batch_reader_next(
 /// transform failed (0 for a null reader).
 ///
 /// # Safety
-/// `reader` must be null or a live pointer returned by `raster_h3_py_open_batch_reader`.
+/// `reader` must be null or a live pointer returned by `dggs_stream_py_open_batch_reader`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_batch_reader_transform_failures(
+pub unsafe extern "C" fn dggs_stream_py_batch_reader_transform_failures(
     reader: *const PyBatchReader,
 ) -> u64 {
-    // SAFETY: non-null `reader` is a live box from `raster_h3_py_open_batch_reader`
+    // SAFETY: non-null `reader` is a live box from `dggs_stream_py_open_batch_reader`
     // (caller contract); only its atomic counter is read.
     unsafe { reader.as_ref() }.map_or(0, |r| r.transform_failures.load(Ordering::Relaxed))
 }
 
-/// Free a reader returned by `raster_h3_py_open_batch_reader`.
+/// Free a reader returned by `dggs_stream_py_open_batch_reader`.
 ///
 /// # Safety
-/// `reader` must be null or returned by `raster_h3_py_open_batch_reader`.
+/// `reader` must be null or returned by `dggs_stream_py_open_batch_reader`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_free_batch_reader(reader: *mut PyBatchReader) {
+pub unsafe extern "C" fn dggs_stream_py_free_batch_reader(reader: *mut PyBatchReader) {
     // SAFETY: non-null `reader` came from `Box::into_raw` in
-    // `raster_h3_py_open_batch_reader` and is freed once (caller contract).
+    // `dggs_stream_py_open_batch_reader` and is freed once (caller contract).
     unsafe {
         if !reader.is_null() {
             let reader = Box::from_raw(reader);

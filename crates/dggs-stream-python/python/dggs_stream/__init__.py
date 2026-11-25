@@ -70,20 +70,25 @@ def _get_lib() -> ctypes.CDLL:
         return _LIB
 
     lib = ctypes.CDLL(_find_native_library())
+    if not hasattr(lib, "dggs_stream_py_create_arrow_schema"):
+        raise RuntimeError(
+            f"The native library at {lib._name} uses an incompatible dggs_stream Python ABI. "
+            "Rebuild it from this checkout or set DGGS_STREAM_PYTHON_LIB to a matching build."
+        )
 
     # Schema & Stream C-ABI
-    lib.raster_h3_py_create_arrow_schema.argtypes = [
+    lib.dggs_stream_py_create_arrow_schema.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    lib.raster_h3_py_create_arrow_schema.restype = ctypes.c_void_p
+    lib.dggs_stream_py_create_arrow_schema.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_free_arrow_schema.argtypes = [ctypes.c_void_p]
-    lib.raster_h3_py_free_arrow_schema.restype = None
+    lib.dggs_stream_py_free_arrow_schema.argtypes = [ctypes.c_void_p]
+    lib.dggs_stream_py_free_arrow_schema.restype = None
 
-    lib.raster_h3_py_create_arrow_stream.argtypes = [
+    lib.dggs_stream_py_create_arrow_stream.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
         ctypes.c_int,
@@ -96,12 +101,12 @@ def _get_lib() -> ctypes.CDLL:
         ctypes.c_int64,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    lib.raster_h3_py_create_arrow_stream.restype = ctypes.c_void_p
+    lib.dggs_stream_py_create_arrow_stream.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_free_arrow_stream.argtypes = [ctypes.c_void_p]
-    lib.raster_h3_py_free_arrow_stream.restype = None
+    lib.dggs_stream_py_free_arrow_stream.argtypes = [ctypes.c_void_p]
+    lib.dggs_stream_py_free_arrow_stream.restype = None
 
-    lib.raster_h3_py_open_batch_reader.argtypes = [
+    lib.dggs_stream_py_open_batch_reader.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
         ctypes.c_int,
@@ -115,18 +120,18 @@ def _get_lib() -> ctypes.CDLL:
         ctypes.c_int64,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    lib.raster_h3_py_open_batch_reader.restype = ctypes.c_void_p
+    lib.dggs_stream_py_open_batch_reader.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_batch_reader_next.argtypes = [
+    lib.dggs_stream_py_batch_reader_next.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    lib.raster_h3_py_batch_reader_next.restype = ctypes.c_void_p
+    lib.dggs_stream_py_batch_reader_next.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_free_batch_reader.argtypes = [ctypes.c_void_p]
-    lib.raster_h3_py_free_batch_reader.restype = None
+    lib.dggs_stream_py_free_batch_reader.argtypes = [ctypes.c_void_p]
+    lib.dggs_stream_py_free_batch_reader.restype = None
 
-    lib.raster_h3_py_scan_json.argtypes = [
+    lib.dggs_stream_py_scan_json.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
         ctypes.c_int,
@@ -139,104 +144,104 @@ def _get_lib() -> ctypes.CDLL:
         ctypes.c_int64,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    lib.raster_h3_py_scan_json.restype = ctypes.c_void_p
+    lib.dggs_stream_py_scan_json.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_free_string.argtypes = [ctypes.c_void_p]
-    lib.raster_h3_py_free_string.restype = None
+    lib.dggs_stream_py_free_string.argtypes = [ctypes.c_void_p]
+    lib.dggs_stream_py_free_string.restype = None
 
     # `_ex` scan variants (newer libraries) add `strict_transforms`; the JSON scan
     # also reports dropped samples, and batch readers expose a running count.
-    scan_args = list(lib.raster_h3_py_scan_json.argtypes[:-1])
+    scan_args = list(lib.dggs_stream_py_scan_json.argtypes[:-1])
     err_ptr = [ctypes.POINTER(ctypes.c_void_p)]
-    if hasattr(lib, "raster_h3_py_create_arrow_stream_ex"):
-        lib.raster_h3_py_create_arrow_stream_ex.argtypes = scan_args + [ctypes.c_int] + err_ptr
-        lib.raster_h3_py_create_arrow_stream_ex.restype = ctypes.c_void_p
-        lib.raster_h3_py_open_batch_reader_ex.argtypes = (
+    if hasattr(lib, "dggs_stream_py_create_arrow_stream_ex"):
+        lib.dggs_stream_py_create_arrow_stream_ex.argtypes = scan_args + [ctypes.c_int] + err_ptr
+        lib.dggs_stream_py_create_arrow_stream_ex.restype = ctypes.c_void_p
+        lib.dggs_stream_py_open_batch_reader_ex.argtypes = (
             scan_args + [ctypes.c_int64, ctypes.c_int] + err_ptr
         )
-        lib.raster_h3_py_open_batch_reader_ex.restype = ctypes.c_void_p
-        lib.raster_h3_py_scan_json_ex.argtypes = (
+        lib.dggs_stream_py_open_batch_reader_ex.restype = ctypes.c_void_p
+        lib.dggs_stream_py_scan_json_ex.argtypes = (
             scan_args + [ctypes.c_int, ctypes.POINTER(ctypes.c_uint64)] + err_ptr
         )
-        lib.raster_h3_py_scan_json_ex.restype = ctypes.c_void_p
-        lib.raster_h3_py_batch_reader_transform_failures.argtypes = [ctypes.c_void_p]
-        lib.raster_h3_py_batch_reader_transform_failures.restype = ctypes.c_uint64
+        lib.dggs_stream_py_scan_json_ex.restype = ctypes.c_void_p
+        lib.dggs_stream_py_batch_reader_transform_failures.argtypes = [ctypes.c_void_p]
+        lib.dggs_stream_py_batch_reader_transform_failures.restype = ctypes.c_uint64
 
         # Partitioned scans (newer libraries).
-        if hasattr(lib, "raster_h3_py_merge_partials"):
-            lib.raster_h3_py_plan_partitions.argtypes = [
+        if hasattr(lib, "dggs_stream_py_merge_partials"):
+            lib.dggs_stream_py_plan_partitions.argtypes = [
                 ctypes.c_char_p,
                 ctypes.c_char_p,
                 ctypes.c_char_p,
                 ctypes.c_int64,
             ] + err_ptr
-            lib.raster_h3_py_plan_partitions.restype = ctypes.c_void_p
-            lib.raster_h3_py_create_arrow_schema_partitioned.argtypes = list(
-                lib.raster_h3_py_create_arrow_schema.argtypes
+            lib.dggs_stream_py_plan_partitions.restype = ctypes.c_void_p
+            lib.dggs_stream_py_create_arrow_schema_partitioned.argtypes = list(
+                lib.dggs_stream_py_create_arrow_schema.argtypes
             )
-            lib.raster_h3_py_create_arrow_schema_partitioned.restype = ctypes.c_void_p
-            lib.raster_h3_py_create_arrow_stream_partitioned.argtypes = (
+            lib.dggs_stream_py_create_arrow_schema_partitioned.restype = ctypes.c_void_p
+            lib.dggs_stream_py_create_arrow_stream_partitioned.argtypes = (
                 scan_args + [ctypes.c_int, ctypes.c_char_p] + err_ptr
             )
-            lib.raster_h3_py_create_arrow_stream_partitioned.restype = ctypes.c_void_p
-            lib.raster_h3_py_open_batch_reader_partitioned.argtypes = (
+            lib.dggs_stream_py_create_arrow_stream_partitioned.restype = ctypes.c_void_p
+            lib.dggs_stream_py_open_batch_reader_partitioned.argtypes = (
                 scan_args + [ctypes.c_int64, ctypes.c_int, ctypes.c_char_p] + err_ptr
             )
-            lib.raster_h3_py_open_batch_reader_partitioned.restype = ctypes.c_void_p
-            lib.raster_h3_py_merge_partials.argtypes = [
+            lib.dggs_stream_py_open_batch_reader_partitioned.restype = ctypes.c_void_p
+            lib.dggs_stream_py_merge_partials.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_int,
                 ctypes.c_char_p,
             ] + err_ptr
-            lib.raster_h3_py_merge_partials.restype = ctypes.c_void_p
+            lib.dggs_stream_py_merge_partials.restype = ctypes.c_void_p
 
     # `_v2` scan variants (newer libraries) add a partition argument (NULL for a whole
     # scan) and an options JSON object, which carries band, sampling and the other options
     # the positional arguments have no slot for.
-    if hasattr(lib, "raster_h3_py_create_arrow_stream_v2"):
-        lib.raster_h3_py_create_arrow_stream_v2.argtypes = (
+    if hasattr(lib, "dggs_stream_py_create_arrow_stream_v2"):
+        lib.dggs_stream_py_create_arrow_stream_v2.argtypes = (
             scan_args + [ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p] + err_ptr
         )
-        lib.raster_h3_py_create_arrow_stream_v2.restype = ctypes.c_void_p
-        lib.raster_h3_py_open_batch_reader_v2.argtypes = (
+        lib.dggs_stream_py_create_arrow_stream_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_open_batch_reader_v2.argtypes = (
             scan_args + [ctypes.c_int64, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p] + err_ptr
         )
-        lib.raster_h3_py_open_batch_reader_v2.restype = ctypes.c_void_p
-        lib.raster_h3_py_scan_json_v2.argtypes = (
+        lib.dggs_stream_py_open_batch_reader_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_scan_json_v2.argtypes = (
             scan_args
             + [ctypes.c_int, ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint64)]
             + err_ptr
         )
-        lib.raster_h3_py_scan_json_v2.restype = ctypes.c_void_p
-        lib.raster_h3_py_plan_partitions_v2.argtypes = [
+        lib.dggs_stream_py_scan_json_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_plan_partitions_v2.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_int64,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_plan_partitions_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_plan_partitions_v2.restype = ctypes.c_void_p
 
-    if hasattr(lib, "raster_h3_py_merge_partials_v2"):
-        lib.raster_h3_py_merge_partials_v2.argtypes = [
+    if hasattr(lib, "dggs_stream_py_merge_partials_v2"):
+        lib.dggs_stream_py_merge_partials_v2.argtypes = [
             ctypes.c_void_p,
             ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_merge_partials_v2.restype = ctypes.c_void_p
-        lib.raster_h3_py_create_arrow_schema_v2.argtypes = [
+        lib.dggs_stream_py_merge_partials_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_create_arrow_schema_v2.argtypes = [
             ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_int,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_create_arrow_schema_v2.restype = ctypes.c_void_p
-        lib.raster_h3_py_quantile_columns.argtypes = [ctypes.c_char_p] + err_ptr
-        lib.raster_h3_py_quantile_columns.restype = ctypes.c_void_p
-    if hasattr(lib, "raster_h3_py_profile_scan_v2"):
-        lib.raster_h3_py_profile_scan_v2.argtypes = [
+        lib.dggs_stream_py_create_arrow_schema_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_quantile_columns.argtypes = [ctypes.c_char_p] + err_ptr
+        lib.dggs_stream_py_quantile_columns.restype = ctypes.c_void_p
+    if hasattr(lib, "dggs_stream_py_profile_scan_v2"):
+        lib.dggs_stream_py_profile_scan_v2.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_int,
@@ -249,57 +254,57 @@ def _get_lib() -> ctypes.CDLL:
             ctypes.c_int64,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_profile_scan_v2.restype = ctypes.c_void_p
+        lib.dggs_stream_py_profile_scan_v2.restype = ctypes.c_void_p
 
-    if hasattr(lib, "raster_h3_py_parquet_to_pmtiles"):
-        lib.raster_h3_py_parquet_to_pmtiles.argtypes = [
+    if hasattr(lib, "dggs_stream_py_parquet_to_pmtiles"):
+        lib.dggs_stream_py_parquet_to_pmtiles.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_parquet_to_pmtiles.restype = ctypes.c_int64
+        lib.dggs_stream_py_parquet_to_pmtiles.restype = ctypes.c_int64
 
-    if hasattr(lib, "raster_h3_py_parquet_to_pmtiles_v2"):
-        lib.raster_h3_py_parquet_to_pmtiles_v2.argtypes = [
+    if hasattr(lib, "dggs_stream_py_parquet_to_pmtiles_v2"):
+        lib.dggs_stream_py_parquet_to_pmtiles_v2.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_parquet_to_pmtiles_v2.restype = ctypes.c_int64
+        lib.dggs_stream_py_parquet_to_pmtiles_v2.restype = ctypes.c_int64
 
     # Grid-neutral scalar C-ABI (absent from older builds); `grid` is a grid code.
-    if hasattr(lib, "raster_h3_py_grid_code"):
+    if hasattr(lib, "dggs_stream_py_grid_code"):
         u64, i64, cint = ctypes.c_uint64, ctypes.c_int64, ctypes.c_int
-        lib.raster_h3_py_grid_code.argtypes = [ctypes.c_char_p]
-        lib.raster_h3_py_grid_code.restype = cint
-        lib.raster_h3_py_grid_max_resolution.argtypes = [cint]
-        lib.raster_h3_py_grid_max_resolution.restype = cint
-        lib.raster_h3_py_grid_lonlat_to_cell.argtypes = [
+        lib.dggs_stream_py_grid_code.argtypes = [ctypes.c_char_p]
+        lib.dggs_stream_py_grid_code.restype = cint
+        lib.dggs_stream_py_grid_max_resolution.argtypes = [cint]
+        lib.dggs_stream_py_grid_max_resolution.restype = cint
+        lib.dggs_stream_py_grid_lonlat_to_cell.argtypes = [
             cint,
             ctypes.c_double,
             ctypes.c_double,
             i64,
         ]
-        lib.raster_h3_py_grid_lonlat_to_cell.restype = u64
-        lib.raster_h3_py_grid_is_valid.argtypes = [cint, u64]
-        lib.raster_h3_py_grid_is_valid.restype = cint
-        lib.raster_h3_py_grid_to_lat.argtypes = [cint, u64]
-        lib.raster_h3_py_grid_to_lat.restype = ctypes.c_double
-        lib.raster_h3_py_grid_to_lng.argtypes = [cint, u64]
-        lib.raster_h3_py_grid_to_lng.restype = ctypes.c_double
-        lib.raster_h3_py_grid_get_resolution.argtypes = [cint, u64]
-        lib.raster_h3_py_grid_get_resolution.restype = i64
-        lib.raster_h3_py_grid_cell_to_parent.argtypes = [cint, u64, i64]
-        lib.raster_h3_py_grid_cell_to_parent.restype = u64
-        lib.raster_h3_py_grid_to_wkb.argtypes = [
+        lib.dggs_stream_py_grid_lonlat_to_cell.restype = u64
+        lib.dggs_stream_py_grid_is_valid.argtypes = [cint, u64]
+        lib.dggs_stream_py_grid_is_valid.restype = cint
+        lib.dggs_stream_py_grid_to_lat.argtypes = [cint, u64]
+        lib.dggs_stream_py_grid_to_lat.restype = ctypes.c_double
+        lib.dggs_stream_py_grid_to_lng.argtypes = [cint, u64]
+        lib.dggs_stream_py_grid_to_lng.restype = ctypes.c_double
+        lib.dggs_stream_py_grid_get_resolution.argtypes = [cint, u64]
+        lib.dggs_stream_py_grid_get_resolution.restype = i64
+        lib.dggs_stream_py_grid_cell_to_parent.argtypes = [cint, u64, i64]
+        lib.dggs_stream_py_grid_cell_to_parent.restype = u64
+        lib.dggs_stream_py_grid_to_wkb.argtypes = [
             cint,
             u64,
             ctypes.POINTER(ctypes.c_uint8),
             ctypes.c_size_t,
         ]
-        lib.raster_h3_py_grid_to_wkb.restype = ctypes.c_size_t
-        lib.raster_h3_py_grid_polygon_to_cells.argtypes = [
+        lib.dggs_stream_py_grid_to_wkb.restype = ctypes.c_size_t
+        lib.dggs_stream_py_grid_polygon_to_cells.argtypes = [
             cint,
             ctypes.c_char_p,
             ctypes.c_size_t,
@@ -308,55 +313,55 @@ def _get_lib() -> ctypes.CDLL:
             ctypes.POINTER(ctypes.POINTER(u64)),
             ctypes.POINTER(ctypes.c_size_t),
         ]
-        lib.raster_h3_py_grid_polygon_to_cells.restype = ctypes.c_int
-    if hasattr(lib, "raster_h3_py_auto_resolution"):
-        lib.raster_h3_py_auto_resolution.argtypes = [
+        lib.dggs_stream_py_grid_polygon_to_cells.restype = ctypes.c_int
+    if hasattr(lib, "dggs_stream_py_auto_resolution"):
+        lib.dggs_stream_py_auto_resolution.argtypes = [
             ctypes.c_char_p,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_char_p,
         ] + err_ptr
-        lib.raster_h3_py_auto_resolution.restype = ctypes.c_int
+        lib.dggs_stream_py_auto_resolution.restype = ctypes.c_int
 
     # Scalar C-ABI
-    lib.raster_h3_py_h3_to_string.argtypes = [ctypes.c_uint64]
-    lib.raster_h3_py_h3_to_string.restype = ctypes.c_void_p
+    lib.dggs_stream_py_h3_to_string.argtypes = [ctypes.c_uint64]
+    lib.dggs_stream_py_h3_to_string.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_string_to_h3.argtypes = [ctypes.c_char_p]
-    lib.raster_h3_py_string_to_h3.restype = ctypes.c_uint64
+    lib.dggs_stream_py_string_to_h3.argtypes = [ctypes.c_char_p]
+    lib.dggs_stream_py_string_to_h3.restype = ctypes.c_uint64
 
-    lib.raster_h3_py_h3_to_lat.argtypes = [ctypes.c_uint64]
-    lib.raster_h3_py_h3_to_lat.restype = ctypes.c_double
+    lib.dggs_stream_py_h3_to_lat.argtypes = [ctypes.c_uint64]
+    lib.dggs_stream_py_h3_to_lat.restype = ctypes.c_double
 
-    lib.raster_h3_py_h3_to_lng.argtypes = [ctypes.c_uint64]
-    lib.raster_h3_py_h3_to_lng.restype = ctypes.c_double
+    lib.dggs_stream_py_h3_to_lng.argtypes = [ctypes.c_uint64]
+    lib.dggs_stream_py_h3_to_lng.restype = ctypes.c_double
 
-    lib.raster_h3_py_h3_get_resolution.argtypes = [ctypes.c_uint64]
-    lib.raster_h3_py_h3_get_resolution.restype = ctypes.c_int64
+    lib.dggs_stream_py_h3_get_resolution.argtypes = [ctypes.c_uint64]
+    lib.dggs_stream_py_h3_get_resolution.restype = ctypes.c_int64
 
-    lib.raster_h3_py_h3_is_valid_u64.argtypes = [ctypes.c_uint64]
-    lib.raster_h3_py_h3_is_valid_u64.restype = ctypes.c_int
+    lib.dggs_stream_py_h3_is_valid_u64.argtypes = [ctypes.c_uint64]
+    lib.dggs_stream_py_h3_is_valid_u64.restype = ctypes.c_int
 
-    lib.raster_h3_py_h3_is_valid_str.argtypes = [ctypes.c_char_p]
-    lib.raster_h3_py_h3_is_valid_str.restype = ctypes.c_int
+    lib.dggs_stream_py_h3_is_valid_str.argtypes = [ctypes.c_char_p]
+    lib.dggs_stream_py_h3_is_valid_str.restype = ctypes.c_int
 
-    lib.raster_h3_py_h3_cell_to_parent_u64.argtypes = [ctypes.c_uint64, ctypes.c_int64]
-    lib.raster_h3_py_h3_cell_to_parent_u64.restype = ctypes.c_uint64
+    lib.dggs_stream_py_h3_cell_to_parent_u64.argtypes = [ctypes.c_uint64, ctypes.c_int64]
+    lib.dggs_stream_py_h3_cell_to_parent_u64.restype = ctypes.c_uint64
 
-    lib.raster_h3_py_h3_cell_to_parent_str.argtypes = [ctypes.c_char_p, ctypes.c_int64]
-    lib.raster_h3_py_h3_cell_to_parent_str.restype = ctypes.c_void_p
+    lib.dggs_stream_py_h3_cell_to_parent_str.argtypes = [ctypes.c_char_p, ctypes.c_int64]
+    lib.dggs_stream_py_h3_cell_to_parent_str.restype = ctypes.c_void_p
 
-    lib.raster_h3_py_h3_to_wkb.argtypes = [
+    lib.dggs_stream_py_h3_to_wkb.argtypes = [
         ctypes.c_uint64,
         ctypes.POINTER(ctypes.c_uint8),
         ctypes.c_size_t,
     ]
-    lib.raster_h3_py_h3_to_wkb.restype = ctypes.c_size_t
+    lib.dggs_stream_py_h3_to_wkb.restype = ctypes.c_size_t
 
-    lib.raster_h3_py_wkb_buf_len.argtypes = []
-    lib.raster_h3_py_wkb_buf_len.restype = ctypes.c_size_t
+    lib.dggs_stream_py_wkb_buf_len.argtypes = []
+    lib.dggs_stream_py_wkb_buf_len.restype = ctypes.c_size_t
 
-    lib.raster_h3_py_h3_polygon_to_cells.argtypes = [
+    lib.dggs_stream_py_h3_polygon_to_cells.argtypes = [
         ctypes.c_char_p,
         ctypes.c_size_t,
         ctypes.c_int64,
@@ -364,10 +369,10 @@ def _get_lib() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.POINTER(ctypes.c_uint64)),
         ctypes.POINTER(ctypes.c_size_t),
     ]
-    lib.raster_h3_py_h3_polygon_to_cells.restype = ctypes.c_int
+    lib.dggs_stream_py_h3_polygon_to_cells.restype = ctypes.c_int
 
-    lib.raster_h3_py_free_cells.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t]
-    lib.raster_h3_py_free_cells.restype = None
+    lib.dggs_stream_py_free_cells.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t]
+    lib.dggs_stream_py_free_cells.restype = None
 
     # Exporters. The `_with_stats` variants (newer libraries) also report the
     # transform-failure count; the original symbols keep their signatures.
@@ -389,8 +394,8 @@ def _get_lib() -> ctypes.CDLL:
     err_arg = [ctypes.POINTER(ctypes.c_void_p)]
     stats_args = [ctypes.POINTER(ctypes.c_uint64)] + err_arg
     for name, args in (
-        ("raster_h3_py_export_parquet", parquet_args),
-        ("raster_h3_py_export_pmtiles", pmtiles_args),
+        ("dggs_stream_py_export_parquet", parquet_args),
+        ("dggs_stream_py_export_pmtiles", pmtiles_args),
     ):
         fn = getattr(lib, name)
         fn.argtypes = args + err_arg
@@ -407,16 +412,16 @@ def _get_lib() -> ctypes.CDLL:
 
     # Capsule destructors implemented in the library (absent from older builds). It never
     # links libpython, so hand it the two CPython functions it needs to reach a payload.
-    if hasattr(lib, "raster_h3_py_set_capsule_api"):
-        lib.raster_h3_py_set_capsule_api.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        lib.raster_h3_py_set_capsule_api.restype = None
-        lib.raster_h3_py_set_capsule_api(
+    if hasattr(lib, "dggs_stream_py_set_capsule_api"):
+        lib.dggs_stream_py_set_capsule_api.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        lib.dggs_stream_py_set_capsule_api.restype = None
+        lib.dggs_stream_py_set_capsule_api(
             ctypes.cast(ctypes.pythonapi.PyCapsule_GetName, ctypes.c_void_p),
             ctypes.cast(ctypes.pythonapi.PyCapsule_GetPointer, ctypes.c_void_p),
         )
         for kind in ("stream", "schema"):
             _NATIVE_CAPSULE_DESTRUCTORS[kind] = _PYCAPSULE_DESTRUCTOR(
-                (f"raster_h3_py_{kind}_capsule_destructor", lib)
+                (f"dggs_stream_py_{kind}_capsule_destructor", lib)
             )
 
     _LIB = lib
@@ -464,7 +469,7 @@ def _schema_capsule_destructor(capsule_ptr: int) -> None:
     if capsule_ptr and _LIB is not None:
         ptr = _capsule_pointer(capsule_ptr)
         if ptr:
-            _LIB.raster_h3_py_free_arrow_schema(ptr)
+            _LIB.dggs_stream_py_free_arrow_schema(ptr)
 
 
 @_PYCAPSULE_DESTRUCTOR
@@ -472,7 +477,7 @@ def _stream_capsule_destructor(capsule_ptr: int) -> None:
     if capsule_ptr and _LIB is not None:
         ptr = _capsule_pointer(capsule_ptr)
         if ptr:
-            _LIB.raster_h3_py_free_arrow_stream(ptr)
+            _LIB.dggs_stream_py_free_arrow_stream(ptr)
 
 
 # Destructors exported by the native library, by capsule kind; filled in by `_get_lib`.
@@ -499,7 +504,7 @@ def _raise_if_err(err_ptr: ctypes.c_void_p) -> None:
     if err_ptr.value:
         lib = _get_lib()
         msg = ctypes.string_at(err_ptr.value).decode("utf-8", errors="replace")
-        lib.raster_h3_py_free_string(err_ptr.value)
+        lib.dggs_stream_py_free_string(err_ptr.value)
         raise RuntimeError(msg)
 
 
@@ -761,7 +766,7 @@ class _OwnedArrowStream:
 
     def __del__(self) -> None:
         if self._ptr and _LIB is not None:
-            _LIB.raster_h3_py_free_arrow_stream(self._ptr)
+            _LIB.dggs_stream_py_free_arrow_stream(self._ptr)
             self._ptr = None
 
 
@@ -875,7 +880,7 @@ class RasterArrowStream:
 
     def _has_v2(self, lib: ctypes.CDLL) -> bool:
         """Whether to call the `_v2` scan variants; the extra scan options require them."""
-        if hasattr(lib, "raster_h3_py_create_arrow_stream_v2"):
+        if hasattr(lib, "dggs_stream_py_create_arrow_stream_v2"):
             return True
         if self._options is not None:
             raise RuntimeError(
@@ -885,7 +890,7 @@ class RasterArrowStream:
         return False
 
     def _partition_arg(self, lib: ctypes.CDLL) -> bytes:
-        if not hasattr(lib, "raster_h3_py_merge_partials"):
+        if not hasattr(lib, "dggs_stream_py_merge_partials"):
             raise RuntimeError("partitioned scans require a newer dggs_stream native library")
         assert self.partition is not None
         return self.partition.encode("utf-8")
@@ -906,7 +911,7 @@ class RasterArrowStream:
 
     def _has_ex(self, lib: ctypes.CDLL) -> bool:
         """Whether to call the `_ex` scan variants; `strict_transforms` requires them."""
-        if hasattr(lib, "raster_h3_py_scan_json_ex"):
+        if hasattr(lib, "dggs_stream_py_scan_json_ex"):
             return True
         if self.strict_transforms:
             raise RuntimeError(
@@ -917,10 +922,10 @@ class RasterArrowStream:
     def __arrow_c_schema__(self) -> Any:
         lib = _get_lib()
         err = ctypes.c_void_p(0)
-        if hasattr(lib, "raster_h3_py_create_arrow_schema_v2"):
+        if hasattr(lib, "dggs_stream_py_create_arrow_schema_v2"):
             if self.partition is not None:
                 self._partition_arg(lib)
-            ptr = lib.raster_h3_py_create_arrow_schema_v2(
+            ptr = lib.dggs_stream_py_create_arrow_schema_v2(
                 1 if self.categorical else 0,
                 self.format.encode("utf-8"),
                 _encode_columns(self.columns),
@@ -935,10 +940,10 @@ class RasterArrowStream:
                 ptr, b"arrow_schema", _capsule_destructor("schema")
             )
         self._has_v2(lib)  # raises when options need a newer library
-        create = lib.raster_h3_py_create_arrow_schema
+        create = lib.dggs_stream_py_create_arrow_schema
         if self.partition is not None:
             self._partition_arg(lib)
-            create = lib.raster_h3_py_create_arrow_schema_partitioned
+            create = lib.dggs_stream_py_create_arrow_schema_partitioned
         ptr = create(
             1 if self.categorical else 0,
             self.format.encode("utf-8"),
@@ -956,7 +961,7 @@ class RasterArrowStream:
         lib = _get_lib()
         err = ctypes.c_void_p(0)
         if self._has_v2(lib):
-            ptr = lib.raster_h3_py_create_arrow_stream_v2(
+            ptr = lib.dggs_stream_py_create_arrow_stream_v2(
                 *self._scan_args(),
                 1 if self.strict_transforms else 0,
                 self._partition_arg(lib) if self.partition is not None else None,
@@ -964,18 +969,18 @@ class RasterArrowStream:
                 ctypes.byref(err),
             )
         elif self.partition is not None:
-            ptr = lib.raster_h3_py_create_arrow_stream_partitioned(
+            ptr = lib.dggs_stream_py_create_arrow_stream_partitioned(
                 *self._scan_args(),
                 1 if self.strict_transforms else 0,
                 self._partition_arg(lib),
                 ctypes.byref(err),
             )
         elif self._has_ex(lib):
-            ptr = lib.raster_h3_py_create_arrow_stream_ex(
+            ptr = lib.dggs_stream_py_create_arrow_stream_ex(
                 *self._scan_args(), 1 if self.strict_transforms else 0, ctypes.byref(err)
             )
         else:
-            ptr = lib.raster_h3_py_create_arrow_stream(*self._scan_args(), ctypes.byref(err))
+            ptr = lib.dggs_stream_py_create_arrow_stream(*self._scan_args(), ctypes.byref(err))
         _raise_if_err(err)
         if not ptr:
             raise RuntimeError("Failed to create ArrowArrayStream")
@@ -993,7 +998,7 @@ class RasterArrowStream:
         err = ctypes.c_void_p(0)
         failures = ctypes.c_uint64(0)
         if self._has_v2(lib):
-            json_ptr = lib.raster_h3_py_scan_json_v2(
+            json_ptr = lib.dggs_stream_py_scan_json_v2(
                 *self._scan_args(),
                 1 if self.strict_transforms else 0,
                 self._options,
@@ -1001,14 +1006,14 @@ class RasterArrowStream:
                 ctypes.byref(err),
             )
         elif self._has_ex(lib):
-            json_ptr = lib.raster_h3_py_scan_json_ex(
+            json_ptr = lib.dggs_stream_py_scan_json_ex(
                 *self._scan_args(),
                 1 if self.strict_transforms else 0,
                 ctypes.byref(failures),
                 ctypes.byref(err),
             )
         else:
-            json_ptr = lib.raster_h3_py_scan_json(*self._scan_args(), ctypes.byref(err))
+            json_ptr = lib.dggs_stream_py_scan_json(*self._scan_args(), ctypes.byref(err))
         _raise_if_err(err)
         if not json_ptr:
             raise RuntimeError("Failed to execute scan_json")
@@ -1016,7 +1021,7 @@ class RasterArrowStream:
             raw = ctypes.string_at(json_ptr).decode("utf-8")
             result = json.loads(raw)
         finally:
-            lib.raster_h3_py_free_string(json_ptr)
+            lib.dggs_stream_py_free_string(json_ptr)
         # Warn only once the native result is freed: the warning may be raised as an error.
         _warn_transform_failures(failures.value, stacklevel=3)
         return result
@@ -1031,14 +1036,14 @@ class RasterArrowStream:
         try:
             while True:
                 err = ctypes.c_void_p(0)
-                ptr = lib.raster_h3_py_batch_reader_next(reader, ctypes.byref(err))
+                ptr = lib.dggs_stream_py_batch_reader_next(reader, ctypes.byref(err))
                 _raise_if_err(err)
                 if not ptr:
-                    failures = lib.raster_h3_py_batch_reader_transform_failures(reader)
+                    failures = lib.dggs_stream_py_batch_reader_transform_failures(reader)
                     break
                 tables.append(pa.table(_OwnedArrowStream(ptr)))
         finally:
-            lib.raster_h3_py_free_batch_reader(reader)
+            lib.dggs_stream_py_free_batch_reader(reader)
         table = pa.concat_tables(tables) if tables else pa.schema(self).empty_table()
         _warn_transform_failures(failures, stacklevel=stacklevel)
         return table
@@ -1058,26 +1063,26 @@ class RasterArrowStream:
         try:
             while True:
                 err = ctypes.c_void_p(0)
-                ptr = lib.raster_h3_py_batch_reader_next(reader, ctypes.byref(err))
+                ptr = lib.dggs_stream_py_batch_reader_next(reader, ctypes.byref(err))
                 _raise_if_err(err)
                 if not ptr:
                     if has_ex:
                         _warn_transform_failures(
-                            lib.raster_h3_py_batch_reader_transform_failures(reader),
+                            lib.dggs_stream_py_batch_reader_transform_failures(reader),
                             stacklevel=3,
                         )
                     return
                 yield _polars_from_stream(_OwnedArrowStream(ptr))
         finally:
-            lib.raster_h3_py_free_batch_reader(reader)
+            lib.dggs_stream_py_free_batch_reader(reader)
 
     def _open_reader(self, lib: ctypes.CDLL, batch_size: Optional[int]) -> int:
-        """Open a native batch reader (free with `raster_h3_py_free_batch_reader`)."""
+        """Open a native batch reader (free with `dggs_stream_py_free_batch_reader`)."""
         err = ctypes.c_void_p(0)
         size = int(batch_size) if batch_size else 0
         strict = 1 if self.strict_transforms else 0
         if self._has_v2(lib):
-            reader = lib.raster_h3_py_open_batch_reader_v2(
+            reader = lib.dggs_stream_py_open_batch_reader_v2(
                 *self._scan_args(),
                 size,
                 strict,
@@ -1086,15 +1091,15 @@ class RasterArrowStream:
                 ctypes.byref(err),
             )
         elif self.partition is not None:
-            reader = lib.raster_h3_py_open_batch_reader_partitioned(
+            reader = lib.dggs_stream_py_open_batch_reader_partitioned(
                 *self._scan_args(), size, strict, self._partition_arg(lib), ctypes.byref(err)
             )
         elif self._has_ex(lib):
-            reader = lib.raster_h3_py_open_batch_reader_ex(
+            reader = lib.dggs_stream_py_open_batch_reader_ex(
                 *self._scan_args(), size, strict, ctypes.byref(err)
             )
         else:
-            reader = lib.raster_h3_py_open_batch_reader(
+            reader = lib.dggs_stream_py_open_batch_reader(
                 *self._scan_args(), size, ctypes.byref(err)
             )
         _raise_if_err(err)
@@ -1479,10 +1484,10 @@ def _polars_drops_unpushed_predicates(version: str) -> bool:
 def _quantile_columns(quantiles: Union[str, Sequence[Union[str, float]]]) -> List[str]:
     """Output column names of a `quantiles` option, from the native parser."""
     lib = _get_lib()
-    if not hasattr(lib, "raster_h3_py_quantile_columns"):
+    if not hasattr(lib, "dggs_stream_py_quantile_columns"):
         raise RuntimeError("quantiles require a newer dggs_stream native library")
     err = ctypes.c_void_p(0)
-    ptr = lib.raster_h3_py_quantile_columns(
+    ptr = lib.dggs_stream_py_quantile_columns(
         _encode_quantiles(quantiles).encode("utf-8"), ctypes.byref(err)
     )
     _raise_if_err(err)
@@ -1491,7 +1496,7 @@ def _quantile_columns(quantiles: Union[str, Sequence[Union[str, float]]]) -> Lis
     try:
         return list(json.loads(ctypes.string_at(ptr).decode("utf-8")))
     finally:
-        lib.raster_h3_py_free_string(ptr)
+        lib.dggs_stream_py_free_string(ptr)
 
 
 def _resolution_list(
@@ -1521,7 +1526,7 @@ def _native_has_scan_options() -> bool:
     """Whether the native library takes scan options (the `_v2` entry points). Pushdown
     adds filter options only then: with an older library the predicate is simply applied
     by Polars, as before."""
-    return hasattr(_get_lib(), "raster_h3_py_create_arrow_stream_v2")
+    return hasattr(_get_lib(), "dggs_stream_py_create_arrow_stream_v2")
 
 
 _FLIPPED = {"Gt": "Lt", "GtEq": "LtEq", "Lt": "Gt", "LtEq": "GtEq", "Eq": "Eq", "NotEq": "NotEq"}
@@ -1702,13 +1707,13 @@ def profile_raster(
     if _wants_histogram(*(options.get(k) for k in _SCAN_OPTIONS if k.startswith("histogram"))):
         categorical = True
     lib = _get_lib()
-    if not hasattr(lib, "raster_h3_py_profile_scan_v2"):
+    if not hasattr(lib, "dggs_stream_py_profile_scan_v2"):
         raise RuntimeError("profile_raster requires a newer dggs_stream native library")
     unknown = [k for k in options if k not in _SCAN_OPTIONS]
     if unknown:
         raise TypeError(f"unknown scan option(s) {sorted(unknown)}")
     err = ctypes.c_void_p(0)
-    ptr = lib.raster_h3_py_profile_scan_v2(
+    ptr = lib.dggs_stream_py_profile_scan_v2(
         str(path).encode("utf-8"),
         _encode_resolutions(resolutions),
         1 if categorical else 0,
@@ -1728,7 +1733,7 @@ def profile_raster(
     try:
         return json.loads(ctypes.string_at(ptr).decode("utf-8"))
     finally:
-        lib.raster_h3_py_free_string(ptr)
+        lib.dggs_stream_py_free_string(ptr)
 
 
 # -----------------------------------------------------------------------------
@@ -1760,13 +1765,14 @@ def plan_partitions(
 
     - rows where `partial_state` is null are final cells;
     - rows where it is set are cells that other partitions also hold samples of. Collect
-      them from all partitions (grouped by `h3_index`) and pass them to `merge_partials`.
+      them from all partitions (grouped by the grid's index column) and pass them to
+      `merge_partials`.
 
     Larger partitions mean less per-task overhead and fewer partial rows; a few hundred
     chunks per partition is a good start.
     """
     lib = _get_lib()
-    if not hasattr(lib, "raster_h3_py_plan_partitions"):
+    if not hasattr(lib, "dggs_stream_py_plan_partitions"):
         raise RuntimeError("plan_partitions requires a newer dggs_stream native library")
     err = ctypes.c_void_p(0)
     args = (
@@ -1776,19 +1782,19 @@ def plan_partitions(
         int(target_chunks),
     )
     options = _encode_scan_options({"overlap_rule": overlap_rule})
-    if hasattr(lib, "raster_h3_py_plan_partitions_v2"):
-        ptr = lib.raster_h3_py_plan_partitions_v2(*args, options, ctypes.byref(err))
+    if hasattr(lib, "dggs_stream_py_plan_partitions_v2"):
+        ptr = lib.dggs_stream_py_plan_partitions_v2(*args, options, ctypes.byref(err))
     elif options is not None:
         raise RuntimeError("overlap_rule requires a newer dggs_stream native library")
     else:
-        ptr = lib.raster_h3_py_plan_partitions(*args, ctypes.byref(err))
+        ptr = lib.dggs_stream_py_plan_partitions(*args, ctypes.byref(err))
     _raise_if_err(err)
     if not ptr:
         raise RuntimeError("Failed to plan partitions")
     try:
         plan = json.loads(ctypes.string_at(ptr).decode("utf-8"))
     finally:
-        lib.raster_h3_py_free_string(ptr)
+        lib.dggs_stream_py_free_string(ptr)
     return [json.dumps(p, separators=(",", ":")) for p in plan]
 
 
@@ -1834,12 +1840,12 @@ def merge_partials(
     `partials` holds the rows whose `partial_state` is set, from all partitions (every
     partial row of a cell must be included, in any order). It can be a PyArrow Table,
     RecordBatch or list of them, or anything exposing `__arrow_c_stream__` (e.g. a Polars
-    DataFrame); only the `resolution`, `h3_index` and `partial_state` columns are read,
-    and integer types are cast as needed (e.g. Spark's signed `h3_index`).
+    DataFrame); only `resolution`, the selected grid's index column and `partial_state`
+    are read. Signed 64-bit cell IDs from Spark are interpreted as unsigned bit patterns.
 
     `categorical`, `columns`, `quantiles` and the filters (`min_count`, `min_mean`,
     `max_mean`, `min_majority_fraction`) must match the scans'. Returns a PyArrow Table with the
-    scan's output columns (without `partial_state`), sorted by resolution and h3_index.
+    scan's output columns (without `partial_state`), sorted by resolution and cell ID.
     Requires pyarrow.
 
     With Spark, for example::
@@ -1852,7 +1858,7 @@ def merge_partials(
     import pyarrow as pa  # type: ignore
 
     lib = _get_lib()
-    if not hasattr(lib, "raster_h3_py_merge_partials"):
+    if not hasattr(lib, "dggs_stream_py_merge_partials"):
         raise RuntimeError("merge_partials requires a newer dggs_stream native library")
     grid = _normalize_grid(grid)
     index_col = f"{grid}_index"
@@ -1869,7 +1875,7 @@ def merge_partials(
             decimals=decimals,
         )
     )
-    if options is not None and not hasattr(lib, "raster_h3_py_merge_partials_v2"):
+    if options is not None and not hasattr(lib, "dggs_stream_py_merge_partials_v2"):
         raise RuntimeError(
             "grid, quantiles and filters in merge_partials require a newer dggs_stream native library"
         )
@@ -1886,12 +1892,17 @@ def merge_partials(
             f"{state.null_count} rows have no {PARTIAL_STATE_COLUMN}: pass only partial rows "
             "(rows without a state are already final)"
         )
-    narrow = pa.table({name: table.column(name).cast(t) for name, t in keys.items()}).combine_chunks()
+    arrays = {}
+    for name, data_type in keys.items():
+        column = table.column(name)
+        signed_cell = name == index_col and column.type == pa.int64()
+        arrays[name] = column.cast(data_type, safe=not signed_cell)
+    narrow = pa.table(arrays).combine_chunks()
     capsule = narrow.__arrow_c_stream__()
     stream = _capsule_object_pointer(capsule, b"arrow_array_stream")
     err = ctypes.c_void_p(0)
-    if hasattr(lib, "raster_h3_py_merge_partials_v2"):
-        out = lib.raster_h3_py_merge_partials_v2(
+    if hasattr(lib, "dggs_stream_py_merge_partials_v2"):
+        out = lib.dggs_stream_py_merge_partials_v2(
             stream,
             1 if categorical else 0,
             _encode_columns(columns),
@@ -1899,7 +1910,7 @@ def merge_partials(
             ctypes.byref(err),
         )
     else:
-        out = lib.raster_h3_py_merge_partials(
+        out = lib.dggs_stream_py_merge_partials(
             stream,
             1 if categorical else 0,
             _encode_columns(columns),
@@ -1918,36 +1929,36 @@ def merge_partials(
 
 def h3_to_string(cell: int) -> Optional[str]:
     lib = _get_lib()
-    ptr = lib.raster_h3_py_h3_to_string(int(cell))
+    ptr = lib.dggs_stream_py_h3_to_string(int(cell))
     if not ptr:
         return None
     try:
         return ctypes.string_at(ptr).decode("utf-8")
     finally:
-        lib.raster_h3_py_free_string(ptr)
+        lib.dggs_stream_py_free_string(ptr)
 
 
 def string_to_h3(hex_str: str) -> int:
-    return int(_get_lib().raster_h3_py_string_to_h3(hex_str.encode("utf-8")))
+    return int(_get_lib().dggs_stream_py_string_to_h3(hex_str.encode("utf-8")))
 
 
 def h3_to_lat(cell: int) -> float:
-    return float(_get_lib().raster_h3_py_h3_to_lat(int(cell)))
+    return float(_get_lib().dggs_stream_py_h3_to_lat(int(cell)))
 
 
 def h3_to_lng(cell: int) -> float:
-    return float(_get_lib().raster_h3_py_h3_to_lng(int(cell)))
+    return float(_get_lib().dggs_stream_py_h3_to_lng(int(cell)))
 
 
 def h3_get_resolution(cell: int) -> int:
-    return int(_get_lib().raster_h3_py_h3_get_resolution(int(cell)))
+    return int(_get_lib().dggs_stream_py_h3_get_resolution(int(cell)))
 
 
 def h3_is_valid(cell_or_hex: Union[int, str]) -> bool:
     lib = _get_lib()
     if isinstance(cell_or_hex, str):
-        return bool(lib.raster_h3_py_h3_is_valid_str(cell_or_hex.encode("utf-8")))
-    return bool(lib.raster_h3_py_h3_is_valid_u64(int(cell_or_hex)))
+        return bool(lib.dggs_stream_py_h3_is_valid_str(cell_or_hex.encode("utf-8")))
+    return bool(lib.dggs_stream_py_h3_is_valid_u64(int(cell_or_hex)))
 
 
 def h3_to_wkb(cell_or_hex: Union[int, str]) -> Optional[bytes]:
@@ -1958,9 +1969,9 @@ def h3_to_wkb(cell_or_hex: Union[int, str]) -> Optional[bytes]:
     lib = _get_lib()
     # The native library reports the capacity that fits every cell
     # (dggs-stream-core's WKB_BUF_LEN), so the two cannot drift apart.
-    cap = lib.raster_h3_py_wkb_buf_len()
+    cap = lib.dggs_stream_py_wkb_buf_len()
     buf = (ctypes.c_uint8 * cap)()
-    written = lib.raster_h3_py_h3_to_wkb(cell, buf, cap)
+    written = lib.dggs_stream_py_h3_to_wkb(cell, buf, cap)
     if written == 0:
         return None
     return bytes(buf[:written])
@@ -1971,7 +1982,7 @@ def h3_cell_to_parent(
 ) -> Optional[Union[int, str]]:
     lib = _get_lib()
     if isinstance(cell_or_hex, str):
-        ptr = lib.raster_h3_py_h3_cell_to_parent_str(
+        ptr = lib.dggs_stream_py_h3_cell_to_parent_str(
             cell_or_hex.encode("utf-8"), int(parent_res)
         )
         if not ptr:
@@ -1979,8 +1990,8 @@ def h3_cell_to_parent(
         try:
             return ctypes.string_at(ptr).decode("utf-8")
         finally:
-            lib.raster_h3_py_free_string(ptr)
-    res = int(lib.raster_h3_py_h3_cell_to_parent_u64(int(cell_or_hex), int(parent_res)))
+            lib.dggs_stream_py_free_string(ptr)
+    res = int(lib.dggs_stream_py_h3_cell_to_parent_u64(int(cell_or_hex), int(parent_res)))
     return res if res != 0 else None
 
 
@@ -2002,7 +2013,7 @@ def h3_polygon_to_cells(
     data = bytes(wkb)
     out_cells = ctypes.POINTER(ctypes.c_uint64)()
     out_len = ctypes.c_size_t(0)
-    status = lib.raster_h3_py_h3_polygon_to_cells(
+    status = lib.dggs_stream_py_h3_polygon_to_cells(
         data,
         len(data),
         resolution,
@@ -2014,7 +2025,7 @@ def h3_polygon_to_cells(
         try:
             return [int(out_cells[i]) for i in range(out_len.value)]
         finally:
-            lib.raster_h3_py_free_cells(out_cells, out_len.value)
+            lib.dggs_stream_py_free_cells(out_cells, out_len.value)
     if status == 2:
         raise ValueError(f"unknown containment mode {containment!r}")
     if status == 3:
@@ -2122,7 +2133,7 @@ def raster_to_parquet(
         crs.encode("utf-8") if crs else None,
         1 if geoparquet else 0,
     )
-    return _run_export("raster_h3_py_export_parquet", args, grid, output)
+    return _run_export("dggs_stream_py_export_parquet", args, grid, output)
 
 
 def raster_to_pmtiles(
@@ -2162,7 +2173,7 @@ def raster_to_pmtiles(
         1 if categorical else 0,
         crs.encode("utf-8") if crs else None,
     )
-    return _run_export("raster_h3_py_export_pmtiles", args, grid, output)
+    return _run_export("dggs_stream_py_export_pmtiles", args, grid, output)
 
 
 def parquet_to_pmtiles(
@@ -2188,20 +2199,20 @@ def parquet_to_pmtiles(
             raise ValueError("pass cell_column or h3_column, not both")
         cell_column = h3_column
     lib = _get_lib()
-    if not hasattr(lib, "raster_h3_py_parquet_to_pmtiles"):
+    if not hasattr(lib, "dggs_stream_py_parquet_to_pmtiles"):
         raise RuntimeError("parquet_to_pmtiles requires a newer dggs_stream native library")
     err = ctypes.c_void_p(0)
     column = cell_column.encode("utf-8") if cell_column else None
     paths = (str(parquet_path).encode("utf-8"), str(output_path).encode("utf-8"))
-    if hasattr(lib, "raster_h3_py_parquet_to_pmtiles_v2"):
+    if hasattr(lib, "dggs_stream_py_parquet_to_pmtiles_v2"):
         grid_arg = None if grid is None else _normalize_grid(grid).encode("utf-8")
-        count = lib.raster_h3_py_parquet_to_pmtiles_v2(
+        count = lib.dggs_stream_py_parquet_to_pmtiles_v2(
             *paths, column, grid_arg, ctypes.byref(err)
         )
     elif grid is not None and _normalize_grid(grid) != "h3":
         raise RuntimeError(f"grid={grid!r} requires a newer dggs_stream native library")
     else:
-        count = lib.raster_h3_py_parquet_to_pmtiles(*paths, column, ctypes.byref(err))
+        count = lib.dggs_stream_py_parquet_to_pmtiles(*paths, column, ctypes.byref(err))
     _raise_if_err(err)
     return int(count)
 
@@ -2212,9 +2223,9 @@ def parquet_to_pmtiles(
 
 def _grid_code(grid: Optional[str]) -> Tuple[ctypes.CDLL, int]:
     lib = _get_lib()
-    if not hasattr(lib, "raster_h3_py_grid_code"):
+    if not hasattr(lib, "dggs_stream_py_grid_code"):
         raise RuntimeError("grid scalar functions require a newer dggs_stream native library")
-    return lib, int(lib.raster_h3_py_grid_code(_normalize_grid(grid).encode("utf-8")))
+    return lib, int(lib.dggs_stream_py_grid_code(_normalize_grid(grid).encode("utf-8")))
 
 
 def _as_cell(cell_or_hex: Union[int, str]) -> int:
@@ -2237,12 +2248,12 @@ def auto_resolution(
     (positive is finer) and clamped to the grid's range. `crs` overrides the raster's CRS.
     """
     lib, code = _grid_code(grid)
-    if not hasattr(lib, "raster_h3_py_auto_resolution"):
+    if not hasattr(lib, "dggs_stream_py_auto_resolution"):
         raise RuntimeError("auto_resolution requires a newer dggs_stream native library")
     if isinstance(offset, bool) or not isinstance(offset, int):
         raise TypeError(f"offset must be an int, got {type(offset).__name__}")
     err = ctypes.c_void_p(0)
-    res = lib.raster_h3_py_auto_resolution(
+    res = lib.dggs_stream_py_auto_resolution(
         str(path).encode("utf-8"),
         code,
         max(-1000, min(1000, offset)),
@@ -2259,7 +2270,7 @@ def lonlat_to_cell(lon: float, lat: float, resolution: int, grid: str = "h3") ->
     """The cell of `grid` holding a WGS84 point (degrees) at `resolution`, or `None` if
     the latitude is outside -90..90 or the resolution outside the grid's range."""
     lib, code = _grid_code(grid)
-    cell = int(lib.raster_h3_py_grid_lonlat_to_cell(code, float(lon), float(lat), int(resolution)))
+    cell = int(lib.dggs_stream_py_grid_lonlat_to_cell(code, float(lon), float(lat), int(resolution)))
     return cell or None
 
 
@@ -2278,25 +2289,25 @@ def string_to_cell(hex_str: str, grid: str = "h3") -> Optional[int]:
 def cell_is_valid(cell_or_hex: Union[int, str], grid: str = "h3") -> bool:
     lib, code = _grid_code(grid)
     cell = _as_cell(cell_or_hex)
-    return bool(cell) and bool(lib.raster_h3_py_grid_is_valid(code, cell))
+    return bool(cell) and bool(lib.dggs_stream_py_grid_is_valid(code, cell))
 
 
 def cell_to_lat(cell_or_hex: Union[int, str], grid: str = "h3") -> float:
     """Centre latitude in degrees (NaN for an invalid cell)."""
     lib, code = _grid_code(grid)
-    return float(lib.raster_h3_py_grid_to_lat(code, _as_cell(cell_or_hex)))
+    return float(lib.dggs_stream_py_grid_to_lat(code, _as_cell(cell_or_hex)))
 
 
 def cell_to_lng(cell_or_hex: Union[int, str], grid: str = "h3") -> float:
     """Centre longitude in degrees (NaN for an invalid cell)."""
     lib, code = _grid_code(grid)
-    return float(lib.raster_h3_py_grid_to_lng(code, _as_cell(cell_or_hex)))
+    return float(lib.dggs_stream_py_grid_to_lng(code, _as_cell(cell_or_hex)))
 
 
 def cell_resolution(cell_or_hex: Union[int, str], grid: str = "h3") -> int:
     """The cell's resolution, or -1 for an invalid cell."""
     lib, code = _grid_code(grid)
-    return int(lib.raster_h3_py_grid_get_resolution(code, _as_cell(cell_or_hex)))
+    return int(lib.dggs_stream_py_grid_get_resolution(code, _as_cell(cell_or_hex)))
 
 
 def cell_to_parent(
@@ -2305,7 +2316,7 @@ def cell_to_parent(
     """The ancestor at `parent_res`, in the form given (integer or hex string); `None` if
     the cell is invalid or `parent_res` is finer than it."""
     lib, code = _grid_code(grid)
-    parent = int(lib.raster_h3_py_grid_cell_to_parent(code, _as_cell(cell_or_hex), int(parent_res)))
+    parent = int(lib.dggs_stream_py_grid_cell_to_parent(code, _as_cell(cell_or_hex), int(parent_res)))
     if not parent:
         return None
     return format(parent, "x") if isinstance(cell_or_hex, str) else parent
@@ -2314,9 +2325,9 @@ def cell_to_parent(
 def cell_to_wkb(cell_or_hex: Union[int, str], grid: str = "h3") -> Optional[bytes]:
     """OGC WKB for a cell: a Polygon, or a MultiPolygon for cells crossing 180°."""
     lib, code = _grid_code(grid)
-    cap = lib.raster_h3_py_wkb_buf_len()
+    cap = lib.dggs_stream_py_wkb_buf_len()
     buf = (ctypes.c_uint8 * cap)()
-    written = lib.raster_h3_py_grid_to_wkb(code, _as_cell(cell_or_hex), buf, cap)
+    written = lib.dggs_stream_py_grid_to_wkb(code, _as_cell(cell_or_hex), buf, cap)
     return bytes(buf[:written]) if written else None
 
 
@@ -2333,7 +2344,7 @@ def polygon_to_cells(
     data = bytes(wkb)
     out_cells = ctypes.POINTER(ctypes.c_uint64)()
     out_len = ctypes.c_size_t(0)
-    status = lib.raster_h3_py_grid_polygon_to_cells(
+    status = lib.dggs_stream_py_grid_polygon_to_cells(
         code,
         data,
         len(data),
@@ -2346,7 +2357,7 @@ def polygon_to_cells(
         try:
             return [int(out_cells[i]) for i in range(out_len.value)]
         finally:
-            lib.raster_h3_py_free_cells(out_cells, out_len.value)
+            lib.dggs_stream_py_free_cells(out_cells, out_len.value)
     if status == 2:
         raise ValueError(f"unknown containment mode {containment!r}")
     if status == 3:

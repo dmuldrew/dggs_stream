@@ -13,7 +13,7 @@ use datafusion::logical_expr::{
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::scalar_ops::{
     grid_polygon_to_cells_wkb_into, parse_containment_mode, ContainmentMode, PolygonToCellsError,
-    H3_CONTAINMENT_MODES,
+    POLYGON_CONTAINMENT_MODES,
 };
 use rayon::prelude::*;
 
@@ -25,28 +25,28 @@ use crate::spatial::is_planar_lnglat;
 /// `geometry` is a WKB `POLYGON` / `MULTIPOLYGON` in lon/lat degrees (`Binary`, or a
 /// `geoarrow.wkb` field whose CRS is `OGC:CRS84` / `EPSG:4326` or unset). Returns the cells
 /// at `resolution` sorted ascending without duplicates, like DuckDB's function of the same
-/// name. `containment` is one of `dggs_stream_core::scalar_ops::H3_CONTAINMENT_MODES`
+/// name. `containment` is one of `dggs_stream_core::scalar_ops::POLYGON_CONTAINMENT_MODES`
 /// (default `contains_centroid`; `covers` keeps every cell that overlaps the polygon).
 /// NULLs and errors follow DuckDB: a NULL argument, a geometry that is not a valid
 /// `POLYGON` / `MULTIPOLYGON`, or a resolution outside the grid's range gives NULL; an
 /// unknown containment name or a polygon above the 10,000,000-cell limit fails the query.
 ///
-/// [`H3PolygonToCells::for_grid`] gives the same function for another grid
+/// [`PolygonToCells::for_grid`] gives the same function for another grid
 /// (`a5_polygon_to_cells`, `s2_polygon_to_cells`, `healpix_polygon_to_cells`).
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub struct H3PolygonToCells {
+pub struct PolygonToCells {
     signature: Signature,
     grid: GridKind,
     name: &'static str,
 }
 
-impl Default for H3PolygonToCells {
+impl Default for PolygonToCells {
     fn default() -> Self {
         Self::for_grid(GridKind::H3)
     }
 }
 
-impl H3PolygonToCells {
+impl PolygonToCells {
     /// `{grid}_polygon_to_cells`.
     pub fn for_grid(grid: GridKind) -> Self {
         Self {
@@ -71,7 +71,7 @@ fn list_type() -> DataType {
     DataType::List(Arc::new(Field::new_list_field(DataType::UInt64, true)))
 }
 
-impl ScalarUDFImpl for H3PolygonToCells {
+impl ScalarUDFImpl for PolygonToCells {
     fn name(&self) -> &str {
         self.name
     }
@@ -153,7 +153,7 @@ impl ScalarUDFImpl for H3PolygonToCells {
             let containment = match mode {
                 None => ContainmentMode::ContainsCentroid,
                 Some(m) => parse_containment_mode(m.value(i)).ok_or_else(|| {
-                    let names: Vec<_> = H3_CONTAINMENT_MODES.iter().map(|(n, _)| *n).collect();
+                    let names: Vec<_> = POLYGON_CONTAINMENT_MODES.iter().map(|(n, _)| *n).collect();
                     DataFusionError::Execution(format!(
                         "{name}: unknown containment mode '{}' (expected one of {})",
                         m.value(i),

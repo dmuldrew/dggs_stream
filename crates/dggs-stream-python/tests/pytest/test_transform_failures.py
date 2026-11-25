@@ -40,13 +40,13 @@ def test_lenient_scans_warn_with_the_count(dggs_stream, past_pole_tif):
 def test_warnings_as_errors_still_free_the_result(dggs_stream, past_pole_tif, monkeypatch):
     lib = dggs_stream._get_lib()
     freed = []
-    real_free = lib.raster_h3_py_free_string
+    real_free = lib.dggs_stream_py_free_string
 
     def recording_free(ptr):
         freed.append(ptr)
         real_free(ptr)
 
-    monkeypatch.setattr(lib, "raster_h3_py_free_string", recording_free)
+    monkeypatch.setattr(lib, "dggs_stream_py_free_string", recording_free)
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         with pytest.raises(RuntimeWarning, match=r"50 valid sample\(s\)"):

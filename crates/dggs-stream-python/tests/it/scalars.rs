@@ -1,30 +1,31 @@
-//! String variants of the scalar C-ABI helpers: `raster_h3_py_h3_is_valid_str` and
-//! `raster_h3_py_h3_cell_to_parent_str`, checked against `h3o`.
+//! String variants of the scalar C-ABI helpers: `dggs_stream_py_h3_is_valid_str` and
+//! `dggs_stream_py_h3_cell_to_parent_str`, checked against `h3o`.
 
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
 use dggs_stream_python::{
-    raster_h3_py_free_string, raster_h3_py_h3_cell_to_parent_str,
-    raster_h3_py_h3_cell_to_parent_u64, raster_h3_py_h3_is_valid_str, raster_h3_py_h3_is_valid_u64,
+    dggs_stream_py_free_string, dggs_stream_py_h3_cell_to_parent_str,
+    dggs_stream_py_h3_cell_to_parent_u64, dggs_stream_py_h3_is_valid_str,
+    dggs_stream_py_h3_is_valid_u64,
 };
 use h3o::{CellIndex, LatLng, Resolution};
 
 fn is_valid(s: &str) -> i32 {
     let c = CString::new(s).unwrap();
     // SAFETY: `c` is a live NUL-terminated CString.
-    unsafe { raster_h3_py_h3_is_valid_str(c.as_ptr()) }
+    unsafe { dggs_stream_py_h3_is_valid_str(c.as_ptr()) }
 }
 
 fn parent(s: &str, res: i64) -> Option<String> {
     let c = CString::new(s).unwrap();
     // SAFETY: `c` is a live NUL-terminated CString, and the result comes from the library,
     // as `owned` requires.
-    unsafe { owned(raster_h3_py_h3_cell_to_parent_str(c.as_ptr(), res)) }
+    unsafe { owned(dggs_stream_py_h3_cell_to_parent_str(c.as_ptr(), res)) }
 }
 
 /// # Safety
-/// `p` must be null or a string returned by a `raster_h3_py_*` function, not yet freed.
+/// `p` must be null or a string returned by a `dggs_stream_py_*` function, not yet freed.
 unsafe fn owned(p: *mut c_char) -> Option<String> {
     if p.is_null() {
         return None;
@@ -33,7 +34,7 @@ unsafe fn owned(p: *mut c_char) -> Option<String> {
     // library (caller contract); it is copied, then freed exactly once.
     let s = unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_string();
     // SAFETY: as above.
-    unsafe { raster_h3_py_free_string(p) };
+    unsafe { dggs_stream_py_free_string(p) };
     Some(s)
 }
 
@@ -61,7 +62,7 @@ fn is_valid_str_agrees_with_h3o_and_the_u64_variant() {
         let hex = cell.to_string();
         assert_eq!(is_valid(&hex), 1, "{hex}");
         assert_eq!(is_valid(&hex.to_uppercase()), 1, "{hex}");
-        assert_eq!(raster_h3_py_h3_is_valid_u64(u64::from(cell)), 1);
+        assert_eq!(dggs_stream_py_h3_is_valid_u64(u64::from(cell)), 1);
     }
     // A res-15 cell whose last digit is 7, which is not a valid direction.
     let invalid_u64 = u64::from(cells()[2]) | 0x7;
@@ -78,7 +79,7 @@ fn is_valid_str_agrees_with_h3o_and_the_u64_variant() {
         assert_eq!(expect, 0, "'{s}' should be invalid");
     }
     // SAFETY: null is an accepted input and is never dereferenced.
-    assert_eq!(unsafe { raster_h3_py_h3_is_valid_str(ptr::null()) }, 0);
+    assert_eq!(unsafe { dggs_stream_py_h3_is_valid_str(ptr::null()) }, 0);
 }
 
 #[test]
@@ -94,7 +95,7 @@ fn cell_to_parent_str_agrees_with_h3o_and_the_u64_variant() {
                 "{hex} -> res {target}"
             );
             assert_eq!(
-                raster_h3_py_h3_cell_to_parent_u64(u64::from(cell), i64::from(target)),
+                dggs_stream_py_h3_cell_to_parent_u64(u64::from(cell), i64::from(target)),
                 u64::from(want)
             );
         }
@@ -104,12 +105,15 @@ fn cell_to_parent_str_agrees_with_h3o_and_the_u64_variant() {
                 continue;
             }
             assert_eq!(parent(&hex, bad), None, "{hex} -> res {bad}");
-            assert_eq!(raster_h3_py_h3_cell_to_parent_u64(u64::from(cell), bad), 0);
+            assert_eq!(
+                dggs_stream_py_h3_cell_to_parent_u64(u64::from(cell), bad),
+                0
+            );
         }
         assert_eq!(parent(&hex, -1), None);
     }
     assert_eq!(parent("not-hex", 3), None);
     assert_eq!(parent("", 3), None);
     // SAFETY: null is an accepted input and is never dereferenced.
-    assert!(unsafe { raster_h3_py_h3_cell_to_parent_str(ptr::null(), 3) }.is_null());
+    assert!(unsafe { dggs_stream_py_h3_cell_to_parent_str(ptr::null(), 3) }.is_null());
 }

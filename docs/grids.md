@@ -34,13 +34,12 @@ migrate imported IDs.
 | PostgreSQL | Per-grid functions: `{grid}_raster_continuous_aggregate`, `{grid}_raster_categorical_aggregate`, `{grid}_auto_resolution` and the scalar set |
 | Python / Polars | `grid=` on `scan_raster`, `read_raster`, `merge_partials`, the exporters and the scalar helpers (`lonlat_to_cell`, `cell_to_parent`, `polygon_to_cells`, ...); `GRIDS` maps each grid to its finest resolution |
 | DataFusion / SedonaDB | `{grid}_raster_{continuous,categorical}_aggregate`, or a grid-name argument (`'s2'`) on any table function; `with_grid(GridKind::S2)` on the providers; per-grid scalar UDFs under DuckDB's names |
+| Apache Spark | `grid` on the `dggs_stream` data source or `dggs_stream.spark.read`. Both merge APIs infer the grid from the index column. |
 | CLI | `--grid h3\|a5\|s2\|healpix`; `-r` is checked against that grid's range |
 | Rust (`dggs-stream-core`) | `MultiResolutionConfig::with_grid(GridKind::S2)`; `scalar_ops::grid_*` helpers |
 
 The output always names its cell columns after the grid: `h3_index` / `h3_hex`, `a5_index` /
 `a5_hex`, `s2_index` / `s2_hex`, `healpix_index` / `healpix_hex`.
-
-Apache Spark's `dggs_stream.spark` data source still hard-codes `h3_index`.
 
 ## Cell ids and their types
 
@@ -98,6 +97,8 @@ targets a size rather than an index, `auto` gives comparable cells on every grid
 | DataFusion / SedonaDB | an `'auto'` resolution argument; `ResolutionSpec` in Rust |
 | PostgreSQL | `{grid}_auto_resolution(path [, offset [, crs]])` |
 | Rust | `dggs_stream_core::resolution` (`ResolutionSpec::parse`, `area_matched_resolution`) |
+
+Apache Spark's `resolutions` option takes integers only.
 
 ## Poles and the antimeridian
 

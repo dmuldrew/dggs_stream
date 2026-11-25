@@ -630,8 +630,8 @@ impl<const SLEEP_MS: u64> ParquetRowGroupBuffer for SlowBuffer<SLEEP_MS> {
     fn clear(&mut self) {
         self.0.clear();
     }
-    fn sort_by_h3_index(&mut self) {
-        self.0.sort_by_h3_index();
+    fn sort_by_cell_id(&mut self) {
+        self.0.sort_by_cell_id();
     }
     fn flush_to_row_group(
         &self,

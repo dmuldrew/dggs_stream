@@ -119,7 +119,7 @@ pub fn write_parent_records<S: ParquetStreamer, B: ParquetRowGroupBuffer<Record 
                 buffer.push_record(row);
             }
             if !buffer.is_empty() {
-                buffer.sort_by_h3_index();
+                buffer.sort_by_cell_id();
                 buffer.flush_to_row_group(&mut writer)?;
                 clock.rows(buffer.len());
                 total += buffer.len();

@@ -13,12 +13,12 @@ use crate::ffi::set_c_err;
 use crate::scanner::PyRasterScanner;
 
 /// Execute a scan and return a NUL-terminated JSON string containing columnar arrays.
-/// Free the returned string with `raster_h3_py_free_string`.
+/// Free the returned string with `dggs_stream_py_free_string`.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_scan_json(
+pub unsafe extern "C" fn dggs_stream_py_scan_json(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -33,7 +33,7 @@ pub unsafe extern "C" fn raster_h3_py_scan_json(
 ) -> *mut c_char {
     // SAFETY: forwards the caller's arguments, which meet the `_ex` contract.
     unsafe {
-        raster_h3_py_scan_json_ex(
+        dggs_stream_py_scan_json_ex(
             path,
             resolutions,
             categorical,
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn raster_h3_py_scan_json(
     }
 }
 
-/// [`raster_h3_py_scan_json`] with `strict_transforms` (non-zero fails the scan as
+/// [`dggs_stream_py_scan_json`] with `strict_transforms` (non-zero fails the scan as
 /// soon as a valid sample point cannot be transformed to WGS84) and
 /// `out_transform_failures`, which receives the number of such points dropped.
 ///
@@ -59,7 +59,7 @@ pub unsafe extern "C" fn raster_h3_py_scan_json(
 /// Pointer arguments must be valid NUL-terminated C strings or NULL;
 /// `out_transform_failures` must be NULL or point to a writable `u64`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_scan_json_ex(
+pub unsafe extern "C" fn dggs_stream_py_scan_json_ex(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -77,8 +77,8 @@ pub unsafe extern "C" fn raster_h3_py_scan_json_ex(
     // SAFETY: every C string argument is null or NUL-terminated (caller contract), as
     // `opt_cstr` requires; `out_transform_failures` is null or a writable `u64`; `out_err`
     // is null or a writable `char **` (as `set_c_err` requires), and error strings are
-    // freed by the caller with `raster_h3_py_free_string`. The returned JSON string is
-    // freed with `raster_h3_py_free_string`.
+    // freed by the caller with `dggs_stream_py_free_string`. The returned JSON string is
+    // freed with `dggs_stream_py_free_string`.
     unsafe {
         let failures = Arc::new(AtomicU64::new(0));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

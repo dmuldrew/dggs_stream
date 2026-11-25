@@ -56,9 +56,9 @@ pub use pmtiles::{
     register_pmtiles_format, write_pmtiles, write_record_batches, PmtilesFormatFactory,
     PmtilesWriteOptions,
 };
-pub use polyfill::H3PolygonToCells;
+pub use polyfill::PolygonToCells;
 pub use table::{RasterTable, TableKind};
-pub use udf::{scalar_udfs, H3ScalarUdf, LonLatToCell};
+pub use udf::{scalar_udfs, CellScalarUdf, LonLatToCell};
 pub use udtf::{
     CategoricalAggregateFunction, ContinuousAggregateFunction, GridCategoricalAggregateFunction,
     GridContinuousAggregateFunction, PlanPartitionsFunction,

@@ -67,7 +67,7 @@ Aggregating rasters into DGGS cells solves four fundamental challenges of workin
 
 ### Choosing a grid
 
-Every engine supports all four grids, so the choice depends on the question, not the engine. Changing grids changes one argument (`grid := 's2'` in SQL, `grid="s2"` in Python, `--grid s2` on the CLI) and the name of the cell column.
+Every engine supports all four grids, so the choice depends on the question, not the engine. Changing grids changes one argument (`grid := 's2'` in SQL, `grid="s2"` in Python, `.option("grid", "s2")` in Spark, `--grid s2` on the CLI) and the name of the cell column.
 
 | | H3 | A5 | S2 | HEALPix |
 | :--- | :--- | :--- | :--- | :--- |

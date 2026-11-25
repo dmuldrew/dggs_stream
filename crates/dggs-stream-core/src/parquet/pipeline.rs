@@ -230,8 +230,8 @@ pub trait ParquetRowGroupBuffer: Sized + Send + 'static {
     /// Clear all column vectors for buffer recycling
     fn clear(&mut self);
 
-    /// Sort all columns by H3 index in-place (if not already sorted)
-    fn sort_by_h3_index(&mut self);
+    /// Sort all columns by cell ID in-place (if not already sorted)
+    fn sort_by_cell_id(&mut self);
 
     /// Write all columns as a new row group in the Parquet file
     fn flush_to_row_group(
@@ -361,7 +361,7 @@ where
             let mut clock = crate::run_profile::SerializeClock::start(run_profile);
             while let Ok(mut buf) = clock.wait(|| writer_rx.recv()) {
                 if !buf.is_empty() {
-                    buf.sort_by_h3_index();
+                    buf.sort_by_cell_id();
                     let count = buf.len();
                     buf.flush_to_row_group(&mut writer)?;
                     total_rows += count;

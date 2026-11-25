@@ -1,6 +1,6 @@
-//! Engine-neutral raster scans and H3 scalar functions over `dggs_stream_core`'s columnar types.
+//! Engine-neutral raster scans and cell scalar functions over `dggs_stream_core`'s columnar types.
 //!
-//! [`crate::table::RasterTable`] and [`crate::udf::H3ScalarUdf`] wrap these in
+//! [`crate::table::RasterTable`] and [`crate::udf::CellScalarUdf`] wrap these in
 //! DataFusion's real `TableProvider` and `ScalarUDFImpl`. The traits here are deliberately
 //! named differently from DataFusion's:
 //! - [`ContinuousRasterTableProvider`] and [`CategoricalRasterTableProvider`] implement
@@ -9,7 +9,7 @@
 //! - [`RasterScanExec`] plans with column projection, filter (`min_count`, `min_mean`,
 //!   `max_mean`, `min_majority_fraction`, `bbox`, `resolution`) and row-limit pushdown, run as
 //!   [`RecordBatch`] iterators or an Arrow C stream.
-//! - [`H3ScalarFn`] implementations for the H3 scalar functions, listed by
+//! - [`CellScalarFn`] implementations for cell scalar functions, listed by
 //!   [`default_scalar_udfs`] and found by name or alias with [`find_scalar_udf`].
 //!
 //! This was the separate `dggs-stream-datafusion` crate until it moved here, its only user.
@@ -31,14 +31,14 @@ pub use provider::{
     RasterScan, RasterScanExec, TableStatistics,
 };
 pub use scalar::{
-    GridScalarFn, GridScalarOp, H3CellToParentUdf, H3GetResolutionUdf, H3IsValidUdf, H3ScalarFn,
+    CellScalarFn, GridScalarFn, GridScalarOp, H3CellToParentUdf, H3GetResolutionUdf, H3IsValidUdf,
     H3ToLatUdf, H3ToLngUdf, H3ToStringUdf, H3ToWkbUdf, StringToH3Udf,
 };
 
 /// Return all standard `dggs_stream` vectorized scalar UDFs: the H3 functions, then the
 /// same set for A5, S2 and HEALPix (`a5_to_string`, `string_to_s2`, `healpix_to_wkb`, ...).
-pub fn default_scalar_udfs() -> Vec<Arc<dyn H3ScalarFn>> {
-    let mut udfs: Vec<Arc<dyn H3ScalarFn>> = vec![
+pub fn default_scalar_udfs() -> Vec<Arc<dyn CellScalarFn>> {
+    let mut udfs: Vec<Arc<dyn CellScalarFn>> = vec![
         Arc::new(H3ToStringUdf),
         Arc::new(StringToH3Udf),
         Arc::new(H3ToLatUdf),
@@ -57,7 +57,7 @@ pub fn default_scalar_udfs() -> Vec<Arc<dyn H3ScalarFn>> {
 }
 
 /// The default scalar function named `name` or having it as an alias, ignoring ASCII case.
-pub fn find_scalar_udf(name: &str) -> Option<Arc<dyn H3ScalarFn>> {
+pub fn find_scalar_udf(name: &str) -> Option<Arc<dyn CellScalarFn>> {
     default_scalar_udfs().into_iter().find(|udf| {
         udf.name().eq_ignore_ascii_case(name)
             || udf

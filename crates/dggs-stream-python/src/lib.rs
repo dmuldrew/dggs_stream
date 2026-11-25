@@ -5,7 +5,7 @@
 //!
 //! Exposes both:
 //! 1. High-level Rust types ([`PyRasterScanner`]) and Arrow C Stream generators.
-//! 2. C-ABI entry points (`raster_h3_py_*`) and `PyCapsule` destructors so Python (`ctypes` / `cffi`
+//! 2. C-ABI entry points (`dggs_stream_py_*`) and `PyCapsule` destructors so Python (`ctypes` / `cffi`
 //!    or C-API `PyCapsule_New`) can construct zero-copy `"arrow_array_stream"` and `"arrow_schema"`
 //!    PyCapsules for Polars (`polars.from_arrow`, `register_io_source`), PyArrow (`pyarrow.table`),
 //!    DuckDB, Daft, GeoPandas, and Lonboard.

@@ -99,6 +99,85 @@ def test_resolution_filter_on_a_view_merges_like_a_narrower_scan(spark, terrain)
     assert_same_rows(as_rows(got), as_rows(want))
 
 
+@pytest.mark.parametrize(("grid", "resolution"), [("h3", 9), ("a5", 14), ("s2", 15), ("healpix", 14)])
+def test_merge_uses_grid_index_in_python_and_sql(spark, terrain, grid, resolution):
+    spark_ds.register(spark, pushdown=True)
+    index = f"{grid}_index"
+    columns = [index, "resolution", "count", "mean"]
+    parts = (
+        spark.read.format("dggs_stream")
+        .option("grid", grid.upper())
+        .option("resolutions", str(resolution))
+        .option("columns", ",".join(columns))
+        .option("target_chunks", 8)
+        .load(terrain)
+    )
+    from pyarrow import compute as pc
+
+    scanned = parts.toArrow()
+    partials = scanned.filter(pc.is_valid(scanned["partial_state"]))
+    assert partials.num_rows > 0
+    if grid == "s2":
+        assert pc.any(pc.less(partials[index], 0)).as_py()
+
+    parts.createOrReplaceTempView("grid_parts")
+    want = pa.table(dggs_stream.RasterArrowStream(
+        terrain, resolutions=[resolution], grid=grid, columns=columns,
+    ))
+    expected = {(r["resolution"], r[index], False): [r] for r in want.to_pylist()}
+    for mode, result in (
+        ("DataFrame", spark_ds.merge_partials(parts, columns=columns)),
+        ("SQL", spark.sql("SELECT * FROM dggs_stream_merge(TABLE(grid_parts), 'buckets=4')")),
+    ):
+        got = result.toArrow()
+        key_pos = got.schema.get_field_index(index)
+        got = got.set_column(key_pos, index, got[index].cast(pa.uint64(), safe=False))
+        assert got.num_rows == len(expected) > 0, (grid, mode, got.num_rows, len(expected))
+        assert_same_rows(
+            {(r["resolution"], r[index], False): [r] for r in got.to_pylist()}, expected,
+        )
+
+
+@pytest.fixture(scope="module")
+def land_cover(tmp_path_factory):
+    """`terrain`'s layout with uint8 classes 1-8 in place of elevations."""
+    import dggs_stream_spark_demo as demo
+
+    path = str(tmp_path_factory.mktemp("rasters") / "land_cover.tif")
+    demo.write_sample(path, side=512, tile=64, categorical=True)
+    return path
+
+
+def test_sql_merge_infers_categorical_from_categorical_only_columns(spark, land_cover):
+    """A projection keeping only `entropy` merges without repeating `categorical=true`."""
+    spark_ds.register(spark, pushdown=True)
+    columns = ["s2_index", "resolution", "entropy"]
+    parts = (
+        spark.read.format("dggs_stream")
+        .option("grid", "s2")
+        .option("categorical", "true")
+        .option("resolutions", "15")
+        .option("columns", ",".join(columns))
+        .option("target_chunks", 8)
+        .load(land_cover)
+    )
+    from pyarrow import compute as pc
+
+    scanned = parts.toArrow()
+    assert pc.sum(pc.is_valid(scanned["partial_state"])).as_py() > 0
+    parts.createOrReplaceTempView("land_cover_parts")
+    got = spark.sql("SELECT * FROM dggs_stream_merge(TABLE(land_cover_parts))").toArrow()
+    got = got.set_column(0, "s2_index", got["s2_index"].cast(pa.uint64(), safe=False))
+    want = pa.table(dggs_stream.RasterArrowStream(
+        land_cover, resolutions=[15], grid="s2", categorical=True, columns=columns,
+    ))
+    def by_cell(table):
+        return {(r["resolution"], r["s2_index"], False): [r] for r in table.to_pylist()}
+
+    assert got.num_rows == want.num_rows > 0
+    assert_same_rows(by_cell(got), by_cell(want))
+
+
 def test_filters_that_exclude_everything_scan_nothing(spark, terrain):
     df = load(spark, terrain, pushdown=True)
     assert df.where("resolution = 12").count() == 0

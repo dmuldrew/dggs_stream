@@ -1,4 +1,4 @@
-//! The `dggs_stream` H3 scalar functions as DataFusion `ScalarUDF`s.
+//! The `dggs_stream` cell scalar functions as DataFusion `ScalarUDF`s.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -18,33 +18,33 @@ use crate::convert::{from_column_array, geometry_field, to_arrow_type, to_column
 
 /// All `dggs_stream` scalar functions, ready for `SessionContext::register_udf`: the
 /// [`scan`](crate::scan) cell functions of every grid, plus
-/// [`H3PolygonToCells`](crate::H3PolygonToCells) and [`LonLatToCell`] for each grid.
+/// [`PolygonToCells`](crate::PolygonToCells) and [`LonLatToCell`] for each grid.
 pub fn scalar_udfs() -> Vec<ScalarUDF> {
     default_scalar_udfs()
         .into_iter()
-        .map(|inner| ScalarUDF::new_from_impl(H3ScalarUdf::new(inner)))
+        .map(|inner| ScalarUDF::new_from_impl(CellScalarUdf::new(inner)))
         .chain(GridKind::ALL.into_iter().flat_map(|grid| {
             [
-                ScalarUDF::new_from_impl(crate::polyfill::H3PolygonToCells::for_grid(grid)),
+                ScalarUDF::new_from_impl(crate::polyfill::PolygonToCells::for_grid(grid)),
                 ScalarUDF::new_from_impl(LonLatToCell::for_grid(grid)),
             ]
         }))
         .collect()
 }
 
-/// Adapts a [`scan`](crate::scan) H3 scalar function to DataFusion's `ScalarUDFImpl`.
+/// Adapts a [`scan`](crate::scan) cell scalar function to DataFusion's `ScalarUDFImpl`.
 ///
 /// Arguments are coerced to the types the core functions take (`UInt64` cells, `Utf8`
 /// hex strings, `Int64` resolutions), so SQL integer and string literals work directly.
 /// Functions returning WKB return a `geoarrow.wkb` field.
-pub struct H3ScalarUdf {
-    inner: Arc<dyn crate::scan::H3ScalarFn>,
+pub struct CellScalarUdf {
+    inner: Arc<dyn crate::scan::CellScalarFn>,
     aliases: Vec<String>,
     signature: Signature,
 }
 
-impl H3ScalarUdf {
-    pub fn new(inner: Arc<dyn crate::scan::H3ScalarFn>) -> Self {
+impl CellScalarUdf {
+    pub fn new(inner: Arc<dyn crate::scan::CellScalarFn>) -> Self {
         let aliases = inner.aliases().iter().map(|a| a.to_string()).collect();
         Self {
             inner,
@@ -69,29 +69,29 @@ impl H3ScalarUdf {
     }
 }
 
-impl PartialEq for H3ScalarUdf {
+impl PartialEq for CellScalarUdf {
     fn eq(&self, other: &Self) -> bool {
         self.inner.name() == other.inner.name()
     }
 }
 
-impl Eq for H3ScalarUdf {}
+impl Eq for CellScalarUdf {}
 
-impl Hash for H3ScalarUdf {
+impl Hash for CellScalarUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.inner.name().hash(state);
     }
 }
 
-impl std::fmt::Debug for H3ScalarUdf {
+impl std::fmt::Debug for CellScalarUdf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H3ScalarUdf")
+        f.debug_struct("CellScalarUdf")
             .field("name", &self.inner.name())
             .finish_non_exhaustive()
     }
 }
 
-impl ScalarUDFImpl for H3ScalarUdf {
+impl ScalarUDFImpl for CellScalarUdf {
     fn name(&self) -> &str {
         self.inner.name()
     }

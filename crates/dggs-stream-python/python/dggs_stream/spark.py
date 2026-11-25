@@ -20,16 +20,19 @@ Each Spark partition scans one partition planned by `dggs_stream.plan_partitions
 set of TIFF tiles or strips), so executors read one raster in parallel and no pixel is read
 twice. The data source returns the scan's columns with Spark's signed types plus
 `partial_state`: rows where it is null are final cells, the others are shares of cells that
-several partitions reach. Weighted H3 overlay on WGS84 tiles can finalize cells inside a partition. `merge_partials` shuffles those by `h3_index` and merges them, so
+several partitions reach. Weighted H3 overlay on WGS84 tiles can finalize cells inside
+a partition. `merge_partials` shuffles rows by the grid's cell index and merges the
+partial rows, so
 the result equals one unpartitioned scan (up to floating-point summation order).
 
 Options (all optional except the path), with the names and meanings of
 `dggs_stream.RasterArrowStream`:
 
     resolutions          "8" or "7,8,9" (default 8)
+    grid                 h3 (default), a5, s2 or healpix
     target_chunks        TIFF tiles or strips per partition (default 256)
     categorical          "true" for categorical aggregation (wide format)
-    columns              comma-separated output columns (keep h3_index and resolution)
+    columns              comma-separated output columns (keep the grid's index and resolution)
     crs, nodata, bbox    CRS override, NoData override, "minx,miny,maxx,maxy" in WGS84
     transfer             assign_centers (default) or overlay (single-band continuous)
     valid_coverage_threshold   minimum valid share of covered area for overlay
@@ -88,6 +91,7 @@ def _str_list(value: str) -> List[str]:
 
 _SCAN_OPTIONS = {
     "resolutions": _int_list,
+    "grid": dggs_stream._normalize_grid,
     "categorical": _bool,
     "crs": _STR,
     "nodata": _FLOAT,
@@ -124,8 +128,7 @@ _MERGE_OPTIONS = (
 )
 _OTHER_OPTIONS = ("path", "target_chunks")
 
-# Spark has no unsigned integers. H3 cell ids never set the top bit, so UInt64 -> Int64 is
-# lossless; the smaller unsigned types widen.
+# Spark has no unsigned integers. Keep all 64 bits of a cell ID in a signed long.
 _SIGNED = {
     pa.uint8(): pa.int16(),
     pa.uint16(): pa.int32(),
@@ -134,6 +137,7 @@ _SIGNED = {
     pa.large_binary(): pa.binary(),
     pa.large_string(): pa.string(),
 }
+_CELL_INDEX_COLUMNS = {f"{grid}_index": grid for grid in dggs_stream.GRIDS}
 
 
 def _signed_schema(schema: pa.Schema) -> pa.Schema:
@@ -148,10 +152,26 @@ def _to_schema(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
     columns = []
     for field in schema:
         if field.name in names:
-            columns.append(batch.column(names.index(field.name)).cast(field.type))
+            column = batch.column(names.index(field.name))
+            signed_cell = (
+                field.name in _CELL_INDEX_COLUMNS
+                and column.type == pa.uint64()
+                and field.type == pa.int64()
+            )
+            columns.append(column.cast(field.type, safe=not signed_cell))
         else:
             columns.append(pa.nulls(batch.num_rows, field.type))
     return pa.RecordBatch.from_arrays(columns, schema=schema)
+
+
+def _merge_key(names: Sequence[str]) -> tuple[str, str]:
+    missing = [name for name in ("resolution", dggs_stream.PARTIAL_STATE_COLUMN) if name not in names]
+    if missing:
+        raise ValueError(f"dggs_stream merge needs a partitioned scan; missing column(s): {', '.join(missing)}")
+    keys = [name for name in _CELL_INDEX_COLUMNS if name in names]
+    if len(keys) != 1:
+        raise ValueError("dggs_stream merge needs exactly one grid index column")
+    return keys[0], _CELL_INDEX_COLUMNS[keys[0]]
 
 
 def _parse_options(options: Mapping[str, Any]) -> Dict[str, Any]:
@@ -203,7 +223,7 @@ else:
     _PUSHDOWN = True
 
 
-class RasterH3Partition(InputPartition):  # type: ignore[misc,valid-type]
+class RasterPartition(InputPartition):  # type: ignore[misc,valid-type]
     """One `plan_partitions` spec: the TIFF chunks one Spark task scans."""
 
     def __init__(self, index: int, spec: str) -> None:
@@ -213,7 +233,7 @@ class RasterH3Partition(InputPartition):  # type: ignore[misc,valid-type]
         self.spec = spec
 
 
-class RasterH3DataSource(DataSource):  # type: ignore[misc,valid-type]
+class RasterDataSource(DataSource):  # type: ignore[misc,valid-type]
     """`spark.read.format("dggs_stream")`: see the module documentation for options."""
 
     @classmethod
@@ -249,8 +269,8 @@ class RasterH3DataSource(DataSource):  # type: ignore[misc,valid-type]
 
         return from_arrow_schema(self.arrow_schema())
 
-    def reader(self, schema) -> "RasterH3Reader":
-        return RasterH3Reader(self.config, self.specs(), self.arrow_schema())
+    def reader(self, schema) -> "RasterReader":
+        return RasterReader(self.config, self.specs(), self.arrow_schema())
 
 
 def _resolution_filter(flt: Any) -> Optional[Any]:
@@ -278,7 +298,7 @@ def _resolution_filter(flt: Any) -> Optional[Any]:
     return None
 
 
-class RasterH3Reader(DataSourceReader):  # type: ignore[misc,valid-type]
+class RasterReader(DataSourceReader):  # type: ignore[misc,valid-type]
     def __init__(self, config: Mapping[str, Any], specs: Sequence[str], schema: pa.Schema) -> None:
         self.config = dict(config)
         self.specs = list(specs)
@@ -286,22 +306,20 @@ class RasterH3Reader(DataSourceReader):  # type: ignore[misc,valid-type]
         # Set by pushFilters (Spark 4.1+): "final" or "partial" rows only, "none", or both (None).
         self.rows: Optional[str] = None
 
-    def partitions(self) -> List[RasterH3Partition]:
-        return [RasterH3Partition(i, spec) for i, spec in enumerate(self.specs)]
+    def partitions(self) -> List[RasterPartition]:
+        return [RasterPartition(i, spec) for i, spec in enumerate(self.specs)]
 
-    def read(self, partition: RasterH3Partition) -> Iterator[pa.RecordBatch]:
+    def read(self, partition: RasterPartition) -> Iterator[pa.RecordBatch]:
         import pyarrow.compute as pc
-
-        import dggs_stream as rh3  # imported on the executor
 
         if not self.config["resolutions"] or self.rows == "none":
             return  # the pushed filters exclude every row
-        stream = rh3.RasterArrowStream(
+        stream = dggs_stream.RasterArrowStream(
             self.config["path"], partition=partition.spec, **_scan_kwargs(self.config)
         )
         for batch in pa.RecordBatchReader.from_stream(stream):
             if self.rows is not None:
-                state = batch.column(batch.schema.get_field_index(rh3.PARTIAL_STATE_COLUMN))
+                state = batch.column(batch.schema.get_field_index(dggs_stream.PARTIAL_STATE_COLUMN))
                 mask = pc.is_null(state) if self.rows == "final" else pc.is_valid(state)
                 batch = batch.filter(mask)
                 if batch.num_rows == 0:
@@ -309,8 +327,8 @@ class RasterH3Reader(DataSourceReader):  # type: ignore[misc,valid-type]
             yield _to_schema(batch, self.arrow_schema)
 
 
-class RasterH3PushdownReader(RasterH3Reader):
-    """`RasterH3Reader` with Spark 4.1 filter pushdown.
+class RasterPushdownReader(RasterReader):
+    """`RasterReader` with Spark 4.1 filter pushdown.
 
     Kept separate because Spark refuses a reader that defines `pushFilters` while
     `spark.sql.python.filterPushdown.enabled` is false; `register` picks the reader.
@@ -342,11 +360,11 @@ class RasterH3PushdownReader(RasterH3Reader):
         return remaining
 
 
-class RasterH3PushdownDataSource(RasterH3DataSource):
+class RasterPushdownDataSource(RasterDataSource):
     """`dggs_stream` with filter pushdown (Spark 4.1+, filter pushdown enabled)."""
 
-    def reader(self, schema) -> "RasterH3PushdownReader":
-        return RasterH3PushdownReader(self.config, self.specs(), self.arrow_schema())
+    def reader(self, schema) -> "RasterPushdownReader":
+        return RasterPushdownReader(self.config, self.specs(), self.arrow_schema())
 
 
 def _require_pyspark() -> None:
@@ -377,8 +395,8 @@ def register(spark, pushdown: Optional[bool] = None) -> None:
         if not _PUSHDOWN:
             raise RuntimeError("filter pushdown needs Spark 4.1 or later")
         spark.conf.set(_PUSHDOWN_CONF, "true")
-    spark.dataSource.register(RasterH3PushdownDataSource if pushdown else RasterH3DataSource)
-    spark.udtf.register("dggs_stream_merge", udtf(RasterH3Merge))
+    spark.dataSource.register(RasterPushdownDataSource if pushdown else RasterDataSource)
+    spark.udtf.register("dggs_stream_merge", udtf(RasterMerge))
 
 
 def merge_partials(
@@ -394,7 +412,8 @@ def merge_partials(
 ):
     """Final cells of a `dggs_stream` DataFrame: merge the rows that have a `partial_state`.
 
-    Pass the scan's `categorical`, `columns`, `quantiles` and filters. Merge each raster's
+    The grid is inferred from the input's index column. Pass the scan's `categorical`,
+    `columns`, `quantiles` and filters. Merge each raster's
     DataFrame on its own: partial states of different rasters must not be combined.
     Returns a DataFrame with the scan's columns, without `partial_state`.
     """
@@ -403,9 +422,11 @@ def merge_partials(
     from pyspark.sql.types import StructType
 
     state = dggs_stream.PARTIAL_STATE_COLUMN
+    index_col, grid = _merge_key(df.columns)
     out_schema = StructType([f for f in df.schema.fields if f.name != state])
     arrow_out = to_arrow_schema(out_schema)
     options = {
+        "grid": grid,
         "categorical": categorical,
         "columns": list(columns) if columns is not None else None,
         "quantiles": quantiles,
@@ -419,8 +440,6 @@ def merge_partials(
     def merge(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
         import pyarrow.compute as pc
 
-        import dggs_stream as rh3  # imported on the executor
-
         partial = []
         for batch in batches:
             is_final = pc.is_null(batch.column(batch.schema.get_field_index(state)))
@@ -431,7 +450,7 @@ def merge_partials(
             if shares.num_rows:
                 partial.append(shares)
         if partial:
-            merged = rh3.merge_partials(pa.Table.from_batches(partial), **options)
+            merged = dggs_stream.merge_partials(pa.Table.from_batches(partial), **options)
             for batch in merged.to_batches():
                 yield _to_schema(batch, arrow_out)
 
@@ -440,20 +459,32 @@ def merge_partials(
     if df.is_cached:
         finals = df.filter(df[state].isNull()).drop(state)
         edges = df.filter(df[state].isNotNull())
-        return finals.unionByName(edges.repartition("h3_index").mapInArrow(merge, out_schema))
-    return df.repartition("h3_index").mapInArrow(merge, out_schema)
+        return finals.unionByName(edges.repartition(index_col).mapInArrow(merge, out_schema))
+    return df.repartition(index_col).mapInArrow(merge, out_schema)
 
 
-_CATEGORICAL_COLUMNS = ("majority_class", "majority_fraction", "total_count", "histogram")
+# Columns found only in the categorical (wide) schema, so a projection naming any of them
+# is a categorical scan. Partitioned scans do not produce the long format.
+_CATEGORICAL_COLUMNS = (
+    "majority_class",
+    "majority_fraction",
+    "majority_count",
+    "unique_classes",
+    "total_count",
+    "histogram",
+    "shannon_entropy",
+    "entropy",
+    "distinct_classes",
+)
 
 
-class RasterH3Merge:
+class RasterMerge:
     """`dggs_stream_merge(TABLE(t) [, 'name=value, ...'])`: the SQL form of `merge_partials`.
 
     `t` is a `dggs_stream` scan (with `partial_state`). Final rows pass through; partial rows
     are merged per cell. The options are those of `merge_partials` (`quantiles`,
     `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`, `categorical`), plus
-    `buckets` (default 64), the number of groups the rows are hashed into by `h3_index`.
+    `buckets` (default 64), the number of groups the rows are hashed into by cell index.
     Categorical input is recognised from its columns.
     """
 
@@ -480,30 +511,32 @@ class RasterH3Merge:
         if not getattr(table, "isTable", False):
             raise ValueError("dggs_stream_merge takes a table: dggs_stream_merge(TABLE(t))")
         names = [f.name for f in table.dataType.fields]
-        missing = [c for c in ("h3_index", "resolution", state) if c not in names]
-        if missing:
-            raise ValueError(f"dggs_stream_merge needs a dggs_stream scan; missing column(s): {', '.join(missing)}")
-        parsed = RasterH3Merge._options(options.value if options is not None else None)
+        index_col, _ = _merge_key(names)
+        parsed = RasterMerge._options(options.value if options is not None else None)
         buckets = int(parsed.get("buckets", 64))
         if buckets < 1:
             raise ValueError("dggs_stream_merge option buckets must be at least 1")
         return AnalyzeResult(
             schema=StructType([f for f in table.dataType.fields if f.name != state]),
-            partitionBy=[PartitioningColumn(f"pmod(xxhash64(h3_index), {buckets})")],
+            partitionBy=[PartitioningColumn(f"pmod(xxhash64({index_col}), {buckets})")],
         )
 
     def __init__(self) -> None:
         self.names: Optional[List[str]] = None
+        self.index_col: str
         self.merge_options: Dict[str, Any] = {}
-        self.partial: Dict[str, list] = {"resolution": [], "h3_index": [], "partial_state": []}
+        self.partial: Dict[str, list] = {}
 
     def _setup(self, row: Any, options: Optional[str]) -> None:
         state = dggs_stream.PARTIAL_STATE_COLUMN
+        self.index_col, grid = _merge_key(row.__fields__)
         self.names = [n for n in row.__fields__ if n != state]
+        self.partial = {name: [] for name in ("resolution", self.index_col, state)}
         parsed = self._options(options)
         parsed.pop("buckets", None)
         typed = _parse_options({**parsed, "path": "-"})
         self.merge_options = {k: typed[k] for k in _MERGE_OPTIONS if k in typed}
+        self.merge_options["grid"] = grid
         self.merge_options["columns"] = self.names
         if "categorical" not in typed and any(c in self.names for c in _CATEGORICAL_COLUMNS):
             self.merge_options["categorical"] = True
@@ -516,21 +549,26 @@ class RasterH3Merge:
             yield tuple(row[n] for n in self.names)
         else:
             self.partial["resolution"].append(row["resolution"])
-            self.partial["h3_index"].append(row["h3_index"])
-            self.partial["partial_state"].append(bytes(state))
+            self.partial[self.index_col].append(row[self.index_col])
+            self.partial[dggs_stream.PARTIAL_STATE_COLUMN].append(bytes(state))
 
     def terminate(self) -> Iterator[tuple]:
-        if not self.partial["h3_index"]:
+        if not self.partial or not self.partial[self.index_col]:
             return
+        state = dggs_stream.PARTIAL_STATE_COLUMN
         table = pa.table(
             {
                 "resolution": pa.array(self.partial["resolution"], pa.int16()),
-                "h3_index": pa.array(self.partial["h3_index"], pa.int64()),
-                "partial_state": pa.array(self.partial["partial_state"], pa.binary()),
+                self.index_col: pa.array(self.partial[self.index_col], pa.int64()),
+                state: pa.array(self.partial[state], pa.binary()),
             }
         )
         options = {k: v for k, v in self.merge_options.items() if v is not False}
         merged = dggs_stream.merge_partials(table, **options)
+        key_pos = merged.schema.get_field_index(self.index_col)
+        merged = merged.set_column(
+            key_pos, self.index_col, merged.column(key_pos).cast(pa.int64(), safe=False)
+        )
         columns = [merged.column(n).to_pylist() for n in self.names]
         yield from zip(*columns)
 
@@ -561,12 +599,12 @@ def read(spark, path: str, **options: Any):
 
 __all__ = [
     "SHORT_NAME",
-    "RasterH3DataSource",
-    "RasterH3Merge",
-    "RasterH3Partition",
-    "RasterH3PushdownDataSource",
-    "RasterH3PushdownReader",
-    "RasterH3Reader",
+    "RasterDataSource",
+    "RasterMerge",
+    "RasterPartition",
+    "RasterPushdownDataSource",
+    "RasterPushdownReader",
+    "RasterReader",
     "merge_partials",
     "read",
     "register",

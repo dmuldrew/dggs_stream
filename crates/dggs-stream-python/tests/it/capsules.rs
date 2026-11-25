@@ -11,8 +11,8 @@ use dggs_stream_core::columnar::{
 };
 use dggs_stream_core::error::Result;
 use dggs_stream_python::{
-    raster_h3_py_schema_capsule_destructor, raster_h3_py_set_capsule_api,
-    raster_h3_py_stream_capsule_destructor,
+    dggs_stream_py_schema_capsule_destructor, dggs_stream_py_set_capsule_api,
+    dggs_stream_py_stream_capsule_destructor,
 };
 
 /// The registered capsule API is process-wide; tests that change it take this lock.
@@ -43,7 +43,7 @@ unsafe extern "C" fn get_pointer(capsule: *mut c_void, name: *const c_char) -> *
 fn register_fakes() {
     // SAFETY: the stand-ins have the registered functions' signatures.
     unsafe {
-        raster_h3_py_set_capsule_api(get_name as *const c_void, get_pointer as *const c_void);
+        dggs_stream_py_set_capsule_api(get_name as *const c_void, get_pointer as *const c_void);
     }
 }
 
@@ -92,7 +92,9 @@ fn stream_destructor_releases_the_payload_under_its_current_name() {
         };
         // SAFETY: `capsule` is live and its payload is an unfreed boxed stream.
         unsafe {
-            raster_h3_py_stream_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
+            dggs_stream_py_stream_capsule_destructor(
+                &mut capsule as *mut FakeCapsule as *mut c_void,
+            );
         }
         assert!(released.load(Ordering::SeqCst), "{name}");
     }
@@ -110,7 +112,7 @@ fn schema_destructor_frees_the_payload() {
     // SAFETY: `capsule` is live and its payload is an unfreed boxed schema. Miri and
     // the leak checker see the box freed exactly once.
     unsafe {
-        raster_h3_py_schema_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
+        dggs_stream_py_schema_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
     }
 }
 
@@ -118,7 +120,7 @@ fn schema_destructor_frees_the_payload() {
 fn destructors_are_inert_without_a_capsule_or_a_registered_api() {
     let _api = API.lock().unwrap();
     // SAFETY: null addresses are allowed and leave the destructors inert.
-    unsafe { raster_h3_py_set_capsule_api(ptr::null(), ptr::null()) };
+    unsafe { dggs_stream_py_set_capsule_api(ptr::null(), ptr::null()) };
     let (payload, released) = boxed_stream();
     let mut capsule = FakeCapsule {
         name: CString::new("arrow_array_stream").unwrap(),
@@ -126,16 +128,16 @@ fn destructors_are_inert_without_a_capsule_or_a_registered_api() {
     };
     // SAFETY: without a registered API the capsule is never dereferenced.
     unsafe {
-        raster_h3_py_stream_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
-        raster_h3_py_schema_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
+        dggs_stream_py_stream_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
+        dggs_stream_py_schema_capsule_destructor(&mut capsule as *mut FakeCapsule as *mut c_void);
     }
     assert!(!released.load(Ordering::SeqCst));
 
     register_fakes();
     // SAFETY: a null capsule is never dereferenced.
     unsafe {
-        raster_h3_py_stream_capsule_destructor(ptr::null_mut());
-        raster_h3_py_schema_capsule_destructor(ptr::null_mut());
+        dggs_stream_py_stream_capsule_destructor(ptr::null_mut());
+        dggs_stream_py_schema_capsule_destructor(ptr::null_mut());
     }
     assert!(!released.load(Ordering::SeqCst));
 
