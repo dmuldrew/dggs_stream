@@ -135,6 +135,14 @@ fn demote_for_auto(
     statuses
 }
 
+/// Categorical overlay on a nested grid clips the finest scanned resolution and rolls
+/// its cells up into the coarser ones (see `dggs_stream_core::transfer::nested_overlay_rollup`), so narrowing the
+/// resolutions would change how the remaining coarser cells are clipped.
+fn rolls_up_nested(config: &MultiResolutionConfig) -> bool {
+    config.resolutions.len() > 1
+        && dggs_stream_core::transfer::nested_overlay_rollup(config.grid, config.transfer, true)
+}
+
 /// Apply a filter common to both providers (`MinCount`, `Bbox`, `Resolution`) by narrowing
 /// `config`. Returns `false` when the filter excludes every row. Filters only ever narrow the
 /// table: a `Resolution` outside the configured set or a `Bbox` disjoint from the configured
@@ -292,6 +300,27 @@ fn reader_limit(
 mod bbox_tests {
     use super::*;
     use h3o::CellIndex;
+
+    #[test]
+    fn nested_rollup_scans_keep_resolution_predicates_residual() {
+        use dggs_stream_core::GridKind;
+        let mut config = MultiResolutionConfig::new(vec![12, 14]).with_grid(GridKind::S2);
+        config.transfer = TransferMode::OVERLAY;
+        assert!(rolls_up_nested(&config));
+        // One resolution, another grid or another transfer mode clips each level.
+        let mut single = config.clone();
+        single.resolutions = vec![12];
+        assert!(!rolls_up_nested(&single));
+        let mut h3 = config.clone();
+        h3.grid = GridKind::H3;
+        assert!(!rolls_up_nested(&h3));
+        let mut mass = config.clone();
+        mass.transfer = TransferMode::Overlay {
+            weighted: true,
+            mass_preserve: true,
+        };
+        assert!(!rolls_up_nested(&mass));
+    }
 
     #[test]
     fn auto_transfer_keeps_resolution_and_bbox_predicates_residual() {
@@ -1240,7 +1269,15 @@ impl RasterScan for CategoricalRasterTableProvider {
                 _ => FilterPushdownStatus::Unsupported,
             })
             .collect();
-        demote_for_auto(&self.config, filters, statuses)
+        let mut statuses = demote_for_auto(&self.config, filters, statuses);
+        if rolls_up_nested(&self.config) {
+            for (status, filter) in statuses.iter_mut().zip(filters) {
+                if matches!(filter, FilterPredicate::Resolution(_)) {
+                    *status = FilterPushdownStatus::Unsupported;
+                }
+            }
+        }
+        statuses
     }
 
     fn scan(
@@ -1277,6 +1314,7 @@ impl RasterScan for CategoricalRasterTableProvider {
                     config.min_majority_fraction =
                         Some(config.min_majority_fraction.map_or(v, |c| c.max(v)));
                 }
+                FilterPredicate::Resolution(_) if rolls_up_nested(&self.config) => {}
                 _ => empty |= !apply_shared_filter(&mut config, f),
             }
         }

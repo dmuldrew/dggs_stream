@@ -2461,3 +2461,84 @@ fn centre_scans_keep_minus_180_centres_in_a_bbox_ending_at_180() {
         assert_eq!(sum, 64.0, "{grid}");
     }
 }
+
+#[test]
+fn nested_rollup_emits_each_parent_once_when_children_wait_for_a_later_tile() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use std::sync::Arc;
+
+    // Tile A touches 180 degrees just south of the equator: its fine children straddling
+    // the antimeridian have bounds that overlap every longitude, so they wait for tile B
+    // to end. Tile B lies farther west in the same level-7 parent (the equatorial
+    // HEALPix cell centred on 180 degrees) and reaches south past it. Level-15 cells are
+    // smaller than B's pixels, so B is planned in two row blocks and the parent's end row
+    // on B passes in the first, while those children still wait.
+    const GRID: GridKind = GridKind::Healpix;
+    const COARSE: u8 = 7;
+    const FINE: u8 = 15;
+    let dir = tempfile::tempdir().unwrap();
+    let seam = dir.path().join("seam.tif");
+    let tall = dir.path().join("tall.tif");
+    let class = |x: u32, y: u32| ((x * 3 + y) % 5 + 1) as u8;
+    write_geotiff(
+        &seam,
+        (10, 20),
+        Layout::Tiles(16, 16),
+        Crs::Geographic {
+            lon: 179.95,
+            lat: 0.0,
+            pixel_deg: 0.005,
+        },
+        "255",
+        class,
+    );
+    write_geotiff(
+        &tall,
+        (20, 256),
+        Layout::Tiles(16, 16),
+        Crs::Geographic {
+            lon: 179.5,
+            lat: 0.5,
+            pixel_deg: 0.01,
+        },
+        "255",
+        class,
+    );
+    let paths = [seam, tall];
+    let mut cfg = MultiResolutionConfig::new(vec![COARSE, FINE]).with_grid(GRID);
+    cfg.transfer = TransferMode::OVERLAY;
+    let mosaic = Arc::new(MosaicReader::open(&paths, None, None, OverlapRule::First).unwrap());
+    let mut streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &cfg).unwrap();
+    let mut cells = BTreeMap::new();
+    while streamer
+        .drain_completed_into(256, |_i, rec| {
+            assert!(
+                cells
+                    .insert((rec.resolution, rec.cell_id), rec.accumulator.total_count)
+                    .is_none(),
+                "duplicate cell ({}, {:x})",
+                rec.resolution,
+                rec.cell_id
+            );
+        })
+        .unwrap()
+        > 0
+    {}
+    // Each parent's weight is the sum of its children's.
+    let mut children = BTreeMap::<u64, f64>::new();
+    for (&(res, id), &total) in &cells {
+        if res == FINE {
+            *children
+                .entry(GRID.parent(id, COARSE).unwrap())
+                .or_default() += total;
+        }
+    }
+    assert!(!children.is_empty());
+    for (parent, total) in children {
+        let got = cells[&(COARSE, parent)];
+        assert!(
+            (got - total).abs() <= 1e-9 * total.max(1.0),
+            "{parent:x}: {got} vs {total}"
+        );
+    }
+}

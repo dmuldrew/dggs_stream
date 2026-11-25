@@ -137,6 +137,12 @@ pub trait TransferAccumulator: Send + 'static {
     const SUPPORTS_MERGE: bool = false;
     /// Whether geometric overlap over NoData pixels must still be recorded (e.g. partial coverage).
     const NEEDS_COVER: bool = false;
+    /// Whether merging the states of a cell's children gives the parent's exact state.
+    /// Nested-grid overlay then clips only the finest resolution and rolls cells up.
+    /// A pixel split across several children must count once, so this holds only when
+    /// no statistic depends on squared per-pixel weights (e.g. not for variance).
+    /// Requires [`Self::SUPPORTS_MERGE`].
+    const NESTED_ROLLUP: bool = false;
     /// Combine another accumulator built for the same cell into `self`.
     fn merge_from(&mut self, _other: &Self) {
         debug_assert!(Self::SUPPORTS_MERGE);
@@ -329,6 +335,8 @@ impl TransferAccumulator for Vec<ContinuousAccumulator> {
 impl TransferAccumulator for CategoricalAccumulator {
     const CATEGORICAL: bool = true;
     const SUPPORTS_MERGE: bool = true;
+    // Class weights are plain sums of overlap areas, so children add up exactly.
+    const NESTED_ROLLUP: bool = true;
     fn merge_from(&mut self, other: &Self) {
         self.merge(other);
     }
@@ -563,6 +571,9 @@ pub struct TransferStream<A: TransferAccumulator> {
     overlap_batches: usize,
     #[cfg(test)]
     overlap_retries: usize,
+    /// Overlay clipping passes (one per block and clipped resolution).
+    #[cfg(test)]
+    overlay_passes: usize,
 }
 
 impl<A: TransferAccumulator> TransferStream<A> {
@@ -695,14 +706,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
         }
         let res_count = resolutions.len();
         let nested_rollup_finest = (res_count > 1
-            && matches!(grid, GridKind::S2 | GridKind::Healpix)
-            && matches!(
-                mode,
-                TransferMode::Overlay {
-                    weighted: true,
-                    mass_preserve: false
-                }
-            )
+            && super::nested_overlay_rollup(grid, mode, A::CATEGORICAL)
+            && A::NESTED_ROLLUP
             && A::SUPPORTS_MERGE
             && !resolutions
                 .iter()
@@ -783,6 +788,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             overlap_batches: 0,
             #[cfg(test)]
             overlap_retries: 0,
+            #[cfg(test)]
+            overlay_passes: 0,
         })
     }
 
@@ -1119,6 +1126,10 @@ impl<A: TransferAccumulator> TransferStream<A> {
         weighted: bool,
         mass_preserve: bool,
     ) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.overlay_passes += 1;
+        }
         let resolution = self.resolutions[res_idx];
         let mosaic = Arc::clone(&self.mosaic);
         let tile = &mosaic.tiles[block.tile];
@@ -1647,6 +1658,18 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 .map(|(cell, _)| *cell)
                 .collect()
         };
+        // A rolled-up parent must wait for every finest child still pending (one held
+        // for a later tile, say): emitting it first would make that child's rollup
+        // start a second row for the same parent.
+        if let Some(finest_idx) = self.nested_rollup_finest.filter(|&f| f != res_idx) {
+            if !done.is_empty() && !self.pending[finest_idx].is_empty() {
+                let waiting: std::collections::HashSet<u64> = self.pending[finest_idx]
+                    .keys()
+                    .filter_map(|&child| self.grid.parent(child, resolution))
+                    .collect();
+                done.retain(|parent| !waiting.contains(parent));
+            }
+        }
         // Deterministic output order within a band and resolution.
         done.sort_unstable();
         for cell in done {
@@ -3820,6 +3843,65 @@ mod tests {
         let (got, want) = (&clipped[&pole], &expected[&pole]);
         assert_eq!(got.count, want.count);
         assert_eq!(got.sum, want.sum);
+    }
+
+    #[test]
+    fn nested_rollup_clips_once_for_categorical_and_per_resolution_for_continuous() {
+        // Class codes stored as floats: the categorical scan rolls the finest S2 level up
+        // into the coarser one, while variance-carrying continuous scans clip each level.
+        let raster = geographic_raster(64, 48, (-122.45, 37.80), (0.002, 0.002), |c, r| {
+            (1 + (3 * c + r) % 5) as f32
+        });
+        let mosaic = || {
+            Arc::new(
+                MosaicReader::open(&[raster.path().to_owned()], None, None, OverlapRule::First)
+                    .unwrap(),
+            )
+        };
+        let config = |resolutions: Vec<u8>| {
+            let mut config = MultiResolutionConfig::new(resolutions).with_grid(GridKind::S2);
+            config.transfer = TransferMode::OVERLAY;
+            config.aggregation_workers = Some(1);
+            config
+        };
+
+        let mut categorical =
+            TransferStream::<CategoricalAccumulator>::new(mosaic(), &config(vec![12, 14])).unwrap();
+        while categorical.drain_into(256, |_, _, _, _| {}).unwrap() > 0 {}
+        assert_eq!(categorical.overlay_passes, categorical.blocks.len());
+
+        let drain = |resolutions: Vec<u8>| {
+            let mut stream =
+                TransferStream::<ContinuousAccumulator>::new(mosaic(), &config(resolutions))
+                    .unwrap();
+            let mut cells = BTreeMap::new();
+            while stream
+                .drain_into(256, |_, res, id, acc| {
+                    cells.insert((res, id), acc);
+                })
+                .unwrap()
+                > 0
+            {}
+            (cells, stream.overlay_passes, stream.blocks.len())
+        };
+        let (multi, passes, blocks) = drain(vec![12, 14]);
+        assert_eq!(passes, 2 * blocks, "continuous scans clip every resolution");
+        let (coarse, _, _) = drain(vec![12]);
+        let multi_coarse: BTreeMap<_, _> = multi
+            .into_iter()
+            .filter(|((res, _), _)| *res == 12)
+            .collect();
+        assert!(!coarse.is_empty());
+        assert_eq!(multi_coarse.len(), coarse.len());
+        for (key, acc) in &coarse {
+            let got = &multi_coarse[key];
+            assert_eq!(
+                got.variance().to_bits(),
+                acc.variance().to_bits(),
+                "{key:?}"
+            );
+            assert_eq!(got.sum.to_bits(), acc.sum.to_bits(), "{key:?}");
+        }
     }
 
     #[test]
