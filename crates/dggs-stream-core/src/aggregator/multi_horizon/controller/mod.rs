@@ -335,12 +335,6 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         }
     }
 
-    /// Stop reading chunks ahead. For a stream that will not be drained through the
-    /// horizon kernel (the transfer modes read the raster themselves).
-    pub(crate) fn stop_prefetch(&mut self) {
-        self.prefetcher.take();
-    }
-
     /// The mosaic this stream reads, shared.
     pub(crate) fn mosaic_arc(&self) -> Arc<MosaicReader> {
         Arc::clone(&self.mosaic)

@@ -440,17 +440,26 @@ fn accumulate_categorical_native<T: SimdSpanAccumulate + CategoricalUniformity>(
     valid
 }
 
-/// A rectangle of pixels of one tile at one resolution, processed as a unit.
+/// Unpadded WGS84 extent computed once per `(tile, rows, cols)` pixel block.
+#[derive(Debug, Clone)]
+pub(super) struct RawBlockExtent {
+    centre_lon: f64,
+    west: f64,
+    east: f64,
+    south: f64,
+    north: f64,
+    full_lon: bool,
+}
+
+/// A rectangle of pixels of one tile, processed once across all resolutions.
 #[derive(Debug, Clone)]
 struct Block {
-    resolution: u8,
     tile: usize,
     rows: Range<u32>,
     cols: Range<u32>,
-    /// `[west, south, east, north]` of the block in WGS84, padded; `west > east` when it
-    /// crosses the antimeridian. `None` if no corner of it could be located.
-    bbox: Option<[f64; 4]>,
-    /// The last block of its tile and resolution.
+    /// Unpadded WGS84 extent of this pixel block; `None` if no sample point mapped.
+    extent: Option<RawBlockExtent>,
+    /// The last block of its tile.
     last_of_tile: bool,
 }
 
@@ -473,7 +482,7 @@ struct BandCoverage {
 
 struct CoverageFilter {
     minimum: f64,
-    cells: HashMap<u64, BandCoverage>,
+    cells: Vec<HashMap<u64, BandCoverage>>,
 }
 
 pub(super) enum OverlapParallelism {
@@ -512,6 +521,7 @@ impl OverlapParallelism {
 pub struct TransferStream<A: TransferAccumulator> {
     mosaic: Arc<MosaicReader>,
     grid: GridKind,
+    resolutions: Vec<u8>,
     mode: TransferMode,
     overlap_parallelism: OverlapParallelism,
     selection: BandSelection,
@@ -536,7 +546,7 @@ pub struct TransferStream<A: TransferAccumulator> {
     prefetch_run_end: usize,
     cache: ChunkCache,
     cache_tile: usize,
-    pending: HashMap<u64, Pending<A>>,
+    pending: Vec<HashMap<u64, Pending<A>>>,
     output: VecDeque<(u8, u64, A)>,
     transform_failures: u64,
     /// Set when a block fails, so later reads cannot mistake the failed scan for EOF.
@@ -623,13 +633,19 @@ impl<A: TransferAccumulator> TransferStream<A> {
             }
         );
         let grid = config.grid;
+        let resolutions = config.resolutions.clone();
         let mut blocks = Vec::new();
-        for &resolution in &config.resolutions {
+        if !resolutions.is_empty() {
+            let finest_res = resolutions.iter().copied().max().unwrap_or(0);
+            let any_coarse = resolutions
+                .iter()
+                .any(|&r| grid.spec().max_cell_diameter_km(r) > COARSE_CELL_DIAMETER_KM);
             for (tile_idx, tile) in mosaic.tiles.iter().enumerate() {
                 plan_tile(
                     grid,
                     mode,
-                    resolution,
+                    finest_res,
+                    any_coarse,
                     tile_idx,
                     tile,
                     bands.len(),
@@ -637,35 +653,49 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     &mut blocks,
                 );
             }
-        }
-        if partial_overlay {
-            let partition = config.partition.as_ref().expect("partitioned overlay");
-            partition.validate_for(&mosaic)?;
-            blocks = partition_blocks(&mosaic, partition, blocks);
+            if let Some(bbox) = config.bbox {
+                blocks = prune_blocks_to_bbox(&mosaic, bbox, blocks);
+            }
+            if partial_overlay {
+                let partition = config.partition.as_ref().expect("partitioned overlay");
+                partition.validate_for(&mosaic)?;
+                blocks = partition_blocks(&mosaic, partition, blocks);
+            }
+            let mut seen_tiles = vec![false; mosaic.tiles.len()];
+            for block in blocks.iter_mut().rev() {
+                if !seen_tiles[block.tile] {
+                    block.last_of_tile = true;
+                    seen_tiles[block.tile] = true;
+                } else {
+                    block.last_of_tile = false;
+                }
+            }
+            for block in &mut blocks {
+                block.extent =
+                    raw_block_extent(&mosaic.tiles[block.tile], &block.rows, &block.cols);
+            }
         }
         let overlay = matches!(mode, TransferMode::Overlay { .. });
-        for block in &mut blocks {
-            block.bbox = block_bbox(
-                grid,
-                block.resolution,
-                &mosaic.tiles[block.tile],
-                &block.rows,
-                &block.cols,
-                overlay,
-            );
-        }
         // Everything a later block can still emit lies south of this latitude.
         let mut horizon = vec![f64::NEG_INFINITY; blocks.len() + 1];
         for i in (0..blocks.len()).rev() {
-            let reach = match blocks[i].bbox {
-                Some(bbox) => bbox[3] + grid.spec().max_cell_radius_deg(blocks[i].resolution),
+            let reach = match &blocks[i].extent {
+                Some(extent) => resolutions
+                    .iter()
+                    .map(|&res| {
+                        pad_block_extent(extent, grid, res, overlay)[3]
+                            + grid.spec().max_cell_radius_deg(res)
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max),
                 None => f64::NEG_INFINITY,
             };
             horizon[i] = horizon[i + 1].max(reach);
         }
+        let res_count = resolutions.len();
         Ok(Self {
             mosaic,
             grid,
+            resolutions,
             mode,
             bands,
             overlap_parallelism: OverlapParallelism::from_workers(config.aggregation_workers)?,
@@ -689,7 +719,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     .filter(|&t| t > 0.0)
                     .map(|minimum| CoverageFilter {
                         minimum,
-                        cells: HashMap::new(),
+                        cells: (0..res_count).map(|_| HashMap::new()).collect(),
                     }),
                 _ => None,
             },
@@ -712,7 +742,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             prefetch_run_end: 0,
             cache: ChunkCache::default(),
             cache_tile: usize::MAX,
-            pending: HashMap::new(),
+            pending: (0..res_count).map(|_| HashMap::new()).collect(),
             output: VecDeque::new(),
             transform_failures: 0,
             failure: None,
@@ -733,7 +763,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
 
     /// Every cell not yet drained lies south of this latitude (`-inf` once finished).
     pub fn current_lat_horizon(&self) -> f64 {
-        if !self.output.is_empty() || !self.pending.is_empty() {
+        if !self.output.is_empty() || self.pending.iter().any(|m| !m.is_empty()) {
             // Cells already built may lie north of the remaining blocks.
             return f64::INFINITY;
         }
@@ -867,7 +897,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             let run_end = block_idx
                 + self.blocks[block_idx..]
                     .iter()
-                    .take_while(|b| b.tile == block.tile && b.resolution == block.resolution)
+                    .take_while(|b| b.tile == block.tile)
                     .count();
             let tile = &self.mosaic.tiles[block.tile];
             let (misses, blocks_covered) = plan_run_chunk_misses(
@@ -900,16 +930,51 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 ));
             }
         }
-        match block.bbox {
+        match &block.extent {
             None => self.record_failures(1)?,
-            Some(bbox) => match self.mode {
-                TransferMode::Interpolate(method) => self.interpolate_block(block, bbox, method)?,
-                TransferMode::Overlay {
-                    weighted,
-                    mass_preserve,
-                } => self.overlay_block(block, bbox, weighted, mass_preserve)?,
-                TransferMode::AssignCenters | TransferMode::Auto => {}
-            },
+            Some(extent) => {
+                let mosaic = Arc::clone(&self.mosaic);
+                let tile = &mosaic.tiles[block.tile];
+                match self.mode {
+                    TransferMode::Interpolate(method) => {
+                        let margin = method.margin();
+                        let rows = block.rows.start.saturating_sub(margin)
+                            ..block.rows.end.saturating_add(margin);
+                        let cols = block.cols.start.saturating_sub(margin)
+                            ..block
+                                .cols
+                                .end
+                                .saturating_add(margin)
+                                .min(tile.reader.metadata.width);
+                        let window = self.load_window(tile, rows, cols)?;
+                        for res_idx in 0..self.resolutions.len() {
+                            let res = self.resolutions[res_idx];
+                            let bbox = pad_block_extent(extent, self.grid, res, false);
+                            self.interpolate_block_for_res(res, block, bbox, &window, method)?;
+                        }
+                    }
+                    TransferMode::Overlay {
+                        weighted,
+                        mass_preserve,
+                    } => {
+                        let window =
+                            self.load_window(tile, block.rows.clone(), block.cols.clone())?;
+                        for res_idx in 0..self.resolutions.len() {
+                            let res = self.resolutions[res_idx];
+                            let bbox = pad_block_extent(extent, self.grid, res, true);
+                            self.overlay_block_for_res(
+                                res_idx,
+                                block,
+                                bbox,
+                                &window,
+                                weighted,
+                                mass_preserve,
+                            )?;
+                        }
+                    }
+                    TransferMode::AssignCenters | TransferMode::Auto => {}
+                }
+            }
         }
         self.finish_cells(block);
         Ok(())
@@ -932,21 +997,20 @@ impl<A: TransferAccumulator> TransferStream<A> {
         }
     }
 
-    fn interpolate_block(
+    fn interpolate_block_for_res(
         &mut self,
+        resolution: u8,
         block: &Block,
         bbox: [f64; 4],
+        window: &RowWindow,
         method: Interpolation,
     ) -> Result<()> {
         let mosaic = Arc::clone(&self.mosaic);
         let tile = &mosaic.tiles[block.tile];
-        let margin = method.margin();
-        let rows = block.rows.start.saturating_sub(margin)..block.rows.end.saturating_add(margin);
-        let window = self.load_window(tile, rows, 0..tile.reader.metadata.width)?;
         let cells = cells_in_bbox(
             self.grid,
             bbox,
-            block.resolution,
+            resolution,
             ContainmentMode::ContainsCentroid,
         )?;
         let histogram_bins_arc = self.histogram_bins.clone();
@@ -956,7 +1020,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             mosaic: &mosaic,
             tile,
             tile_idx: block.tile,
-            window: &window,
+            window,
             method,
             rows: block.rows.clone(),
             cols: block.cols.clone(),
@@ -972,7 +1036,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let mut apply_outcome = |cell: u64, outcome: InterpOutcome<A>| match outcome {
             InterpOutcome::Skip => {}
             InterpOutcome::Failed => failures += 1,
-            InterpOutcome::Emit(acc) => output.push_back((block.resolution, cell, acc)),
+            InterpOutcome::Emit(acc) => output.push_back((resolution, cell, acc)),
         };
 
         if self
@@ -1003,20 +1067,22 @@ impl<A: TransferAccumulator> TransferStream<A> {
         self.record_failures(failures)
     }
 
-    fn overlay_block(
+    fn overlay_block_for_res(
         &mut self,
+        res_idx: usize,
         block: &Block,
         bbox: [f64; 4],
+        window: &RowWindow,
         weighted: bool,
         mass_preserve: bool,
     ) -> Result<()> {
+        let resolution = self.resolutions[res_idx];
         let mosaic = Arc::clone(&self.mosaic);
         let tile = &mosaic.tiles[block.tile];
-        let window = self.load_window(tile, block.rows.clone(), block.cols.clone())?;
         let width = i64::from(window.width());
         let rows = (i64::from(block.rows.start), i64::from(block.rows.end));
         let band_width = window.width() as usize;
-        let cells = cells_in_bbox(self.grid, bbox, block.resolution, ContainmentMode::Covers)?;
+        let cells = cells_in_bbox(self.grid, bbox, resolution, ContainmentMode::Covers)?;
         let several_tiles = mosaic.tiles.len() > 1;
         let gt = &tile.reader.metadata.geotransform;
 
@@ -1032,8 +1098,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let longitude_bounds = periodic_longitude_bounds(tile);
         let mut failures = 0;
         // Cells this large are assigned whole pixels by centre (see below).
-        let coarse =
-            self.grid.spec().max_cell_diameter_km(block.resolution) > COARSE_CELL_DIAMETER_KM;
+        let coarse = self.grid.spec().max_cell_diameter_km(resolution) > COARSE_CELL_DIAMETER_KM;
         // The cell holding each pixel centre of the block, built when first needed.
         let mut pixel_cells: Option<Vec<Option<u64>>> = None;
         let owners_of_block = || {
@@ -1042,7 +1107,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 for c in 0..width {
                     let (x, y) = gt.pixel_to_coord(c as f64 + 0.5, r as f64 + 0.5);
                     owners.push(tile.crs_transformer.transform_point(x, y).ok().and_then(
-                        |(lon, lat)| self.grid.cell_at(lat, wrap_lon_180(lon), block.resolution),
+                        |(lon, lat)| self.grid.cell_at(lat, wrap_lon_180(lon), resolution),
                     ));
                 }
             }
@@ -1057,7 +1122,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let remapper_arc = self.remapper.clone();
         let histogram_bins = histogram_bins_arc.as_deref();
         let remapper = remapper_arc.as_deref();
-
+        let emit_nodata = self.emit_nodata;
         let mut selected = (!(!mass_preserve && !coarse && A::SUPPORTS_MERGE)
             && (bbox_filter.is_some() || several_tiles))
             .then(|| vec![None; band_width * block.rows.len()]);
@@ -1172,7 +1237,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 tile,
                 tile_idx: block.tile,
                 several_tiles,
-                window: &window,
+                window,
                 longitude_bounds,
                 rows,
                 cols: block.cols.clone(),
@@ -1181,7 +1246,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 weighted,
                 track_quantiles,
                 need_coverage: self.coverage_filter.is_some(),
-                emit_nodata: self.emit_nodata,
+                emit_nodata,
                 bbox: bbox_filter,
                 histogram_bins,
                 remapper,
@@ -1190,9 +1255,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
             let use_parallel = cells.len() >= MIN_PARALLEL_DIRECT_CELLS
                 && rayon::current_thread_index().is_none()
                 && !matches!(self.overlap_parallelism, OverlapParallelism::Serial);
+            let pending_map = &mut self.pending[res_idx];
+            let mut cov_map = self.coverage_filter.as_mut().map(|f| &mut f.cells[res_idx]);
             let mut apply_outcome = |cell: u64, outcome: CellOutcome<A>| match outcome {
                 CellOutcome::NoDataOnly { end_row } => {
-                    if let Some(pending) = self.pending.get_mut(&cell) {
+                    if let Some(pending) = pending_map.get_mut(&cell) {
                         if block.tile == pending.last_tile {
                             pending.end_row = Some(end_row);
                         }
@@ -1212,8 +1279,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
                             });
                         }
                     }
-                    if overlaps.len() > before || self.pending.contains_key(&cell) {
-                        let pending = self.pending.entry(cell).or_insert_with(|| Pending {
+                    if overlaps.len() > before || pending_map.contains_key(&cell) {
+                        let pending = pending_map.entry(cell).or_insert_with(|| Pending {
                             acc: A::empty_bands(track_quantiles, band_count),
                             touched: false,
                             end_row: None,
@@ -1226,8 +1293,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
                         if block.tile == pending.last_tile {
                             pending.end_row = Some(end_row);
                         }
-                        let mut coverage = self.coverage_filter.as_mut().map(|filter| {
-                            filter.cells.entry(cell).or_insert_with(|| BandCoverage {
+                        let mut coverage = cov_map.as_mut().map(|map| {
+                            map.entry(cell).or_insert_with(|| BandCoverage {
                                 valid_area: vec![0.0; band_count],
                                 covered_area: 0.0,
                             })
@@ -1249,7 +1316,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     } else {
                         block.tile
                     };
-                    match self.pending.entry(cell) {
+                    match pending_map.entry(cell) {
                         std::collections::hash_map::Entry::Vacant(slot) => {
                             slot.insert(Pending {
                                 acc,
@@ -1267,8 +1334,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
                             }
                         }
                     }
-                    if let (Some(filter), Some(cov)) = (self.coverage_filter.as_mut(), cell_cov) {
-                        let entry = filter.cells.entry(cell).or_insert_with(|| BandCoverage {
+                    if let (Some(map), Some(cov)) = (cov_map.as_mut(), cell_cov) {
+                        let entry = map.entry(cell).or_insert_with(|| BandCoverage {
                             valid_area: vec![0.0; band_count],
                             covered_area: 0.0,
                         });
@@ -1339,10 +1406,11 @@ impl<A: TransferAccumulator> TransferStream<A> {
             && cells.len() >= OVERLAP_BATCH_CELLS / 2
             && rayon::current_thread_index().is_none()
             && !matches!(self.overlap_parallelism, OverlapParallelism::Serial)
-            && crate::resolution::pixel_ground_area_m2(tile).is_ok_and(|area| {
-                self.grid.area_m2(block.resolution) <= MAX_MEAN_PIXELS_PER_CELL * area
-            });
+            && crate::resolution::pixel_ground_area_m2(tile)
+                .is_ok_and(|area| self.grid.area_m2(resolution) <= MAX_MEAN_PIXELS_PER_CELL * area);
         let mut prepared = Vec::<(Option<i64>, Vec<OverlapRun>)>::new();
+        let pending_map = &mut self.pending[res_idx];
+        let mut cov_map = self.coverage_filter.as_mut().map(|f| &mut f.cells[res_idx]);
         for (i, &cell) in cells.iter().enumerate() {
             // Keep the serial reducer in original cell and pixel order.
             let slot = i % OVERLAP_BATCH_CELLS;
@@ -1417,10 +1485,10 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 failures += 1;
                 continue;
             }
-            if overlaps.len() == before && !self.pending.contains_key(&cell) {
+            if overlaps.len() == before && !pending_map.contains_key(&cell) {
                 continue;
             }
-            let pending = self.pending.entry(cell).or_insert_with(|| Pending {
+            let pending = pending_map.entry(cell).or_insert_with(|| Pending {
                 acc: A::empty_bands(track_quantiles, band_count),
                 touched: false,
                 end_row: None,
@@ -1442,8 +1510,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
                 cell_ends.push((cell, overlaps.len()));
             } else {
-                let mut coverage = self.coverage_filter.as_mut().map(|filter| {
-                    filter.cells.entry(cell).or_insert_with(|| BandCoverage {
+                let mut coverage = cov_map.as_mut().map(|map| {
+                    map.entry(cell).or_insert_with(|| BandCoverage {
                         valid_area: vec![0.0; band_count],
                         covered_area: 0.0,
                     })
@@ -1456,8 +1524,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         }
         let mut start = 0;
         for (cell, end) in cell_ends {
-            let pending = self
-                .pending
+            let pending = pending_map
                 .get_mut(&cell)
                 .expect("cell remains pending until block completion");
             for &run in &overlaps[start..end] {
@@ -1494,45 +1561,45 @@ impl<A: TransferAccumulator> TransferStream<A> {
 
     /// Move the cells no later pixel can reach from `pending` to the output.
     fn finish_cells(&mut self, block: &Block) {
-        if self.pending.is_empty() {
-            return;
-        }
+        let last_overall = self.next_block >= self.blocks.len();
         let end = i64::from(
             self.blocks
                 .get(self.next_block)
-                .filter(|b| b.tile == block.tile && b.resolution == block.resolution)
+                .filter(|b| b.tile == block.tile)
                 .map_or(block.rows.end, |b| b.rows.start),
         );
-        let last_block_of_resolution = self
-            .blocks
-            .get(self.next_block)
-            .is_none_or(|next| next.resolution != block.resolution);
-        let mut done: Vec<u64> = self
-            .pending
-            .iter()
-            .filter(|(_, p)| {
-                last_block_of_resolution
-                    || (p.last_tile == block.tile
-                        && (p.end_row.is_some_and(|row| row <= end) || block.last_of_tile))
-                    || p.last_tile < block.tile
-            })
-            .map(|(cell, _)| *cell)
-            .collect();
-        // Deterministic output order within a band.
-        done.sort_unstable();
-        for cell in done {
-            if let Some(mut pending) = self.pending.remove(&cell) {
-                let keep = pending.acc.has_samples() || (self.emit_nodata && pending.touched);
-                let valid = self.coverage_filter.as_mut().is_none_or(|filter| {
-                    filter.cells.remove(&cell).is_some_and(|coverage| {
-                        pending.acc.retain_covered(
-                            &coverage.valid_area,
-                            filter.minimum * coverage.covered_area,
-                        )
-                    })
-                });
-                if keep && valid && pending.acc.passes(&self.filters) {
-                    self.output.push_back((block.resolution, cell, pending.acc));
+        for res_idx in 0..self.resolutions.len() {
+            let resolution = self.resolutions[res_idx];
+            let pending_map = &mut self.pending[res_idx];
+            if pending_map.is_empty() {
+                continue;
+            }
+            let mut done: Vec<u64> = pending_map
+                .iter()
+                .filter(|(_, p)| {
+                    last_overall
+                        || (p.last_tile == block.tile
+                            && (p.end_row.is_some_and(|row| row <= end) || block.last_of_tile))
+                        || p.last_tile < block.tile
+                })
+                .map(|(cell, _)| *cell)
+                .collect();
+            // Deterministic output order within a band and resolution.
+            done.sort_unstable();
+            for cell in done {
+                if let Some(mut pending) = pending_map.remove(&cell) {
+                    let keep = pending.acc.has_samples() || (self.emit_nodata && pending.touched);
+                    let valid = self.coverage_filter.as_mut().is_none_or(|filter| {
+                        filter.cells[res_idx].remove(&cell).is_some_and(|coverage| {
+                            pending.acc.retain_covered(
+                                &coverage.valid_area,
+                                filter.minimum * coverage.covered_area,
+                            )
+                        })
+                    });
+                    if keep && valid && pending.acc.passes(&self.filters) {
+                        self.output.push_back((resolution, cell, pending.acc));
+                    }
                 }
             }
         }
@@ -1565,10 +1632,85 @@ fn partition_blocks(
             cols.sort_unstable();
         }
     }
-    let mut out = Vec::new();
+    filter_blocks_by_chunks(mosaic, &owned, blocks, false)
+}
+
+/// Prune planned blocks to the chunks intersecting `bbox` and trim each block's columns
+/// to contiguous intersecting chunk runs.
+fn prune_blocks_to_bbox(mosaic: &MosaicReader, bbox: [f64; 4], blocks: Vec<Block>) -> Vec<Block> {
+    let mut owned = vec![std::collections::BTreeMap::<u32, Vec<u32>>::new(); mosaic.tiles.len()];
+    if mosaic.bbox == Some(bbox) {
+        for chunk in &mosaic.chunk_refs {
+            let across = mosaic.tiles[chunk.tile_idx]
+                .reader
+                .chunk_layout
+                .chunks_across;
+            owned[chunk.tile_idx]
+                .entry(chunk.chunk_idx / across)
+                .or_default()
+                .push(chunk.chunk_idx % across);
+        }
+    } else {
+        for (tile_idx, tile) in mosaic.tiles.iter().enumerate() {
+            let layout = tile.reader.chunk_layout;
+            let (width, height) = (tile.reader.metadata.width, tile.reader.metadata.height);
+            let gt = &tile.reader.metadata.geotransform;
+            let crs = &tile.crs_transformer;
+            for chunk_idx in 0..layout.total_chunks {
+                let bounds = layout.get_chunk_bounds(chunk_idx, width, height);
+                if bounds.width == 0 || bounds.height == 0 {
+                    continue;
+                }
+                let rect = crs.transform_rect_bounds(
+                    gt,
+                    f64::from(bounds.col_offset),
+                    f64::from(bounds.row_offset),
+                    f64::from(bounds.width),
+                    f64::from(bounds.height),
+                );
+                if crate::aggregator::horizon_streamer::bounds_intersect_bbox(crs, rect, &bbox) {
+                    owned[tile_idx]
+                        .entry(chunk_idx / layout.chunks_across)
+                        .or_default()
+                        .push(chunk_idx % layout.chunks_across);
+                }
+            }
+        }
+    }
+    for tile in &mut owned {
+        for cols in tile.values_mut() {
+            cols.sort_unstable();
+            cols.dedup();
+        }
+    }
+    filter_blocks_by_chunks(mosaic, &owned, blocks, true)
+}
+
+fn filter_blocks_by_chunks(
+    mosaic: &MosaicReader,
+    owned: &[std::collections::BTreeMap<u32, Vec<u32>>],
+    blocks: Vec<Block>,
+    coalesce_rows: bool,
+) -> Vec<Block> {
+    let mut out: Vec<Block> = Vec::new();
+    let mut row_runs: Vec<Range<u32>> = Vec::new();
+    // How many planned blocks touch each chunk row of each tile.
+    let mut bands_per_chunk_row = HashMap::<(usize, u32), usize>::new();
+    if coalesce_rows {
+        for block in &blocks {
+            let layout = mosaic.tiles[block.tile].reader.chunk_layout;
+            let first = block.rows.start / layout.chunk_height;
+            let last = block.rows.end.div_ceil(layout.chunk_height);
+            for row in first..last {
+                *bands_per_chunk_row.entry((block.tile, row)).or_default() += 1;
+            }
+        }
+    }
     for block in blocks {
         let tile = &mosaic.tiles[block.tile];
         let layout = tile.reader.chunk_layout;
+        let width = tile.reader.metadata.width;
+        let mut can_coalesce = false;
         for (&row, cols) in owned[block.tile].range(
             block.rows.start / layout.chunk_height..block.rows.end.div_ceil(layout.chunk_height),
         ) {
@@ -1577,32 +1719,73 @@ fn partition_blocks(
                     .rows
                     .end
                     .min((row + 1).saturating_mul(layout.chunk_height));
+            if rows.is_empty() {
+                continue;
+            }
+            row_runs.clear();
             for run in cols.chunk_by(|a, b| *b == *a + 1) {
-                let cols = run[0] * layout.chunk_width
-                    ..tile
-                        .reader
-                        .metadata
-                        .width
-                        .min((run[run.len() - 1] + 1).saturating_mul(layout.chunk_width));
+                let c0 = (run[0] * layout.chunk_width).max(block.cols.start);
+                let c1 = width
+                    .min((run[run.len() - 1] + 1).saturating_mul(layout.chunk_width))
+                    .min(block.cols.end);
+                if c0 < c1 {
+                    row_runs.push(c0..c1);
+                }
+            }
+            // A box across the antimeridian selects chunks at both raster edges. Separate
+            // windows would evict one edge each time the other is loaded and decode both
+            // again for every band of the chunk row. One window over the gap decodes each
+            // chunk of the row once.
+            if coalesce_rows && row_runs.len() > 1 {
+                let chunk_cols = |range: &Range<u32>| {
+                    (range.end.div_ceil(layout.chunk_width) - range.start / layout.chunk_width)
+                        as usize
+                };
+                let selected: usize = row_runs.iter().map(chunk_cols).sum();
+                let span = row_runs[0].start..row_runs[row_runs.len() - 1].end;
+                // Reloading the selected chunks for every band of the row costs
+                // `selected * bands`; one window over the gap costs its width once.
+                let bands = bands_per_chunk_row
+                    .get(&(block.tile, row))
+                    .copied()
+                    .unwrap_or(1);
+                if chunk_cols(&span) < selected.saturating_mul(bands) {
+                    row_runs.clear();
+                    row_runs.push(span);
+                }
+            }
+            if coalesce_rows && can_coalesce && row_runs.len() == 1 {
+                let prev = out
+                    .last_mut()
+                    .expect("can_coalesce guarantees previous block");
+                if prev.rows.end == rows.start && prev.cols == row_runs[0] {
+                    prev.rows.end = rows.end;
+                    continue;
+                }
+            }
+            for cols in row_runs.drain(..) {
                 out.push(Block {
-                    bbox: None,
+                    extent: None,
                     rows: rows.clone(),
                     cols,
                     last_of_tile: false,
                     ..block
                 });
             }
+            can_coalesce = coalesce_rows && out.last().is_some_and(|b| b.rows == rows);
         }
     }
     out
 }
 
-/// Cut one tile into blocks for `mode` at `resolution`.
+/// Cut one tile into blocks for `mode` sized by `resolution`, with `any_coarse` controlling
+/// chunk-row expansion across all resolutions.
 #[allow(clippy::too_many_arguments)]
 fn plan_tile(
     grid: GridKind,
     mode: TransferMode,
     resolution: u8,
+    any_coarse: bool,
     tile_idx: usize,
     tile: &TileDescriptor,
     band_count: usize,
@@ -1623,14 +1806,13 @@ fn plan_tile(
         TransferMode::Interpolate(method) => 2 * method.margin(),
         _ => 0,
     };
-    let coarse = grid.spec().max_cell_diameter_km(resolution) > COARSE_CELL_DIAMETER_KM;
     let base_window_rows = ((MAX_WINDOW_VALUES / band_count / width as usize) as u32)
         .saturating_sub(margin)
         .max(1);
     // Whole chunk rows where the budgets allow, so chunks are not decoded twice.
     let chunk_height = tile.reader.chunk_layout.chunk_height.max(1);
     let window_rows = if allow_chunk_row_window
-        && !coarse
+        && !any_coarse
         && super::window::supports_native_tiled_window(tile, band_count)
     {
         base_window_rows.max(chunk_height.min(MAX_NATIVE_CHUNK_ROW_WINDOW))
@@ -1664,11 +1846,10 @@ fn plan_tile(
             let block_rows = row..row_end;
             let block_cols = col..col_end;
             blocks.push(Block {
-                resolution,
                 tile: tile_idx,
                 rows: block_rows,
                 cols: block_cols,
-                bbox: None,
+                extent: None,
                 last_of_tile: false,
             });
             col = col_end;
@@ -1709,14 +1890,16 @@ fn plan_run_chunk_misses(
     let mut blocks_covered = 0;
 
     for block in run_blocks {
-        if block.bbox.is_none() || matches!(mode, TransferMode::AssignCenters) {
+        if block.extent.is_none()
+            || matches!(mode, TransferMode::AssignCenters | TransferMode::Auto)
+        {
             blocks_covered += 1;
             continue;
         }
         let (raw_rows, raw_cols) = match mode {
             TransferMode::Interpolate(_) => (
                 block.rows.start.saturating_sub(margin)..block.rows.end.saturating_add(margin),
-                0..width,
+                block.cols.start.saturating_sub(margin)..block.cols.end.saturating_add(margin),
             ),
             TransferMode::Overlay { .. } => (block.rows.clone(), block.cols.clone()),
             TransferMode::AssignCenters | TransferMode::Auto => unreachable!(),
@@ -1775,17 +1958,12 @@ fn plan_run_chunk_misses(
     (misses, blocks_covered.max(1))
 }
 
-/// The WGS84 box `[west, south, east, north]` of a block of pixels, padded so that it
-/// holds the centre of every cell whose centre is on the block (and, for an overlay,
-/// every cell that touches the block).
-fn block_bbox(
-    grid: GridKind,
-    resolution: u8,
+/// Unpadded WGS84 extent of a pixel block, transformed once across its boundary and centre.
+pub(super) fn raw_block_extent(
     tile: &TileDescriptor,
     rows: &Range<u32>,
     cols: &Range<u32>,
-    overlay: bool,
-) -> Option<[f64; 4]> {
+) -> Option<RawBlockExtent> {
     const STEPS: u32 = 8;
     let gt = &tile.reader.metadata.geotransform;
     let (c0, c1) = (f64::from(cols.start), f64::from(cols.end));
@@ -1843,6 +2021,24 @@ fn block_bbox(
             }
         }
     }
+    Some(RawBlockExtent {
+        centre_lon,
+        west,
+        east,
+        south,
+        north,
+        full_lon,
+    })
+}
+
+/// Pad `ext` for `grid` at `resolution` so it holds every cell whose centre is on the block
+/// (and, for an `overlay`, every cell that touches the block).
+pub(super) fn pad_block_extent(
+    ext: &RawBlockExtent,
+    grid: GridKind,
+    resolution: u8,
+    overlay: bool,
+) -> [f64; 4] {
     // Edges curve between the sampled points, and an overlay needs the cells that only
     // touch the block.
     let reach = if overlay {
@@ -1850,20 +2046,24 @@ fn block_bbox(
     } else {
         0.0
     };
-    let pad_lat = 0.05 * (north - south) + 1e-7 + reach;
-    let south = (south - pad_lat).max(-90.0);
-    let north = (north + pad_lat).min(90.0);
+    let pad_lat = 0.05 * (ext.north - ext.south) + 1e-7 + reach;
+    let south = (ext.south - pad_lat).max(-90.0);
+    let north = (ext.north + pad_lat).min(90.0);
     let cos = south.abs().max(north.abs()).min(89.9).to_radians().cos();
-    let pad_lon = 0.05 * (east - west) + 1e-7 + 2.0 * reach / cos;
-    if full_lon || (east - west) + 2.0 * pad_lon >= 360.0 || north >= 90.0 || south <= -90.0 {
-        return Some([-180.0, south, 180.0, north]);
+    let pad_lon = 0.05 * (ext.east - ext.west) + 1e-7 + 2.0 * reach / cos;
+    if ext.full_lon
+        || (ext.east - ext.west) + 2.0 * pad_lon >= 360.0
+        || north >= 90.0
+        || south <= -90.0
+    {
+        return [-180.0, south, 180.0, north];
     }
-    Some([
-        wrap_lon_180(centre_lon + west - pad_lon),
+    [
+        wrap_lon_180(ext.centre_lon + ext.west - pad_lon),
         south,
-        wrap_lon_180(centre_lon + east + pad_lon),
+        wrap_lon_180(ext.centre_lon + ext.east + pad_lon),
         north,
-    ])
+    ]
 }
 
 /// Widest slice handed to A5's spherical great-circle polygon fill, in degrees of
@@ -1993,9 +2193,19 @@ fn cells_in_bbox(
             } else {
                 (south, north, 1)
             };
-            let wkb = densified_rectangle_wkb(w, wkb_south, e, wkb_north, lon_segments);
-            match grid_polygon_to_cells_wkb_into(grid, &wkb, i64::from(resolution), mode, &mut part)
-            {
+            let fill_result = if grid.spec().polygon_fill == PolygonFill::NestedDescent {
+                crate::polygon_fill::fill_nested_grid_rect(
+                    grid,
+                    [w, wkb_south, e, wkb_north],
+                    resolution,
+                    mode,
+                    &mut part,
+                )
+            } else {
+                let wkb = densified_rectangle_wkb(w, wkb_south, e, wkb_north, lon_segments);
+                grid_polygon_to_cells_wkb_into(grid, &wkb, i64::from(resolution), mode, &mut part)
+            };
+            match fill_result {
                 Ok(()) => cells.extend_from_slice(&part),
                 Err(PolygonToCellsError::TooManyCells { estimate, limit }) => {
                     return Err(DggsStreamError::InvalidParameter(format!(
@@ -2795,7 +3005,7 @@ mod tests {
         // of the production planner's target block size.
         for rows in [0..32, 32..64] {
             split.blocks.push(Block {
-                bbox: block_bbox(split.grid, 9, &mosaic.tiles[1], &rows, &last.cols, true),
+                extent: raw_block_extent(&mosaic.tiles[1], &rows, &last.cols),
                 last_of_tile: rows.end == 64,
                 rows,
                 ..last.clone()
@@ -2804,8 +3014,7 @@ mod tests {
         split.advance_until_completed(1).unwrap();
         assert_eq!(split.next_block, 2);
         assert!(!split.output.is_empty());
-        assert!(split
-            .pending
+        assert!(split.pending[0]
             .values()
             .any(|p| p.end_row.is_some_and(|r| r > 32) && p.touched));
         let actual = drain(split);
@@ -3131,49 +3340,51 @@ mod tests {
             Arc::make_mut(&mut info.chunk_bytes)[s] = 0;
         }
         let tile = TileDescriptor::new(0, reader, None).unwrap();
-        let bbox = Some([-122.5, 37.8, -122.4, 37.85]);
+        let extent = Some(RawBlockExtent {
+            centre_lon: -122.45,
+            west: -0.05,
+            east: 0.05,
+            south: 37.8,
+            north: 37.85,
+            full_lon: false,
+        });
 
         // Adjacent overlay blocks within strip 0 (0..1, 1..2) followed by strip 1 (sparse),
-        // strip 2 (4..6), plus None bbox block.
+        // strip 2 (4..6), plus None extent block.
         let blocks = vec![
             Block {
-                resolution: 8,
                 tile: 0,
                 rows: 0..1,
                 cols: 0..16,
-                bbox,
+                extent: extent.clone(),
                 last_of_tile: false,
             },
             Block {
-                resolution: 8,
                 tile: 0,
                 rows: 1..2,
                 cols: 0..16,
-                bbox,
+                extent: extent.clone(),
                 last_of_tile: false,
             },
             Block {
-                resolution: 8,
                 tile: 0,
                 rows: 2..4,
                 cols: 0..16,
-                bbox,
+                extent: extent.clone(),
                 last_of_tile: false,
             },
             Block {
-                resolution: 8,
                 tile: 0,
                 rows: 4..6,
                 cols: 0..16,
-                bbox: None,
+                extent: None,
                 last_of_tile: false,
             },
             Block {
-                resolution: 8,
                 tile: 0,
                 rows: 6..10,
                 cols: 0..16,
-                bbox,
+                extent,
                 last_of_tile: true,
             },
         ];

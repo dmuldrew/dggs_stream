@@ -1681,3 +1681,506 @@ fn overlay_slice_accumulation_matches_per_pixel_accumulation_on_all_grids() {
         }
     }
 }
+
+fn collect_multi_scan(
+    path: &Path,
+    cfg: &MultiResolutionConfig,
+) -> BTreeMap<(u8, u64), ContinuousAccumulator> {
+    use std::sync::Arc;
+    let mosaic =
+        MosaicReader::open(&[path.to_path_buf()], None, None, OverlapRule::Cutline).unwrap();
+    let mut streamer = MultiScanHorizonStreamer::new_mosaic(Arc::new(mosaic), cfg).unwrap();
+    let mut out = BTreeMap::new();
+    while streamer
+        .drain_completed_into(1024, |_, row| {
+            assert!(
+                out.insert((row.resolution, row.cell_id), row.accumulator)
+                    .is_none(),
+                "duplicate cell ({}, {:x})",
+                row.resolution,
+                row.cell_id
+            );
+        })
+        .unwrap()
+        > 0
+    {}
+    out
+}
+
+fn assert_continuous_close(a: &ContinuousAccumulator, b: &ContinuousAccumulator, ctx: &str) {
+    let close = |x: f64, y: f64, label: &str| {
+        assert!(
+            (x - y).abs() <= 1e-10 * y.abs().max(1.0),
+            "{ctx} {label}: left={x} right={y}"
+        );
+    };
+    close(a.count, b.count, "count");
+    close(a.sum, b.sum, "sum");
+    close(a.min, b.min, "min");
+    close(a.max, b.max, "max");
+    close(a.m2, b.m2, "m2");
+    close(a.sum_w2, b.sum_w2, "sum_w2");
+}
+
+#[test]
+fn multi_resolution_overlay_and_interpolate_decode_single_pass() {
+    use dggs_stream_core::run_profile::RunProfile;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled_128.tif");
+    crate::helpers::write_tiled(
+        &path,
+        (128, 128),
+        (32, 32),
+        crate::helpers::Crs::Geographic {
+            lon: ORIGIN.0,
+            lat: ORIGIN.1,
+            pixel_deg: PIXEL,
+        },
+        "-9999",
+        |x, y| -> f32 {
+            if (x * 7 + y * 5).is_multiple_of(97) {
+                -9999.0
+            } else {
+                plane(
+                    ORIGIN.0 + (f64::from(x) + 0.5) * PIXEL,
+                    ORIGIN.1 - (f64::from(y) + 0.5) * PIXEL,
+                ) as f32
+            }
+        },
+    );
+
+    let resolutions = vec![7u8, 8, 9];
+    for mode in [
+        TransferMode::OVERLAY,
+        TransferMode::Interpolate(Interpolation::Bilinear),
+    ] {
+        let mut multi_cfg = MultiResolutionConfig::new(resolutions.clone());
+        multi_cfg.grid = GridKind::H3;
+        multi_cfg.transfer = mode;
+        let multi_profile = RunProfile::new();
+        multi_cfg.profile = Some(Arc::clone(&multi_profile));
+        let multi_cells = collect_multi_scan(&path, &multi_cfg);
+        assert!(!multi_cells.is_empty());
+
+        let mut single_expected = BTreeMap::new();
+        let mut ref_single_report = None;
+        for &res in &resolutions {
+            let mut single_cfg = config(GridKind::H3, res, mode);
+            let single_profile = RunProfile::new();
+            single_cfg.profile = Some(Arc::clone(&single_profile));
+            let res_cells = collect_multi_scan(&path, &single_cfg);
+            assert!(!res_cells.is_empty());
+            single_expected.extend(res_cells);
+            ref_single_report.get_or_insert_with(|| single_profile.report());
+        }
+
+        assert_eq!(multi_cells, single_expected, "mode={mode:?}");
+
+        let m_rep = multi_profile.report();
+        let s_rep = ref_single_report.unwrap();
+        assert!(m_rep.chunks > 0);
+        assert!(
+            m_rep.chunks <= s_rep.chunks,
+            "mode={mode:?}: multi chunks {} exceeded single chunks {}",
+            m_rep.chunks,
+            s_rep.chunks
+        );
+        assert_eq!(
+            m_rep.windows, s_rep.windows,
+            "mode={mode:?}: expected single-pass window count"
+        );
+    }
+}
+
+#[test]
+fn wrapped_bbox_decodes_each_chunk_of_a_tile_row_once() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::run_profile::RunProfile;
+    use std::sync::Arc;
+
+    // 64 x 16 pixels of 5.625 degrees cover -180..180 and 45..-45, in 16 x 1 tiles of
+    // 4 x 16 pixels.
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("globe_tiled.tif");
+    let strip_path = dir.path().join("globe_strip.tif");
+    let crs = Crs::Geographic {
+        lon: -180.0,
+        lat: 45.0,
+        pixel_deg: 5.625,
+    };
+    let pixel = |x: u32, y: u32| -> f32 { 100.0 + ((x * 7 + y * 3) % 61) as f32 };
+    write_geotiff(
+        &tiled_path,
+        (64, 16),
+        Layout::Tiles(4, 16),
+        crs,
+        "-9999",
+        pixel,
+    );
+    write_geotiff(
+        &strip_path,
+        (64, 16),
+        Layout::Strips(16),
+        crs,
+        "-9999",
+        pixel,
+    );
+
+    let profile = RunProfile::new();
+    // H3 resolution 5 cells are far smaller than the pixels, so interpolation plans
+    // one-row bands: every band of the one chunk row would otherwise reload both edges.
+    let mut cfg = config(
+        GridKind::H3,
+        5,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
+    cfg.bbox = Some([170.0, -45.0, -170.0, 45.0]);
+    let mut oracle_cfg = cfg.clone();
+    cfg.profile = Some(Arc::clone(&profile));
+    oracle_cfg.profile = None;
+
+    let tiled_cells = collect_multi_scan(&tiled_path, &cfg);
+    let oracle_cells = collect_multi_scan(&strip_path, &oracle_cfg);
+    assert!(tiled_cells.len() > 500, "{} cells", tiled_cells.len());
+    assert_eq!(
+        tiled_cells.keys().collect::<Vec<_>>(),
+        oracle_cells.keys().collect::<Vec<_>>()
+    );
+    for (k, a) in &tiled_cells {
+        assert_continuous_close(a, &oracle_cells[k], &format!("key={k:?}"));
+    }
+    let chunks = profile.report().chunks;
+    assert!(
+        chunks <= 16,
+        "{chunks} chunk decodes for a raster of 16 chunks"
+    );
+}
+
+#[test]
+fn bbox_ending_at_180_keeps_the_seam_chunk_for_interpolation() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+
+    // A tiled globe whose first chunk column starts at -180. The S2 face centre at
+    // longitude 180, latitude 0 lies in a bbox ending at 180 and reads that chunk.
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("seam_tiled.tif");
+    let strip_path = dir.path().join("seam_strip.tif");
+    let crs = Crs::Geographic {
+        lon: -180.0,
+        lat: 45.0,
+        pixel_deg: 5.625,
+    };
+    let pixel = |x: u32, y: u32| -> f32 { 100.0 + ((x * 7 + y * 3) % 61) as f32 };
+    write_geotiff(
+        &tiled_path,
+        (64, 16),
+        Layout::Tiles(4, 16),
+        crs,
+        "-9999",
+        pixel,
+    );
+    write_geotiff(
+        &strip_path,
+        (64, 16),
+        Layout::Strips(16),
+        crs,
+        "-9999",
+        pixel,
+    );
+
+    let mut cfg = config(
+        GridKind::S2,
+        0,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
+    cfg.bbox = Some([179.0, -1.0, 180.0, 1.0]);
+    let tiled_cells = collect_multi_scan(&tiled_path, &cfg);
+    let strip_cells = collect_multi_scan(&strip_path, &cfg);
+    assert!(
+        !strip_cells.is_empty(),
+        "the full-width scan finds the seam cell"
+    );
+    assert_eq!(
+        tiled_cells.keys().collect::<Vec<_>>(),
+        strip_cells.keys().collect::<Vec<_>>()
+    );
+    for (k, a) in &tiled_cells {
+        assert_continuous_close(a, &strip_cells[k], &format!("key={k:?}"));
+    }
+}
+
+#[test]
+fn bbox_prunes_transfer_chunks_and_matches_full_scan() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::run_profile::RunProfile;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("sf_tiled.tif");
+    let strip_path = dir.path().join("sf_strip.tif");
+    let crs = Crs::Geographic {
+        lon: -122.45,
+        lat: 37.80,
+        pixel_deg: 0.0005,
+    };
+    let sf_pixel = |x: u32, y: u32| -> f32 {
+        if (x * 11 + y * 13).is_multiple_of(89) {
+            -9999.0
+        } else {
+            100.0 + 25.0 * (f32::from(x as u16) / 19.0).sin() + f32::from(y as u16) * 0.25
+        }
+    };
+    write_geotiff(
+        &tiled_path,
+        (256, 256),
+        Layout::Tiles(32, 32),
+        crs,
+        "-9999",
+        sf_pixel,
+    );
+    write_geotiff(
+        &strip_path,
+        (256, 256),
+        Layout::Strips(256),
+        crs,
+        "-9999",
+        sf_pixel,
+    );
+
+    let interior_bbox = [-122.398, 37.740, -122.390, 37.748];
+    let modes = [
+        TransferMode::OVERLAY,
+        TransferMode::Overlay {
+            weighted: true,
+            mass_preserve: true,
+        },
+        TransferMode::Interpolate(Interpolation::Nearest),
+        TransferMode::Interpolate(Interpolation::Bilinear),
+        TransferMode::Interpolate(Interpolation::Bicubic),
+        TransferMode::Interpolate(Interpolation::Lanczos),
+    ];
+
+    for mode in modes {
+        let profile = RunProfile::new();
+        let mut cfg = config(GridKind::H3, 10, mode);
+        cfg.bbox = Some(interior_bbox);
+        let mut oracle_cfg = cfg.clone();
+        cfg.profile = Some(Arc::clone(&profile));
+        oracle_cfg.profile = None;
+
+        let tiled_cells = collect_multi_scan(&tiled_path, &cfg);
+        let oracle_cells = collect_multi_scan(&strip_path, &oracle_cfg);
+        assert!(!tiled_cells.is_empty(), "mode={mode:?} produced no cells");
+        assert_eq!(
+            tiled_cells.keys().collect::<Vec<_>>(),
+            oracle_cells.keys().collect::<Vec<_>>(),
+            "mode={mode:?} key mismatch"
+        );
+        for (k, a) in &tiled_cells {
+            assert_continuous_close(a, &oracle_cells[k], &format!("mode={mode:?} key={k:?}"));
+        }
+        let report = profile.report();
+        assert!(
+            report.chunks > 0 && report.chunks < 16,
+            "mode={mode:?}: expected < 16 of 64 chunks, got {}",
+            report.chunks
+        );
+    }
+
+    // Disjoint bbox must decode 0 chunks and emit 0 cells.
+    for mode in [
+        TransferMode::OVERLAY,
+        TransferMode::Interpolate(Interpolation::Bilinear),
+    ] {
+        let profile = RunProfile::new();
+        let mut cfg = config(GridKind::H3, 10, mode);
+        cfg.bbox = Some([10.0, 10.0, 11.0, 11.0]);
+        cfg.profile = Some(Arc::clone(&profile));
+        let cells = collect_multi_scan(&tiled_path, &cfg);
+        assert!(cells.is_empty(), "mode={mode:?} expected empty cells");
+        assert_eq!(
+            profile.report().chunks,
+            0,
+            "mode={mode:?} expected 0 chunks"
+        );
+    }
+
+    // Antimeridian-crossing bbox (`west > east`) on a global 360°-wide raster.
+    let global_tiled = dir.path().join("global_tiled.tif");
+    let global_strip = dir.path().join("global_strip.tif");
+    let global_crs = Crs::Geographic {
+        lon: -180.0,
+        lat: 90.0,
+        pixel_deg: 360.0 / 256.0,
+    };
+    let global_pixel = |x: u32, y: u32| -> f32 {
+        if (x * 17 + y * 5).is_multiple_of(73) {
+            -9999.0
+        } else {
+            ((x * 3 + y * 7) % 100 + 1) as f32
+        }
+    };
+    write_geotiff(
+        &global_tiled,
+        (256, 128),
+        Layout::Tiles(32, 32),
+        global_crs,
+        "-9999",
+        global_pixel,
+    );
+    write_geotiff(
+        &global_strip,
+        (256, 128),
+        Layout::Strips(128),
+        global_crs,
+        "-9999",
+        global_pixel,
+    );
+    let antimeridian_bbox = [170.0, 2.0, -170.0, 35.0];
+    for mode in [
+        TransferMode::OVERLAY,
+        TransferMode::Interpolate(Interpolation::Bilinear),
+    ] {
+        let profile = RunProfile::new();
+        let mut cfg = config(GridKind::H3, 3, mode);
+        cfg.bbox = Some(antimeridian_bbox);
+        let mut oracle_cfg = cfg.clone();
+        cfg.profile = Some(Arc::clone(&profile));
+        oracle_cfg.profile = None;
+
+        let tiled_cells = collect_multi_scan(&global_tiled, &cfg);
+        let oracle_cells = collect_multi_scan(&global_strip, &oracle_cfg);
+        assert!(!tiled_cells.is_empty(), "antimeridian mode={mode:?}");
+        assert_eq!(
+            tiled_cells.keys().collect::<Vec<_>>(),
+            oracle_cells.keys().collect::<Vec<_>>(),
+            "antimeridian key mismatch for mode={mode:?}"
+        );
+        for (k, a) in &tiled_cells {
+            assert_continuous_close(a, &oracle_cells[k], &format!("antimeridian {mode:?} {k:?}"));
+        }
+        let report = profile.report();
+        assert!(
+            report.chunks > 0 && report.chunks < 16,
+            "antimeridian mode={mode:?}: expected < 16 of 32 chunks, got {}",
+            report.chunks
+        );
+    }
+}
+
+#[test]
+fn ground_area_multi_resolution_and_bbox_prune_match_single_resolution() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("ga_tiled.tif");
+    let strip_path = dir.path().join("ga_strip.tif");
+    let crs = Crs::Geographic {
+        lon: -122.45,
+        lat: 37.80,
+        pixel_deg: 0.0005,
+    };
+    let px = |x: u32, y: u32| -> f32 {
+        if (x * 9 + y * 7).is_multiple_of(83) {
+            -9999.0
+        } else {
+            ((x * 5 + y * 3) % 41 + 1) as f32
+        }
+    };
+    write_geotiff(
+        &tiled_path,
+        (256, 256),
+        Layout::Tiles(32, 32),
+        crs,
+        "-9999",
+        px,
+    );
+    write_geotiff(
+        &strip_path,
+        (256, 256),
+        Layout::Strips(256),
+        crs,
+        "-9999",
+        px,
+    );
+
+    let bbox = [-122.398, 37.724, -122.374, 37.748];
+    let run_ga = |path: &Path, resolutions: Vec<u8>| {
+        let reader = GeoTiffStreamReader::open(path).unwrap();
+        let mut cfg = MultiResolutionConfig::new(resolutions);
+        cfg.grid = GridKind::H3;
+        cfg.transfer = TransferMode::OVERLAY;
+        cfg.bbox = Some(bbox);
+        let profile = RunProfile::new();
+        cfg.profile = Some(Arc::clone(&profile));
+        let mut out = BTreeMap::new();
+        for row in scan_ground_area_overlay(reader, &cfg).unwrap() {
+            let (res, id, acc) = row.unwrap();
+            assert!(out.insert((res, id), acc).is_none());
+        }
+        (out, profile.report())
+    };
+
+    let (multi_tiled, multi_report) = run_ga(&tiled_path, vec![8, 9]);
+    let (single_8, report_8) = run_ga(&tiled_path, vec![8]);
+    let (single_9, _) = run_ga(&tiled_path, vec![9]);
+    let (multi_oracle, _) = run_ga(&strip_path, vec![8, 9]);
+
+    let mut single_combined = single_8;
+    single_combined.extend(single_9);
+
+    assert!(!multi_tiled.is_empty());
+    assert_eq!(
+        multi_tiled.keys().collect::<Vec<_>>(),
+        single_combined.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        multi_tiled.keys().collect::<Vec<_>>(),
+        multi_oracle.keys().collect::<Vec<_>>()
+    );
+
+    for other in [&single_combined, &multi_oracle] {
+        for (k, a) in &multi_tiled {
+            let b = &other[k];
+            assert!(
+                (a.pixel_count() - b.pixel_count()).abs() <= 1e-10 * b.pixel_count().max(1.0),
+                "{k:?} pixel_count"
+            );
+            assert!(
+                (a.retained_area_m2() - b.retained_area_m2()).abs()
+                    <= 1e-10 * b.retained_area_m2().max(1.0),
+                "{k:?} area"
+            );
+            assert!(
+                (a.area_weighted_sum() - b.area_weighted_sum()).abs()
+                    <= 1e-10 * b.area_weighted_sum().abs().max(1.0),
+                "{k:?} sum"
+            );
+            assert!(
+                (a.area_stats().mean() - b.area_stats().mean()).abs()
+                    <= 1e-10 * b.area_stats().mean().abs().max(1.0),
+                "{k:?} mean"
+            );
+            assert!(
+                (a.area_stats().variance() - b.area_stats().variance()).abs()
+                    <= 1e-10 * b.area_stats().variance().abs().max(1.0),
+                "{k:?} variance"
+            );
+        }
+    }
+
+    assert!(
+        multi_report.chunks > 0 && multi_report.chunks < 16,
+        "expected < 16 of 64 chunks, got {}",
+        multi_report.chunks
+    );
+    assert_eq!(
+        multi_report.chunks, report_8.chunks,
+        "multi-resolution ground_area should decode chunks once"
+    );
+}

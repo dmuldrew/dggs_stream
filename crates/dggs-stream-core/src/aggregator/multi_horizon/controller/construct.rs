@@ -70,6 +70,25 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
         config: &MultiResolutionConfig,
         kernel: K,
     ) -> Result<Self> {
+        Self::build_mosaic(mosaic, config, kernel, true)
+    }
+
+    /// Initialize a new MultiHorizonStreamer without starting its chunk prefetcher
+    /// (used when `TransferStream` owns raster reading).
+    pub(crate) fn new_mosaic_without_prefetch(
+        mosaic: Arc<MosaicReader>,
+        config: &MultiResolutionConfig,
+        kernel: K,
+    ) -> Result<Self> {
+        Self::build_mosaic(mosaic, config, kernel, false)
+    }
+
+    fn build_mosaic(
+        mosaic: Arc<MosaicReader>,
+        config: &MultiResolutionConfig,
+        kernel: K,
+        start_prefetch: bool,
+    ) -> Result<Self> {
         config.validate()?;
         check_bands_exist(&mosaic, config)?;
         let should_compact = config.should_compact_h3_children();
@@ -103,14 +122,16 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             resolution_u8s.push(res_u8);
         }
 
-        let prefetcher = PrefetchedMosaicReader::spawn_with_profile(
-            Arc::clone(&mosaic),
-            config.prefetch_chunks,
-            config.decode_workers,
-            config.fetch_workers,
-            config.decode_budget_bytes,
-            config.profile.clone(),
-        );
+        let prefetcher = start_prefetch.then(|| {
+            PrefetchedMosaicReader::spawn_with_profile(
+                Arc::clone(&mosaic),
+                config.prefetch_chunks,
+                config.decode_workers,
+                config.fetch_workers,
+                config.decode_budget_bytes,
+                config.profile.clone(),
+            )
+        });
         let num_res = resolution_u8s.len();
         let mut resolution_shards: Vec<_> =
             (0..num_res).map(|_| ShardedResolutionMap::new()).collect();
@@ -215,7 +236,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
 
         Ok(Self {
             kernel,
-            prefetcher: Some(prefetcher),
+            prefetcher,
             mosaic,
             grid: config.grid,
             resolutions,
