@@ -284,7 +284,7 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
             batch_pixels,
             output_byte_limit,
             peak_active_bytes: 0,
-            finished_sets: Vec::new(),
+            finished_sets: Default::default(),
             mask_cache: Default::default(),
             new_cell_buffer: Vec::new(),
             key_chunk_buffer: Vec::new(),

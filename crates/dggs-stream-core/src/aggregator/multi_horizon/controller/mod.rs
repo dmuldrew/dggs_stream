@@ -227,7 +227,7 @@ pub struct MultiHorizonStreamer<K: HorizonStreamKernel> {
     /// can start its next window while earlier ones wait to be merged).
     worker_maps: Vec<CellMaps<K::Accumulator>>,
     /// Ring of out-of-order sets, bounded by the map-set count and reused across batches.
-    finished_sets: Vec<Option<CellMaps<K::Accumulator>>>,
+    finished_sets: pipeline::PipelineScratch<K::Accumulator>,
     /// New-cell and computed-key lists of a batch, reused across batches.
     new_cell_buffer: Vec<(usize, u64)>,
     key_chunk_buffer: Vec<KeyChunk>,
