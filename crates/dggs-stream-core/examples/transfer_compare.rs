@@ -1,23 +1,26 @@
-//! Time one continuous scan in a chosen transfer mode or sampling preset, in a fresh process.
+//! Time one scan in a chosen transfer mode or sampling preset, in a fresh process.
 //!
-//! Usage: transfer_compare TIFF GRID RESOLUTION MODE [CELLS_CSV]
+//! Usage: transfer_compare TIFF GRID RESOLUTION KIND MODE [CELLS_CSV]
 //!
-//! MODE is `center` or another sampling preset of the default kernel (`rgss`, `5point`,
-//! `9point`, `16point`, ...), `overlay`, `mass` (mass-preserving overlay), `bilinear`,
-//! `nearest`, `bicubic` or `lanczos` (interpolation), or `auto`.
+//! KIND is `continuous` or `categorical`. MODE is `center` or another sampling preset of
+//! the default kernel (`rgss`, `5point`, `9point`, `16point`, ...), `overlay`, `mass`
+//! (mass-preserving overlay), `nearest`, `bilinear`, `bicubic` or `lanczos`
+//! (interpolation; categorical scans accept only `nearest`), or `auto`.
 //!
-//! Prints `MODE_RUN CELLS MILLISECONDS PEAK_RSS_KIB`, where MODE_RUN is the mode actually
-//! run (`auto` reports its choice) and PEAK_RSS_KIB is the process's peak resident memory
-//! from `/proc/self/status` (`-` where that file doesn't exist). With CELLS_CSV, also
-//! writes `cell_id,count,mean` for every emitted cell, for accuracy comparisons; time
-//! separate runs without it.
+//! Prints `MODE_RUN CELLS MILLISECONDS PEAK_RSS_KIB RATIO`: the mode actually run (`auto`
+//! reports its choice), the cells emitted, the scan time, the process's peak resident
+//! memory from `/proc/self/status` (`-` where that file doesn't exist), and the mean cell
+//! area over the ground area of the raster's centre pixel, the ratio `auto` decides by.
+//! With CELLS_CSV it also writes one line per cell for accuracy comparisons:
+//! `cell_id,count,mean` (continuous) or `cell_id,total,class:weight;class:weight...`
+//! (categorical). Time separate runs without it.
 //! `scripts/benchmark_transfer_modes.py` drives it.
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
 use dggs_stream_core::aggregator::multi_horizon::{
-    MultiResolutionConfig, MultiScanHorizonStreamer,
+    MultiCategoricalHorizonStreamer, MultiResolutionConfig, MultiScanHorizonStreamer,
 };
 use dggs_stream_core::aggregator::SamplingPattern;
 use dggs_stream_core::grid::GridKind;
@@ -31,6 +34,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = args.next().ok_or("missing raster path")?;
     let grid = GridKind::parse(&args.next().ok_or("missing grid")?).ok_or("unknown grid")?;
     let resolution: u8 = args.next().ok_or("missing resolution")?.parse()?;
+    let categorical = match args.next().as_deref() {
+        Some("continuous") => false,
+        Some("categorical") => true,
+        _ => return Err("expected continuous or categorical".into()),
+    };
     let mode = args.next().ok_or("missing mode")?;
     let mut output = args
         .next()
@@ -40,6 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.next().is_some() {
         return Err("unexpected argument".into());
     }
+
+    let tile = TileDescriptor::new(0, GeoTiffStreamReader::open(&path)?, None)?;
+    let pixel_m2 = pixel_ground_area_m2(&tile)?;
+    let ratio = grid.area_m2(resolution) / pixel_m2;
 
     let mut config = MultiResolutionConfig::single(resolution);
     config.grid = grid;
@@ -56,18 +68,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "mass".to_string()
         }
         "auto" => {
-            // Resolve here only to report the choice; the scan itself runs `Auto`.
-            let tile = TileDescriptor::new(0, GeoTiffStreamReader::open(&path)?, None)?;
-            let chosen = resolve_auto_transfer(
-                grid,
-                &[resolution],
-                pixel_ground_area_m2(&tile)?,
-                false,
-                true,
-            );
+            // Resolved here only to report the choice; the scan itself runs `Auto`.
+            let chosen = resolve_auto_transfer(grid, &[resolution], pixel_m2, categorical, true);
             config.transfer = TransferMode::Auto;
             match chosen {
-                TransferMode::Interpolate(_) => "auto:bilinear".to_string(),
+                TransferMode::Interpolate(method) => {
+                    format!("auto:{}", format!("{method:?}").to_lowercase())
+                }
                 other => format!("auto:{}", other.as_str()),
             }
         }
@@ -84,15 +91,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let start = Instant::now();
-    let mut stream = MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path)?, &config)?;
     let mut cells = 0usize;
-    while !stream.is_finished() {
-        let records = stream.fetch_next_batch(4096)?;
-        cells += records.len();
-        if let Some(writer) = &mut output {
-            for record in records {
-                let acc = &record.accumulator;
-                writeln!(writer, "{},{},{}", record.cell_id, acc.count, acc.mean())?;
+    if categorical {
+        let reader = GeoTiffStreamReader::open(&path)?;
+        let mut stream = MultiCategoricalHorizonStreamer::new(reader, &config)?;
+        while !stream.is_finished() {
+            let records = stream.fetch_next_batch(4096)?;
+            cells += records.len();
+            if let Some(writer) = &mut output {
+                for record in records {
+                    let acc = &record.accumulator;
+                    write!(writer, "{},{},", record.cell_id, acc.total_count)?;
+                    let mut first = true;
+                    let mut result = Ok(());
+                    acc.for_each_class(|class, weight| {
+                        if result.is_ok() {
+                            let sep = if first { "" } else { ";" };
+                            result = write!(writer, "{sep}{class}:{weight}");
+                            first = false;
+                        }
+                    });
+                    result?;
+                    writeln!(writer)?;
+                }
+            }
+        }
+    } else {
+        let reader = GeoTiffStreamReader::open(&path)?;
+        let mut stream = MultiScanHorizonStreamer::new(reader, &config)?;
+        while !stream.is_finished() {
+            let records = stream.fetch_next_batch(4096)?;
+            cells += records.len();
+            if let Some(writer) = &mut output {
+                for record in records {
+                    let acc = &record.accumulator;
+                    writeln!(writer, "{},{},{}", record.cell_id, acc.count, acc.mean())?;
+                }
             }
         }
     }
@@ -116,6 +150,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
         })
         .map_or_else(|| "-".to_string(), |kib| kib.to_string());
-    println!("{label} {cells} {elapsed_ms:.3} {peak_rss_kib}");
+    println!("{label} {cells} {elapsed_ms:.3} {peak_rss_kib} {ratio:.6}");
     Ok(())
 }
