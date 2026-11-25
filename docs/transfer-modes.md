@@ -31,15 +31,9 @@ mean.
   │  sub-pixel)  │  per cell)           │  are a real share of each cell)
 ```
 
-Within `overlay`, pick the variant by what a pixel value means:
-
-| The raster holds... | Example | Use |
-| :--- | :--- | :--- |
-| An intensive value, the same whatever the area | temperature, elevation, NDVI, depth | `overlay` (area-weighted mean) |
-| An amount per pixel, to be shared out | population count, biomass per pixel | `overlay` + `mass_preserve` |
-| An amount per unit area, on a lon/lat raster | people per km², kg/m², mm of water | `overlay` + `ground_area` |
-| A class code | land cover, soil type | `overlay` on a categorical scan (class areas) |
-| Presence: did anything touch the cell? | burned area, footprints | `overlay` + `overlay_weighted = false` |
+Within a mode, [choosing a kernel](#choosing-a-kernel) and
+[choosing an overlay mode](#choosing-an-overlay-mode) pick the options by what the pixel values
+mean.
 
 ## Let the engine choose: `auto`
 
@@ -130,6 +124,37 @@ from the surrounding pixels. Each cell is filled exactly once, so `count` is 1 a
 | `bicubic` | Catmull-Rom cubic convolution | 4 × 4 | Sharper; exact for values varying linearly or quadratically; can overshoot near steps |
 | `lanczos` | Lanczos windowed sinc, a = 3, normalised | 6 × 6 | Sharpest; most prone to ringing next to abrupt changes |
 
+### Choosing a kernel
+
+Start from what the raster holds:
+
+| Your raster | Use | Why |
+| :--- | :--- | :--- |
+| Class codes (land cover, soil, zoning) | `nearest` | Codes can't be blended; a categorical scan rejects every other kernel, including the `bilinear` default, so name it |
+| Values that must stay within their neighbours' range (percentages, probabilities, counts, depths that can't go negative) | `bilinear` | It never overshoots, so you won't get 102% cover or a negative depth |
+| Smooth fields (temperature, pressure, elevation in rolling terrain) | `bicubic` | Sharper than `bilinear`, and exact where values vary linearly or quadratically |
+| Very smooth fields where sharpness matters, without NoData nearby | `lanczos` | The sharpest kernel, but it rings next to abrupt changes |
+| Sharp steps (cliffs, coastlines, flood edges, burn scars) | `bilinear`, or `nearest` to keep the step | `bicubic` and `lanczos` overshoot on both sides of a step |
+| Raw pixel values, just on finer cells | `nearest` | It adds no new values |
+
+Things that decide close calls:
+
+- **Overshoot is not clamped.** `bicubic` and `lanczos` can return values slightly above the
+  highest or below the lowest neighbouring pixel; the engine does not clip them. If a bound
+  matters (0–100%, depth ≥ 0), use `bilinear` or clip the result yourself.
+- **NoData narrows the choice.** Whenever any of their taps is NoData, `bicubic` and `lanczos`
+  fall back to `bilinear`, so on a patchy raster (clouds, coasts) most edge cells are bilinear
+  whichever you pick.
+- **Cost grows with the window**: 1, 4, 16 and 36 pixel reads per cell. That matters at very fine
+  resolutions, where the scan emits many cells for every pixel.
+- **No kernel adds detail.** Interpolation only smooths between pixel values: features smaller
+  than a pixel stay invisible, and cells much finer than about a tenth of a pixel across mostly
+  add rows, not information.
+- **Defaults.** Without `interpolation`, `interpolate` uses `bilinear`, so a categorical scan
+  must name `nearest` explicitly or it is rejected. `transfer = "auto"` picks `bilinear` for
+  continuous scans and `nearest` for categorical ones: the choices that are never wrong, if not
+  always the sharpest.
+
 The names `near`, `linear`, `cubic` and `lanczos3` are accepted too, and an interpolation name can
 be passed directly as the transfer (`transfer := 'bicubic'` is `interpolate` with `bicubic`).
 
@@ -163,6 +188,50 @@ that one computation:
 
 Three modifiers apply on top: a [valid-coverage filter](#valid-coverage-valid_coverage_threshold),
 [several bands at once](#several-bands-at-once), and [partitioned scans](#partitioned-overlay).
+
+### Choosing an overlay mode
+
+Start from what one pixel value means:
+
+| The raster holds... | Example | Use | Read |
+| :--- | :--- | :--- | :--- |
+| A value that doesn't scale with area | temperature, elevation, NDVI, depth | weighted `overlay` | `mean` |
+| An amount per pixel | population count, biomass per pixel | `overlay` + `mass_preserve` | `sum` |
+| An amount per unit area, on a lon/lat (EPSG:4326) raster | people per km², kg/m², mm of water | `overlay` + `ground_area` | `area_weighted_sum` (÷ 10⁶ for per-km²) |
+| An amount per unit area, on an equal-area projected raster | people per km² in EPSG:5070 or LAEA | weighted `overlay` | `sum × pixel area` |
+| A class code | land cover, soil type | `overlay` on a categorical scan | `fraction`, or `count × pixel area` |
+| Presence: did anything touch the cell? | burned, built or flooded pixels | `overlay` + `overlay_weighted = false` | `count > 0`, `max` |
+
+Then check the questions that change the answer:
+
+- **Is the total the answer?** Weighted overlay splits each pixel across cells by area, so its
+  `sum` comes close to the raster's total, but only `mass_preserve` guarantees it, by
+  normalising every pixel's shares to exactly one. Use `mass_preserve` whenever you will add cells
+  up or compare the result with a published total.
+- **Do pixels differ in area?** Pixel-weighted statistics treat every pixel the same. That is
+  exact on an equal-area projection, close on a small region of any projection, and wrong for
+  totals and densities on a lon/lat raster, whose pixels shrink with cos(latitude): use
+  `ground_area` there. Web Mercator pixels vary even more (with cos²) and `ground_area` doesn't
+  accept them; reproject densities to an equal-area CRS or to EPSG:4326 first. For means of
+  intensive values, the error inside one cell is small unless the cell spans many degrees of
+  latitude.
+- **What does NoData mean?** If it means *not observed* (clouds, gaps, outside a survey), a cell
+  that is mostly NoData reports a mean from a sliver: add `valid_coverage_threshold` (e.g. 0.5)
+  to drop it. If it means *none here* (dry ground in a flood depth grid, no population), the
+  valid `count` is the extent of what you are measuring, so read it rather than filtering on it,
+  or use the threshold deliberately to keep cells that are mostly covered.
+- **Should slivers count in `min` and `max`?** They do: a pixel that overlaps a cell by a
+  fraction of a percent still sets its `min` or `max`. That is the conservative choice for
+  hazards (the deepest water touching a parcel). For a value typical of the cell, use `mean`.
+- **Will you add counts across cells?** Not with `overlay_weighted = false`: a pixel on an edge
+  counts in every cell it touches. Use it to flag cells, not to total them.
+- **Are the cells near pixel size?** Overlay is right at any size, but between about 1 and 16
+  pixels per cell centre assignment is faster and usually close enough for means. Overlay pays off
+  there for categorical fractions, for small cells along edges that matter (coastlines,
+  boundaries), and wherever totals must hold.
+- **Very coarse cells.** Above 500 km across, overlay takes whole pixels by centre (and
+  ground-area overlay refuses), so the choice between overlay and centre assignment stops
+  mattering.
 
 ### What the output columns mean
 
