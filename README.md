@@ -21,7 +21,7 @@ Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) a
 | `assign_centers` (default) | The pixels whose centres it holds | Cells about a pixel in size, where it is fastest |
 | `interpolate` | The value interpolated at its centre | Cells finer than the pixels |
 | `overlay` | Every pixel it overlaps, weighted by the part inside it, with modes that [conserve totals](docs/transfer-modes.md#mass-preserving-mass_preserve), [weight by true ground area](docs/transfer-modes.md#ground-area-overlay-ground_area) on lon/lat rasters, or [measure class areas](docs/transfer-modes.md#categorical-overlay-class-areas) | Many pixels per cell (where it is also [fastest](docs/transfer-modes.md#comparing-the-modes)), or when edge pixels, totals or km² must be exact |
-| `auto` | Whichever of the three fits the cell-to-pixel size ratio | You'd rather not choose; pair it with `resolutions="auto"` for pixel-sized cells |
+| `auto` | `interpolate` for continuous rasters with cells finer than the pixels, `overlay` otherwise | You'd rather not choose; pair it with `resolutions="auto"` for pixel-sized cells |
 
 The modes differ in which side does the looking:
 
@@ -246,8 +246,7 @@ error at the edge of the buffer, where a hexagon is wholly in or out, is small. 
 finer than the pixels only work because of the transfer mode: with the default centre
 assignment, two of every three resolution-12 hexagons would hold no NLCD pixel centre and drop
 out of the join, and the rest would be all-or-nothing. `overlay` gives each one its exact class
-areas instead. (`transfer := 'auto'` would pick `interpolate` with `nearest` here, which keeps
-every hexagon but gives each one only the class at its centre.) The NLCD
+areas instead; `transfer := 'auto'` runs overlay for categorical scans too. The NLCD
 [Tree Canopy Cover](https://www.mrlc.gov/data) product (percent canopy per pixel) is a more
 direct measure than forest classes: aggregate it with `h3_raster_continuous_aggregate`, use
 `mean` in place of `forest_share`, and `transfer := 'auto'` to interpolate it smoothly.
@@ -368,7 +367,7 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
   interpolates a value at each cell's centre; `transfer=overlay` splits each pixel across the
   cells it overlaps, tracing curved cell edges to 1/64 of a pixel, with
   [modes](docs/transfer-modes.md#the-overlay-modes) for conserved totals, true ground area,
-  class areas and valid-coverage filtering. `transfer=auto` picks between them from the
+  class areas and valid-coverage filtering. `transfer=auto` picks between the two from the
   cell-to-pixel size ratio. Both stream the raster in bands of rows, decode chunks ahead of the
   scan, and clip fine cells in parallel ([details](docs/transfer-modes.md#performance)).
   Overlay accumulates runs of whole pixels as slices; Rust callers can hook that path with

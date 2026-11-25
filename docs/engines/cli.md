@@ -42,7 +42,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--nodata-policy <omit\|emit>` | all (ground-area scans require `omit`) | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
-| `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Transfer Modes](../transfer-modes.md)). `auto` picks `interpolate` for cells finer than pixels, weighted `overlay` for cells much coarser, and `assign_centers` otherwise; it is reported on stderr |
+| `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Transfer Modes](../transfer-modes.md)). `auto` picks bilinear `interpolate` for continuous scans with cells finer than the pixels and weighted `overlay` otherwise (categorical scans always overlay); it is reported on stderr |
 | `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer interpolate` | Interpolation (default `bilinear`) |
 | `--overlay-weighted <true\|false>` | `--transfer overlay` | `false` counts every touched pixel once |
 | `--valid-coverage-threshold <0..1>` | `--transfer overlay` | Minimum valid fraction of selected overlap, measured by area even for unweighted statistics. Mass-preserving scans are exempt. |

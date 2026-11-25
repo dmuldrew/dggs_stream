@@ -134,8 +134,9 @@ other datasets you might join later are most likely to be indexed on already.
 weighted `overlay`. Each hexagon then gets every pixel it overlaps, split at its edges by area:
 `count` becomes the wet area in pixels, exact to a fraction of a pixel, and `max` sees a deep
 pixel even when its centre lies in the next hexagon. Because dry ground is NoData, `count × 9 m²`
-is the flooded area of each hexagon. Fed a 30 m flood model, the same call would pick
-`assign_centers` (about 2.4 pixels per hexagon), and at resolution 13 `interpolate`.
+is the flooded area of each hexagon. Fed a 30 m flood model, the same call would still pick
+`overlay` (about 2.4 pixels per hexagon), and at resolution 13, with cells finer than the
+pixels, `interpolate`.
 
 ```sql
 INSTALL spatial; LOAD spatial;
@@ -236,8 +237,8 @@ where the centres fall, and a pixel on the edge counts wholly for one side. Over
 edge pixel by area, so each cell's `mean` is the true area-weighted mean and its `count` the
 overlapped area in pixels. Because S2 children tile their parent and each pixel's shares add up
 to the whole pixel, the level-9 roll-up in step 4 is the same weighted mean a direct level-9
-overlay would give. (`transfer="auto"` keeps centre assignment at this ratio, so ask for overlay
-explicitly.)
+overlay would give. (`transfer="auto"` picks overlay here too; it is spelled out because the
+roll-up depends on it.)
 
 ```python
 # Build the bindings: cd crates/dggs-stream-sedona/python && maturin develop --release

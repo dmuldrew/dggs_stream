@@ -2616,7 +2616,7 @@ mod tests {
                 .unwrap();
             let near_res = (0..=grid.max_resolution())
                 .rev()
-                .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+                .find(|&r| grid.area_m2(r) >= pixel_m2)
                 .unwrap();
             let overlay_res = (0..=grid.max_resolution())
                 .rev()
@@ -2642,13 +2642,15 @@ mod tests {
                 parse(&["-r", &r_fine, "--transfer", "auto"]),
                 TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Bilinear)
             );
+            // Categorical scans overlay even below 1:1.
             assert_eq!(
                 parse(&["-r", &r_fine, "-c", "--transfer", "auto"]),
-                TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Nearest)
+                TransferMode::OVERLAY
             );
+            // From 1:1 up, continuous scans overlay too.
             assert_eq!(
                 parse(&["-r", &r_near, "--transfer", "auto"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
             assert_eq!(
                 parse(&["-r", &r_over, "--transfer", "auto"]),
@@ -2669,9 +2671,10 @@ mod tests {
                 parse(&["-r", &r_over, "--transfer", "auto", "--ground-area"]),
                 TransferMode::OVERLAY
             );
+            // Ground area cannot interpolate, so below 1:1 it overlays as well.
             assert_eq!(
                 parse(&["-r", &r_fine, "--transfer", "auto", "--ground-area"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
         }
     }

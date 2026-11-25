@@ -1245,16 +1245,17 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         let fine_res = (0..=grid.max_resolution())
             .find(|&r| grid.area_m2(r) < pixel_m2)
             .unwrap();
+        // The finest resolution at or above 1:1, and the finest at or above 16:1.
         let near_res = (0..=grid.max_resolution())
             .rev()
-            .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+            .find(|&r| grid.area_m2(r) >= pixel_m2)
             .unwrap();
         let overlay_res = (0..=grid.max_resolution())
             .rev()
             .find(|&r| grid.area_m2(r) >= 16.0 * pixel_m2)
             .unwrap();
 
-        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> Interpolate(Nearest).
+        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> OVERLAY.
         let auto_cont_fine = scan(&cont_path, &config(grid, fine_res, TransferMode::Auto));
         let exp_cont_fine = scan(
             &cont_path,
@@ -1275,12 +1276,9 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             &config(grid, fine_res, TransferMode::Auto),
         )
         .unwrap();
-        assert_eq!(
-            auto_cat.transfer_mode(),
-            TransferMode::Interpolate(Interpolation::Nearest)
-        );
+        assert_eq!(auto_cat.transfer_mode(), TransferMode::OVERLAY, "{grid}");
 
-        // Near 1:1 -> AssignCenters.
+        // At or just above 1:1 -> OVERLAY, with the same rows as an explicit overlay.
         let s_near = MultiScanHorizonStreamer::new(
             GeoTiffStreamReader::open(&cont_path).unwrap(),
             &config(grid, near_res, TransferMode::Auto),
@@ -1288,7 +1286,12 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         .unwrap();
         assert_eq!(
             s_near.transfer_mode(),
-            TransferMode::AssignCenters,
+            TransferMode::OVERLAY,
+            "{grid} near_res={near_res}"
+        );
+        assert_eq!(
+            scan(&cont_path, &config(grid, near_res, TransferMode::Auto)),
+            scan(&cont_path, &config(grid, near_res, TransferMode::OVERLAY)),
             "{grid} near_res={near_res}"
         );
 
@@ -1304,15 +1307,16 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             "{grid} overlay_res={overlay_res}"
         );
 
-        // valid_coverage_threshold forces OVERLAY even near 1:1.
-        let mut cov_cfg = config(grid, near_res, TransferMode::Auto);
+        // valid_coverage_threshold forces OVERLAY even below 1:1, where a continuous scan
+        // would otherwise interpolate.
+        let mut cov_cfg = config(grid, fine_res, TransferMode::Auto);
         cov_cfg.valid_coverage_threshold = Some(0.5);
         let s_cov =
             MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&cont_path).unwrap(), &cov_cfg)
                 .unwrap();
         assert_eq!(s_cov.transfer_mode(), TransferMode::OVERLAY);
 
-        // Compaction forces AssignCenters even at coarse resolution.
+        // Compaction forces AssignCenters at any ratio.
         if grid == GridKind::H3 {
             let mut cmp_cfg = config(grid, overlay_res, TransferMode::Auto);
             cmp_cfg.compact_h3_children = true;
