@@ -601,6 +601,21 @@ _FLOAT_OPTIONS = (
 GRIDS: Dict[str, int] = {"h3": 15, "a5": 30, "s2": 30, "healpix": 29}
 
 
+def _may_roll_up_nested(grid: str, categorical: bool, options: Dict[str, Any]) -> bool:
+    """Whether a scan may roll fine overlay cells up into coarser ones.
+
+    Mirrors the core's condition: categorical, weighted, non-mass-preserving overlay on a
+    strictly nested grid. Resolution predicates are then left to Polars.
+    """
+    return (
+        categorical
+        and grid in ("s2", "healpix")
+        and str(options.get("transfer") or "").strip().lower() == "overlay"
+        and options.get("overlay_weighted") is not False
+        and not options.get("mass_preserve")
+    )
+
+
 def _normalize_grid(grid: Optional[str]) -> str:
     """A grid name in canonical form; `None` is H3."""
     if grid is None:
@@ -1404,6 +1419,11 @@ def scan_raster(
                 # narrowed list could change the mode and with it the retained rows.
                 # Leave the resolution predicate to Polars then.
                 if str(options.get("transfer") or "").strip().lower() == "auto":
+                    allowed = None
+                # Categorical overlay on nested grids (S2, HEALPix) clips the finest
+                # scanned resolution and rolls its cells up into the coarser ones, so
+                # dropping the finest would change how coarser cells are clipped.
+                if _may_roll_up_nested(grid, categorical, options):
                     allowed = None
                 if allowed is not None:
                     configured = _resolution_list(resolutions, GRIDS[grid])

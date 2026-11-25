@@ -2186,6 +2186,263 @@ fn ground_area_multi_resolution_and_bbox_prune_match_single_resolution() {
 }
 
 #[test]
+fn nested_overlay_rollup_matches_single_res_continuous_quantiles_and_filters() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::aggregator::{NodataPolicy, QuantileTarget};
+    use dggs_stream_core::run_profile::RunProfile;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested_cont.tif");
+    let crs = Crs::Geographic {
+        lon: -122.45,
+        lat: 37.80,
+        pixel_deg: 0.002,
+    };
+    write_geotiff(
+        &path,
+        (64, 64),
+        Layout::Tiles(16, 16),
+        crs,
+        "-9999",
+        |x, y| {
+            if (x * 11 + y * 7) % 13 == 0 {
+                -9999.0
+            } else {
+                10.0 + ((x * 5 + y * 3) % 47) as f32 * 0.5
+            }
+        },
+    );
+
+    for (grid, resolutions) in [
+        (GridKind::S2, vec![12u8, 13, 14]),
+        (GridKind::Healpix, vec![11u8, 12, 13]),
+    ] {
+        for (nodata_policy, min_count, valid_cov, bbox) in [
+            (NodataPolicy::Omit, None, None, None),
+            (
+                NodataPolicy::Emit,
+                None,
+                Some(0.5f64),
+                Some([-122.43, 37.70, -122.34, 37.78]),
+            ),
+            (
+                NodataPolicy::Omit,
+                Some(2.0f64),
+                Some(0.5f64),
+                Some([-122.43, 37.70, -122.34, 37.78]),
+            ),
+        ] {
+            let mut multi_cfg = MultiResolutionConfig::new(resolutions.clone()).with_grid(grid);
+            multi_cfg.transfer = TransferMode::OVERLAY;
+            multi_cfg.quantiles = QuantileTarget::parse_list("p50").unwrap();
+            multi_cfg.nodata_policy = nodata_policy;
+            multi_cfg.min_count = min_count;
+            multi_cfg.valid_coverage_threshold = valid_cov;
+            multi_cfg.bbox = bbox;
+            let multi_profile = RunProfile::new();
+            multi_cfg.profile = Some(Arc::clone(&multi_profile));
+            let multi_cells = collect_multi_scan(&path, &multi_cfg);
+            assert!(!multi_cells.is_empty(), "{grid:?} produced no cells");
+
+            let mut single_combined = BTreeMap::new();
+            let mut finest_single_report = None;
+            for &res in &resolutions {
+                let mut single_cfg = multi_cfg.clone();
+                single_cfg.resolutions = vec![res];
+                let single_profile = RunProfile::new();
+                single_cfg.profile = Some(Arc::clone(&single_profile));
+                let res_cells = collect_multi_scan(&path, &single_cfg);
+                assert!(
+                    !res_cells.is_empty(),
+                    "{grid:?} res {res} produced no cells"
+                );
+                single_combined.extend(res_cells);
+                if res == *resolutions.iter().max().unwrap() {
+                    finest_single_report = Some(single_profile.report());
+                }
+            }
+
+            assert_eq!(
+                multi_cells.keys().collect::<Vec<_>>(),
+                single_combined.keys().collect::<Vec<_>>(),
+                "{grid:?} key mismatch"
+            );
+            for (k, a) in &multi_cells {
+                let b = &single_combined[k];
+                let tol = if k.0 == *resolutions.iter().max().unwrap() {
+                    1e-10
+                } else {
+                    // Coarser S2/HEALPix polygons use 4-corner chords while the
+                    // nested finest children follow the subdivided curved edge.
+                    2e-3
+                };
+                for (x, y, label) in [
+                    (a.count, b.count, "count"),
+                    (a.sum, b.sum, "sum"),
+                    (a.min, b.min, "min"),
+                    (a.max, b.max, "max"),
+                    (a.m2, b.m2, "m2"),
+                ] {
+                    assert!(
+                        (x - y).abs() <= tol * y.abs().max(1.0),
+                        "{grid:?} {k:?} {label}: left={x} right={y}"
+                    );
+                }
+                if k.0 == *resolutions.iter().max().unwrap() {
+                    assert!(
+                        (a.sum_w2 - b.sum_w2).abs() <= 1e-10 * b.sum_w2.abs().max(1.0),
+                        "{grid:?} {k:?} sum_w2: left={} right={}",
+                        a.sum_w2,
+                        b.sum_w2
+                    );
+                }
+                let (qa, qb) = (a.quantile(0.5), b.quantile(0.5));
+                if qa.is_finite() && qb.is_finite() {
+                    assert!(
+                        (qa - qb).abs() <= 1.0,
+                        "{grid:?} {k:?} median: left={qa} right={qb}"
+                    );
+                } else {
+                    assert_eq!(qa.is_nan(), qb.is_nan(), "{grid:?} {k:?} median NaN");
+                }
+            }
+
+            let m_rep = multi_profile.report();
+            let f_rep = finest_single_report.unwrap();
+            assert!(m_rep.chunks > 0);
+            assert!(
+                m_rep.chunks <= f_rep.chunks,
+                "{grid:?}: multi chunks {} exceeded finest single chunks {}",
+                m_rep.chunks,
+                f_rep.chunks
+            );
+            assert_eq!(m_rep.windows, f_rep.windows, "{grid:?} windows");
+        }
+    }
+}
+
+#[test]
+fn nested_overlay_rollup_matches_single_res_categorical_and_multi_tile() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let tile_north = dir.path().join("cat_north.tif");
+    let tile_south = dir.path().join("cat_south.tif");
+
+    // Two vertically adjacent tiles so parents straddle the tile seam.
+    write_geotiff(
+        &tile_north,
+        (48, 32),
+        Layout::Tiles(16, 16),
+        Crs::Geographic {
+            lon: -122.45,
+            lat: 37.80,
+            pixel_deg: 0.002,
+        },
+        "255",
+        |x, y| {
+            if (x + y * 3) % 11 == 0 {
+                255
+            } else {
+                ((x * 3 + y) % 5 + 1) as u8
+            }
+        },
+    );
+    write_geotiff(
+        &tile_south,
+        (48, 32),
+        Layout::Tiles(16, 16),
+        Crs::Geographic {
+            lon: -122.45,
+            lat: 37.80 - 32.0 * 0.002,
+            pixel_deg: 0.002,
+        },
+        "255",
+        |x, y| {
+            if (x * 5 + y) % 13 == 0 {
+                255
+            } else {
+                ((x + y * 2) % 5 + 1) as u8
+            }
+        },
+    );
+
+    let paths = [tile_north, tile_south];
+    let collect_cat = |cfg: &MultiResolutionConfig| -> BTreeMap<(u8, u64), _> {
+        let mosaic = Arc::new(MosaicReader::open(&paths, None, None, OverlapRule::First).unwrap());
+        let mut streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, cfg).unwrap();
+        let mut out = BTreeMap::new();
+        while streamer
+            .drain_completed_into(256, |_i, rec| {
+                assert!(
+                    out.insert((rec.resolution, rec.cell_id), rec.accumulator)
+                        .is_none(),
+                    "duplicate cell ({}, {})",
+                    rec.resolution,
+                    rec.cell_id
+                );
+            })
+            .unwrap()
+            > 0
+        {}
+        out
+    };
+
+    for (grid, resolutions) in [
+        (GridKind::S2, vec![12u8, 13, 14]),
+        (GridKind::Healpix, vec![11u8, 12, 13]),
+    ] {
+        let mut multi_cfg = MultiResolutionConfig::new(resolutions.clone()).with_grid(grid);
+        multi_cfg.transfer = TransferMode::OVERLAY;
+        multi_cfg.valid_coverage_threshold = Some(0.4);
+        let multi_cells = collect_cat(&multi_cfg);
+        assert!(!multi_cells.is_empty(), "{grid:?} produced no cells");
+
+        let mut single_combined = BTreeMap::new();
+        for &res in &resolutions {
+            let mut single_cfg = multi_cfg.clone();
+            single_cfg.resolutions = vec![res];
+            single_combined.extend(collect_cat(&single_cfg));
+        }
+
+        assert_eq!(
+            multi_cells.keys().collect::<Vec<_>>(),
+            single_combined.keys().collect::<Vec<_>>(),
+            "{grid:?} categorical key mismatch"
+        );
+        for (k, a) in &multi_cells {
+            let b = &single_combined[k];
+            let tol = if k.0 == *resolutions.iter().max().unwrap() {
+                1e-10
+            } else {
+                2e-3
+            };
+            assert!(
+                (a.total_count - b.total_count).abs() <= tol * b.total_count.max(1.0),
+                "{grid:?} {k:?} total_count: left={} right={}",
+                a.total_count,
+                b.total_count
+            );
+            assert_eq!(a.majority().0, b.majority().0, "{grid:?} {k:?} mode");
+            assert_eq!(
+                a.unique_classes(),
+                b.unique_classes(),
+                "{grid:?} {k:?} classes"
+            );
+            a.for_each_class(|cls, w_a| {
+                let w_b = b.get_class_count(cls);
+                assert!(
+                    (w_a - w_b).abs() <= tol * w_b.max(1.0),
+                    "{grid:?} {k:?} class {cls} weight: left={w_a} right={w_b}"
+                );
+            });
+        }
+    }
+}
+
+#[test]
 fn centre_scans_keep_minus_180_centres_in_a_bbox_ending_at_180() {
     // One-degree pixels whose first centre is longitude -180, which the point filter
     // places in a box reaching 180. Batched S2 and HEALPix rows must keep it too.
@@ -2202,5 +2459,86 @@ fn centre_scans_keep_minus_180_centres_in_a_bbox_ending_at_180() {
         // Column 0 of each of the 4 rows: values 1, 11, 21, 31.
         assert_eq!(count, 4.0, "{grid}");
         assert_eq!(sum, 64.0, "{grid}");
+    }
+}
+
+#[test]
+fn nested_rollup_emits_each_parent_once_when_children_wait_for_a_later_tile() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use std::sync::Arc;
+
+    // Tile A touches 180 degrees just south of the equator: its fine children straddling
+    // the antimeridian have bounds that overlap every longitude, so they wait for tile B
+    // to end. Tile B lies farther west in the same level-7 parent (the equatorial
+    // HEALPix cell centred on 180 degrees) and reaches south past it. Level-15 cells are
+    // smaller than B's pixels, so B is planned in two row blocks and the parent's end row
+    // on B passes in the first, while those children still wait.
+    const GRID: GridKind = GridKind::Healpix;
+    const COARSE: u8 = 7;
+    const FINE: u8 = 15;
+    let dir = tempfile::tempdir().unwrap();
+    let seam = dir.path().join("seam.tif");
+    let tall = dir.path().join("tall.tif");
+    let class = |x: u32, y: u32| ((x * 3 + y) % 5 + 1) as u8;
+    write_geotiff(
+        &seam,
+        (10, 20),
+        Layout::Tiles(16, 16),
+        Crs::Geographic {
+            lon: 179.95,
+            lat: 0.0,
+            pixel_deg: 0.005,
+        },
+        "255",
+        class,
+    );
+    write_geotiff(
+        &tall,
+        (20, 256),
+        Layout::Tiles(16, 16),
+        Crs::Geographic {
+            lon: 179.5,
+            lat: 0.5,
+            pixel_deg: 0.01,
+        },
+        "255",
+        class,
+    );
+    let paths = [seam, tall];
+    let mut cfg = MultiResolutionConfig::new(vec![COARSE, FINE]).with_grid(GRID);
+    cfg.transfer = TransferMode::OVERLAY;
+    let mosaic = Arc::new(MosaicReader::open(&paths, None, None, OverlapRule::First).unwrap());
+    let mut streamer = MultiCategoricalHorizonStreamer::new_mosaic(mosaic, &cfg).unwrap();
+    let mut cells = BTreeMap::new();
+    while streamer
+        .drain_completed_into(256, |_i, rec| {
+            assert!(
+                cells
+                    .insert((rec.resolution, rec.cell_id), rec.accumulator.total_count)
+                    .is_none(),
+                "duplicate cell ({}, {:x})",
+                rec.resolution,
+                rec.cell_id
+            );
+        })
+        .unwrap()
+        > 0
+    {}
+    // Each parent's weight is the sum of its children's.
+    let mut children = BTreeMap::<u64, f64>::new();
+    for (&(res, id), &total) in &cells {
+        if res == FINE {
+            *children
+                .entry(GRID.parent(id, COARSE).unwrap())
+                .or_default() += total;
+        }
+    }
+    assert!(!children.is_empty());
+    for (parent, total) in children {
+        let got = cells[&(COARSE, parent)];
+        assert!(
+            (got - total).abs() <= 1e-9 * total.max(1.0),
+            "{parent:x}: {got} vs {total}"
+        );
     }
 }
