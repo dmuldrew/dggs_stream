@@ -209,6 +209,39 @@ impl<A: AccumulatorMerge> ShardedResolutionMap<A> {
         self.structure_bytes = (0..NUM_SHARDS).map(|s| self.shard_bytes(s)).sum();
     }
 
+    /// Upper bound on the table and eviction-heap bytes merging would allocate if
+    /// `incoming[s]` more cells reached shard `s` (each taken as a new cell). A table
+    /// that outgrows its capacity is reallocated at least twice as large, and the new
+    /// allocation is live alongside the old one (already in [`Self::estimated_bytes`])
+    /// while it rehashes; eviction heaps grow the same way when keys are tracked.
+    pub(crate) fn structure_growth_bytes(&self, incoming: &[usize; NUM_SHARDS]) -> usize {
+        let mut growth = 0usize;
+        for (s, &n) in incoming.iter().enumerate() {
+            if n == 0 {
+                continue;
+            }
+            let table = &self.shards[s];
+            let needed = table.len().saturating_add(n);
+            if needed > table.capacity() {
+                growth = growth.saturating_add(table_bytes::<u64, A>(
+                    needed.max(table.capacity().saturating_mul(2)),
+                ));
+            }
+            if self.track_eviction {
+                let heap = &self.eviction[s];
+                let needed = heap.len().saturating_add(n);
+                if needed > heap.capacity() {
+                    growth = growth.saturating_add(
+                        needed
+                            .max(heap.capacity().saturating_mul(2))
+                            .saturating_mul(size_of::<EvictionEntry>()),
+                    );
+                }
+            }
+        }
+        growth
+    }
+
     /// Return total active in-flight cell count across all 32 shards
     pub fn active_cell_count(&self) -> usize {
         self.shards.iter().map(|s| s.len()).sum()
@@ -554,6 +587,34 @@ mod tests {
             .map(|a| a.heap_bytes())
             .sum();
         dynamic + (0..NUM_SHARDS).map(|s| map.shard_bytes(s)).sum::<usize>()
+    }
+
+    #[test]
+    fn structure_growth_counts_only_shards_that_outgrow_their_capacity() {
+        let mut map = ShardedResolutionMap::<ContinuousAccumulator>::new();
+        let mut incoming = [0usize; NUM_SHARDS];
+        assert_eq!(map.structure_growth_bytes(&incoming), 0);
+        // Fill shard 0's table to capacity, then ask for one more cell there.
+        let key = (0u64..).find(|&k| get_shard(k) == 0).unwrap();
+        map.shards[0].reserve(8);
+        let capacity = map.shards[0].capacity();
+        let mut next = key;
+        while map.shards[0].len() < capacity {
+            map.shards[0].insert(next, ContinuousAccumulator::new(1.0));
+            next = (next + 1..).find(|&k| get_shard(k) == 0).unwrap();
+        }
+        incoming[0] = 1;
+        let growth = map.structure_growth_bytes(&incoming);
+        assert!(
+            growth >= table_bytes::<u64, ContinuousAccumulator>(2 * capacity),
+            "{growth}"
+        );
+        // Room left in another shard costs no table growth.
+        incoming[0] = 0;
+        map.shards[1].reserve(64);
+        incoming[1] = 4;
+        map.set_eviction_enabled(false);
+        assert_eq!(map.structure_growth_bytes(&incoming), 0);
     }
 
     #[test]

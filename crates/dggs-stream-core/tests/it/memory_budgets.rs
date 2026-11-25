@@ -185,3 +185,43 @@ fn compaction_limit_decomposes_groups_without_losing_or_duplicating_samples() {
     assert_eq!(covered.len(), plain.len());
     assert!(covered.values().all(|&n| n == 1));
 }
+
+#[test]
+fn parallel_spills_match_serial_spills_and_the_in_memory_scan() {
+    // Resolution-11 cells are about one per pixel, so a 4 MiB aggregation budget
+    // spills repeatedly, each time with enough cells to sort and merge in parallel.
+    let file = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let scan = |budget: usize, workers: usize| {
+        let mut config = MultiResolutionConfig::new(vec![11]);
+        config.aggregation_budget_bytes = budget;
+        config.aggregation_workers = Some(workers);
+        config.decode_workers = 2;
+        config.spill_directory = Some(dir.path().to_path_buf());
+        run(file.path(), &config)
+    };
+    let reference = scan(512 << 20, 1);
+    assert_eq!(
+        reference.spill_runs, 0,
+        "the large budget keeps every cell in memory"
+    );
+    let serial = scan(4 << 20, 1);
+    let parallel = scan(4 << 20, 8);
+    assert!(
+        serial.spill_runs > 1,
+        "{} serial spill runs",
+        serial.spill_runs
+    );
+    assert!(
+        parallel.spill_runs > 1,
+        "{} parallel spill runs",
+        parallel.spill_runs
+    );
+    assert!(
+        reference.cells.len() > 100_000,
+        "{} cells",
+        reference.cells.len()
+    );
+    assert_same(&reference.cells, &serial.cells);
+    assert_same(&reference.cells, &parallel.cells);
+}
