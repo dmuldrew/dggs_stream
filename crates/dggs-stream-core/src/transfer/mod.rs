@@ -258,6 +258,23 @@ impl TransferMode {
     }
 }
 
+/// Whether an overlay scan with `mode` on `grid` may clip only its finest resolution and
+/// roll those cells up into the coarser ones (strictly nested grids, weighted overlay
+/// without mass preservation, categorical statistics). Engines that push resolution
+/// predicates into a scan must not do so then: dropping the finest resolution changes
+/// how the coarser cells are clipped.
+pub fn nested_overlay_rollup(grid: GridKind, mode: TransferMode, categorical: bool) -> bool {
+    categorical
+        && matches!(grid, GridKind::S2 | GridKind::Healpix)
+        && matches!(
+            mode,
+            TransferMode::Overlay {
+                weighted: true,
+                mass_preserve: false
+            }
+        )
+}
+
 /// Choose a concrete [`TransferMode`] for `grid` at `resolutions` given `pixel_area_m2`.
 ///
 /// - When all resolutions have `cell_area / pixel_area < 1.0`, selects `Interpolate`
