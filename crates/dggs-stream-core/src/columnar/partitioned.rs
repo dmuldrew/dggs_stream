@@ -122,6 +122,9 @@ impl PartitionedBatchReader {
             config.quantiles.clear();
         }
         let mosaic = open_mosaic(paths, &config)?;
+        if config.transfer.is_auto() {
+            config.transfer = config.transfer.resolve_for_mosaic(&mosaic, &config, false);
+        }
         if let Some(partition) = config
             .partition
             .as_ref()

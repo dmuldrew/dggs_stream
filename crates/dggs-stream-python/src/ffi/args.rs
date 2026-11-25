@@ -211,7 +211,7 @@ pub(crate) struct PyScanOptions {
     pub(crate) nodata_policy: Option<String>,
     pub(crate) emit_nodata_value: Option<f64>,
     pub(crate) decimals: Option<i64>,
-    /// `assign_centers` (default), `interpolate` or `overlay`.
+    /// `assign_centers` (default), `interpolate`, `overlay` or `auto`.
     pub(crate) transfer: Option<String>,
     pub(crate) interpolation: Option<String>,
     pub(crate) overlay_weighted: Option<bool>,
@@ -447,7 +447,10 @@ fn apply_scan_options(cfg: &mut PyScanConfig, options: Option<&str>) -> Result<(
         if cfg.categorical
             || opts.band.is_some()
             || cfg.spectral_formula.is_some()
-            || cfg.transfer != TransferMode::AssignCenters
+            || !matches!(
+                cfg.transfer,
+                TransferMode::AssignCenters | TransferMode::Auto
+            )
             || cfg.min_count.is_some()
             || cfg.min_mean.is_some()
             || cfg.max_mean.is_some()

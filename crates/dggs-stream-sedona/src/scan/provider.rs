@@ -108,6 +108,33 @@ fn compacts(config: &MultiResolutionConfig) -> bool {
     config.compact || config.compact_h3_children
 }
 
+/// `transfer = 'auto'` chooses its mode from the scanned resolutions and the bbox, so
+/// narrowing either could change the mode and the values of the cells that remain.
+/// Their predicates stay residual, applied to the completed scan.
+fn auto_transfer(config: &MultiResolutionConfig) -> bool {
+    config.transfer.is_auto()
+}
+
+/// Resolution and bbox predicates change what `transfer = 'auto'` resolves to, so
+/// they are not pushed into such a scan (a partitioned scan resolves to centres).
+fn demote_for_auto(
+    config: &MultiResolutionConfig,
+    filters: &[FilterPredicate],
+    mut statuses: Vec<FilterPushdownStatus>,
+) -> Vec<FilterPushdownStatus> {
+    if auto_transfer(config) && config.partition.is_none() {
+        for (status, filter) in statuses.iter_mut().zip(filters) {
+            if matches!(
+                filter,
+                FilterPredicate::Resolution(_) | FilterPredicate::Bbox(_)
+            ) {
+                *status = FilterPushdownStatus::Unsupported;
+            }
+        }
+    }
+    statuses
+}
+
 /// Apply a filter common to both providers (`MinCount`, `Bbox`, `Resolution`) by narrowing
 /// `config`. Returns `false` when the filter excludes every row. Filters only ever narrow the
 /// table: a `Resolution` outside the configured set or a `Bbox` disjoint from the configured
@@ -129,6 +156,7 @@ fn apply_shared_filter(config: &mut MultiResolutionConfig, filter: &FilterPredic
             }
             true
         }
+        FilterPredicate::Resolution(_) | FilterPredicate::Bbox(_) if auto_transfer(config) => true,
         FilterPredicate::Resolution(r) => {
             if config.resolutions.contains(&r) {
                 config.resolutions = vec![r];
@@ -264,6 +292,36 @@ fn reader_limit(
 mod bbox_tests {
     use super::*;
     use h3o::CellIndex;
+
+    #[test]
+    fn auto_transfer_keeps_resolution_and_bbox_predicates_residual() {
+        let filters = [
+            FilterPredicate::Resolution(9),
+            FilterPredicate::Bbox([0.0, 0.0, 1.0, 1.0]),
+            FilterPredicate::MinCount(2.0),
+        ];
+        let pushed = vec![
+            FilterPushdownStatus::Exact,
+            FilterPushdownStatus::Inexact,
+            FilterPushdownStatus::Exact,
+        ];
+        let mut config = MultiResolutionConfig::single(9);
+        assert_eq!(
+            demote_for_auto(&config, &filters, pushed.clone()),
+            pushed,
+            "a concrete mode keeps the pushdown"
+        );
+        config.transfer = TransferMode::Auto;
+        let demoted = demote_for_auto(&config, &filters, pushed);
+        assert_eq!(demoted[0], FilterPushdownStatus::Unsupported);
+        assert_eq!(demoted[1], FilterPushdownStatus::Unsupported);
+        assert_eq!(demoted[2], FilterPushdownStatus::Exact);
+
+        // Narrowing is skipped too, so the scan still resolves against the full set.
+        let mut narrowed = config.clone();
+        assert!(apply_shared_filter(&mut narrowed, &filters[0]));
+        assert_eq!(narrowed.resolutions, config.resolutions);
+    }
 
     #[test]
     fn expand_wraps_and_saturates() {
@@ -513,12 +571,14 @@ fn partitioned_scan(
     batch_size: usize,
 ) -> Result<Box<dyn RasterScanExec>> {
     // SedonaDB's SQL aggregate accepts center-assignment states only.
-    if config.transfer != TransferMode::AssignCenters {
+    let mut config = config.clone();
+    if config.transfer.is_auto() {
+        config.transfer = TransferMode::AssignCenters;
+    } else if config.transfer != TransferMode::AssignCenters {
         return Err(DggsStreamError::InvalidParameter(
             "SedonaDB partitioned scans require transfer 'assign_centers'".into(),
         ));
     }
-    let mut config = config.clone();
     let mut empty = false;
     for f in filters {
         if let FilterPredicate::Resolution(_) = f {
@@ -827,7 +887,7 @@ impl RasterScan for ContinuousRasterTableProvider {
         if self.config.partition.is_some() {
             return filters.iter().map(partitioned_pushdown).collect();
         }
-        filters
+        let statuses: Vec<_> = filters
             .iter()
             .map(|f| match f {
                 FilterPredicate::MinCount(_)
@@ -852,7 +912,8 @@ impl RasterScan for ContinuousRasterTableProvider {
                 FilterPredicate::Bbox(_) => FilterPushdownStatus::Inexact,
                 _ => FilterPushdownStatus::Unsupported,
             })
-            .collect()
+            .collect();
+        demote_for_auto(&self.config, filters, statuses)
     }
 
     fn scan(
@@ -1163,7 +1224,7 @@ impl RasterScan for CategoricalRasterTableProvider {
         if self.config.partition.is_some() {
             return filters.iter().map(partitioned_pushdown).collect();
         }
-        filters
+        let statuses: Vec<_> = filters
             .iter()
             .map(|f| match f {
                 FilterPredicate::MinCount(_) if emits_nodata(&self.config) => {
@@ -1178,7 +1239,8 @@ impl RasterScan for CategoricalRasterTableProvider {
                 FilterPredicate::Bbox(_) => FilterPushdownStatus::Inexact,
                 _ => FilterPushdownStatus::Unsupported,
             })
-            .collect()
+            .collect();
+        demote_for_auto(&self.config, filters, statuses)
     }
 
     fn scan(

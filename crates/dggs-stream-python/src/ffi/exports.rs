@@ -97,7 +97,7 @@ struct PyExportOptions {
     nodata_policy: Option<String>,
     emit_nodata_value: Option<f64>,
     decimals: Option<i64>,
-    /// `assign_centers` (default), `interpolate` or `overlay`.
+    /// `assign_centers` (default), `interpolate`, `overlay` or `auto`.
     transfer: Option<String>,
     interpolation: Option<String>,
     overlay_weighted: Option<bool>,

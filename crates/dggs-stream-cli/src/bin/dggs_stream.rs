@@ -112,9 +112,10 @@ fn print_help() {
           --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
                                      each pixel into the cell holding its centre),\n                                     \
                                      interpolate (each cell takes the value interpolated\n                                     \
-                                     at its centre; for cells finer than pixels) or\n                                     \
+                                     at its centre; for cells finer than pixels),\n                                     \
                                      overlay (each cell aggregates the pixels it\n                                     \
-                                     overlaps, weighted by overlap area)\n  \
+                                     overlaps, weighted by overlap area), or auto\n                                     \
+                                     (pick from cell-to-pixel area ratio and options)\n  \
           --interpolation <M>        nearest, bilinear (default), bicubic or lanczos\n  \
           --valid-coverage-threshold <F>  Overlay: minimum valid overlap fraction (0..1)\n  \
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \

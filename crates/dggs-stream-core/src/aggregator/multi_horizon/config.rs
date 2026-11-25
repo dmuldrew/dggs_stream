@@ -461,10 +461,28 @@ impl MultiResolutionConfig {
     pub(crate) fn validate_coverage_threshold(&self) -> Result<()> {
         if let Some(t) = self.valid_coverage_threshold {
             if !(0.0..=1.0).contains(&t)
-                || !matches!(self.transfer, crate::transfer::TransferMode::Overlay { .. })
+                || !matches!(
+                    self.transfer,
+                    crate::transfer::TransferMode::Overlay { .. }
+                        | crate::transfer::TransferMode::Auto
+                )
             {
                 return Err(DggsStreamError::InvalidParameter(
                     "valid_coverage_threshold requires overlay and a finite fraction in [0, 1]"
+                        .into(),
+                ));
+            }
+            // `auto` falls back to centre assignment for these options, which cannot
+            // enforce a coverage threshold: refuse instead of dropping the filter.
+            if self.transfer.is_auto()
+                && (self.should_compact_h3_children()
+                    || self.spectral_formula.is_some()
+                    || !self.sampling.is_single_point())
+            {
+                return Err(DggsStreamError::InvalidParameter(
+                    "valid_coverage_threshold needs overlay, but compaction, a spectral formula \
+                     and sub-pixel sampling force center assignment; use transfer 'overlay' \
+                     without them or drop the threshold"
                         .into(),
                 ));
             }
@@ -628,6 +646,19 @@ mod tests {
         assert_eq!(cfg.resolutions, vec![8]);
         assert_eq!(cfg.quantiles.len(), 0);
         assert!(cfg.spectral_formula.is_none());
+    }
+
+    #[test]
+    fn auto_transfer_refuses_a_coverage_threshold_it_cannot_enforce() {
+        let mut cfg = MultiResolutionConfig {
+            transfer: crate::transfer::TransferMode::Auto,
+            valid_coverage_threshold: Some(1.0),
+            ..Default::default()
+        };
+        cfg.validate().expect("auto can resolve to overlay");
+        cfg.sampling = SamplingPattern::nine_point();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("valid_coverage_threshold"), "{err}");
     }
 
     #[test]

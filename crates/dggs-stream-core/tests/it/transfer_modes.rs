@@ -35,7 +35,11 @@ fn pixel_centre(c: u32, r: u32) -> (f64, f64) {
 fn scan(path: &Path, config: &MultiResolutionConfig) -> BTreeMap<u64, ContinuousAccumulator> {
     let reader = GeoTiffStreamReader::open(path).unwrap();
     let streamer = MultiScanHorizonStreamer::new(reader, config).unwrap();
-    assert_eq!(streamer.transfer_mode(), config.transfer);
+    if config.transfer.is_auto() {
+        assert!(!streamer.transfer_mode().is_auto());
+    } else {
+        assert_eq!(streamer.transfer_mode(), config.transfer);
+    }
     collect_cells(streamer)
 }
 
@@ -1212,6 +1216,114 @@ fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
         assert!((a.area_stats().mean() - 3.0).abs() < 1e-12);
     }
     assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
+}
+
+#[test]
+fn auto_transfer_resolves_across_scales_and_constraints() {
+    let (_tmp, cont_path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| {
+            let (lon, lat) = pixel_centre(c, r);
+            plane(lon, lat) as f32
+        });
+    let (_cat_tmp, cat_path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_tempfile(|c, r| ((c / 4 + r / 4) % 5 + 1) as u8);
+
+    let mosaic = MosaicReader::open(
+        std::slice::from_ref(&cont_path),
+        None,
+        None,
+        OverlapRule::default(),
+    )
+    .unwrap();
+    let pixel_m2 = dggs_stream_core::resolution::mosaic_pixel_ground_area_m2(&mosaic).unwrap();
+
+    for grid in GridKind::ALL {
+        let fine_res = (0..=grid.max_resolution())
+            .find(|&r| grid.area_m2(r) < pixel_m2)
+            .unwrap();
+        let near_res = (0..=grid.max_resolution())
+            .rev()
+            .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+            .unwrap();
+        let overlay_res = (0..=grid.max_resolution())
+            .rev()
+            .find(|&r| grid.area_m2(r) >= 16.0 * pixel_m2)
+            .unwrap();
+
+        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> Interpolate(Nearest).
+        let auto_cont_fine = scan(&cont_path, &config(grid, fine_res, TransferMode::Auto));
+        let exp_cont_fine = scan(
+            &cont_path,
+            &config(
+                grid,
+                fine_res,
+                TransferMode::Interpolate(Interpolation::Bilinear),
+            ),
+        );
+        assert_eq!(
+            auto_cont_fine, exp_cont_fine,
+            "{grid} fine_res={fine_res} continuous"
+        );
+
+        let cat_reader = GeoTiffStreamReader::open(&cat_path).unwrap();
+        let auto_cat = MultiCategoricalHorizonStreamer::new(
+            cat_reader,
+            &config(grid, fine_res, TransferMode::Auto),
+        )
+        .unwrap();
+        assert_eq!(
+            auto_cat.transfer_mode(),
+            TransferMode::Interpolate(Interpolation::Nearest)
+        );
+
+        // Near 1:1 -> AssignCenters.
+        let s_near = MultiScanHorizonStreamer::new(
+            GeoTiffStreamReader::open(&cont_path).unwrap(),
+            &config(grid, near_res, TransferMode::Auto),
+        )
+        .unwrap();
+        assert_eq!(
+            s_near.transfer_mode(),
+            TransferMode::AssignCenters,
+            "{grid} near_res={near_res}"
+        );
+
+        // Coarse (>= 16:1) -> OVERLAY.
+        let s_overlay = MultiScanHorizonStreamer::new(
+            GeoTiffStreamReader::open(&cont_path).unwrap(),
+            &config(grid, overlay_res, TransferMode::Auto),
+        )
+        .unwrap();
+        assert_eq!(
+            s_overlay.transfer_mode(),
+            TransferMode::OVERLAY,
+            "{grid} overlay_res={overlay_res}"
+        );
+
+        // valid_coverage_threshold forces OVERLAY even near 1:1.
+        let mut cov_cfg = config(grid, near_res, TransferMode::Auto);
+        cov_cfg.valid_coverage_threshold = Some(0.5);
+        let s_cov =
+            MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&cont_path).unwrap(), &cov_cfg)
+                .unwrap();
+        assert_eq!(s_cov.transfer_mode(), TransferMode::OVERLAY);
+
+        // Compaction forces AssignCenters even at coarse resolution.
+        if grid == GridKind::H3 {
+            let mut cmp_cfg = config(grid, overlay_res, TransferMode::Auto);
+            cmp_cfg.compact_h3_children = true;
+            let s_cmp = MultiScanHorizonStreamer::new(
+                GeoTiffStreamReader::open(&cont_path).unwrap(),
+                &cmp_cfg,
+            )
+            .unwrap();
+            assert_eq!(s_cmp.transfer_mode(), TransferMode::AssignCenters);
+        }
+    }
 }
 
 /// Fixed, dense native-grid references, independent of the overlay subdivision.

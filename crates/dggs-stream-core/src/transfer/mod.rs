@@ -11,6 +11,9 @@
 //!   the overlapped fraction of each pixel, computed exactly from the cell's polygon in
 //!   pixel space. With `mass_preserve`, every pixel's weights are normalised to sum to
 //!   one, so the cells' `sum` column adds up to the raster's total.
+//! - [`TransferMode::Auto`](crate::transfer::TransferMode::Auto): resolves on the open raster from `cell_area / pixel_area`
+//!   (`Interpolate` below 1:1, `AssignCenters` near 1:1, weighted `Overlay` at >= 16:1)
+//!   while respecting scan options such as categorical mode, compaction, and coverage.
 //!
 //! Both non-default modes walk the raster in bands of rows, list the cells of each band
 //! from the band's bounding box, and hold only that band's pixels and the cells still
@@ -30,7 +33,27 @@ pub(crate) use stream::ground_area_overlay_tile;
 pub use stream::{scan_ground_area_overlay, TransferAccumulator, TransferStream};
 pub use window::RowWindow;
 
+use crate::aggregator::multi_horizon::MultiResolutionConfig;
 use crate::error::{DggsStreamError, Result};
+use crate::grid::GridKind;
+use crate::histogram::HistogramWeight;
+use crate::raster::mosaic::MosaicReader;
+
+/// Maximum `cell_area / pixel_area` ratio for `transfer = "auto"` to pick cell-centre
+/// interpolation (`Interpolate`): below 1:1, cells are smaller than pixels so centre
+/// assignment leaves empty cells.
+pub const AUTO_INTERPOLATE_MAX_RATIO: f64 = 1.0;
+
+/// Minimum `cell_area / pixel_area` ratio for `transfer = "auto"` to pick area-weighted
+/// `Overlay`: from 16:1 (roughly 4x linear pixel size) upward, fractional boundary
+/// weights improve accuracy and polygon span clipping avoids per-pixel indexing.
+pub const AUTO_OVERLAY_MIN_RATIO: f64 = 16.0;
+
+/// Above this cell diameter bound (`GridSpec::max_cell_diameter_km`, about four times a
+/// typical edge) `overlay` assigns whole pixels to cells by centre: the edges of such
+/// cells bend by more than a kilometre from the straight lines the polygon clipping
+/// assumes, and a pixel is negligible next to the cell.
+pub(crate) const COARSE_CELL_DIAMETER_KM: f64 = 500.0;
 
 /// How pixels are transferred onto cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -49,11 +72,14 @@ pub enum TransferMode {
         /// conserved exactly.
         mass_preserve: bool,
     },
+    /// Choose between [`Self::Interpolate`], [`Self::AssignCenters`], and
+    /// [`Self::OVERLAY`] automatically from cell-to-pixel area ratio and scan options.
+    Auto,
 }
 
 impl TransferMode {
     /// The accepted mode names, for error messages.
-    pub const EXPECTED: &'static str = "'assign_centers', 'interpolate' or 'overlay'";
+    pub const EXPECTED: &'static str = "'assign_centers', 'interpolate', 'overlay' or 'auto'";
 
     /// The area-weighted overlay.
     pub const OVERLAY: Self = Self::Overlay {
@@ -62,10 +88,10 @@ impl TransferMode {
     };
 
     /// Build a mode from the user-facing options: `transfer` (`assign_centers`,
-    /// `interpolate`, `overlay`; `None` is the default), `interpolation` (`nearest`,
-    /// `bilinear`, `bicubic`, `lanczos`; default `bilinear`), `overlay_weighted`
-    /// (default `true`) and `mass_preserve` (default `false`). An option that does not
-    /// belong to the chosen mode is an error.
+    /// `interpolate`, `overlay`, `auto`; `None` is the default `assign_centers`),
+    /// `interpolation` (`nearest`, `bilinear`, `bicubic`, `lanczos`; default `bilinear`),
+    /// `overlay_weighted` (default `true`) and `mass_preserve` (default `false`). An
+    /// option that does not belong to the chosen mode is an error.
     pub fn from_options(
         transfer: Option<&str>,
         interpolation: Option<&str>,
@@ -76,6 +102,7 @@ impl TransferMode {
         let name = transfer.map(|t| t.trim().to_ascii_lowercase().replace('-', "_"));
         let mode = match name.as_deref() {
             None | Some("assign_centers" | "assign" | "centers" | "centres") => Self::AssignCenters,
+            Some("auto") => Self::Auto,
             Some("interpolate" | "interpolation" | "resample") => {
                 Self::Interpolate(match interpolation {
                     None => Interpolation::Bilinear,
@@ -142,13 +169,142 @@ impl TransferMode {
         matches!(self, Self::AssignCenters)
     }
 
-    /// `"assign_centers"`, `"interpolate"` or `"overlay"`.
+    /// Whether this mode asks the engine to choose a concrete transfer mode automatically.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    /// Resolve `Self::Auto` for a standard single-band continuous or categorical mosaic
+    /// scan, returning concrete modes unchanged.
+    pub fn resolve_for_mosaic(
+        &self,
+        mosaic: &MosaicReader,
+        config: &MultiResolutionConfig,
+        categorical: bool,
+    ) -> Self {
+        self.resolve_for_mosaic_with(mosaic, config, categorical, true)
+    }
+
+    /// Resolve `Self::Auto` for a `ground_area` scan (`Interpolate` is unsupported there,
+    /// so resolution stays between [`Self::AssignCenters`] and [`Self::OVERLAY`]).
+    pub fn resolve_for_ground_area(
+        &self,
+        mosaic: &MosaicReader,
+        config: &MultiResolutionConfig,
+    ) -> Self {
+        self.resolve_for_mosaic_with(mosaic, config, false, false)
+    }
+
+    /// Resolve `Self::Auto` for a multi-band continuous scan (`Interpolate` is
+    /// unsupported there, so resolution stays between [`Self::AssignCenters`] and
+    /// [`Self::OVERLAY`]).
+    pub fn resolve_for_multiband(
+        &self,
+        mosaic: &MosaicReader,
+        config: &MultiResolutionConfig,
+    ) -> Self {
+        self.resolve_for_mosaic_with(mosaic, config, false, false)
+    }
+
+    fn resolve_for_mosaic_with(
+        &self,
+        mosaic: &MosaicReader,
+        config: &MultiResolutionConfig,
+        categorical: bool,
+        allow_interpolate: bool,
+    ) -> Self {
+        if !self.is_auto() {
+            return *self;
+        }
+        if config.should_compact_h3_children()
+            || config.spectral_formula.is_some()
+            || !config.sampling.is_single_point()
+        {
+            return Self::AssignCenters;
+        }
+        if config.valid_coverage_threshold.is_some()
+            || config
+                .histogram
+                .as_ref()
+                .is_some_and(|h| h.weight == HistogramWeight::Area)
+        {
+            return Self::OVERLAY;
+        }
+        if config.partition.is_some() {
+            return Self::AssignCenters;
+        }
+        let Ok(pixel_area_m2) =
+            crate::resolution::mosaic_pixel_ground_area_m2_in_bbox(mosaic, config.bbox)
+        else {
+            return Self::AssignCenters;
+        };
+        resolve_auto_transfer(
+            config.grid,
+            &config.resolutions,
+            pixel_area_m2,
+            categorical,
+            allow_interpolate,
+        )
+    }
+
+    /// `"assign_centers"`, `"interpolate"`, `"overlay"` or `"auto"`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AssignCenters => "assign_centers",
             Self::Interpolate(_) => "interpolate",
             Self::Overlay { .. } => "overlay",
+            Self::Auto => "auto",
         }
+    }
+}
+
+/// Choose a concrete [`TransferMode`] for `grid` at `resolutions` given `pixel_area_m2`.
+///
+/// - When all resolutions have `cell_area / pixel_area < 1.0`, selects `Interpolate`
+///   (`Nearest` when `categorical`, `Bilinear` when continuous) if `allow_interpolate`,
+///   or falls back to `AssignCenters`.
+/// - When all resolutions have `cell_area / pixel_area >= 16.0`, or span across `1.0`,
+///   and every cell diameter bound is at most `500 km`, selects [`TransferMode::OVERLAY`].
+/// - Otherwise (near `1:1` or coarse global cells), selects [`TransferMode::AssignCenters`].
+pub fn resolve_auto_transfer(
+    grid: GridKind,
+    resolutions: &[u8],
+    pixel_area_m2: f64,
+    categorical: bool,
+    allow_interpolate: bool,
+) -> TransferMode {
+    if resolutions.is_empty() || !pixel_area_m2.is_finite() || pixel_area_m2 <= 0.0 {
+        return TransferMode::AssignCenters;
+    }
+    let spec = grid.spec();
+    let any_coarse = resolutions
+        .iter()
+        .any(|&r| spec.max_cell_diameter_km(r) > COARSE_CELL_DIAMETER_KM);
+    let mut min_ratio = f64::INFINITY;
+    let mut max_ratio = 0.0f64;
+    for &r in resolutions {
+        let ratio = grid.area_m2(r) / pixel_area_m2;
+        min_ratio = min_ratio.min(ratio);
+        max_ratio = max_ratio.max(ratio);
+    }
+    let all_below_one = max_ratio < AUTO_INTERPOLATE_MAX_RATIO;
+    let all_overlay = min_ratio >= AUTO_OVERLAY_MIN_RATIO;
+    let spans_unit =
+        min_ratio < AUTO_INTERPOLATE_MAX_RATIO && max_ratio >= AUTO_INTERPOLATE_MAX_RATIO;
+    if all_below_one {
+        if allow_interpolate {
+            TransferMode::Interpolate(if categorical {
+                Interpolation::Nearest
+            } else {
+                Interpolation::Bilinear
+            })
+        } else {
+            TransferMode::AssignCenters
+        }
+    } else if (all_overlay || spans_unit) && !any_coarse {
+        TransferMode::OVERLAY
+    } else {
+        TransferMode::AssignCenters
     }
 }
 
@@ -197,11 +353,25 @@ mod tests {
                 mass_preserve: false
             }
         );
+        assert_eq!(
+            build(Some("auto"), None, None, None).unwrap(),
+            TransferMode::Auto
+        );
+        assert_eq!(
+            build(Some("AUTO"), None, None, None).unwrap(),
+            TransferMode::Auto
+        );
+        assert!(TransferMode::Auto.is_auto());
+        assert!(!TransferMode::AssignCenters.is_auto());
+        assert_eq!(TransferMode::Auto.as_str(), "auto");
         for bad in [
             build(Some("smear"), None, None, None),
             build(Some("interpolate"), Some("cubic9"), None, None),
             build(None, Some("bilinear"), None, None),
             build(Some("overlay"), Some("bilinear"), None, None),
+            build(Some("auto"), Some("bilinear"), None, None),
+            build(Some("auto"), None, Some(true), None),
+            build(Some("auto"), None, None, Some(true)),
             build(Some("interpolate"), None, None, Some(true)),
             build(None, None, Some(true), None),
             build(Some("overlay"), None, Some(false), Some(true)),
@@ -225,5 +395,74 @@ mod tests {
             "interpolate"
         );
         assert_eq!(TransferMode::OVERLAY.as_str(), "overlay");
+    }
+
+    #[test]
+    fn resolve_auto_transfer_thresholds() {
+        for grid in GridKind::ALL {
+            let res = 8u8.min(grid.max_resolution());
+            let cell = grid.area_m2(res);
+
+            // Below 1:1 chooses interpolate (Bilinear for continuous, Nearest for categorical),
+            // or AssignCenters when interpolation is disallowed.
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell * 2.0, false, true),
+                TransferMode::Interpolate(Interpolation::Bilinear)
+            );
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell * 2.0, true, true),
+                TransferMode::Interpolate(Interpolation::Nearest)
+            );
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell * 2.0, false, false),
+                TransferMode::AssignCenters
+            );
+
+            // Near 1:1 (1..16) chooses AssignCenters.
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell, false, true),
+                TransferMode::AssignCenters
+            );
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell / 10.0, false, true),
+                TransferMode::AssignCenters
+            );
+
+            // At or above 16:1 chooses Overlay (unless cell exceeds 500 km diameter).
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell / 16.0, false, true),
+                TransferMode::OVERLAY
+            );
+            assert_eq!(
+                resolve_auto_transfer(grid, &[res], cell / 16.0, true, true),
+                TransferMode::OVERLAY
+            );
+        }
+
+        // Mixed resolutions spanning across 1:1 choose Overlay when below 500 km.
+        let r10 = 10u8;
+        let pixel_at_11 = GridKind::H3.area_m2(11);
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[r10, 12], pixel_at_11, false, true),
+            TransferMode::OVERLAY
+        );
+        // Coarse global resolution (> 500 km diameter bound) falls back to AssignCenters.
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[0], 1e6, false, true),
+            TransferMode::AssignCenters
+        );
+        // Degenerate or empty inputs fall back safely to AssignCenters.
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[], 100.0, false, true),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[8], 0.0, false, true),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[8], f64::NAN, false, true),
+            TransferMode::AssignCenters
+        );
     }
 }

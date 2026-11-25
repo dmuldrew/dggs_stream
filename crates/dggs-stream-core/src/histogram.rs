@@ -244,10 +244,12 @@ impl HistogramSpec {
     pub fn transfer_mode(&self, requested: TransferMode) -> Result<TransferMode> {
         match (self.weight, requested) {
             (HistogramWeight::Count, mode) => Ok(mode),
-            (HistogramWeight::Area, TransferMode::AssignCenters) => Ok(TransferMode::Overlay {
-                weighted: true,
-                mass_preserve: false,
-            }),
+            (HistogramWeight::Area, TransferMode::AssignCenters | TransferMode::Auto) => {
+                Ok(TransferMode::Overlay {
+                    weighted: true,
+                    mass_preserve: false,
+                })
+            }
             (HistogramWeight::Area, mode @ TransferMode::Overlay { weighted: true, .. }) => {
                 Ok(mode)
             }

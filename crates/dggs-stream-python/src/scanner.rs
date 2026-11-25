@@ -72,7 +72,7 @@ impl PyRasterScanner {
                 || cfg.spectral_formula.is_some()
                 || !matches!(
                     cfg.transfer,
-                    TransferMode::AssignCenters | TransferMode::OVERLAY
+                    TransferMode::AssignCenters | TransferMode::OVERLAY | TransferMode::Auto
                 )
                 || cfg.sampling != SamplingPattern::center()
                 || cfg.output.nodata != NodataPolicy::Omit)
@@ -82,9 +82,10 @@ impl PyRasterScanner {
             ));
         }
         if cfg.ground_area
-            && cfg
-                .valid_coverage_threshold
-                .is_some_and(|t| cfg.transfer != TransferMode::OVERLAY || !(0.0..=1.0).contains(&t))
+            && cfg.valid_coverage_threshold.is_some_and(|t| {
+                !matches!(cfg.transfer, TransferMode::OVERLAY | TransferMode::Auto)
+                    || !(0.0..=1.0).contains(&t)
+            })
         {
             return Err(DggsStreamError::InvalidParameter("ground_area valid_coverage_threshold requires weighted overlay and a fraction in [0, 1]".into()));
         }
@@ -190,7 +191,10 @@ impl PyRasterScanner {
         }
         if (self.config.aggregation_budget_bytes.is_some()
             || self.config.decode_budget_bytes.is_some())
-            && mr_cfg.transfer != TransferMode::AssignCenters
+            && !matches!(
+                mr_cfg.transfer,
+                TransferMode::AssignCenters | TransferMode::Auto
+            )
         {
             return Err(DggsStreamError::InvalidParameter(
                 "aggregation_budget_mb and decode_budget_mb require transfer=assign_centers".into(),

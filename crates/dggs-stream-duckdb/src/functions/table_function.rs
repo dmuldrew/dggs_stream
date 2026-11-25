@@ -211,7 +211,7 @@ impl RasterTable for ContinuousTable {
             use dggs_stream_core::transfer::TransferMode;
             if !matches!(
                 common.execution.transfer,
-                TransferMode::AssignCenters | TransferMode::OVERLAY
+                TransferMode::AssignCenters | TransferMode::OVERLAY | TransferMode::Auto
             ) {
                 bind.set_error("ground_area requires center assignment or weighted overlay without mass_preserve");
                 return None;

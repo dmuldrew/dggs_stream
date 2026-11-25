@@ -115,30 +115,66 @@ impl MultiBandStreamer {
             ));
         }
         let bands = reader.project_bands(bands);
-        if matches!(config.transfer, TransferMode::Overlay { .. }) {
-            config.validate()?;
-            let mosaic = crate::raster::mosaic::MosaicReader::from_single_reader(
+        let (overlay_mosaic, resolved) = if config.transfer.is_auto() {
+            let mosaic = Arc::new(crate::raster::mosaic::MosaicReader::from_single_reader(
                 reader,
                 config.bbox,
                 config.custom_crs.as_deref(),
-            )?;
-            let stream = TransferStream::new_bands(Arc::new(mosaic), config, bands)?;
+            )?);
+            let resolved = config.transfer.resolve_for_multiband(&mosaic, config);
+            if matches!(resolved, TransferMode::Overlay { .. }) {
+                (Some(mosaic), resolved)
+            } else {
+                let mut resolved_cfg = config.clone();
+                resolved_cfg.transfer = resolved;
+                let kernel = Kernel {
+                    bands,
+                    quantiles: resolved_cfg.track_quantiles(),
+                };
+                let streamer = MultiHorizonStreamer::new_mosaic(mosaic, &resolved_cfg, kernel)?;
+                return Ok(Self {
+                    profile: streamer.run_profile().cloned(),
+                    first_resolution: streamer.resolution_u8s().first().copied(),
+                    inner: Scan::Centers(Box::new(streamer)),
+                });
+            }
+        } else if matches!(config.transfer, TransferMode::Overlay { .. }) {
+            let mosaic = Arc::new(crate::raster::mosaic::MosaicReader::from_single_reader(
+                reader,
+                config.bbox,
+                config.custom_crs.as_deref(),
+            )?);
+            (Some(mosaic), config.transfer)
+        } else {
+            let kernel = Kernel {
+                bands,
+                quantiles: config.track_quantiles(),
+            };
+            let streamer = MultiHorizonStreamer::new(reader, config, kernel)?;
+            return Ok(Self {
+                profile: streamer.run_profile().cloned(),
+                first_resolution: streamer.resolution_u8s().first().copied(),
+                inner: Scan::Centers(Box::new(streamer)),
+            });
+        };
+        if let Some(mosaic) = overlay_mosaic {
+            config.validate()?;
+            let mut resolved_cfg;
+            let cfg = if resolved == config.transfer {
+                config
+            } else {
+                resolved_cfg = config.clone();
+                resolved_cfg.transfer = resolved;
+                &resolved_cfg
+            };
+            let stream = TransferStream::new_bands(mosaic, cfg, bands)?;
             return Ok(Self {
                 inner: Scan::Overlay(Box::new(stream)),
-                profile: config.profile.clone(),
-                first_resolution: config.resolutions.first().copied(),
+                profile: cfg.profile.clone(),
+                first_resolution: cfg.resolutions.first().copied(),
             });
         }
-        let kernel = Kernel {
-            bands,
-            quantiles: config.track_quantiles(),
-        };
-        let streamer = MultiHorizonStreamer::new(reader, config, kernel)?;
-        Ok(Self {
-            profile: streamer.run_profile().cloned(),
-            first_resolution: streamer.resolution_u8s().first().copied(),
-            inner: Scan::Centers(Box::new(streamer)),
-        })
+        unreachable!()
     }
 
     pub fn transform_failures(&self) -> u64 {
