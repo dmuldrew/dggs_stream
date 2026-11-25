@@ -253,7 +253,7 @@ direct measure than forest classes: aggregate it with `h3_raster_continuous_aggr
 | [Wetland loss inside vs. outside protected areas](docs/worked-examples.md#1-wetland-loss-inside-vs-outside-protected-areas--polars-on-a5) | Python & Polars | A5 (equal-area) | Categorical overlay: exact class areas |
 | [Flooded area at parcels and roads](docs/worked-examples.md#2-flooded-area-at-parcels-and-roads--duckdb-on-h3) | DuckDB | H3 | `auto` (picks area-weighted overlay) |
 | [Snowpack per sub-basin, rolled up to the basin](docs/worked-examples.md#3-snowpack-per-sub-basin-rolled-up-to-the-basin--sedonadb-on-s2) | SedonaDB | S2 (exact nesting) | Weighted overlay |
-| [Land temperature by latitude band](docs/worked-examples.md#4-land-temperature-by-latitude-band--cli-on-healpix) | CLI | HEALPix (equal-area rings) | Ground-area overlay, `auto` resolution |
+| [Land temperature by latitude band and by city](docs/worked-examples.md#4-land-temperature-by-latitude-band-and-by-city--cli-on-healpix) | CLI | HEALPix (equal-area rings) | Ground-area overlay with `auto` resolution; `interpolate` (`nearest` vs. `bicubic`) |
 
 > No GDAL. No intermediate files. The raster *becomes* a queryable table source — a SQL table function in DuckDB, a `LazyFrame` in Polars, a table provider in SedonaDB, a file in one command from the CLI — on whichever grid fits the question.
 

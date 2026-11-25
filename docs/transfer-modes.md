@@ -143,6 +143,9 @@ Edges and NoData:
 - Zero-alpha pixels and pixels marked invalid by an internal TIFF mask count as NoData, as in the
   default mode.
 
+[Worked example 4](worked-examples.md#4-land-temperature-by-latitude-band-and-by-city--cli-on-healpix)
+interpolates a 10′ climate raster onto city-scale cells and compares `nearest` with `bicubic`.
+
 ## The overlay modes
 
 `overlay` gives each cell every pixel it overlaps. The cell's polygon is clipped against the

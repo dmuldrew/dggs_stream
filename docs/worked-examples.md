@@ -14,7 +14,7 @@ data, either on a shared cell id or on cell shapes. Each one also uses a differe
 | [Wetland loss inside vs. outside protected areas](#1-wetland-loss-inside-vs-outside-protected-areas--polars-on-a5) | Python & Polars | A5 | Equal-area cells, so cell fractions add up to true km² | Categorical `overlay`: exact class areas per cell |
 | [Flooded area at parcels and roads](#2-flooded-area-at-parcels-and-roads--duckdb-on-h3) | DuckDB | H3 | Hexagons, the grid other datasets are most often indexed on | `auto`, which picks weighted `overlay` |
 | [Snowpack per sub-basin, rolled up to the basin](#3-snowpack-per-sub-basin-rolled-up-to-the-basin--sedonadb-on-s2) | SedonaDB | S2 | Exact nesting: four children tile their parent | Weighted `overlay` at about one pixel per cell |
-| [Land temperature by latitude band](#4-land-temperature-by-latitude-band--cli-on-healpix) | CLI | HEALPix | Equal-area cells laid out in rings of constant latitude | Ground-area `overlay` with `auto` resolution |
+| [Land temperature by latitude band and by city](#4-land-temperature-by-latitude-band-and-by-city--cli-on-healpix) | CLI | HEALPix | Equal-area cells laid out in rings of constant latitude | Ground-area `overlay` with `auto` resolution; `interpolate` onto fine cells, `nearest` vs. `bicubic` |
 
 Without a shared spatial index, each of these needs a GIS overlay: reprojecting rasters, clipping
 polygons, rasterizing geometries and managing gigabytes of scratch files. With dggs_stream, the
@@ -114,7 +114,7 @@ of the raster is read. For a map, `(wet_2001_km2 - wet_2021_km2) / CELL_KM2` is 
 cell's ground that stopped being wetland; it compares fairly across cells only because they all
 have the same area. Pixel counts are areas here only because every NLCD pixel covers the same
 900 m². On a continuous lon/lat raster, whose pixels shrink toward the poles,
-`ground_area=True` weights by true m² instead ([example 4](#4-land-temperature-by-latitude-band--cli-on-healpix));
+`ground_area=True` weights by true m² instead ([example 4](#4-land-temperature-by-latitude-band-and-by-city--cli-on-healpix));
 categorical scans are weighted by pixel. See the
 [Python scan parameters](engines/python-polars.md#scan-parameters).
 
@@ -318,16 +318,20 @@ S2 cells aren't equal-area and SNODAS pixels shrink with latitude, so this examp
 pixel-weighted means and shares, not totals. For the volume of water itself, scan the same file in
 DuckDB or Python with `ground_area=True, transfer="overlay"`: SNODAS is a north-up lon/lat
 raster, so each cell's `area_weighted_sum` is its SWE integrated over true ground area, in
-mm × m², and `area_weighted_sum / 1e12` is km³ of water. To join on cell ids instead, as DuckDB and Polars do, see [DataFusion &
+mm × m², and `area_weighted_sum / 1e12` is km³ of water. To check SNODAS against SNOTEL station
+readings, go the other way: `transfer="interpolate"` at a level far finer than the pixels (level
+16, about 0.02 km², with a small `bbox`) gives a bilinear SWE at each station's cell, as
+[example 4](#4-land-temperature-by-latitude-band-and-by-city--cli-on-healpix) does for cities.
+To join on cell ids instead, as DuckDB and Polars do, see [DataFusion &
 SedonaDB](engines/datafusion.md#from-sedonadbs-python-api).
 
-## 4. Land temperature by latitude band — CLI on HEALPix
+## 4. Land temperature by latitude band and by city — CLI on HEALPix
 
-**The question**: *How does average land temperature change from pole to pole, and how much land
-lies in each latitude band?*
+**The question**: *How does average land temperature change from pole to pole, how much land
+lies in each latitude band, and what is the mean temperature at each Alpine city?*
 
 **Data**: WorldClim 2.1 annual mean temperature (BIO1), a 10-arc-minute global GeoTIFF in
-lon/lat (EPSG:4326), with NoData over the ocean.
+lon/lat (EPSG:4326), with NoData over the ocean, and Natural Earth's populated places.
 
 **Why HEALPix**: every cell has the same area, and the cells sit in rings of constant latitude, so
 cells group cleanly into latitude bands. HEALPix also puts the poles on cell corners, so no cell
@@ -364,6 +368,31 @@ SELECT floor(healpix_to_lat(healpix_index) / 10) * 10           AS band_south_de
 FROM read_json('bio1_healpix.jsonl')
 GROUP BY ALL
 ORDER BY band_south_deg DESC"
+
+# 4. City-scale cells over the Alps: three depths finer (depth 11, about 10 km², 1/24 of a
+#    pixel here). Too fine for centre assignment, so interpolate, once per kernel.
+for kernel in nearest bicubic; do
+  dggs-stream-cli jsonl wc2.1_10m_bio_1.tif --grid healpix -r auto+3 --bbox 5,43,17,49 \
+      --transfer interpolate --interpolation $kernel \
+      --columns healpix_index,mean > bio1_alps_$kernel.jsonl
+done
+
+# 5. Each city's cell, looked up in both
+duckdb -c "
+INSTALL spatial; LOAD spatial; LOAD dggs_stream;
+WITH cities AS (
+    SELECT NAME AS city, healpix_lonlat_to_cell(LONGITUDE, LATITUDE, 11) AS healpix_index
+    FROM ST_Read('ne_10m_populated_places.shp')
+    WHERE LONGITUDE BETWEEN 5 AND 17 AND LATITUDE BETWEEN 43 AND 49
+)
+SELECT city,
+       round(n.mean, 1)          AS nearest_c,
+       round(b.mean, 1)          AS bicubic_c,
+       round(b.mean - n.mean, 1) AS difference
+FROM cities
+JOIN read_json('bio1_alps_nearest.jsonl') AS n USING (healpix_index)
+JOIN read_json('bio1_alps_bicubic.jsonl') AS b USING (healpix_index)
+ORDER BY abs(b.mean - n.mean) DESC"
 ```
 
 The CLI's advantage is that it needs nothing else installed: one executable (also put on `PATH`
@@ -378,3 +407,23 @@ count only for their land. A plain scan (`dggs-stream-cli parquet ... -r 8`) wou
 pixel the same, and counting cells × 649 km² would count coastal cells in full. Each cell's
 centroid latitude lies within a fraction of a cell (about 0.2°) of its ring's, which is plenty for
 10° bands; a cell straddling a band's edge counts wholly in one band.
+
+**Why interpolate for the cities**: a 10′ pixel is about 13 × 18 km at the Alps' latitude, far
+larger than a city's cell at depth 11. With centre assignment, about 23 of every 24 depth-11
+cells would hold no pixel centre and be missing, cities included. `interpolate` gives every cell
+whose centre lies on the raster one value, read at that centre:
+
+- `nearest` returns the value of the pixel holding the centre, so the two dozen cells in a pixel
+  share one value and a city near a pixel edge takes whichever side its centre falls on. It is
+  the only kernel for categorical rasters.
+- `bicubic` fits a smooth surface through the 4 × 4 surrounding pixels, so the value changes
+  continuously from cell to cell, and the `difference` column shows how much the nearest pixel
+  was off. Its catch is overshoot next to sharp steps, such as a ridge between two valleys.
+- `bilinear`, the default and what `--transfer auto` picks here, never overshoots;
+  `lanczos` is the sharpest and rings most.
+
+On the coast, ocean pixels are NoData: `bilinear` leaves them out and renormalises the rest, and
+`bicubic` and `lanczos` fall back to `bilinear` when any tap is NoData, so a harbour city still
+gets a value. Interpolation smooths between pixels but adds no detail finer than them. A valley
+city still gets the average of its 18 km neighbourhood, mountains included; for that you need a
+finer raster or a lapse-rate correction from a DEM.
