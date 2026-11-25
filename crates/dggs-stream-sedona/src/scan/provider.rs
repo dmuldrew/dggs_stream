@@ -124,7 +124,10 @@ fn demote_for_auto(
 ) -> Vec<FilterPushdownStatus> {
     if auto_transfer(config) && config.partition.is_none() {
         for (status, filter) in statuses.iter_mut().zip(filters) {
-            if matches!(filter, FilterPredicate::Resolution(_) | FilterPredicate::Bbox(_)) {
+            if matches!(
+                filter,
+                FilterPredicate::Resolution(_) | FilterPredicate::Bbox(_)
+            ) {
                 *status = FilterPushdownStatus::Unsupported;
             }
         }
