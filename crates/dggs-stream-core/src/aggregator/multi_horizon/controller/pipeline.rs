@@ -203,7 +203,51 @@ pub(super) type KeyChunk = (usize, Vec<(usize, u64)>, Vec<CellKeys>);
 type ShardedWindow<A> = Vec<[Vec<(u64, A)>; NUM_SHARDS]>;
 
 /// Metadata carried alongside a finished window map set.
-type WindowMeta<A> = (Option<ShardedWindow<A>>, Vec<usize>, usize);
+type WindowMeta<A> = (Option<ShardedWindow<A>>, ResBytes, usize);
+
+/// Per-resolution byte estimates of one window. Scans request few resolutions, so up
+/// to eight are kept inline: a vector per window would add an allocation per chunk.
+#[derive(Clone, Debug)]
+enum ResBytes {
+    Inline([usize; 8], usize),
+    Heap(Vec<usize>),
+}
+
+impl ResBytes {
+    fn with_resolutions(n: usize) -> Self {
+        if n <= 8 {
+            Self::Inline([0; 8], 0)
+        } else {
+            Self::Heap(Vec::with_capacity(n))
+        }
+    }
+
+    fn push(&mut self, bytes: usize) {
+        match self {
+            Self::Inline(values, len) if *len < values.len() => {
+                values[*len] = bytes;
+                *len += 1;
+            }
+            Self::Inline(values, len) => {
+                let mut heap = values[..*len].to_vec();
+                heap.push(bytes);
+                *self = Self::Heap(heap);
+            }
+            Self::Heap(values) => values.push(bytes),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for ResBytes {
+    type Output = usize;
+
+    fn index(&self, i: usize) -> &usize {
+        match self {
+            Self::Inline(values, len) => &values[..*len][i],
+            Self::Heap(values) => &values[i],
+        }
+    }
+}
 
 /// Input item for a shard-merge worker task.
 type MergeShardJob<A> = (
@@ -251,7 +295,7 @@ enum Done<A> {
         index: usize,
         maps: CellMaps<A>,
         sharded: Option<ShardedWindow<A>>,
-        res_bytes: Vec<usize>,
+        res_bytes: ResBytes,
         worker_bytes: usize,
         profile: super::super::profile::WorkerProfile,
         ns: u64,
@@ -375,8 +419,8 @@ impl<A> Iterator for KWayStripeMerge<A> {
     }
 }
 
-fn compute_window_stats<A: SpillAccumulator>(maps: &CellMaps<A>) -> (Vec<usize>, usize, usize) {
-    let mut per_res = Vec::with_capacity(maps.len());
+fn compute_window_stats<A: SpillAccumulator>(maps: &CellMaps<A>) -> (ResBytes, usize, usize) {
+    let mut per_res = ResBytes::with_resolutions(maps.len());
     let mut total_bytes = 0usize;
     let mut total_entries = 0usize;
     for m in maps {
@@ -557,10 +601,37 @@ where
     Ok(())
 }
 
+/// Buffers [`run_pipelined`] reuses across batches, so a batch allocates no slot
+/// tables of its own.
+pub(super) struct PipelineScratch<A> {
+    /// Window maps that finished out of order, by slot.
+    maps: Vec<Option<CellMaps<A>>>,
+    meta: Vec<Option<WindowMeta<A>>>,
+    ready: Vec<ReadyWindow<A>>,
+}
+
+impl<A> Default for PipelineScratch<A> {
+    fn default() -> Self {
+        Self {
+            maps: Vec::new(),
+            meta: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+}
+
+impl<A> std::ops::Deref for PipelineScratch<A> {
+    type Target = Vec<Option<CellMaps<A>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.maps
+    }
+}
+
 struct ReadyWindow<A> {
     maps: CellMaps<A>,
     sharded: Option<ShardedWindow<A>>,
-    res_bytes: Vec<usize>,
+    res_bytes: ResBytes,
     worker_bytes: usize,
 }
 
@@ -856,7 +927,7 @@ pub(super) fn run_pipelined<'s, A, J, W, C>(
     run_window: &'s W,
     compute_keys: &'s C,
     target: &mut MergeTarget<'_, A>,
-    finished: &mut Vec<Option<CellMaps<A>>>,
+    scratch: &mut PipelineScratch<A>,
 ) -> Result<()>
 where
     A: SpillAccumulator + Send + 's,
@@ -948,11 +1019,18 @@ where
     }
     drop(done_tx);
 
-    finished.clear();
+    let PipelineScratch {
+        maps: finished,
+        meta: finished_meta,
+        ready: ready_wave,
+    } = scratch;
     let slots = free.len();
+    finished.clear();
     finished.resize_with(slots, || None);
-    let mut finished_meta: Vec<Option<WindowMeta<A>>> = vec![None; slots];
-    let mut ready_wave: Vec<ReadyWindow<A>> = Vec::with_capacity(slots);
+    finished_meta.clear();
+    finished_meta.resize_with(slots, || None);
+    ready_wave.clear();
+    ready_wave.reserve(slots);
     let count = jobs.len();
     let (mut next, mut expected, mut end) = (0, 0, count);
     let (mut key_chunk, mut keys_out) = (0, 0);
@@ -980,7 +1058,7 @@ where
                 first_reply,
                 slots,
                 finished,
-                &mut finished_meta,
+                &mut *finished_meta,
                 target,
                 &mut keys_out,
                 &mut panic,
@@ -993,7 +1071,7 @@ where
                 reply,
                 slots,
                 finished,
-                &mut finished_meta,
+                &mut *finished_meta,
                 target,
                 &mut keys_out,
                 &mut panic,
@@ -1025,7 +1103,7 @@ where
 
         if !ready_wave.is_empty() {
             if result.is_ok() {
-                for w in &ready_wave {
+                for w in ready_wave.iter() {
                     target.metrics.peak_worker_bytes = target
                         .metrics
                         .peak_worker_bytes
@@ -1055,14 +1133,14 @@ where
                         {
                             merge_res_parallel_wave(
                                 i,
-                                &mut ready_wave,
+                                &mut *ready_wave,
                                 other_res_bytes,
                                 workers,
                                 &work_queue,
                                 &done_rx,
                                 slots,
                                 finished,
-                                &mut finished_meta,
+                                &mut *finished_meta,
                                 target,
                                 &mut keys_out,
                                 &mut panic,
@@ -1070,14 +1148,14 @@ where
                         } else {
                             merge_res_sharded_serial(
                                 i,
-                                &mut ready_wave,
+                                &mut *ready_wave,
                                 other_res_bytes,
                                 workers,
                                 &work_queue,
                                 &done_rx,
                                 slots,
                                 finished,
-                                &mut finished_meta,
+                                &mut *finished_meta,
                                 target,
                                 &mut keys_out,
                                 &mut panic,
@@ -1093,7 +1171,7 @@ where
                         total_shards = other_res_bytes + target.shards[i].estimated_bytes();
                     }
                 } else {
-                    for w in &mut ready_wave {
+                    for w in ready_wave.iter_mut() {
                         if let Some(mut sharded) = w.sharded.take() {
                             let mut total_shards = target.total_shard_bytes();
                             for (i, shard_vecs) in sharded.iter_mut().enumerate() {
@@ -1110,7 +1188,7 @@ where
                                                     &done_rx,
                                                     slots,
                                                     finished,
-                                                    &mut finished_meta,
+                                                    &mut *finished_meta,
                                                     target,
                                                     &mut keys_out,
                                                     &mut panic,
@@ -1153,7 +1231,7 @@ where
                                                 &done_rx,
                                                 slots,
                                                 finished,
-                                                &mut finished_meta,
+                                                &mut *finished_meta,
                                                 target,
                                                 &mut keys_out,
                                                 &mut panic,
@@ -1225,24 +1303,24 @@ where
             if result.is_ok()
                 && (target.new_cells.len() >= KEY_CHUNK || (last && !target.new_cells.is_empty()))
             {
-                let cells = std::mem::take(&mut target.new_cells);
-                let chunk_size = if cells.len() <= KEY_CHUNK * 2 {
-                    cells.len()
+                let total = target.new_cells.len();
+                let chunk_size = if total <= KEY_CHUNK * 2 {
+                    total
                 } else {
-                    KEY_CHUNK.max(cells.len().div_ceil(workers.max(1)))
+                    KEY_CHUNK.max(total.div_ceil(workers.max(1)))
                 };
-                let mut rest = cells;
-                while !rest.is_empty() {
-                    let take = chunk_size.min(rest.len());
-                    let tail = rest.split_off(take);
+                // Copy each chunk out and keep `new_cells`' buffer: taking the vector
+                // would make every batch regrow it, and splitting off the tail per
+                // chunk would copy the remaining keys once per chunk.
+                for cells in target.new_cells.chunks(chunk_size) {
                     work_queue.push_normal(Work::Keys {
                         chunk: key_chunk,
-                        cells: rest,
+                        cells: cells.to_vec(),
                     });
                     key_chunk += 1;
                     keys_out += 1;
-                    rest = tail;
                 }
+                target.new_cells.clear();
             }
         }
     }

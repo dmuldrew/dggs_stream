@@ -1,7 +1,9 @@
 use super::super::eviction_space::CellKeys;
 use super::super::sharded_map::ShardedResolutionMap;
 use super::super::spill::SpillRuns;
-use super::pipeline::{run_pipelined, run_serial, CellMaps, MergeTarget, WindowJobs};
+use super::pipeline::{
+    run_pipelined, run_serial, CellMaps, MergeTarget, PipelineScratch, WindowJobs,
+};
 use crate::aggregator::accumulator::ContinuousAccumulator;
 use crate::aggregator::categorical::CategoricalAccumulator;
 use crate::aggregator::cell_hash::CellIdBuildHasher;
@@ -211,7 +213,7 @@ fn scheduling_storage_is_bounded_for_half_a_million_windows() {
     let mut free = (0..8)
         .map(|_| vec![HashMap::with_hasher(CellIdBuildHasher)])
         .collect();
-    let mut finished = Vec::new();
+    let mut finished = PipelineScratch::default();
     let mut target = MergeTarget {
         shards: &mut shards,
         spill_runs: &mut spill_runs,
@@ -315,7 +317,7 @@ fn run(jobs: usize, panic_at: Option<usize>) -> std::thread::Result<Result<Vec<u
                 &run_window,
                 &compute_keys,
                 &mut target,
-                &mut Vec::new(),
+                &mut PipelineScratch::default(),
             )
         });
         result.map(|()| {
@@ -443,7 +445,7 @@ fn parallel_shard_wave_merge_matches_serial_bit_for_bit() {
             &run_window,
             &compute_keys,
             &mut p_target,
-            &mut Vec::new(),
+            &mut PipelineScratch::default(),
         )
     })
     .unwrap();
@@ -579,7 +581,7 @@ fn parallel_shard_wave_merge_categorical_matches_serial() {
             &run_window,
             &compute_keys,
             &mut p_target,
-            &mut Vec::new(),
+            &mut PipelineScratch::default(),
         )
     })
     .unwrap();
@@ -695,7 +697,7 @@ fn parallel_spill_sort_produces_identical_merged_output() {
             &run_window,
             &compute_keys,
             &mut p_target,
-            &mut Vec::new(),
+            &mut PipelineScratch::default(),
         )
     })
     .unwrap();
@@ -778,7 +780,7 @@ fn parallel_wave_merge_enforces_accumulator_limit() {
                 &run_window,
                 &compute_keys,
                 &mut target,
-                &mut Vec::new(),
+                &mut PipelineScratch::default(),
             )
         })
         .unwrap_err();
@@ -837,7 +839,7 @@ fn parallel_wave_merge_enforces_accumulator_limit() {
                 &run_merge_overflow,
                 &compute_keys,
                 &mut target,
-                &mut Vec::new(),
+                &mut PipelineScratch::default(),
             )
         })
         .unwrap_err();
@@ -912,7 +914,7 @@ fn parallel_wave_merge_drains_windows_stashed_during_stripe_wait() {
             &run_window,
             &compute_keys,
             &mut target,
-            &mut Vec::new(),
+            &mut PipelineScratch::default(),
         )
     })
     .unwrap();
