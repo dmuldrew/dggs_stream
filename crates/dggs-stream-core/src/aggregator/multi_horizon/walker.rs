@@ -405,10 +405,15 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
                                     let last_c = cols.end.saturating_sub(1);
                                     let row_west = lon_col0 + cols.start as f64 * dlon;
                                     let row_east = lon_col0 + last_c as f64 * dlon;
+                                    // `is_point_in_bbox` takes -180 as part of a box that
+                                    // reaches 180; raw longitudes cannot express that, so
+                                    // such rows take the scalar predicate.
+                                    let seam = row_west <= -180.0 && max_lon >= 180.0;
                                     if row_west.is_finite()
                                         && row_east.is_finite()
                                         && row_west >= -180.0
                                         && row_east <= 180.0
+                                        && !seam
                                     {
                                         let col_lon = |c: usize| {
                                             projector.affine_lon(col_offset + c, row_idx, sp)
@@ -446,9 +451,13 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
                             }
                         };
                         if let Some(active_cols) = active_cols {
-                            if let Some(row_state) =
-                                B::prepare_row(lat_deg, lon_col0, dlon, max_res)
-                            {
+                            if let Some(row_state) = B::prepare_row(
+                                lat_deg,
+                                lon_col0,
+                                dlon,
+                                projector.exact_lon(col_offset, sp),
+                                max_res,
+                            ) {
                                 const BATCH: usize = 64;
                                 let mut fine_cells = [0u64; BATCH];
                                 let mut cur_fine: Option<u64> = None;
@@ -763,6 +772,18 @@ impl<'a> SampleProjector<'a> {
                 ))
             }
             _ => None,
+        }
+    }
+
+    /// The exact column-longitude formula of [`Self::affine_lon`] for a row whose
+    /// first column is `col_offset`, for batched rows to recompute guarded samples.
+    fn exact_lon(&self, col_offset: usize, sp: SamplePoint) -> crate::grid::ExactLon {
+        crate::grid::ExactLon {
+            c0: self.gt.c0,
+            a: self.gt.a,
+            col_offset,
+            dx: sp.dx,
+            mercator: matches!(self.cache, RowCache::Mercator(_)),
         }
     }
 

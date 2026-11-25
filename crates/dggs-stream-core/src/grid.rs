@@ -1035,6 +1035,44 @@ pub trait GridBackend: Copy + Send + Sync + 'static {
     );
 }
 
+/// The longitude a scalar walk computes for a column of a constant-latitude row:
+/// `c0 + (col_offset + col + dx) * a` in the source CRS, then (for Web Mercator)
+/// converted to degrees. Batched rows approximate it by stepping from the first
+/// column; samples near a cell boundary are recomputed with this exact formula, so
+/// they land in the same cell as the scalar walk.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExactLon {
+    pub c0: f64,
+    pub a: f64,
+    pub col_offset: usize,
+    pub dx: f64,
+    pub mercator: bool,
+}
+
+impl ExactLon {
+    /// A row whose column `col` lies at `lon_col0 + col * dlon` exactly.
+    #[cfg(test)]
+    pub(crate) fn linear(lon_col0: f64, dlon: f64) -> Self {
+        Self {
+            c0: lon_col0,
+            a: dlon,
+            col_offset: 0,
+            dx: 0.0,
+            mercator: false,
+        }
+    }
+
+    #[inline]
+    fn at(&self, col: usize) -> f64 {
+        let x = self.c0 + ((self.col_offset + col) as f64 + self.dx) * self.a;
+        if self.mercator {
+            crate::crs::transformer::web_mercator_lon(x)
+        } else {
+            x
+        }
+    }
+}
+
 /// Optional row-hoisted & batched indexing for constant-latitude affine-longitude
 /// scanlines (`RowBatchBackend::SUPPORTS_ROW_BATCH == true`).
 ///
@@ -1056,6 +1094,7 @@ pub(crate) trait RowBatchBackend: GridBackend {
         _lat_deg: f64,
         _lon_col0_deg: f64,
         _dlon_deg: f64,
+        _exact: ExactLon,
         _max_res: u8,
     ) -> Option<Self::RowState> {
         None
@@ -1252,8 +1291,7 @@ fn s2_face_ij_to_cell_at_level(lookup: &[u16; 1024], face: u64, i: u32, j: u32, 
 #[derive(Clone, Copy)]
 pub(crate) struct S2RowState {
     lat_deg: f64,
-    lon_col0_deg: f64,
-    dlon_deg: f64,
+    exact: ExactLon,
     theta_col0: f64,
     dtheta: f64,
     cos_phi: f64,
@@ -1270,7 +1308,7 @@ impl S2RowState {
     #[cold]
     #[inline(never)]
     fn fallback(&self, col: usize) -> u64 {
-        let lon_deg = self.lon_col0_deg + col as f64 * self.dlon_deg;
+        let lon_deg = self.exact.at(col);
         S2CellId::from(s2::latlng::LatLng::from_degrees(
             self.lat_deg,
             wrap_lon_180(lon_deg),
@@ -1326,6 +1364,7 @@ impl RowBatchBackend for S2Backend {
         lat_deg: f64,
         lon_col0_deg: f64,
         dlon_deg: f64,
+        exact: ExactLon,
         max_res: u8,
     ) -> Option<Self::RowState> {
         if !lat_deg.is_finite()
@@ -1350,9 +1389,8 @@ impl RowBatchBackend for S2Backend {
         let n_side = (1u64 << max_res) as f64;
         let eps = (1e-9 * n_side).max(1e-7);
         Some(S2RowState {
+            exact,
             lat_deg,
-            lon_col0_deg,
-            dlon_deg,
             theta_col0,
             dtheta,
             cos_phi,
@@ -1471,8 +1509,7 @@ enum HealpixRowRegion {
 #[derive(Clone, Copy)]
 pub(crate) struct HealpixRowState {
     lat_deg: f64,
-    lon_col0_deg: f64,
-    dlon_deg: f64,
+    exact: ExactLon,
     x_col0: f64,
     dx_step: f64,
     region: HealpixRowRegion,
@@ -1487,7 +1524,7 @@ impl HealpixRowState {
     #[cold]
     #[inline(never)]
     fn fallback(&self, col: usize) -> u64 {
-        let lon_deg = self.lon_col0_deg + col as f64 * self.dlon_deg;
+        let lon_deg = self.exact.at(col);
         let deep = healpix::get(HEALPIX_MAX_DEPTH).hash([
             lon_deg.rem_euclid(360.0).to_radians(),
             self.lat_deg.to_radians(),
@@ -1562,6 +1599,7 @@ impl RowBatchBackend for HealpixBackend {
         lat_deg: f64,
         lon_col0_deg: f64,
         dlon_deg: f64,
+        exact: ExactLon,
         max_res: u8,
     ) -> Option<Self::RowState> {
         if !lat_deg.is_finite()
@@ -1592,9 +1630,8 @@ impl RowBatchBackend for HealpixBackend {
         };
         let nside = (1u64 << max_res) as f64;
         Some(HealpixRowState {
+            exact,
             lat_deg,
-            lon_col0_deg,
-            dlon_deg,
             x_col0: lon_col0_deg / 90.0,
             dx_step: dlon_deg / 90.0,
             region,
@@ -2229,6 +2266,48 @@ mod tests {
     }
 
     #[test]
+    fn batched_rows_match_scalar_cells_for_centres_on_cell_boundaries() {
+        // The walker steps from the first centre; column 97 of this row is exactly
+        // longitude 0 in the scalar formula (an S2 and HEALPix boundary) but about
+        // -7e-15 when stepped. The boundary guard must recompute the exact longitude.
+        let (c0, a, dx) = (-32.5, 1.0 / 3.0, 0.5);
+        for col_offset in [0usize, 7] {
+            let exact = ExactLon {
+                c0,
+                a,
+                col_offset,
+                dx,
+                mercator: false,
+            };
+            let lon_col0 = c0 + (col_offset as f64 + dx) * a;
+            let mut batch = [0u64; 64];
+            for lat in [10.0, -10.0, 41.8103148957786] {
+                for max_res in [1u8, 2, 5, 12] {
+                    let s2 = S2Backend::prepare_row(lat, lon_col0, a, exact, max_res)
+                        .expect("S2 row state");
+                    let healpix = HealpixBackend::prepare_row(lat, lon_col0, a, exact, max_res);
+                    for start in [0usize, 64, 128] {
+                        S2Backend::index_row_batch(&s2, start, &mut batch);
+                        for (k, &got) in batch.iter().enumerate() {
+                            let lon = exact.at(start + k);
+                            let want = GridKind::S2.cell_at(lat, lon, max_res).unwrap();
+                            assert_eq!(got, want, "S2 res={max_res} lat={lat} lon={lon}");
+                        }
+                        if let Some(state) = &healpix {
+                            HealpixBackend::index_row_batch(state, start, &mut batch);
+                            for (k, &got) in batch.iter().enumerate() {
+                                let lon = exact.at(start + k);
+                                let want = GridKind::Healpix.cell_at(lat, lon, max_res).unwrap();
+                                assert_eq!(got, want, "HEALPix res={max_res} lat={lat} lon={lon}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn healpix_row_batch_matches_reference_bit_for_bit() {
         let lats = [
             -90.0,
@@ -2265,7 +2344,13 @@ mod tests {
             for &lat in &lats {
                 for &lon0 in &lon_starts {
                     for &dlon in &dlons {
-                        let prepared = HealpixBackend::prepare_row(lat, lon0, dlon, max_res);
+                        let prepared = HealpixBackend::prepare_row(
+                            lat,
+                            lon0,
+                            dlon,
+                            ExactLon::linear(lon0, dlon),
+                            max_res,
+                        );
                         if lat.abs() > 89.9999
                             || ((lat.to_radians().sin().abs() - 2.0 / 3.0).abs() < 1e-6)
                         {
@@ -2341,7 +2426,13 @@ mod tests {
             for &lat in &lats {
                 for &lon0 in &lon_starts {
                     for &dlon in &dlons {
-                        let prepared = S2Backend::prepare_row(lat, lon0, dlon, max_res);
+                        let prepared = S2Backend::prepare_row(
+                            lat,
+                            lon0,
+                            dlon,
+                            ExactLon::linear(lon0, dlon),
+                            max_res,
+                        );
                         if lat.abs() > 89.9999 {
                             assert!(prepared.is_none(), "expected fallback near lat {lat}");
                             continue;

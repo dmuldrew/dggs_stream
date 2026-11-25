@@ -290,20 +290,21 @@ impl<A: SpillAccumulator> RunReader<A> {
         else {
             return Ok(None);
         };
+        // Readers run from the oldest level to the newest. Merge each older state with
+        // the combined newer ones (`older.merge(newer)`), the grouping a carry-merge of
+        // the levels produced, so floating-point sums do not depend on the reader.
         let mut merged: Option<A> = None;
-        for (head, reader) in self.heads.iter_mut().zip(&mut self.readers) {
+        for (head, reader) in self.heads.iter_mut().zip(&mut self.readers).rev() {
             if head.as_ref().is_some_and(|(k, _)| *k == min_key) {
-                let (_, acc) = head.take().unwrap();
+                let (_, mut acc) = head.take().unwrap();
                 *head = reader.next_record()?;
-                match &mut merged {
-                    None => merged = Some(acc),
-                    Some(dest) => {
-                        dest.merge(&acc);
-                        if dest.memory_bytes() > self.limit {
-                            return Err(invalid("merged accumulator exceeds aggregation budget"));
-                        }
+                if let Some(newer) = merged.take() {
+                    acc.merge(&newer);
+                    if acc.memory_bytes() > self.limit {
+                        return Err(invalid("merged accumulator exceeds aggregation budget"));
                     }
                 }
+                merged = Some(acc);
             }
         }
         Ok(merged.map(|acc| (min_key, acc)))
@@ -633,6 +634,24 @@ mod tests {
             assert!(reader.next_record().unwrap().is_none());
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn finishing_three_levels_merges_each_older_level_with_the_newer_ones() {
+        // Seven runs fill levels 2 (runs 1-4), 1 (runs 5-6) and 0 (run 7). A carry-merge
+        // computes oldest + (middle + newest); grouping oldest-first would lose the 1.
+        let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, None);
+        for value in [1.0, 0.0, 0.0, 0.0, 1e16, 0.0, -1e16] {
+            runs.push_sorted([(7, ContinuousAccumulator::new(value))])
+                .unwrap();
+        }
+        assert!(runs.levels.iter().take(3).all(Option::is_some));
+        let mut reader = runs.finish().unwrap().unwrap();
+        let (key, acc) = reader.next_record().unwrap().unwrap();
+        assert_eq!(key, 7);
+        assert_eq!(acc.count, 7.0);
+        assert_eq!(acc.sum, 1.0);
+        assert!(reader.next_record().unwrap().is_none());
     }
 
     #[test]
