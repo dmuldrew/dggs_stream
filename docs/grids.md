@@ -91,13 +91,14 @@ targets a size rather than an index, `auto` gives comparable cells on every grid
 
 | Engine | Syntax |
 | :--- | :--- |
-| Apache Spark | `grid` on the `dggs_stream` data source or `dggs_stream.spark.read`. Both merge APIs infer the grid from the index column. |
 | CLI | `-r auto`, `-r auto+1` |
 | DuckDB | `resolutions := 'auto'` |
 | Python | `resolutions="auto"`; `auto_resolution(path, grid=...)` returns the choice |
 | DataFusion / SedonaDB | an `'auto'` resolution argument; `ResolutionSpec` in Rust |
 | PostgreSQL | `{grid}_auto_resolution(path [, offset [, crs]])` |
 | Rust | `dggs_stream_core::resolution` (`ResolutionSpec::parse`, `area_matched_resolution`) |
+
+Apache Spark's `resolutions` option takes integers only.
 
 ## Poles and the antimeridian
 

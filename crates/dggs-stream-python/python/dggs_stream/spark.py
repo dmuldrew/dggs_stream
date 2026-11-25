@@ -463,7 +463,19 @@ def merge_partials(
     return df.repartition(index_col).mapInArrow(merge, out_schema)
 
 
-_CATEGORICAL_COLUMNS = ("majority_class", "majority_fraction", "total_count", "histogram")
+# Columns found only in the categorical (wide) schema, so a projection naming any of them
+# is a categorical scan. Partitioned scans do not produce the long format.
+_CATEGORICAL_COLUMNS = (
+    "majority_class",
+    "majority_fraction",
+    "majority_count",
+    "unique_classes",
+    "total_count",
+    "histogram",
+    "shannon_entropy",
+    "entropy",
+    "distinct_classes",
+)
 
 
 class RasterMerge:
