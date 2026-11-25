@@ -237,9 +237,13 @@ SELECT a5_lonlat_to_cell(-122.4, 37.8, 10) AS cell,
 
 ### Transfer modes, histograms, empty cells and profiling
 
-See [Scan Options](../scan-options.md) for what each option does.
+See [Transfer Modes](../transfer-modes.md) and [Scan Options](../scan-options.md) for what each option does.
 
 ```sql
+-- Let the engine pick cells about one pixel in size and the mode that suits them
+SELECT h3_index, mean
+FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto', transfer := 'auto');
+
 -- Cells finer than the pixels: a bicubic value at each cell centre
 SELECT h3_index, mean
 FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto+2',

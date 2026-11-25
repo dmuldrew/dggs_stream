@@ -99,6 +99,12 @@ targets a size rather than an index, `auto` gives comparable cells on every grid
 | PostgreSQL | `{grid}_auto_resolution(path [, offset [, crs]])` |
 | Rust | `dggs_stream_core::resolution` (`ResolutionSpec::parse`, `area_matched_resolution`) |
 
+Cells about one pixel in size suit the default `assign_centers` transfer; offsets move into the
+other modes' territory (`auto+1` and finer: `interpolate`; a few steps coarser: `overlay`).
+Pair `auto` with `transfer = "auto"` to have the mode follow the resolution, as described in
+[Transfer Modes](transfer-modes.md#let-the-engine-choose-auto). The CLI reports the chosen
+resolution on stderr.
+
 ## Poles and the antimeridian
 
 - **Pole cells.** A pole can sit inside a cell (`GridKind::interior_pole`). That cell's

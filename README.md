@@ -14,7 +14,16 @@ Each panel shows every cell at the indicated level. Cell counts give a common re
 
 Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) and **categorical** classifications (land cover, zoning, soil types) with dedicated streaming engines.
 
-Default scans use pixel contributions. The Rust core also supports [ground-area overlay](docs/engines/core.md#ground-area-weighted-overlay) for integrating densities over partial pixels. It also offers [ground-area-weighted center scans](docs/engines/core.md#ground-area-weighted-center-scans) for north-up WGS84 rasters. For partial pixels, use `ground_area=True, transfer="overlay"` in Python or Polars, or `ground_area := true, transfer := 'overlay'` in DuckDB. For center assignment, use `ground_area := true` in DuckDB, `--ground-area` in CLI IPC and JSONL output (add `--transfer overlay` for partial pixels; `--decode-workers` and `--aggregation-workers` size the worker pools), or `ground_area=True` in Python and Polars. CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
+**How pixels become cells** is a per-scan choice, the same on every grid and in every engine but PostgreSQL ([Transfer Modes](docs/transfer-modes.md)):
+
+| `transfer` | Each cell gets | Best when |
+| :--- | :--- | :--- |
+| `assign_centers` (default) | The pixels whose centres it holds | Cells about a pixel in size; fastest |
+| `interpolate` | The value interpolated at its centre | Cells finer than the pixels |
+| `overlay` | Every pixel it overlaps, weighted by the part inside it, with modes that [conserve totals](docs/transfer-modes.md#mass-preserving-mass_preserve), [weight by true ground area](docs/transfer-modes.md#ground-area-overlay-ground_area) on lon/lat rasters, or [measure class areas](docs/transfer-modes.md#categorical-overlay-class-areas) | Many pixels per cell, or when edge pixels, totals or km² must be exact |
+| `auto` | Whichever of the three fits the cell-to-pixel size ratio | You'd rather not choose; pair it with `resolutions="auto"` for pixel-sized cells |
+
+CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
 > **Formerly raster_h3.** See the [changelog](CHANGELOG.md#unreleased) for the new names and migration details.
 
@@ -158,22 +167,25 @@ such as `bbox := '...'`.
 
 A tract-level join answers "which tracts", but a resident feels the trees on their own street.
 Overture's building footprints narrow the question to *how much canopy lies within 100 m of each
-home*. Each home is buffered by 100 m and the buffer is filled with resolution-11 hexagons
-(about 50 m across, 2–3 NLCD pixels each): the home's own hexagon and its neighbours out to
-100 m, roughly 15 cells. Each home is then scored on its own neighbourhood, not on its tract's
-average.
+home*. Each home is buffered by 100 m and the buffer is filled with resolution-12 hexagons
+(about 20 m across, a third of an NLCD pixel each): roughly a hundred cells per home. Each home
+is then scored on its own neighbourhood, not on its tract's average.
 
 ```sql
 -- Overture is read straight from S3: INSTALL httpfs; LOAD httpfs; SET s3_region = 'us-west-2';
 
--- 4. Forest share of every resolution-11 hexagon. In the long layout each class in a
---    hexagon is its own row; summing over all of them keeps hexagons with no forest (0).
+-- 4. Forest share of every resolution-12 hexagon (about 307 m², a third of an NLCD pixel).
+--    transfer := 'overlay' splits each pixel across the hexagons it overlaps, so every
+--    hexagon gets the exact share of its area in each class, even with no pixel centre
+--    inside it. In the long layout each class in a hexagon is its own row; summing over
+--    all of them keeps hexagons with no forest (0).
 CREATE TABLE forest_h3 AS
 SELECT h3_index,
        sum(CASE WHEN category IN (41, 42, 43)     -- deciduous, evergreen, mixed forest
                 THEN fraction ELSE 0 END) AS forest_share
 FROM h3_raster_categorical_aggregate(
-    'nlcd_landcover_2021.tif', resolution := 11, format := 'long',
+    'nlcd_landcover_2021.tif', resolution := 12, format := 'long',
+    transfer := 'overlay',
     bbox := '-90.32,38.53,-90.12,38.77'          -- the city's bounding box
 )
 GROUP BY h3_index;
@@ -193,18 +205,18 @@ WHERE t.tract_name IN (SELECT tract_name FROM census_tracts_h3
   AND b.bbox.ymin >  38.53 AND b.bbox.ymax <  38.77;
 
 -- 6. Each home's neighbourhood: buffer 100 m in metres (EPSG:5070), back to lon/lat, then
---    every resolution-11 hexagon whose centre is inside the buffer. 'contains_centroid'
+--    every resolution-12 hexagon whose centre is inside the buffer. 'contains_centroid'
 --    (the default) lets edge hexagons fall in or out, so the errors roughly cancel;
 --    'covers' would keep every hexagon the buffer touches and overshoot 100 m.
 CREATE TABLE home_hexes AS
 SELECT id, tract_name,
        unnest(h3_polygon_to_cells(ST_AsWKB(ST_Transform(
            ST_Buffer(ST_Transform(geometry, 'EPSG:4326', 'EPSG:5070', always_xy := true), 100),
-           'EPSG:5070', 'EPSG:4326', always_xy := true)), 11, 'contains_centroid')) AS h3_index
+           'EPSG:5070', 'EPSG:4326', always_xy := true)), 12, 'contains_centroid')) AS h3_index
 FROM homes;
 
--- 7. Canopy near each home, then per tract. The inner join drops any hexagon that
---    no pixel centre fell in, rather than counting it as treeless.
+-- 7. Canopy near each home, then per tract. With overlay every hexagon over the raster
+--    has a row, so the inner join loses nothing inside the city.
 WITH per_home AS (
     SELECT h.id, h.tract_name, avg(f.forest_share) AS canopy_near_home
     FROM home_hexes AS h
@@ -221,25 +233,27 @@ ORDER BY avg_canopy_near_home;
 ```
 
 The averages in step 7 count every hexagon the same; H3 cells next to each other are almost
-exactly the same size, so within 100 m that is effectively area-weighted. The remaining error is
-at the edge of the buffer, where a hexagon is either wholly in or wholly out. For an exact
-answer, weight each hexagon by `ST_Area(ST_Intersection(cell, buffer))`; it is slower and rarely
-changes the ranking. Going finer than resolution 11 doesn't help: cells smaller than NLCD's 30 m
-pixels start to come back empty. The NLCD
+exactly the same size, so within 100 m that is effectively area-weighted, and at about 20 m the
+error at the edge of the buffer, where a hexagon is wholly in or out, is small. Cells this much
+finer than the pixels only work because of the transfer mode: with the default centre
+assignment, two of every three resolution-12 hexagons would hold no NLCD pixel centre and drop
+out of the join, and the rest would be all-or-nothing. `overlay` gives each one its exact class
+areas instead. (`transfer := 'auto'` would pick `interpolate` with `nearest` here, which keeps
+every hexagon but gives each one only the class at its centre.) The NLCD
 [Tree Canopy Cover](https://www.mrlc.gov/data) product (percent canopy per pixel) is a more
-direct measure than forest classes: aggregate it with `h3_raster_continuous_aggregate` and use
-`mean` in place of `forest_share`.
+direct measure than forest classes: aggregate it with `h3_raster_continuous_aggregate`, use
+`mean` in place of `forest_share`, and `transfer := 'auto'` to interpolate it smoothly.
 
 ### More worked examples
 
-[Worked Examples](docs/worked-examples.md) pairs each engine with the grid that suits a question:
+[Worked Examples](docs/worked-examples.md) pairs each engine with the grid and the [transfer mode](docs/transfer-modes.md) that suit a question:
 
-| Question | Engine | Grid |
-| :--- | :--- | :--- |
-| [Wetland loss inside vs. outside protected areas](docs/worked-examples.md#1-wetland-loss-inside-vs-outside-protected-areas--polars-on-a5) | Python & Polars | A5 (equal-area) |
-| [Flood depth at parcels and roads](docs/worked-examples.md#2-flood-depth-at-parcels-and-roads--duckdb-on-h3) | DuckDB | H3 |
-| [Snowpack per sub-basin, rolled up to the basin](docs/worked-examples.md#3-snowpack-per-sub-basin-rolled-up-to-the-basin--sedonadb-on-s2) | SedonaDB | S2 (exact nesting) |
-| [Land temperature by latitude band](docs/worked-examples.md#4-land-temperature-by-latitude-band--cli-on-healpix) | CLI | HEALPix (equal-area rings) |
+| Question | Engine | Grid | Transfer mode |
+| :--- | :--- | :--- | :--- |
+| [Wetland loss inside vs. outside protected areas](docs/worked-examples.md#1-wetland-loss-inside-vs-outside-protected-areas--polars-on-a5) | Python & Polars | A5 (equal-area) | Categorical overlay: exact class areas |
+| [Flooded area at parcels and roads](docs/worked-examples.md#2-flooded-area-at-parcels-and-roads--duckdb-on-h3) | DuckDB | H3 | `auto` (picks area-weighted overlay) |
+| [Snowpack per sub-basin, rolled up to the basin](docs/worked-examples.md#3-snowpack-per-sub-basin-rolled-up-to-the-basin--sedonadb-on-s2) | SedonaDB | S2 (exact nesting) | Weighted overlay |
+| [Land temperature by latitude band](docs/worked-examples.md#4-land-temperature-by-latitude-band--cli-on-healpix) | CLI | HEALPix (equal-area rings) | Ground-area overlay, `auto` resolution |
 
 > No GDAL. No intermediate files. The raster *becomes* a queryable table source — a SQL table function in DuckDB, a `LazyFrame` in Polars, a table provider in SedonaDB, a file in one command from the CLI — on whichever grid fits the question.
 
@@ -343,14 +357,14 @@ dggs_stream reads a raster like a document scanner: one strip at a time, from no
   requested resolution, which is how a multi-zoom PMTiles pyramid comes from a
   single read.
 - **Fine cells and partial pixels.** For cells finer than the pixels, `transfer=interpolate`
-  interpolates a value at each cell's centre; for area weighting, `transfer=overlay`
-  splits each pixel across the cells it overlaps, tracing curved cell edges to a sampled
-  tolerance of 1/64 of a pixel ([details](docs/transfer-modes.md#overlay-area-weighted-aggregation)).
-  Both stream the raster in bands of rows.
-  Rust, CLI, DuckDB, and Python/Polars overlay scans can filter cells by the fraction of their selected overlap with valid data.
-  In Rust, overlay scans clip fine-resolution cells in parallel by default (`aggregation_workers: Some(1)` keeps them serial) ([details](docs/transfer-modes.md#parallel-overlap-calculation)).
-  Interpolate and overlay scans decode and fetch chunks ahead of the scan on `decode_workers` / `fetch_workers` threads (Rust `MultiResolutionConfig`, bounded by `decode_budget_bytes`); single-band unmasked rasters are summed straight from the native-typed decoded chunks.
-  Overlay walks each cell's edges once and accumulates runs of whole pixels as slices; Rust callers can hook that path with [`TransferAccumulator::add_band_unit_slice`](docs/engines/core.md#custom-transfer-accumulators).
+  interpolates a value at each cell's centre; `transfer=overlay` splits each pixel across the
+  cells it overlaps, tracing curved cell edges to 1/64 of a pixel, with
+  [modes](docs/transfer-modes.md#the-overlay-modes) for conserved totals, true ground area,
+  class areas and valid-coverage filtering. `transfer=auto` picks between them from the
+  cell-to-pixel size ratio. Both stream the raster in bands of rows, decode chunks ahead of the
+  scan, and clip fine cells in parallel ([details](docs/transfer-modes.md#performance)).
+  Overlay accumulates runs of whole pixels as slices; Rust callers can hook that path with
+  [`TransferAccumulator::add_band_unit_slice`](docs/engines/core.md#custom-transfer-accumulators).
   See [Scan Options](docs/scan-options.md).
 
 See [Core Engineering Architecture](#core-engineering-architecture) for how each step is
@@ -405,6 +419,10 @@ SELECT h3_hex, mean, count
 FROM h3_raster_continuous_aggregate('dem.tif', resolution := 8)
 LIMIT 5;
 
+-- Cells three steps coarser than a pixel; 'auto' picks area-weighted overlay for them
+SELECT h3_hex, mean, count
+FROM h3_raster_continuous_aggregate('dem.tif', resolutions := 'auto-3', transfer := 'auto');
+
 -- Polyfill a WKB polygon: list of UBIGINT cells; containment defaults to 'contains_centroid'
 SELECT h3_polygon_to_cells(ST_AsWKB(geom), 8, 'covers') AS cells FROM areas;
 ```
@@ -422,6 +440,11 @@ df = (dggs_stream.scan_raster("dem.tif", 8)
         .filter(pl.col("count") > 10)
         .select("h3_hex", "mean", "count")
         .collect())
+
+# Population from a people-per-km² raster in lon/lat: integrate over each cell's true area
+pop = (dggs_stream.scan_raster("density_per_km2.tif", 8, ground_area=True, transfer="overlay")
+         .select("h3_hex", (pl.col("area_weighted_sum") / 1e6).alias("population"))
+         .collect())
 ```
 
 **PostgreSQL**
@@ -436,6 +459,7 @@ SELECT h3_hex, mean, count FROM h3_raster_continuous_aggregate('/data/dem.tif', 
 ```bash
 dggs-stream-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 5
 dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
+dggs-stream-cli jsonl dem.tif --grid healpix -r auto --transfer auto   # choices reported on stderr
 ```
 
 **Raster scans without a `SessionContext`** (`dggs_stream_sedona::scan`)
