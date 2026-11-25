@@ -19,6 +19,10 @@ pub trait SpillAccumulator: AccumulatorMerge {
     }
 }
 
+/// Runs [`SpillRuns::finish`] streams at once: the two merge heads the aggregation
+/// budget reserves (see the controller's budget split).
+const MAX_STREAMED_RUNS: usize = 2;
+
 pub(crate) fn table_bytes<K, V>(capacity: usize) -> usize {
     // Conservative allowance for bucket slack, control bytes and alignment.
     if capacity == 0 {
@@ -419,15 +423,21 @@ impl<A: SpillAccumulator> SpillRuns<A> {
         Ok(Run { file, len })
     }
     pub fn finish(&mut self) -> io::Result<Option<RunReader<A>>> {
-        let mut runs = Vec::new();
-        for i in (0..self.levels.len()).rev() {
-            if let Some(run) = self.levels[i].take() {
-                runs.push(run);
-            }
-        }
+        // Occupied levels, newest (and smallest) first.
+        let mut runs: Vec<Run> = self.levels.iter_mut().filter_map(Option::take).collect();
         if runs.is_empty() {
             return Ok(None);
         }
+        // Streaming holds one decoded state and one read buffer per run. The budget
+        // leaves room for two, as a carry merge reads two runs at once, so the newest
+        // levels are merged into one run first. Merging each older level with the
+        // combined newer ones keeps the grouping a full carry merge would produce.
+        while runs.len() > MAX_STREAMED_RUNS {
+            let newest = runs.remove(0);
+            let older = runs.remove(0);
+            runs.insert(0, self.merge(older, newest)?);
+        }
+        runs.reverse();
         RunReader::from_runs(runs, self.limit).map(Some)
     }
 }
@@ -634,6 +644,40 @@ mod tests {
             assert!(reader.next_record().unwrap().is_none());
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn finishing_many_levels_streams_at_most_two_runs_with_carry_merge_grouping() {
+        // Fifteen runs fill levels 0 to 3. Key 7 holds 1 in the oldest level and
+        // +1e16 / -1e16 in newer ones, so only the carry-merge grouping keeps the 1.
+        let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, None);
+        for i in 0..15u64 {
+            let value = match i {
+                0 => 1.0,
+                8 => 1e16,
+                14 => -1e16,
+                _ => 0.0,
+            };
+            runs.push_sorted([
+                (7, ContinuousAccumulator::new(value)),
+                (100 + i, ContinuousAccumulator::new(2.0)),
+            ])
+            .unwrap();
+        }
+        assert_eq!(runs.levels.iter().filter(|l| l.is_some()).count(), 4);
+        let mut reader = runs.finish().unwrap().unwrap();
+        assert!(reader.readers.len() <= MAX_STREAMED_RUNS);
+        let (key, acc) = reader.next_record().unwrap().unwrap();
+        assert_eq!(key, 7);
+        assert_eq!(acc.count, 15.0);
+        assert_eq!(acc.sum, 1.0);
+        let mut rest = 0;
+        while let Some((key, acc)) = reader.next_record().unwrap() {
+            assert!((100..115).contains(&key));
+            assert_eq!((acc.count, acc.sum), (1.0, 2.0));
+            rest += 1;
+        }
+        assert_eq!(rest, 15);
     }
 
     #[test]

@@ -1127,9 +1127,22 @@ where
                             .sum();
                         let wave_res_bytes: usize = ready_wave.iter().map(|w| w.res_bytes[i]).sum();
                         let est = target.shards[i].estimated_bytes();
+                        // Workers merge shards concurrently, so a nearly full shard can
+                        // double its table before the next budget check: charge every
+                        // shard's possible growth up front, besides the incoming bytes.
+                        let mut incoming = [0usize; NUM_SHARDS];
+                        for w in ready_wave.iter() {
+                            let shards = &w.sharded.as_ref().unwrap()[i];
+                            for (count, bucket) in incoming.iter_mut().zip(shards.iter()) {
+                                *count += bucket.len();
+                            }
+                        }
+                        let growth = target.shards[i].structure_growth_bytes(&incoming);
+                        let headroom = wave_res_bytes
+                            .saturating_mul(2)
+                            .max(wave_res_bytes.saturating_add(growth));
                         let res_outcome = if wave_entries >= SHARD_PARTITION_THRESHOLD
-                            && est.saturating_add(wave_res_bytes.saturating_mul(2))
-                                < target.map_budget
+                            && est.saturating_add(headroom) < target.map_budget
                         {
                             merge_res_parallel_wave(
                                 i,
