@@ -301,6 +301,10 @@ pub struct GeoTiffStreamReader {
     pub file_path: PathBuf,
     /// Backing data source providing raw byte access (local memory map or remote HTTP stream).
     pub source: RasterSource,
+    /// Identity of the mapped local file. Decoders open their own descriptor lazily,
+    /// so a mosaic holds descriptors per active decoder rather than per tile.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    local_identity: Option<LocalIdentity>,
     /// Parsed GeoTIFF metadata including spatial reference, extent, and NoData value.
     pub metadata: GeoTiffMetadata,
     /// Grid layout partitioning the raster into discrete strips or tiles.
@@ -379,6 +383,64 @@ impl FastDecodeError {
     }
 }
 
+/// Device, inode and length of a mapped local file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalIdentity {
+    dev: u64,
+    ino: u64,
+    len: u64,
+}
+
+impl LocalIdentity {
+    #[cfg(unix)]
+    fn of(file: &File) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        Ok(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn read_local_payload_into(
+    file: &File,
+    file_len: u64,
+    chunk_index: u32,
+    info: &TiffChunkInfo,
+    buf: &mut Vec<u8>,
+) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
+    let idx = chunk_index as usize;
+    let offset = *info
+        .chunk_offsets
+        .get(idx)
+        .ok_or_else(|| DggsStreamError::InvalidMetadata("invalid chunk offset".into()))?;
+    let len_u64 = *info
+        .chunk_bytes
+        .get(idx)
+        .ok_or_else(|| DggsStreamError::InvalidMetadata("invalid chunk bytes".into()))?;
+    let len = usize::try_from(len_u64)
+        .ok()
+        .filter(|_| {
+            offset
+                .checked_add(len_u64)
+                .is_some_and(|end| end <= file_len)
+        })
+        .ok_or_else(|| DggsStreamError::InvalidMetadata("chunk offset out of bounds".into()))?;
+    buf.resize(len, 0);
+    file.read_exact_at(buf, offset).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::UnexpectedEof {
+            DggsStreamError::InvalidMetadata("chunk offset out of bounds".into())
+        } else {
+            err.into()
+        }
+    })
+}
+
 /// Persistent chunk decoder that reuses the TIFF decoder across reads.
 /// This avoids re-parsing IFD headers, tag tables, and strip/tile offset
 /// arrays on every chunk read — the single largest I/O optimization.
@@ -392,6 +454,17 @@ pub struct ChunkDecoder<'a> {
     pub nodata: Option<f64>,
     chunk_info: Option<Arc<TiffChunkInfo>>,
     source: DecoderSource<'a>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    local_identity: Option<LocalIdentity>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    local_path: PathBuf,
+    /// Opened on first use and checked against `local_identity`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    local_file: Option<File>,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    local_file_unavailable: bool,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    compressed_scratch: Vec<u8>,
     libdeflater: Option<libdeflater::Decompressor>,
     lzw_decoder: Option<weezl::decode::Decoder>,
     zstd_decoder: Option<zstd::bulk::Decompressor<'static>>,
@@ -636,13 +709,51 @@ impl<'a> ChunkDecoder<'a> {
             let res = self.fast_decode(chunk_index, bytes, target_buffer.as_mut());
             self.stage_for_generic_decoder(&res, chunk_index, bytes);
             (res, true)
-        } else if let Some(ref info) = self.chunk_info {
-            // A failed read is final. The generic decoder would only request the
-            // same bytes again through a second code path.
-            let payload = self.source.get_chunk_payload(chunk_index, info)?;
-            let res = self.fast_decode(chunk_index, payload.as_ref(), target_buffer.as_mut());
-            self.stage_for_generic_decoder(&res, chunk_index, payload.as_ref());
-            (res, false)
+        } else if let Some(info) = self.chunk_info.clone() {
+            #[cfg(unix)]
+            // Codecs without a fast decoder fall back to the generic decoder, which
+            // reads the mapped bytes itself: copying them first would read twice.
+            let local = if matches!(
+                info.compression,
+                CompressionMethod::None
+                    | CompressionMethod::Deflate
+                    | CompressionMethod::OldDeflate
+                    | CompressionMethod::LZW
+                    | CompressionMethod::ZSTD
+            ) {
+                self.take_local_file()
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            if let Some((file, file_len)) = local {
+                let mut buf = std::mem::take(&mut self.compressed_scratch);
+                let read_res =
+                    read_local_payload_into(&file, file_len, chunk_index, &info, &mut buf);
+                self.local_file = Some(file);
+                let fast_res =
+                    read_res.map(|()| self.fast_decode(chunk_index, &buf, target_buffer.as_mut()));
+                if buf.capacity() <= 16 * 1024 * 1024 {
+                    self.compressed_scratch = buf;
+                }
+                (fast_res?, false)
+            } else {
+                // A failed read is final. The generic decoder would only request the
+                // same bytes again through a second code path.
+                let payload = self.source.get_chunk_payload(chunk_index, &info)?;
+                let res = self.fast_decode(chunk_index, payload.as_ref(), target_buffer.as_mut());
+                self.stage_for_generic_decoder(&res, chunk_index, payload.as_ref());
+                (res, false)
+            }
+            #[cfg(not(unix))]
+            {
+                // A failed read is final. The generic decoder would only request the
+                // same bytes again through a second code path.
+                let payload = self.source.get_chunk_payload(chunk_index, &info)?;
+                let res = self.fast_decode(chunk_index, payload.as_ref(), target_buffer.as_mut());
+                self.stage_for_generic_decoder(&res, chunk_index, payload.as_ref());
+                (res, false)
+            }
         } else {
             (
                 Err(FastDecodeError::Unsupported(
@@ -688,6 +799,24 @@ impl<'a> ChunkDecoder<'a> {
     /// generic decoder's reader so it decodes them instead of downloading the chunk again.
     /// Bytes that failed to decode are not staged: a caller-supplied copy is then re-read
     /// from the source, which is the point of that retry.
+    /// The decoder's own descriptor for the mapped file, opened on first use. It is
+    /// refused unless the path still names the file that was mapped.
+    #[cfg(unix)]
+    fn take_local_file(&mut self) -> Option<(File, u64)> {
+        let identity = self.local_identity?;
+        if let Some(file) = self.local_file.take() {
+            return Some((file, identity.len));
+        }
+        if self.local_file_unavailable {
+            return None;
+        }
+        let file = File::open(&self.local_path)
+            .ok()
+            .filter(|file| LocalIdentity::of(file).is_ok_and(|now| now == identity));
+        self.local_file_unavailable = file.is_none();
+        file.map(|file| (file, identity.len))
+    }
+
     fn stage_for_generic_decoder(
         &self,
         fast_res: &std::result::Result<Option<DecodingResult>, FastDecodeError>,
@@ -1357,6 +1486,7 @@ impl GeoTiffStreamReader {
             return Ok(Self {
                 file_path: path_buf,
                 source: RasterSource::Remote(remote),
+                local_identity: None,
                 metadata,
                 chunk_layout,
                 chunk_info,
@@ -1373,6 +1503,7 @@ impl GeoTiffStreamReader {
             return Ok(Self {
                 file_path: path_buf,
                 source: RasterSource::Remote(remote),
+                local_identity: None,
                 metadata,
                 chunk_layout,
                 chunk_info,
@@ -1385,9 +1516,11 @@ impl GeoTiffStreamReader {
         // reads may fault or see torn data. That is the standard `mmap` caveat,
         // accepted here for zero-copy reads.
         let mmap = unsafe { Mmap::map(&file)? };
-        #[cfg(unix)]
-        let _ = mmap.advise(memmap2::Advice::Sequential);
         let mmap_arc = Arc::new(mmap);
+        #[cfg(unix)]
+        let local_identity = LocalIdentity::of(&file).ok();
+        #[cfg(not(unix))]
+        let local_identity = None;
 
         let cursor = Cursor::new(&mmap_arc[..]);
         let mut decoder = Decoder::new(cursor)?;
@@ -1396,6 +1529,7 @@ impl GeoTiffStreamReader {
         Ok(Self {
             file_path: path_buf,
             source: RasterSource::Local(mmap_arc),
+            local_identity,
             metadata,
             chunk_layout,
             chunk_info,
@@ -1464,7 +1598,6 @@ impl GeoTiffStreamReader {
             RasterSource::Local(mmap) => DecoderSource::Local(&mmap[..]),
             RasterSource::Remote(remote) => DecoderSource::Remote(Arc::clone(remote)),
         };
-
         Ok(ChunkDecoder {
             inner,
             chunk_layout: self.chunk_layout,
@@ -1479,6 +1612,11 @@ impl GeoTiffStreamReader {
             nodata: self.metadata.nodata,
             chunk_info: self.chunk_info.clone(),
             source,
+            local_identity: self.local_identity,
+            local_path: self.file_path.clone(),
+            local_file: None,
+            local_file_unavailable: false,
+            compressed_scratch: Vec::new(),
             libdeflater,
             lzw_decoder,
             zstd_decoder,
@@ -1602,5 +1740,78 @@ mod tests {
             matches!(err, DggsStreamError::InvalidMetadata(_)),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_local_file_is_never_read_through_a_new_descriptor() {
+        let tmp = encode_gray_geotiff(
+            32,
+            32,
+            tiff::encoder::Compression::Deflate(Default::default()),
+            &[],
+        );
+        let reader = GeoTiffStreamReader::open(tmp.path()).unwrap();
+        // Swap another file in under the same path; the mapping keeps the original.
+        let other = encode_gray_geotiff(
+            48,
+            48,
+            tiff::encoder::Compression::Deflate(Default::default()),
+            &[],
+        );
+        std::fs::rename(other.path(), tmp.path()).unwrap();
+        let mut decoder = reader.open_decoder().unwrap();
+        let (bounds, data) = decoder.read_chunk(0).unwrap();
+        assert_eq!(bounds.width, 32, "decoded the mapped file");
+        assert!(decoder.local_file.is_none(), "descriptor was refused");
+        let DecodingResult::U8(samples) = data else {
+            panic!("expected u8 samples");
+        };
+        assert!(samples.iter().all(|&v| v == 7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_pread_reads_compressed_chunks_and_checks_bounds() {
+        let tmp = encode_gray_geotiff(
+            32,
+            32,
+            tiff::encoder::Compression::Deflate(Default::default()),
+            &[],
+        );
+        let reader = GeoTiffStreamReader::open(tmp.path()).unwrap();
+        let mut decoder = reader.open_decoder().unwrap();
+        assert!(decoder.local_file.is_none(), "descriptor opens lazily");
+
+        let (bounds, data) = decoder.read_chunk(0).unwrap();
+        assert!(decoder.local_file.is_some());
+        assert_eq!(bounds.width, 32);
+        let DecodingResult::U8(samples) = data else {
+            panic!("expected u8 samples");
+        };
+        assert!(samples.iter().all(|&v| v == 7));
+        assert!(decoder.compressed_scratch.capacity() > 0);
+
+        // Corrupt chunk offset beyond file length and confirm error + scratch restoration.
+        let mut bad = (*decoder.chunk_info.clone().unwrap()).clone();
+        bad.chunk_offsets = Arc::from(vec![u64::MAX - 8]);
+        bad.chunk_bytes = Arc::from(vec![16]);
+        let orig_info = decoder.chunk_info.take();
+        decoder.chunk_info = Some(Arc::new(bad));
+        let err = match decoder.read_chunk(0) {
+            Ok(_) => panic!("out-of-bounds offset must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, DggsStreamError::InvalidMetadata(_)),
+            "unexpected error: {err}"
+        );
+
+        decoder.chunk_info = orig_info;
+        let (_, reread) = decoder.read_chunk(0).unwrap();
+        let DecodingResult::U8(reread) = reread else {
+            panic!("expected u8 samples");
+        };
+        assert!(reread.iter().all(|&v| v == 7));
     }
 }

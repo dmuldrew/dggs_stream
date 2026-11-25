@@ -107,7 +107,7 @@ fn print_help() {
           --emit-nodata-value <NUM>  Value of an all-NoData cell's statistics under\n                                     \
                                      `--nodata-policy emit` (default: null)\n  \
           --decimals <N>             Round output statistics to N decimals (0..=15)\n  \
-          --ground-area              Weight center assignments by pixel area in square metres (ipc/jsonl)\n  \
+          --ground-area              Weight continuous center or overlay stats by pixel area in square metres (ipc/jsonl)\n  \
           --bands <LIST|all>         Wide continuous IPC/JSONL/Parquet statistics, e.g. --bands 3,1\n  \
           --transfer <MODE>          How pixels map onto cells: assign_centers (default,\n                                     \
                                      each pixel into the cell holding its centre),\n                                     \
@@ -129,6 +129,8 @@ fn print_help() {
           --histogram-normalize <N>  none (default), fraction or density (bins only)\n  \
           --profile                  Print where the time went (decode, kernel, horizon,\n                                     \
                                      serialization; pixels, cells, stalls) on stderr\n  \
+          --decode-workers <N>       Background TIFF decode threads (>=1)\n  \
+          --aggregation-workers <N>  Aggregation/overlay worker threads (>=1)\n  \
           --raw-values               Skip GDAL band scale/offset calibration\n  \
           --bbox <minx,miny,maxx,maxy> WGS84 bounding box filter\n  \
           --columns <col1,col2,...>  Column projection pushdown\n  \
