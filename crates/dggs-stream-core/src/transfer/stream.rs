@@ -522,6 +522,8 @@ pub struct TransferStream<A: TransferAccumulator> {
     mosaic: Arc<MosaicReader>,
     grid: GridKind,
     resolutions: Vec<u8>,
+    /// Index of the finest resolution when rolling up strictly nested `overlay` grids.
+    nested_rollup_finest: Option<usize>,
     mode: TransferMode,
     overlap_parallelism: OverlapParallelism,
     selection: BandSelection,
@@ -692,10 +694,38 @@ impl<A: TransferAccumulator> TransferStream<A> {
             horizon[i] = horizon[i + 1].max(reach);
         }
         let res_count = resolutions.len();
+        let nested_rollup_finest = (res_count > 1
+            && matches!(grid, GridKind::S2 | GridKind::Healpix)
+            && matches!(
+                mode,
+                TransferMode::Overlay {
+                    weighted: true,
+                    mass_preserve: false
+                }
+            )
+            && A::SUPPORTS_MERGE
+            && !resolutions
+                .iter()
+                .any(|&r| grid.spec().max_cell_diameter_km(r) > COARSE_CELL_DIAMETER_KM))
+        .then(|| {
+            let mut sorted = resolutions.clone();
+            sorted.sort_unstable();
+            let all_distinct = sorted.windows(2).all(|w| w[0] != w[1]);
+            all_distinct.then(|| {
+                resolutions
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|&(_, &r)| r)
+                    .map(|(idx, _)| idx)
+            })
+        })
+        .flatten()
+        .flatten();
         Ok(Self {
             mosaic,
             grid,
             resolutions,
+            nested_rollup_finest,
             mode,
             bands,
             overlap_parallelism: OverlapParallelism::from_workers(config.aggregation_workers)?,
@@ -959,17 +989,30 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     } => {
                         let window =
                             self.load_window(tile, block.rows.clone(), block.cols.clone())?;
-                        for res_idx in 0..self.resolutions.len() {
-                            let res = self.resolutions[res_idx];
+                        if let Some(finest_idx) = self.nested_rollup_finest {
+                            let res = self.resolutions[finest_idx];
                             let bbox = pad_block_extent(extent, self.grid, res, true);
                             self.overlay_block_for_res(
-                                res_idx,
+                                finest_idx,
                                 block,
                                 bbox,
                                 &window,
                                 weighted,
                                 mass_preserve,
                             )?;
+                        } else {
+                            for res_idx in 0..self.resolutions.len() {
+                                let res = self.resolutions[res_idx];
+                                let bbox = pad_block_extent(extent, self.grid, res, true);
+                                self.overlay_block_for_res(
+                                    res_idx,
+                                    block,
+                                    bbox,
+                                    &window,
+                                    weighted,
+                                    mass_preserve,
+                                )?;
+                            }
                         }
                     }
                     TransferMode::AssignCenters | TransferMode::Auto => {}
@@ -1568,13 +1611,32 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 .filter(|b| b.tile == block.tile)
                 .map_or(block.rows.end, |b| b.rows.start),
         );
+        if let Some(finest_idx) = self.nested_rollup_finest {
+            self.finish_resolution_cells(finest_idx, block, last_overall, end, true);
+        }
         for res_idx in 0..self.resolutions.len() {
-            let resolution = self.resolutions[res_idx];
-            let pending_map = &mut self.pending[res_idx];
-            if pending_map.is_empty() {
+            if self.nested_rollup_finest == Some(res_idx) {
                 continue;
             }
-            let mut done: Vec<u64> = pending_map
+            self.finish_resolution_cells(res_idx, block, last_overall, end, false);
+        }
+    }
+
+    fn finish_resolution_cells(
+        &mut self,
+        res_idx: usize,
+        block: &Block,
+        last_overall: bool,
+        end: i64,
+        roll_up_to_coarser: bool,
+    ) {
+        let resolution = self.resolutions[res_idx];
+        let mut done: Vec<u64> = {
+            let pending_map = &self.pending[res_idx];
+            if pending_map.is_empty() {
+                return;
+            }
+            pending_map
                 .iter()
                 .filter(|(_, p)| {
                     last_overall
@@ -1583,24 +1645,103 @@ impl<A: TransferAccumulator> TransferStream<A> {
                         || p.last_tile < block.tile
                 })
                 .map(|(cell, _)| *cell)
-                .collect();
-            // Deterministic output order within a band and resolution.
-            done.sort_unstable();
-            for cell in done {
-                if let Some(mut pending) = pending_map.remove(&cell) {
-                    let keep = pending.acc.has_samples() || (self.emit_nodata && pending.touched);
-                    let valid = self.coverage_filter.as_mut().is_none_or(|filter| {
-                        filter.cells[res_idx].remove(&cell).is_some_and(|coverage| {
-                            pending.acc.retain_covered(
-                                &coverage.valid_area,
-                                filter.minimum * coverage.covered_area,
-                            )
-                        })
-                    });
-                    if keep && valid && pending.acc.passes(&self.filters) {
-                        self.output.push_back((resolution, cell, pending.acc));
+                .collect()
+        };
+        // Deterministic output order within a band and resolution.
+        done.sort_unstable();
+        for cell in done {
+            let Some(mut pending) = self.pending[res_idx].remove(&cell) else {
+                continue;
+            };
+            let cov = self
+                .coverage_filter
+                .as_mut()
+                .and_then(|filter| filter.cells[res_idx].remove(&cell));
+            if roll_up_to_coarser {
+                self.roll_up_finished_cell(res_idx, cell, block, &pending, cov.as_ref());
+            }
+            let keep = pending.acc.has_samples() || (self.emit_nodata && pending.touched);
+            let valid = match (self.coverage_filter.as_ref(), cov) {
+                (Some(filter), Some(coverage)) => pending
+                    .acc
+                    .retain_covered(&coverage.valid_area, filter.minimum * coverage.covered_area),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if keep && valid && pending.acc.passes(&self.filters) {
+                self.output.push_back((resolution, cell, pending.acc));
+            }
+        }
+    }
+
+    fn roll_up_finished_cell(
+        &mut self,
+        finest_idx: usize,
+        cell: u64,
+        block: &Block,
+        pending: &Pending<A>,
+        cov: Option<&BandCoverage>,
+    ) {
+        let tile = &self.mosaic.tiles[block.tile];
+        let lon_bounds = periodic_longitude_bounds(tile);
+        for parent_idx in 0..self.resolutions.len() {
+            if parent_idx == finest_idx {
+                continue;
+            }
+            let parent_res = self.resolutions[parent_idx];
+            let Some(parent) = self.grid.parent(cell, parent_res) else {
+                continue;
+            };
+            match self.pending[parent_idx].entry(parent) {
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    let entry = o.into_mut();
+                    entry.acc.merge_from(&pending.acc);
+                    entry.touched |= pending.touched;
+                    if entry.last_tile == block.tile {
+                        if entry.end_row.is_none() {
+                            entry.end_row = Some(cell_end_row(self.grid, parent, tile, lon_bounds));
+                        }
+                        if pending.last_tile == block.tile {
+                            if let Some(child_end) = pending.end_row {
+                                entry.end_row =
+                                    Some(entry.end_row.map_or(child_end, |e| e.max(child_end)));
+                            }
+                        }
                     }
                 }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let last_tile =
+                        last_overlapping_tile(&self.mosaic, self.grid, parent, block.tile);
+                    let end_row = (last_tile == block.tile).then(|| {
+                        let mut row = cell_end_row(self.grid, parent, tile, lon_bounds);
+                        if pending.last_tile == block.tile {
+                            if let Some(child_end) = pending.end_row {
+                                row = row.max(child_end);
+                            }
+                        }
+                        row
+                    });
+                    let mut acc = A::empty_bands(self.track_quantiles, self.bands.len());
+                    acc.merge_from(&pending.acc);
+                    v.insert(Pending {
+                        acc,
+                        touched: pending.touched,
+                        end_row,
+                        last_tile,
+                    });
+                }
+            }
+            if let (Some(filter), Some(child_cov)) = (self.coverage_filter.as_mut(), cov) {
+                let parent_cov = filter.cells[parent_idx].entry(parent).or_default();
+                if parent_cov.valid_area.len() < child_cov.valid_area.len() {
+                    parent_cov
+                        .valid_area
+                        .resize(child_cov.valid_area.len(), 0.0);
+                }
+                for (dst, &src) in parent_cov.valid_area.iter_mut().zip(&child_cov.valid_area) {
+                    *dst += src;
+                }
+                parent_cov.covered_area += child_cov.covered_area;
             }
         }
     }
@@ -2857,6 +2998,36 @@ pub(super) fn project_cell_polygons(
         }
     }
     ProjectedCell::Polygons { count: copies }
+}
+
+/// Exclusive end row on `tile` for `cell`'s projected boundary, falling back to
+/// the tile height when the boundary cannot be projected as finite polygons.
+fn cell_end_row(
+    grid: GridKind,
+    cell: u64,
+    tile: &TileDescriptor,
+    longitude_bounds: Option<(f64, f64)>,
+) -> i64 {
+    let tile_height = i64::from(tile.reader.metadata.height);
+    let mut rings = ProjectedRings::default();
+    let ProjectedCell::Polygons { count } =
+        project_cell_polygons(grid, cell, tile, longitude_bounds, &mut rings)
+    else {
+        return tile_height;
+    };
+    let mut max_row = f64::NEG_INFINITY;
+    for copy in 0..count {
+        for &(_, row) in rings.ring(copy) {
+            max_row = max_row.max(row);
+        }
+    }
+    if max_row.is_finite() {
+        (max_row.ceil() as i64)
+            .saturating_add(1)
+            .clamp(0, tile_height)
+    } else {
+        tile_height
+    }
 }
 
 /// Visit the cell polygon on each longitude branch touching the raster. A
