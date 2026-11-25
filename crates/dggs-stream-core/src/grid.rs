@@ -1035,6 +1035,83 @@ pub trait GridBackend: Copy + Send + Sync + 'static {
     );
 }
 
+/// The longitude a scalar walk computes for a column of a constant-latitude row:
+/// `c0 + (col_offset + col + dx) * a` in the source CRS, then (for Web Mercator)
+/// converted to degrees. Batched rows approximate it by stepping from the first
+/// column; samples near a cell boundary are recomputed with this exact formula, so
+/// they land in the same cell as the scalar walk.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExactLon {
+    pub c0: f64,
+    pub a: f64,
+    pub col_offset: usize,
+    pub dx: f64,
+    pub mercator: bool,
+}
+
+impl ExactLon {
+    /// A row whose column `col` lies at `lon_col0 + col * dlon` exactly.
+    #[cfg(test)]
+    pub(crate) fn linear(lon_col0: f64, dlon: f64) -> Self {
+        Self {
+            c0: lon_col0,
+            a: dlon,
+            col_offset: 0,
+            dx: 0.0,
+            mercator: false,
+        }
+    }
+
+    #[inline]
+    fn at(&self, col: usize) -> f64 {
+        let x = self.c0 + ((self.col_offset + col) as f64 + self.dx) * self.a;
+        if self.mercator {
+            crate::crs::transformer::web_mercator_lon(x)
+        } else {
+            x
+        }
+    }
+}
+
+/// Optional row-hoisted & batched indexing for constant-latitude affine-longitude
+/// scanlines (`RowBatchBackend::SUPPORTS_ROW_BATCH == true`).
+///
+/// Backends opt in when indexing at the finest requested resolution supports
+/// per-row coordinate hoisting (such as S2 and HEALPix) and coarser requested
+/// resolutions can be derived purely by bit masking/shifting (`parents_from_finest`).
+pub(crate) trait RowBatchBackend: GridBackend {
+    /// Per-row hoisted constants shared across every pixel in a constant-latitude row.
+    type RowState: Copy;
+
+    /// Whether this backend implements fast row-hoisted batch indexing.
+    const SUPPORTS_ROW_BATCH: bool = false;
+
+    /// Precompute row-invariant constants for a row at `lat_deg` with column `0` at
+    /// `lon_col0_deg` and per-column longitude step `dlon_deg`, indexing at `max_res`.
+    /// Returns `None` for singular rows (e.g. near poles or projection transitions).
+    #[inline(always)]
+    fn prepare_row(
+        _lat_deg: f64,
+        _lon_col0_deg: f64,
+        _dlon_deg: f64,
+        _exact: ExactLon,
+        _max_res: u8,
+    ) -> Option<Self::RowState> {
+        None
+    }
+
+    /// Index consecutive columns `start_col .. start_col + out.len()` into `out`
+    /// at the `max_res` given to [`Self::prepare_row`].
+    #[inline(always)]
+    fn index_row_batch(_state: &Self::RowState, _start_col: usize, _out: &mut [u64]) {}
+
+    /// Derive cell IDs for all sorted/arbitrary `resolutions` from `finest_cell`
+    /// (which is at `max_res`), writing into `out`.
+    #[inline(always)]
+    fn parents_from_finest(_finest_cell: u64, _max_res: u8, _resolutions: &[u8], _out: &mut [u64]) {
+    }
+}
+
 /// Static [`GridBackend`] implementation for Uber H3 (`h3o`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct H3Backend;
@@ -1071,6 +1148,10 @@ impl GridBackend for H3Backend {
             out,
         );
     }
+}
+
+impl RowBatchBackend for H3Backend {
+    type RowState = ();
 }
 
 /// Static [`GridBackend`] implementation for A5 pentagons (`a5`).
@@ -1118,6 +1199,125 @@ impl GridBackend for A5Backend {
     }
 }
 
+impl RowBatchBackend for A5Backend {
+    type RowState = ();
+}
+
+/// 4-bit S2 Hilbert lookup table mapping `(i_nib << 6) | (j_nib << 2) | orientation`
+/// to `(pos_bits << 2) | next_orientation`.
+fn s2_lookup_pos() -> &'static [u16; 1024] {
+    static LOOKUP_POS: OnceLock<[u16; 1024]> = OnceLock::new();
+    LOOKUP_POS.get_or_init(|| {
+        const SWAP_MASK: usize = 1;
+        const INVERT_MASK: usize = 2;
+        const POS_TO_IJ: [[usize; 4]; 4] = [[0, 1, 3, 2], [0, 2, 3, 1], [3, 2, 0, 1], [3, 1, 0, 2]];
+        const POS_TO_ORIENTATION: [usize; 4] = [SWAP_MASK, 0, 0, INVERT_MASK | SWAP_MASK];
+
+        fn init_lookup_cell(
+            level: u8,
+            i: usize,
+            j: usize,
+            orig_orientation: usize,
+            pos: usize,
+            orientation: usize,
+            table: &mut [u16; 1024],
+        ) {
+            if level == 4 {
+                let ij = (i << 4) + j;
+                table[(ij << 2) + orig_orientation] = ((pos << 2) + orientation) as u16;
+            } else {
+                let next_level = level + 1;
+                let i = i << 1;
+                let j = j << 1;
+                let pos = pos << 2;
+                let r = &POS_TO_IJ[orientation];
+                for (k, &ij_bits) in r.iter().enumerate() {
+                    init_lookup_cell(
+                        next_level,
+                        i + (ij_bits >> 1),
+                        j + (ij_bits & 1),
+                        orig_orientation,
+                        pos + k,
+                        orientation ^ POS_TO_ORIENTATION[k],
+                        table,
+                    );
+                }
+            }
+        }
+
+        let mut table = [0u16; 1024];
+        init_lookup_cell(0, 0, 0, 0, 0, 0, &mut table);
+        init_lookup_cell(0, 0, 0, SWAP_MASK, 0, SWAP_MASK, &mut table);
+        init_lookup_cell(0, 0, 0, INVERT_MASK, 0, INVERT_MASK, &mut table);
+        init_lookup_cell(
+            0,
+            0,
+            0,
+            SWAP_MASK | INVERT_MASK,
+            0,
+            SWAP_MASK | INVERT_MASK,
+            &mut table,
+        );
+        table
+    })
+}
+
+/// Encode `(face, i, j)` at S2 `level` (`0..=30`) where `0 <= i, j < (1 << level)`.
+#[inline(always)]
+fn s2_face_ij_to_cell_at_level(lookup: &[u16; 1024], face: u64, i: u32, j: u32, level: u8) -> u64 {
+    if level == 0 {
+        return (face << 61) | (1u64 << 60);
+    }
+    let shift = 30 - level;
+    let i30 = i << shift;
+    let j30 = j << shift;
+    let mut bits = (face & 1) as usize;
+    let mut pos: u64 = 0;
+    let min_k = (30 - level) / 4;
+    for k in (min_k..=7).rev() {
+        let r = k * 4;
+        bits += (((i30 >> r) & 0xF) as usize) << 6;
+        bits += (((j30 >> r) & 0xF) as usize) << 2;
+        let v = lookup[bits];
+        pos |= u64::from(v >> 2) << (2 * r);
+        bits = usize::from(v & 3);
+    }
+    let raw = (face << 61) | (pos << 1);
+    let lsb = 1u64 << (60 - 2 * level);
+    let mask = !(lsb.wrapping_sub(1) | lsb);
+    (raw & mask) | lsb
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct S2RowState {
+    lat_deg: f64,
+    exact: ExactLon,
+    theta_col0: f64,
+    dtheta: f64,
+    cos_phi: f64,
+    sin_phi: f64,
+    step_cos: [f64; 16],
+    step_sin: [f64; 16],
+    lookup: &'static [u16; 1024],
+    max_res: u8,
+    n_side: f64,
+    eps: f64,
+}
+
+impl S2RowState {
+    #[cold]
+    #[inline(never)]
+    fn fallback(&self, col: usize) -> u64 {
+        let lon_deg = self.exact.at(col);
+        S2CellId::from(s2::latlng::LatLng::from_degrees(
+            self.lat_deg,
+            wrap_lon_180(lon_deg),
+        ))
+        .parent(u64::from(self.max_res))
+        .0
+    }
+}
+
 /// Static [`GridBackend`] implementation for Google S2 (`s2`).
 ///
 /// A sample is indexed once at the leaf level; every coarser level is a bit mask away.
@@ -1155,6 +1355,203 @@ impl GridBackend for S2Backend {
     }
 }
 
+impl RowBatchBackend for S2Backend {
+    type RowState = S2RowState;
+    const SUPPORTS_ROW_BATCH: bool = true;
+
+    #[inline]
+    fn prepare_row(
+        lat_deg: f64,
+        lon_col0_deg: f64,
+        dlon_deg: f64,
+        exact: ExactLon,
+        max_res: u8,
+    ) -> Option<Self::RowState> {
+        if !lat_deg.is_finite()
+            || !lon_col0_deg.is_finite()
+            || !dlon_deg.is_finite()
+            || lat_deg.abs() > 89.9999
+            || max_res > 30
+        {
+            return None;
+        }
+        let phi = lat_deg.to_radians();
+        let (sin_phi, cos_phi) = phi.sin_cos();
+        let theta_col0 = lon_col0_deg.to_radians();
+        let dtheta = dlon_deg.to_radians();
+        let mut step_cos = [0.0f64; 16];
+        let mut step_sin = [0.0f64; 16];
+        for k in 0..16 {
+            let (s, c) = (k as f64 * dtheta).sin_cos();
+            step_cos[k] = c;
+            step_sin[k] = s;
+        }
+        let n_side = (1u64 << max_res) as f64;
+        let eps = (1e-9 * n_side).max(1e-7);
+        Some(S2RowState {
+            exact,
+            lat_deg,
+            theta_col0,
+            dtheta,
+            cos_phi,
+            sin_phi,
+            step_cos,
+            step_sin,
+            lookup: s2_lookup_pos(),
+            max_res,
+            n_side,
+            eps,
+        })
+    }
+
+    #[inline(always)]
+    fn index_row_batch(state: &Self::RowState, start_col: usize, out: &mut [u64]) {
+        let z = state.sin_phi;
+        let az = z.abs();
+        let mut off = 0usize;
+        while off < out.len() {
+            let len = (out.len() - off).min(16);
+            let theta0 = state.theta_col0 + (start_col + off) as f64 * state.dtheta;
+            let (base_sin, base_cos) = theta0.sin_cos();
+            let bx = state.cos_phi * base_cos;
+            let by = state.cos_phi * base_sin;
+            let mut xs = [0.0f64; 16];
+            let mut ys = [0.0f64; 16];
+            for k in 0..len {
+                xs[k] = bx * state.step_cos[k] - by * state.step_sin[k];
+                ys[k] = by * state.step_cos[k] + bx * state.step_sin[k];
+            }
+            for k in 0..len {
+                let x = xs[k];
+                let y = ys[k];
+                let ax = x.abs();
+                let ay = y.abs();
+                let (face, u, v, edge_gap) = if ax >= ay && ax >= az {
+                    let gap = ax - ay.max(az);
+                    if x >= 0.0 {
+                        (0u64, y / x, z / x, gap)
+                    } else {
+                        (3u64, z / x, y / x, gap)
+                    }
+                } else if ay >= az {
+                    let gap = ay - ax.max(az);
+                    if y >= 0.0 {
+                        (1u64, -x / y, z / y, gap)
+                    } else {
+                        (4u64, z / y, -x / y, gap)
+                    }
+                } else {
+                    let gap = az - ax.max(ay);
+                    if z >= 0.0 {
+                        (2u64, -x / z, -y / z, gap)
+                    } else {
+                        (5u64, -y / z, -x / z, gap)
+                    }
+                };
+                if edge_gap < 1e-9 {
+                    out[off + k] = state.fallback(start_col + off + k);
+                    continue;
+                }
+                let s = if u >= 0.0 {
+                    0.5 * (1.0 + 3.0 * u).sqrt()
+                } else {
+                    1.0 - 0.5 * (1.0 - 3.0 * u).sqrt()
+                };
+                let t = if v >= 0.0 {
+                    0.5 * (1.0 + 3.0 * v).sqrt()
+                } else {
+                    1.0 - 0.5 * (1.0 - 3.0 * v).sqrt()
+                };
+                let si = s * state.n_side;
+                let ti = t * state.n_side;
+                let sf = si - si.floor();
+                let tf = ti - ti.floor();
+                if si <= state.eps
+                    || si >= state.n_side - state.eps
+                    || ti <= state.eps
+                    || ti >= state.n_side - state.eps
+                    || sf < state.eps
+                    || sf > 1.0 - state.eps
+                    || tf < state.eps
+                    || tf > 1.0 - state.eps
+                {
+                    out[off + k] = state.fallback(start_col + off + k);
+                    continue;
+                }
+                out[off + k] = s2_face_ij_to_cell_at_level(
+                    state.lookup,
+                    face,
+                    si as u32,
+                    ti as u32,
+                    state.max_res,
+                );
+            }
+            off += len;
+        }
+    }
+
+    #[inline(always)]
+    fn parents_from_finest(finest_cell: u64, _max_res: u8, resolutions: &[u8], out: &mut [u64]) {
+        for (cell, &res) in out.iter_mut().zip(resolutions) {
+            let lsb = 1u64 << (60 - 2 * res);
+            *cell = (finest_cell & !(lsb.wrapping_sub(1) | lsb)) | lsb;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HealpixRowRegion {
+    Equatorial { y: f64 },
+    NorthPolar { sigma: f64 },
+    SouthPolar { sigma: f64 },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HealpixRowState {
+    lat_deg: f64,
+    exact: ExactLon,
+    x_col0: f64,
+    dx_step: f64,
+    region: HealpixRowRegion,
+    max_res: u8,
+    nside: f64,
+    shift_to_base: u32,
+    nuniq_offset: u64,
+    eps: f64,
+}
+
+impl HealpixRowState {
+    #[cold]
+    #[inline(never)]
+    fn fallback(&self, col: usize) -> u64 {
+        let lon_deg = self.exact.at(col);
+        let deep = healpix::get(HEALPIX_MAX_DEPTH).hash([
+            lon_deg.rem_euclid(360.0).to_radians(),
+            self.lat_deg.to_radians(),
+        ]);
+        healpix_encode(
+            self.max_res,
+            deep >> (2 * (HEALPIX_MAX_DEPTH - self.max_res)),
+        )
+    }
+}
+
+/// SWAR Morton bit interleave of `(i, j)` (`0 <= i, j < 2^29`), placing `i` in
+/// even bits (`0, 2, 4, ...`) and `j` in odd bits (`1, 3, 5, ...`).
+#[inline(always)]
+fn morton_interleave_ij(i: u64, j: u64) -> u64 {
+    #[inline(always)]
+    fn part1by1(mut x: u64) -> u64 {
+        x &= 0x0000_0000_FFFF_FFFF;
+        x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
+        x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
+        x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+        x = (x | (x << 2)) & 0x3333_3333_3333_3333;
+        (x | (x << 1)) & 0x5555_5555_5555_5555
+    }
+    part1by1(i) | (part1by1(j) << 1)
+}
+
 /// Static [`GridBackend`] implementation for HEALPix (`healpix`, nested scheme).
 ///
 /// A sample is hashed once at the deepest depth; every coarser depth is a shift away.
@@ -1189,6 +1586,125 @@ impl GridBackend for HealpixBackend {
     ) {
         for (cell, &res) in out.iter_mut().zip(resolutions) {
             *cell = healpix_encode(res, point >> (2 * (HEALPIX_MAX_DEPTH - res)));
+        }
+    }
+}
+
+impl RowBatchBackend for HealpixBackend {
+    type RowState = HealpixRowState;
+    const SUPPORTS_ROW_BATCH: bool = true;
+
+    #[inline]
+    fn prepare_row(
+        lat_deg: f64,
+        lon_col0_deg: f64,
+        dlon_deg: f64,
+        exact: ExactLon,
+        max_res: u8,
+    ) -> Option<Self::RowState> {
+        if !lat_deg.is_finite()
+            || !lon_col0_deg.is_finite()
+            || !dlon_deg.is_finite()
+            || lat_deg.abs() > 89.9999
+            || max_res > HEALPIX_MAX_DEPTH
+        {
+            return None;
+        }
+        let lat_rad = lat_deg.to_radians();
+        let z = lat_rad.sin();
+        let abs_z = z.abs();
+        if (abs_z - 2.0 / 3.0).abs() < 1e-6 {
+            return None;
+        }
+        let region = if abs_z <= 2.0 / 3.0 {
+            HealpixRowRegion::Equatorial { y: 0.75 * z }
+        } else {
+            let cos_lat = lat_rad.cos();
+            let one_minus_abs_z = (cos_lat * cos_lat) / (1.0 + abs_z);
+            let sigma = (3.0 * one_minus_abs_z).sqrt();
+            if z > 0.0 {
+                HealpixRowRegion::NorthPolar { sigma }
+            } else {
+                HealpixRowRegion::SouthPolar { sigma }
+            }
+        };
+        let nside = (1u64 << max_res) as f64;
+        Some(HealpixRowState {
+            exact,
+            lat_deg,
+            x_col0: lon_col0_deg / 90.0,
+            dx_step: dlon_deg / 90.0,
+            region,
+            max_res,
+            nside,
+            shift_to_base: 2 * u32::from(max_res),
+            nuniq_offset: 4u64 << (2 * max_res),
+            eps: (1e-9 * nside).max(1e-7),
+        })
+    }
+
+    #[inline(always)]
+    fn index_row_batch(state: &Self::RowState, start_col: usize, out: &mut [u64]) {
+        for (k, slot) in out.iter_mut().enumerate() {
+            let col = start_col + k;
+            let x_raw = state.x_col0 + col as f64 * state.dx_step;
+            let x = x_raw - 4.0 * (x_raw * 0.25).floor();
+            let q_f = x.floor();
+            let dx = x - q_f;
+            if !(1e-9..=1.0 - 1e-9).contains(&dx) {
+                *slot = state.fallback(col);
+                continue;
+            }
+            let q = (q_f as u64) & 3;
+            let (d0h, u_ne, v_nw) = match state.region {
+                HealpixRowRegion::Equatorial { y } => {
+                    let p1 = dx + y;
+                    let p2 = dx - y;
+                    if (p1 - 0.5).abs() < 1e-9 || (p2 - 0.5).abs() < 1e-9 {
+                        *slot = state.fallback(col);
+                        continue;
+                    }
+                    if p1 >= 0.5 && p2 <= 0.5 {
+                        (q, p1 - 0.5, 0.5 - p2)
+                    } else if p1 < 0.5 && p2 > 0.5 {
+                        (8 + q, p1 + 0.5, 1.5 - p2)
+                    } else if p1 < 0.5 && p2 <= 0.5 {
+                        (4 + q, p1 + 0.5, 0.5 - p2)
+                    } else {
+                        (4 + ((q + 1) & 3), p1 - 0.5, 1.5 - p2)
+                    }
+                }
+                HealpixRowRegion::NorthPolar { sigma } => {
+                    (q, 1.0 - (1.0 - dx) * sigma, 1.0 - dx * sigma)
+                }
+                HealpixRowRegion::SouthPolar { sigma } => (8 + q, dx * sigma, (1.0 - dx) * sigma),
+            };
+            let us = u_ne * state.nside;
+            let vs = v_nw * state.nside;
+            let uf = us - us.floor();
+            let vf = vs - vs.floor();
+            if us <= state.eps
+                || us >= state.nside - state.eps
+                || vs <= state.eps
+                || vs >= state.nside - state.eps
+                || uf < state.eps
+                || uf > 1.0 - state.eps
+                || vf < state.eps
+                || vf > 1.0 - state.eps
+            {
+                *slot = state.fallback(col);
+                continue;
+            }
+            let interleaved = morton_interleave_ij(us as u64, vs as u64);
+            *slot = state.nuniq_offset + ((d0h << state.shift_to_base) | interleaved);
+        }
+    }
+
+    #[inline(always)]
+    fn parents_from_finest(finest_cell: u64, max_res: u8, resolutions: &[u8], out: &mut [u64]) {
+        let pixel = finest_cell - (4u64 << (2 * max_res));
+        for (cell, &res) in out.iter_mut().zip(resolutions) {
+            *cell = healpix_encode(res, pixel >> (2 * (max_res - res)));
         }
     }
 }
@@ -1743,6 +2259,209 @@ mod tests {
                         let p = A5Backend::make_point(lon, lat).unwrap();
                         A5Backend::index_all(&mut (), p, &[res, res], &mut cells);
                         assert_eq!(cells, [want, want], "res {res} lat {lat}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batched_rows_match_scalar_cells_for_centres_on_cell_boundaries() {
+        // The walker steps from the first centre; column 97 of this row is exactly
+        // longitude 0 in the scalar formula (an S2 and HEALPix boundary) but about
+        // -7e-15 when stepped. The boundary guard must recompute the exact longitude.
+        let (c0, a, dx) = (-32.5, 1.0 / 3.0, 0.5);
+        for col_offset in [0usize, 7] {
+            let exact = ExactLon {
+                c0,
+                a,
+                col_offset,
+                dx,
+                mercator: false,
+            };
+            let lon_col0 = c0 + (col_offset as f64 + dx) * a;
+            let mut batch = [0u64; 64];
+            for lat in [10.0, -10.0, 41.8103148957786] {
+                for max_res in [1u8, 2, 5, 12] {
+                    let s2 = S2Backend::prepare_row(lat, lon_col0, a, exact, max_res)
+                        .expect("S2 row state");
+                    let healpix = HealpixBackend::prepare_row(lat, lon_col0, a, exact, max_res);
+                    for start in [0usize, 64, 128] {
+                        S2Backend::index_row_batch(&s2, start, &mut batch);
+                        for (k, &got) in batch.iter().enumerate() {
+                            let lon = exact.at(start + k);
+                            let want = GridKind::S2.cell_at(lat, lon, max_res).unwrap();
+                            assert_eq!(got, want, "S2 res={max_res} lat={lat} lon={lon}");
+                        }
+                        if let Some(state) = &healpix {
+                            HealpixBackend::index_row_batch(state, start, &mut batch);
+                            for (k, &got) in batch.iter().enumerate() {
+                                let lon = exact.at(start + k);
+                                let want = GridKind::Healpix.cell_at(lat, lon, max_res).unwrap();
+                                assert_eq!(got, want, "HEALPix res={max_res} lat={lat} lon={lon}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn healpix_row_batch_matches_reference_bit_for_bit() {
+        let lats = [
+            -90.0,
+            -89.99995,
+            -89.5,
+            -75.125,
+            -60.0,
+            -45.0,
+            -41.8103148957786, // south transition -2/3
+            -41.7,
+            -30.5,
+            -12.345,
+            0.0,
+            12.345,
+            30.5,
+            41.7,
+            41.8103148957786, // north transition +2/3
+            45.0,
+            60.0,
+            75.125,
+            89.5,
+            89.99995,
+            90.0,
+        ];
+        let lon_starts = [-540.0, -180.0, -90.0, -45.3, 0.0, 89.99, 179.95, 270.0];
+        let dlons = [0.0002777777777777778, 0.75, 15.0, -0.25];
+        let depths = [0u8, 1, 5, 12, 15, 20, 29];
+        let mut batch = [0u64; 64];
+
+        for &max_res in &depths {
+            let parent_res: Vec<u8> = depths.iter().copied().filter(|&d| d <= max_res).collect();
+            let mut parents_fast = vec![0u64; parent_res.len()];
+            let mut parents_ref = vec![0u64; parent_res.len()];
+            for &lat in &lats {
+                for &lon0 in &lon_starts {
+                    for &dlon in &dlons {
+                        let prepared = HealpixBackend::prepare_row(
+                            lat,
+                            lon0,
+                            dlon,
+                            ExactLon::linear(lon0, dlon),
+                            max_res,
+                        );
+                        if lat.abs() > 89.9999
+                            || ((lat.to_radians().sin().abs() - 2.0 / 3.0).abs() < 1e-6)
+                        {
+                            assert!(prepared.is_none(), "expected fallback near lat {lat}");
+                            continue;
+                        }
+                        let state = prepared.expect("valid healpix row state");
+                        for start_col in [0usize, 13, 64] {
+                            HealpixBackend::index_row_batch(&state, start_col, &mut batch);
+                            for (k, &got) in batch.iter().enumerate() {
+                                let col = start_col + k;
+                                let lon = lon0 + col as f64 * dlon;
+                                let pt = HealpixBackend::make_point(lon, lat).unwrap();
+                                HealpixBackend::index_all(
+                                    &mut (),
+                                    pt,
+                                    &parent_res,
+                                    &mut parents_ref,
+                                );
+                                let expected_finest = *parents_ref.last().unwrap();
+                                assert_eq!(
+                                    got, expected_finest,
+                                    "healpix mismatch res={max_res} lat={lat} lon={lon} col={col}"
+                                );
+                                HealpixBackend::parents_from_finest(
+                                    got,
+                                    max_res,
+                                    &parent_res,
+                                    &mut parents_fast,
+                                );
+                                assert_eq!(
+                                    parents_fast, parents_ref,
+                                    "healpix parents mismatch max_res={max_res} lat={lat} lon={lon}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn s2_row_batch_matches_reference_bit_for_bit() {
+        let lats = [
+            -90.0,
+            -89.99995,
+            -89.5,
+            -60.0,
+            -45.0,
+            -35.264389682754654, // cube corner latitude
+            -12.345,
+            0.0,
+            12.345,
+            35.264389682754654,
+            45.0,
+            60.0,
+            89.5,
+            89.99995,
+            90.0,
+        ];
+        let lon_starts = [
+            -540.0, -180.0, -135.0, -45.0, 0.0, 44.95, 134.95, 179.95, 270.0,
+        ];
+        let dlons = [0.0002777777777777778, 0.75, 15.0, -0.25];
+        let levels = [0u8, 1, 2, 10, 14, 16, 20, 30];
+        let mut batch = [0u64; 64];
+
+        for &max_res in &levels {
+            let parent_res: Vec<u8> = levels.iter().copied().filter(|&l| l <= max_res).collect();
+            let mut parents_fast = vec![0u64; parent_res.len()];
+            let mut parents_ref = vec![0u64; parent_res.len()];
+            for &lat in &lats {
+                for &lon0 in &lon_starts {
+                    for &dlon in &dlons {
+                        let prepared = S2Backend::prepare_row(
+                            lat,
+                            lon0,
+                            dlon,
+                            ExactLon::linear(lon0, dlon),
+                            max_res,
+                        );
+                        if lat.abs() > 89.9999 {
+                            assert!(prepared.is_none(), "expected fallback near lat {lat}");
+                            continue;
+                        }
+                        let state = prepared.expect("valid s2 row state");
+                        for start_col in [0usize, 13, 64] {
+                            S2Backend::index_row_batch(&state, start_col, &mut batch);
+                            for (k, &got) in batch.iter().enumerate() {
+                                let col = start_col + k;
+                                let lon = lon0 + col as f64 * dlon;
+                                let pt = S2Backend::make_point(lon, lat).unwrap();
+                                S2Backend::index_all(&mut (), pt, &parent_res, &mut parents_ref);
+                                let expected_finest = *parents_ref.last().unwrap();
+                                assert_eq!(
+                                    got, expected_finest,
+                                    "s2 mismatch res={max_res} lat={lat} lon={lon} col={col}"
+                                );
+                                S2Backend::parents_from_finest(
+                                    got,
+                                    max_res,
+                                    &parent_res,
+                                    &mut parents_fast,
+                                );
+                                assert_eq!(
+                                    parents_fast, parents_ref,
+                                    "s2 parents mismatch max_res={max_res} lat={lat} lon={lon}"
+                                );
+                            }
+                        }
                     }
                 }
             }

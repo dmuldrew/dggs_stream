@@ -19,6 +19,10 @@ pub trait SpillAccumulator: AccumulatorMerge {
     }
 }
 
+/// Runs [`SpillRuns::finish`] streams at once: the two merge heads the aggregation
+/// budget reserves (see the controller's budget split).
+const MAX_STREAMED_RUNS: usize = 2;
+
 pub(crate) fn table_bytes<K, V>(capacity: usize) -> usize {
     // Conservative allowance for bucket slack, control bytes and alignment.
     if capacity == 0 {
@@ -26,6 +30,10 @@ pub(crate) fn table_bytes<K, V>(capacity: usize) -> usize {
     } else {
         (capacity + 1).saturating_mul(2 * (size_of::<(K, V)>() + 1)) + 64
     }
+}
+#[inline]
+fn spill_buf_capacity(limit: usize) -> usize {
+    (limit / 4).clamp(4096, 64 * 1024)
 }
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -38,24 +46,14 @@ fn read_u64(input: &mut impl Read) -> io::Result<u64> {
     input.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
 }
-fn write_f64(out: &mut impl Write, v: f64) -> io::Result<()> {
-    write_u64(out, v.to_bits())
-}
-fn read_f64(input: &mut impl Read) -> io::Result<f64> {
-    Ok(f64::from_bits(read_u64(input)?))
-}
-/// A total or count: never NaN, negative or infinite (sums of finite positive weights).
-fn read_total(input: &mut impl Read, what: &str) -> io::Result<f64> {
-    let v = read_f64(input)?;
+fn check_total(v: f64, what: &str) -> io::Result<f64> {
     if v.is_finite() && v >= 0.0 {
         Ok(v)
     } else {
         Err(invalid(&format!("invalid {what} {v} in accumulator state")))
     }
 }
-/// One bucket's or class's weight: always finite and positive (empty entries are not kept).
-fn read_weight(input: &mut impl Read, what: &str) -> io::Result<f64> {
-    let v = read_f64(input)?;
+fn check_weight(v: f64, what: &str) -> io::Result<f64> {
     if v.is_finite() && v > 0.0 {
         Ok(v)
     } else {
@@ -63,6 +61,14 @@ fn read_weight(input: &mut impl Read, what: &str) -> io::Result<f64> {
             "invalid {what} weight {v} in accumulator state"
         )))
     }
+}
+#[inline]
+fn f64_from_le_slice(bytes: &[u8]) -> f64 {
+    f64::from_bits(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+#[inline]
+fn u64_from_le_slice(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes.try_into().unwrap())
 }
 fn count(input: &mut impl Read, limit: usize) -> io::Result<usize> {
     let n = usize::try_from(read_u64(input)?).map_err(|_| invalid("spill length overflow"))?;
@@ -74,25 +80,27 @@ fn count(input: &mut impl Read, limit: usize) -> io::Result<usize> {
 
 impl SpillAccumulator for ContinuousAccumulator {
     fn write_state(&self, out: &mut impl Write) -> io::Result<()> {
-        for v in [
-            self.sum,
-            self.count,
-            self.sum_w2,
-            self.min,
-            self.max,
-            self.m2,
-        ] {
-            write_f64(out, v)?;
-        }
-        write_u64(out, u64::from(self.quantiles.is_some()))?;
+        let mut hdr = [0u8; 56];
+        hdr[0..8].copy_from_slice(&self.sum.to_bits().to_le_bytes());
+        hdr[8..16].copy_from_slice(&self.count.to_bits().to_le_bytes());
+        hdr[16..24].copy_from_slice(&self.sum_w2.to_bits().to_le_bytes());
+        hdr[24..32].copy_from_slice(&self.min.to_bits().to_le_bytes());
+        hdr[32..40].copy_from_slice(&self.max.to_bits().to_le_bytes());
+        hdr[40..48].copy_from_slice(&self.m2.to_bits().to_le_bytes());
+        hdr[48..56].copy_from_slice(&u64::from(self.quantiles.is_some()).to_le_bytes());
+        out.write_all(&hdr)?;
         if let Some(q) = &self.quantiles {
-            write_f64(out, q.zero_count)?;
-            write_f64(out, q.total_count)?;
+            let mut qhdr = [0u8; 16];
+            qhdr[0..8].copy_from_slice(&q.zero_count.to_bits().to_le_bytes());
+            qhdr[8..16].copy_from_slice(&q.total_count.to_bits().to_le_bytes());
+            out.write_all(&qhdr)?;
             for bins in [&q.pos_bins, &q.neg_bins] {
                 write_u64(out, bins.len() as u64)?;
                 for (&k, &v) in bins {
-                    out.write_all(&k.to_le_bytes())?;
-                    write_f64(out, v)?;
+                    let mut entry = [0u8; 12];
+                    entry[0..4].copy_from_slice(&k.to_le_bytes());
+                    entry[4..12].copy_from_slice(&v.to_bits().to_le_bytes());
+                    out.write_all(&entry)?;
                 }
             }
         }
@@ -102,10 +110,16 @@ impl SpillAccumulator for ContinuousAccumulator {
     /// `sum_w2`, a negative `m2`, or `min > max` (or a NaN bound) once anything is counted.
     /// `sum`, a NaN `m2` and infinite bounds stay allowed: extreme inputs can overflow them.
     fn read_state(input: &mut impl Read, limit: usize) -> io::Result<Self> {
-        let sum = read_f64(input)?;
-        let count = read_total(input, "count")?;
-        let sum_w2 = read_total(input, "sum of squared weights")?;
-        let (min, max, m2) = (read_f64(input)?, read_f64(input)?, read_f64(input)?);
+        let mut hdr = [0u8; 56];
+        input.read_exact(&mut hdr)?;
+        let sum = f64_from_le_slice(&hdr[0..8]);
+        let count = check_total(f64_from_le_slice(&hdr[8..16]), "count")?;
+        let sum_w2 = check_total(f64_from_le_slice(&hdr[16..24]), "sum of squared weights")?;
+        let (min, max, m2) = (
+            f64_from_le_slice(&hdr[24..32]),
+            f64_from_le_slice(&hdr[32..40]),
+            f64_from_le_slice(&hdr[40..48]),
+        );
         if m2 < 0.0 {
             return Err(invalid("negative m2 in accumulator state"));
         }
@@ -113,22 +127,24 @@ impl SpillAccumulator for ContinuousAccumulator {
             return Err(invalid("accumulator state has min > max"));
         }
         let mut acc = Self::from_weighted_stats(sum, count, sum_w2, min, max, m2);
-        match read_u64(input)? {
+        match u64_from_le_slice(&hdr[48..56]) {
             0 => {}
             1 => {
+                let mut qhdr = [0u8; 16];
+                input.read_exact(&mut qhdr)?;
                 let mut q = QuantileSketch::new();
-                q.zero_count = read_total(input, "quantile zero count")?;
-                q.total_count = read_total(input, "quantile total count")?;
+                q.zero_count = check_total(f64_from_le_slice(&qhdr[0..8]), "quantile zero count")?;
+                q.total_count =
+                    check_total(f64_from_le_slice(&qhdr[8..16]), "quantile total count")?;
                 for bins in [&mut q.pos_bins, &mut q.neg_bins] {
                     let n = self::count(input, limit)?;
                     for _ in 0..n {
-                        let mut k = [0; 4];
-                        input.read_exact(&mut k)?;
-                        let key = i32::from_le_bytes(k);
-                        if bins
-                            .insert(key, read_weight(input, "quantile bucket")?)
-                            .is_some()
-                        {
+                        let mut entry = [0u8; 12];
+                        input.read_exact(&mut entry)?;
+                        let key = i32::from_le_bytes(entry[0..4].try_into().unwrap());
+                        let weight =
+                            check_weight(f64_from_le_slice(&entry[4..12]), "quantile bucket")?;
+                        if bins.insert(key, weight).is_some() {
                             return Err(invalid("duplicate quantile bucket in accumulator state"));
                         }
                     }
@@ -146,15 +162,18 @@ impl SpillAccumulator for ContinuousAccumulator {
 
 impl SpillAccumulator for CategoricalAccumulator {
     fn write_state(&self, out: &mut impl Write) -> io::Result<()> {
-        write_f64(out, self.total_count)?;
-        write_u64(out, self.unique_classes() as u64)?;
+        let mut hdr = [0u8; 16];
+        hdr[0..8].copy_from_slice(&self.total_count.to_bits().to_le_bytes());
+        hdr[8..16].copy_from_slice(&(self.unique_classes() as u64).to_le_bytes());
+        out.write_all(&hdr)?;
         // Do not round-trip through JSON: it cannot preserve arbitrary f64 states.
         let mut result = Ok(());
         self.for_each_class(|k, v| {
             if result.is_ok() {
-                result = out
-                    .write_all(&k.to_le_bytes())
-                    .and_then(|_| write_f64(out, v));
+                let mut entry = [0u8; 16];
+                entry[0..8].copy_from_slice(&k.to_le_bytes());
+                entry[8..16].copy_from_slice(&v.to_bits().to_le_bytes());
+                result = out.write_all(&entry);
             }
         });
         result
@@ -162,21 +181,24 @@ impl SpillAccumulator for CategoricalAccumulator {
     /// Rejects a NaN, negative or infinite total, a class weight that is not finite and
     /// positive, and a class listed twice.
     fn read_state(input: &mut impl Read, limit: usize) -> io::Result<Self> {
-        let total = read_total(input, "total count")?;
+        let mut hdr = [0u8; 16];
+        input.read_exact(&mut hdr)?;
+        let total = check_total(f64_from_le_slice(&hdr[0..8]), "total count")?;
         // The compact list stores a class in 16 bytes, so the generic `count` bound
         // (64 bytes per entry) would refuse states that `push_sorted` accepted. Bound
         // the count by the smallest per-class size and check the real size as
         // classes arrive, so an oversized state still fails before it grows far.
-        let n = usize::try_from(read_u64(input)?).map_err(|_| invalid("spill length overflow"))?;
+        let n = usize::try_from(u64_from_le_slice(&hdr[8..16]))
+            .map_err(|_| invalid("spill length overflow"))?;
         if n > limit / size_of::<(i64, f64)>() {
             return Err(invalid("spill accumulator exceeds aggregation budget"));
         }
         let mut acc = Self::new();
         for _ in 0..n {
-            let mut k = [0; 8];
-            input.read_exact(&mut k)?;
-            let class = i64::from_le_bytes(k);
-            let weight = read_weight(input, "class")?;
+            let mut entry = [0u8; 16];
+            input.read_exact(&mut entry)?;
+            let class = i64::from_le_bytes(entry[0..8].try_into().unwrap());
+            let weight = check_weight(f64_from_le_slice(&entry[8..16]), "class")?;
             if acc.get_class_count(class) != 0.0 {
                 return Err(invalid("duplicate class in accumulator state"));
             }
@@ -202,23 +224,25 @@ struct Run {
     len: u64,
 }
 
-pub struct RunReader<A> {
+struct SingleRunReader<A> {
     input: BufReader<File>,
     remaining: u64,
     limit: usize,
     _acc: PhantomData<A>,
 }
-impl<A: SpillAccumulator> RunReader<A> {
+
+impl<A: SpillAccumulator> SingleRunReader<A> {
     fn new(mut run: Run, limit: usize) -> io::Result<Self> {
         run.file.seek(SeekFrom::Start(0))?;
         Ok(Self {
-            input: BufReader::with_capacity(4096, run.file),
+            input: BufReader::with_capacity(spill_buf_capacity(limit), run.file),
             remaining: run.len,
             limit,
             _acc: PhantomData,
         })
     }
-    pub fn next_record(&mut self) -> io::Result<Option<(u64, A)>> {
+
+    fn next_record(&mut self) -> io::Result<Option<(u64, A)>> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -227,6 +251,67 @@ impl<A: SpillAccumulator> RunReader<A> {
         let value = A::read_state(&mut self.input, self.limit)?;
         self.remaining -= 1;
         Ok(Some((key, value)))
+    }
+}
+
+pub struct RunReader<A> {
+    readers: Vec<SingleRunReader<A>>,
+    heads: Vec<Option<(u64, A)>>,
+    initialized: bool,
+    limit: usize,
+}
+
+impl<A: SpillAccumulator> RunReader<A> {
+    fn from_runs(runs: Vec<Run>, limit: usize) -> io::Result<Self> {
+        let mut readers = Vec::with_capacity(runs.len());
+        for run in runs {
+            readers.push(SingleRunReader::new(run, limit)?);
+        }
+        Ok(Self {
+            readers,
+            heads: Vec::new(),
+            initialized: false,
+            limit,
+        })
+    }
+
+    pub fn next_record(&mut self) -> io::Result<Option<(u64, A)>> {
+        if self.readers.len() == 1 {
+            return self.readers[0].next_record();
+        }
+        if !self.initialized {
+            self.initialized = true;
+            self.heads = Vec::with_capacity(self.readers.len());
+            for reader in &mut self.readers {
+                self.heads.push(reader.next_record()?);
+            }
+        }
+        let Some(min_key) = self
+            .heads
+            .iter()
+            .filter_map(|h| h.as_ref().map(|(k, _)| *k))
+            .min()
+        else {
+            return Ok(None);
+        };
+        // Readers run from the oldest level to the newest. Merge each older state with
+        // the combined newer ones (`older.merge(newer)`), the grouping a carry-merge of
+        // the levels produced, so floating-point sums do not depend on the reader.
+        let mut merged: Option<A> = None;
+        for (head, reader) in self.heads.iter_mut().zip(&mut self.readers).rev() {
+            if head.as_ref().is_some_and(|(k, _)| *k == min_key) {
+                let (_, mut acc) = head.take().unwrap();
+                *head = reader.next_record()?;
+                if let Some(newer) = merged.take() {
+                    acc.merge(&newer);
+                    if acc.memory_bytes() > self.limit {
+                        return Err(invalid("merged accumulator exceeds aggregation budget"));
+                    }
+                }
+                merged = Some(acc);
+            }
+        }
+        Ok(merged.map(|acc| (min_key, acc)))
     }
 }
 
@@ -259,7 +344,7 @@ impl<A: SpillAccumulator> SpillRuns<A> {
         }
     }
     pub fn push_sorted(&mut self, records: impl IntoIterator<Item = (u64, A)>) -> io::Result<()> {
-        let mut out = BufWriter::with_capacity(4096, self.file()?);
+        let mut out = BufWriter::with_capacity(spill_buf_capacity(self.limit), self.file()?);
         let mut len = 0;
         let mut previous = None;
         for (key, acc) in records {
@@ -301,11 +386,11 @@ impl<A: SpillAccumulator> SpillRuns<A> {
         Ok(())
     }
     fn merge(&mut self, left: Run, right: Run) -> io::Result<Run> {
-        let mut left = RunReader::<A>::new(left, self.limit)?;
-        let mut right = RunReader::<A>::new(right, self.limit)?;
+        let mut left = SingleRunReader::<A>::new(left, self.limit)?;
+        let mut right = SingleRunReader::<A>::new(right, self.limit)?;
         let mut a = left.next_record()?;
         let mut b = right.next_record()?;
-        let mut out = BufWriter::with_capacity(4096, self.file()?);
+        let mut out = BufWriter::with_capacity(spill_buf_capacity(self.limit), self.file()?);
         let mut len = 0;
         while a.is_some() || b.is_some() {
             let (key, acc) = if b.is_none()
@@ -338,16 +423,22 @@ impl<A: SpillAccumulator> SpillRuns<A> {
         Ok(Run { file, len })
     }
     pub fn finish(&mut self) -> io::Result<Option<RunReader<A>>> {
-        let mut combined = None;
-        for i in 0..self.levels.len() {
-            if let Some(run) = self.levels[i].take() {
-                combined = Some(match combined {
-                    Some(other) => self.merge(run, other)?,
-                    None => run,
-                });
-            }
+        // Occupied levels, newest (and smallest) first.
+        let mut runs: Vec<Run> = self.levels.iter_mut().filter_map(Option::take).collect();
+        if runs.is_empty() {
+            return Ok(None);
         }
-        combined.map(|r| RunReader::new(r, self.limit)).transpose()
+        // Streaming holds one decoded state and one read buffer per run. The budget
+        // leaves room for two, as a carry merge reads two runs at once, so the newest
+        // levels are merged into one run first. Merging each older level with the
+        // combined newer ones keeps the grouping a full carry merge would produce.
+        while runs.len() > MAX_STREAMED_RUNS {
+            let newest = runs.remove(0);
+            let older = runs.remove(0);
+            runs.insert(0, self.merge(older, newest)?);
+        }
+        runs.reverse();
+        RunReader::from_runs(runs, self.limit).map(Some)
     }
 }
 
@@ -373,6 +464,10 @@ mod tests {
             a,
             ContinuousAccumulator::read_state(&mut Cursor::new(bytes), 65536).unwrap()
         );
+    }
+
+    fn write_f64(out: &mut impl Write, v: f64) -> io::Result<()> {
+        write_u64(out, v.to_bits())
     }
 
     /// A quantile sketch's zero count, total count and positive buckets.
@@ -552,6 +647,58 @@ mod tests {
     }
 
     #[test]
+    fn finishing_many_levels_streams_at_most_two_runs_with_carry_merge_grouping() {
+        // Fifteen runs fill levels 0 to 3. Key 7 holds 1 in the oldest level and
+        // +1e16 / -1e16 in newer ones, so only the carry-merge grouping keeps the 1.
+        let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, None);
+        for i in 0..15u64 {
+            let value = match i {
+                0 => 1.0,
+                8 => 1e16,
+                14 => -1e16,
+                _ => 0.0,
+            };
+            runs.push_sorted([
+                (7, ContinuousAccumulator::new(value)),
+                (100 + i, ContinuousAccumulator::new(2.0)),
+            ])
+            .unwrap();
+        }
+        assert_eq!(runs.levels.iter().filter(|l| l.is_some()).count(), 4);
+        let mut reader = runs.finish().unwrap().unwrap();
+        assert!(reader.readers.len() <= MAX_STREAMED_RUNS);
+        let (key, acc) = reader.next_record().unwrap().unwrap();
+        assert_eq!(key, 7);
+        assert_eq!(acc.count, 15.0);
+        assert_eq!(acc.sum, 1.0);
+        let mut rest = 0;
+        while let Some((key, acc)) = reader.next_record().unwrap() {
+            assert!((100..115).contains(&key));
+            assert_eq!((acc.count, acc.sum), (1.0, 2.0));
+            rest += 1;
+        }
+        assert_eq!(rest, 15);
+    }
+
+    #[test]
+    fn finishing_three_levels_merges_each_older_level_with_the_newer_ones() {
+        // Seven runs fill levels 2 (runs 1-4), 1 (runs 5-6) and 0 (run 7). A carry-merge
+        // computes oldest + (middle + newest); grouping oldest-first would lose the 1.
+        let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, None);
+        for value in [1.0, 0.0, 0.0, 0.0, 1e16, 0.0, -1e16] {
+            runs.push_sorted([(7, ContinuousAccumulator::new(value))])
+                .unwrap();
+        }
+        assert!(runs.levels.iter().take(3).all(Option::is_some));
+        let mut reader = runs.finish().unwrap().unwrap();
+        let (key, acc) = reader.next_record().unwrap().unwrap();
+        assert_eq!(key, 7);
+        assert_eq!(acc.count, 7.0);
+        assert_eq!(acc.sum, 1.0);
+        assert!(reader.next_record().unwrap().is_none());
+    }
+
+    #[test]
     fn truncated_runs_are_errors_not_eof() {
         let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, None);
         runs.push_sorted([(1, ContinuousAccumulator::new(2.0))])
@@ -616,5 +763,52 @@ mod tests {
                 assert!(result.is_err());
             }
         }
+    }
+
+    #[test]
+    fn streaming_finish_merges_multiple_levels_and_enforces_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            // 13 runs occupy binary-carry levels 0, 2, 3 (multiple non-empty levels at finish).
+            let mut runs = SpillRuns::<ContinuousAccumulator>::new(65536, Some(dir.path()));
+            for n in 1..=13 {
+                runs.push_sorted((0..50).map(|k| {
+                    let mut acc = ContinuousAccumulator::with_quantiles();
+                    acc.update((k * 10 + n) as f64);
+                    (k, acc)
+                }))
+                .unwrap();
+            }
+            assert!(runs.levels.iter().filter(|l| l.is_some()).count() == 3);
+            let mut reader = runs.finish().unwrap().unwrap();
+            for k in 0..50u64 {
+                let (key, acc) = reader.next_record().unwrap().unwrap();
+                assert_eq!(key, k);
+                assert_eq!(acc.count, 13.0);
+                let expected_sum: f64 = (1..=13).map(|n| (k * 10 + n) as f64).sum();
+                assert!((acc.sum - expected_sum).abs() < 1e-12);
+                assert_eq!(acc.quantiles.unwrap().count(), 13.0);
+            }
+            assert!(reader.next_record().unwrap().is_none());
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // Two levels (3 runs -> level 1 has keys 10, 20; level 0 has key 10) whose
+        // combined categorical state on key 10 exceeds the 2048-byte limit on finish.
+        let mut cat_limit = SpillRuns::<CategoricalAccumulator>::new(2048, None);
+        for (i, offset) in [0i64, 200, 50].into_iter().enumerate() {
+            let mut acc = CategoricalAccumulator::new();
+            for c in offset..offset + 40 {
+                acc.update(c);
+            }
+            let key = if i == 1 { 20 } else { 10 };
+            cat_limit.push_sorted([(key, acc)]).unwrap();
+        }
+        let mut reader = cat_limit.finish().unwrap().unwrap();
+        let err = reader.next_record().unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds aggregation budget"),
+            "{err}"
+        );
     }
 }

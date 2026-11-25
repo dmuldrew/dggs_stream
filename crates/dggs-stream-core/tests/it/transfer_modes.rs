@@ -2184,3 +2184,23 @@ fn ground_area_multi_resolution_and_bbox_prune_match_single_resolution() {
         "multi-resolution ground_area should decode chunks once"
     );
 }
+
+#[test]
+fn centre_scans_keep_minus_180_centres_in_a_bbox_ending_at_180() {
+    // One-degree pixels whose first centre is longitude -180, which the point filter
+    // places in a box reaching 180. Batched S2 and HEALPix rows must keep it too.
+    let (_tmp, path) = TestGeoTiffBuilder::new(10, 4)
+        .origin(-180.5, 10.0)
+        .pixel_size(1.0)
+        .create_tempfile::<f32, _>(|c, r| 1.0 + c as f32 + 10.0 * r as f32);
+    for grid in [GridKind::S2, GridKind::Healpix, GridKind::H3] {
+        let mut cfg = config(grid, 3, TransferMode::AssignCenters);
+        cfg.bbox = Some([179.0, -90.0, 180.0, 90.0]);
+        let cells = scan(&path, &cfg);
+        let count: f64 = cells.values().map(|a| a.count).sum();
+        let sum: f64 = cells.values().map(|a| a.sum).sum();
+        // Column 0 of each of the 4 rows: values 1, 11, 21, 31.
+        assert_eq!(count, 4.0, "{grid}");
+        assert_eq!(sum, 64.0, "{grid}");
+    }
+}
