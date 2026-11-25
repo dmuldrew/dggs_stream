@@ -13,7 +13,7 @@ mode in depth; in short:
 | Mode | What a cell gets | When to use it |
 | :--- | :--- | :--- |
 | `auto` | One of the three below, chosen from the cell-to-pixel area ratio and the other options | You'd rather not choose |
-| `assign_centers` (default) | Every pixel whose centre it holds (or sub-pixel samples, see [Super-Sampling](super-sampling.md)) | Cells about the size of pixels; the fastest single-pass kernel |
+| `assign_centers` (default) | Every pixel whose centre it holds (or sub-pixel samples, see [Super-Sampling](super-sampling.md)) | Cells about the size of pixels, where it is the fastest kernel ([comparison](transfer-modes.md#comparing-the-modes)) |
 | `interpolate` | The value interpolated at its centre (`interpolation`: `nearest`, `bilinear`, `bicubic`, `lanczos`) | Cells finer than the pixels |
 | `overlay` | Every pixel it overlaps, weighted by the fraction it covers | Many pixels per cell, exact edges, conserved totals |
 

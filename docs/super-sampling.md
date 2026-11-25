@@ -5,6 +5,11 @@
 > Sub-pixel sampling refines the default `assign_centers` transfer. For cells smaller than the
 > pixels (interpolation at cell centres) or exact area weighting, see
 > [Transfer Modes](transfer-modes.md); those modes replace sampling and can't be combined with it.
+> In the [mode comparison](transfer-modes.md#comparing-the-modes), sampling rarely came out
+> ahead: from about 6 pixels per cell up, `overlay` was both faster and exact, and at about one
+> pixel per cell `interpolate` was faster and more accurate. Its one niche was cells somewhat
+> finer than the pixels, where `16point` approximated overlay at under 40% of its time. Otherwise
+> reach for it only where a transfer mode can't run.
 
 When a raster pixel lies across the boundary between two or more H3 hexagons, single-point center sampling assigns 100% of the pixel's value to whichever cell contains the center point. 
 
