@@ -23,7 +23,7 @@ With **Sub-Pixel Super-Sampling**, multiple sample offsets (dx_i, dy_i) are eval
 | **`'5point'`** / `'quincunx'` | 5 | 0.20 each | Center + 4 diagonal corners | **Classic Area Weighting**: Standard 5-point super-sampling. |
 | **`'8rooks'`** / `'stratified8'`| 8 | 1/8 each | Latin Hypercube non-attacking rooks | **Diagonal Anti-Aliasing**: Eliminates sample clumping along diagonal hexagon edges. |
 | **`'9point'`** / `'3x3'` | 9 | 1/9 each | Regular 3 × 3 grid | **Dense Uniform Coverage**: Smooth, uniform sub-pixel discretization. |
-| **`'16point'`** / `'4x4'` | 16 | 1/16 each | Regular 4 × 4 grid | **Coarse → Fine Resampling**: Ideal when coarse pixels (e.g. 1km climate / ERA5 data) overlap fine H3 cells (Res 9–11). |
+| **`'16point'`** / `'4x4'` | 16 | 1/16 each | Regular 4 × 4 grid | **Dense Uniform Coverage**: Finest split of edge pixels among the presets. For coarse pixels over fine cells, prefer `transfer = 'interpolate'` or `'overlay'`. |
 
 ## What Sampling Does and Does Not Compute
 
@@ -33,8 +33,9 @@ pixel's split across cell boundaries; it is not an exact pixel–hexagon area
 intersection, and it does not weight by ground area (pixels in geographic
 grids shrink toward the poles). The approximation error depends on the
 pattern, pixel size relative to cell size, and the CRS; no universal bound is
-claimed. Workflows that need area-weighted means or conserved extensive totals
-should supply equal-area inputs or apply their own area weights.
+claimed. For exact area-weighted means use `transfer = 'overlay'`; for conserved
+totals add `mass_preserve`; for true ground areas on lon/lat rasters add
+`ground_area` ([Transfer Modes](transfer-modes.md#choosing-an-overlay-mode)).
 
 `stddev` treats each pixel as **one observation** per cell, weighted by the sum of
 its sample weights in that cell (`w_i`). The reliability-weighted sample variance
@@ -52,7 +53,7 @@ the usual `M2 / (n - 1)`; boundary pixels add only their fractional share.
 | **`hex`** | 7 | **$\sim 0.60\times$** | Hexagonally symmetric sample layout | When a symmetric sub-pixel pattern is preferred (still sample-weighted, not area-weighted) |
 | **`gaussian`** | 5 | **$\sim 0.68\times$** | Optical PSF Emulation | Remote sensing satellite imagery where pixel centers dominate sensor response |
 | **`8rooks`** | 8 | **$\sim 0.55\times$** | Full Stratified Anti-Aliasing | Highly complex boundary contours with diagonal edges |
-| **`16point`** | 16 | **$\sim 0.35\times$** | Sub-Grid Reconstruction | Coarse rasters (e.g. 1km climate grids) aggregated into fine H3 cells (Res 9–11) |
+| **`16point`** | 16 | **$\sim 0.35\times$** | Sub-Grid Reconstruction | Densest preset; for coarse rasters into fine cells prefer `transfer = 'interpolate'` or `'overlay'` |
 
 ## The Recommended Compromise: Why RGSS is the Optimal Default
 
@@ -88,7 +89,10 @@ Is raster pixel resolution significantly smaller than H3 cell? (e.g. 10m pixels 
  ├── YES ──> Use 'center' (Maximum throughput; only pixels straddling cell edges are misattributed, so the error shrinks as pixels get smaller relative to cells)
  └── NO
       ├── Are raster pixels LARGER than H3 cells? (e.g. 1km climate grids into Res 9+)
-      │    └── YES ──> Use '16point' (Prevents blocky spatial quantization across hexagons)
+      │    └── YES ──> Use transfer 'interpolate' (smooth values at every cell centre) or 'overlay'
+      │               (exact area shares), not sampling. '16point' only if a transfer mode can't run.
+      ├── Must edges or totals be exact?
+      │    └── YES ──> Use transfer 'overlay' (exact; 'mass_preserve' for totals)
       └── Standard Production & Analytical Queries
            └── YES ──> Use 'rgss' (Optimal balance: eliminates collinear aliasing with minimal overhead)
 ```

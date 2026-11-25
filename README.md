@@ -23,6 +23,14 @@ Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) a
 | `overlay` | Every pixel it overlaps, weighted by the part inside it, with modes that [conserve totals](docs/transfer-modes.md#mass-preserving-mass_preserve), [weight by true ground area](docs/transfer-modes.md#ground-area-overlay-ground_area) on lon/lat rasters, or [measure class areas](docs/transfer-modes.md#categorical-overlay-class-areas) | Many pixels per cell, or when edge pixels, totals or km² must be exact |
 | `auto` | Whichever of the three fits the cell-to-pixel size ratio | You'd rather not choose; pair it with `resolutions="auto"` for pixel-sized cells |
 
+The modes differ in which side does the looking:
+
+- **From the pixels.** `assign_centers` drops each pixel's centre into one cell. Sub-pixel [`sampling`](docs/super-sampling.md) (`rgss`, `5point`, ...) refines it by dropping several weighted points per pixel, so a pixel on an edge is split roughly by area and cell edges are anti-aliased.
+- **From the cells.** `interpolate` asks the raster for its value at each cell's centre, so every cell gets one, however small.
+- **Exactly, both ways.** `overlay` intersects each cell with each pixel, which is what sampling approximates. Prefer it whenever edges or totals matter. Sampling stays useful where only the default kernel runs: compaction, spectral formulas, and partitioned scans other than single-band continuous overlay.
+
+`sampling` and `transfer` can't be combined, and `transfer = "sample"` is rejected with a pointer to both.
+
 CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 
 > **Formerly raster_h3.** See the [changelog](CHANGELOG.md#unreleased) for the new names and migration details.
