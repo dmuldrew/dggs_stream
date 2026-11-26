@@ -176,25 +176,35 @@ WHERE subtype = 'road'
   AND bbox.xmax > -95.80 AND bbox.xmin < -95.01
   AND bbox.ymax >  29.52 AND bbox.ymin <  30.11;
 
--- 4a. Flooded parcels: an integer hash join on the shared H3 index, then one row per parcel
---     (a parcel can span several hexagons)
-WITH parcel_depth AS (
-    SELECT p.parcel_id,
-           any_value(p.land_use)       AS land_use,
-           any_value(p.assessed_value) AS assessed_value,
-           max(f.p90_depth_m)          AS depth_m,
-           sum(f.flooded_m2)           AS flooded_m2   -- wet ground in the parcel's hexagons
+-- 4a. Flooded parcels: an integer hash join on the shared H3 index. A parcel can span several
+--     hexagons and a hexagon several parcels, so depth is summarised per parcel, and flooded
+--     ground per land use from distinct hexagons, so no hexagon counts twice in one land use.
+WITH parcel_flood AS (
+    SELECT p.parcel_id, p.land_use, p.assessed_value, f.h3_index, f.p90_depth_m, f.flooded_m2
     FROM parcels_h3 AS p
     JOIN flood_h3 AS f USING (h3_index)
-    GROUP BY p.parcel_id
+),
+parcel_depth AS (
+    SELECT parcel_id,
+           any_value(land_use)       AS land_use,
+           any_value(assessed_value) AS assessed_value,
+           max(p90_depth_m)          AS depth_m
+    FROM parcel_flood
+    GROUP BY parcel_id
+),
+land_use_ground AS (
+    SELECT land_use, sum(flooded_m2) AS flooded_m2
+    FROM (SELECT DISTINCT land_use, h3_index, flooded_m2 FROM parcel_flood)
+    GROUP BY land_use
 )
-SELECT land_use,
-       count(*)                          AS parcels_flooded,
-       round(avg(depth_m), 2)            AS avg_depth_m,
-       round(sum(flooded_m2) / 1e6, 2)   AS flooded_km2,
-       sum(assessed_value)               AS value_at_risk
-FROM parcel_depth
-GROUP BY land_use
+SELECT d.land_use,
+       count(*)                                  AS parcels_flooded,
+       round(avg(d.depth_m), 2)                  AS avg_depth_m,
+       round(any_value(g.flooded_m2) / 1e6, 2)   AS flooded_km2,
+       sum(d.assessed_value)                     AS value_at_risk
+FROM parcel_depth AS d
+JOIN land_use_ground AS g USING (land_use)
+GROUP BY d.land_use
 ORDER BY value_at_risk DESC;
 
 -- 4b. Impassable road length: roads are lines, so join on shape. Hexagons don't overlap,
@@ -213,8 +223,10 @@ dataset on S3, and joins them with a hash join where polygons can be polyfilled 
 where lines can't. The same SQL runs from the DuckDB CLI or from Python, Node.js and R. DuckDB
 also exposes every engine option, including quantiles, compaction and memory budgets. Unlike
 SedonaDB, `WHERE` filters apply after aggregation, so narrow the scan with `bbox := '...'`.
-`flooded_km2` counts the ground of every hexagon a parcel touches (parcels were polyfilled with
-`'covers'`), so it measures exposure around the parcel; neighbouring parcels can share a hexagon.
+`flooded_km2` is the flooded ground in the hexagons that a land use's parcels touch (parcels were
+polyfilled with `'covers'`), each hexagon counted once per land use. It measures exposure around
+those parcels, not ground inside them, and a hexagon touching parcels of two land uses counts for
+both, so the column does not add up to the city's flooded area.
 To keep only hexagons that are mostly under water, add `valid_coverage_threshold := 0.5`: dry
 NoData pixels count against a hexagon's coverage, so the filter keeps hexagons at least half
 flooded.
@@ -360,7 +372,8 @@ dggs-stream-cli jsonl wc2.1_10m_bio_1.tif --grid healpix -r auto \
 # 2. The same raster as a web map: one PMTiles archive, zooming from depth 4 to depth 8
 dggs-stream-cli pmtiles wc2.1_10m_bio_1.tif --grid healpix -r 4,5,6,7,8 -o bio1_healpix.pmtiles
 
-# 3. Summarise by 10° band in DuckDB; healpix_to_lat comes from the dggs_stream extension
+# 3. Summarise by 10° band in DuckDB; healpix_to_lat comes from the dggs_stream extension.
+#    (Installed from a custom repository? Use LOAD dggs_stream FROM <repository> instead.)
 duckdb -c "
 LOAD dggs_stream;
 SELECT floor(healpix_to_lat(healpix_index) / 10) * 10           AS band_south_deg,
@@ -391,9 +404,10 @@ SELECT city,
        round(b.mean, 1)          AS bicubic_c,
        round(b.mean - n.mean, 1) AS difference
 FROM cities
-JOIN read_json('bio1_alps_nearest.jsonl') AS n USING (healpix_index)
-JOIN read_json('bio1_alps_bicubic.jsonl') AS b USING (healpix_index)
-ORDER BY abs(b.mean - n.mean) DESC"
+LEFT JOIN read_json('bio1_alps_nearest.jsonl') AS n USING (healpix_index)
+LEFT JOIN read_json('bio1_alps_bicubic.jsonl') AS b USING (healpix_index)
+WHERE n.mean IS NOT NULL OR b.mean IS NOT NULL
+ORDER BY abs(b.mean - n.mean) DESC NULLS FIRST"
 ```
 
 The CLI's advantage is that it needs nothing else installed: one executable (also put on `PATH`
@@ -425,6 +439,8 @@ whose centre lies on the raster one value, read at that centre:
 
 On the coast, ocean pixels are NoData: `bilinear` leaves them out and renormalises the rest, and
 `bicubic` and `lanczos` fall back to `bilinear` when any tap is NoData, so a harbour city still
-gets a value. Interpolation smooths between pixels but adds no detail finer than them. A valley
+gets a value. `nearest` has no such fallback: a city whose cell centre falls on an ocean pixel
+gets no `nearest` row, so step 5 uses outer joins, keeps such cities with an empty `nearest_c`,
+and lists them first. Interpolation smooths between pixels but adds no detail finer than them. A valley
 city still gets the average of its 18 km neighbourhood, mountains included; for that you need a
 finer raster or a lapse-rate correction from a DEM.

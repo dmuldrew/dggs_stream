@@ -349,7 +349,7 @@ lf = dggs_stream.scan_raster(
 )
 ```
 
-Ground-area overlay runs serially and adaptively traces grid edges in raster pixel coordinates.
+Ground-area overlay clips each window's cells in parallel on the ambient Rayon pool and adaptively traces grid edges in raster pixel coordinates.
 It requires a resolution with a maximum cell diameter of at most 500 km and rejects pole-containing candidate cells. [Geometry and units](core.md#ground-area-weighted-overlay)
 
 The names and defaults match the DuckDB parameters; see the

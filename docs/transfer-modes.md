@@ -68,7 +68,8 @@ Scan options take precedence over the ratio:
 - `ground_area` and multi-band (`bands`) scans can't interpolate, so below 1:1 `auto` runs
   weighted `overlay` for them too.
 - Resolutions whose cells are over 500 km across (the coarsest two or three of each grid) run
-  `assign_centers`: overlay would take whole pixels by centre there anyway.
+  `assign_centers`: overlay would take whole pixels by centre there anyway. A continuous scan
+  whose cells are all smaller than its pixels still interpolates, however large both are.
 - If the pixel size can't be measured, `auto` runs `assign_centers`.
 
 `auto` never adds options of its own: it doesn't turn on `mass_preserve` or `ground_area`, and
@@ -692,7 +693,8 @@ Eligible overlay blocks project and clip cells in parallel. The pool is set by
 and `1` runs serially. Ordinary overlay without `mass_preserve` clips and accumulates each cell on
 a worker; mass-preserving overlay has workers prepare intersections that the caller applies in the
 original cell and pixel order, including normalisation and per-band coverage filtering. Results
-are identical either way. DuckDB's ground-area overlay runs serially whatever `workers` says.
+are identical either way. Ground-area overlay uses the same pool: it processes row windows in
+order and clips the cells of each window with at least 16 candidates in parallel.
 
 The mass-preserving path uses the pool for blocks with at least 64 candidate cells and at most
 512 estimated source pixels per cell. Coarse-cell fallbacks and callers already on a Rayon worker
