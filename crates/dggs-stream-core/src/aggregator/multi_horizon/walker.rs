@@ -357,6 +357,10 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
     let mut assignments: Vec<(u64, f64)> = Vec::with_capacity(ctx.sampling.points.len());
     let mut position_cells: Vec<u64> = Vec::with_capacity(ctx.sampling.points.len() * num_res);
 
+    // Temporary A/B benchmark switch, evaluated once per chunk.
+    let experiment = ctx.grid == GridKind::H3
+        && ctx.bbox.is_none()
+        && std::env::var_os("DGGS_BENCH_H3_ROW").is_some();
     for r in 0..chunk.height as usize {
         let start = r * stride;
         if start >= slice.len() {
@@ -384,6 +388,37 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
             debug_assert_eq!(spp, 1);
             let sp = ctx.sampling.points[0];
             let col_offset = chunk.col_offset as usize;
+            if experiment {
+                if let Some((lat, _, _)) = projector.constant_lat_affine_lon(ctx, col_offset, sp) {
+                    if lat.is_finite() && (-90.0..=90.0).contains(&lat) {
+                        let exact = projector.exact_lon(col_offset, sp);
+                        for c in cols.clone() {
+                            if read(&row[c..c + 1]).is_none() {
+                                continue;
+                            }
+                            let Some(point) = B::make_point(exact.at(c), lat) else {
+                                super::profile::transform_failed();
+                                if let Some(s) = span_start.take() {
+                                    runs.add_span(&row[s..c], engine);
+                                }
+                                continue;
+                            };
+                            runs.advance_cells(
+                                point,
+                                res_u8s,
+                                &row[..c],
+                                &mut span_start,
+                                engine,
+                                maps,
+                            );
+                        }
+                        if let Some(s) = span_start {
+                            runs.add_span(&row[s..cols.end], engine);
+                        }
+                        continue;
+                    }
+                }
+            }
             if B::SUPPORTS_ROW_BATCH && !res_u8s.is_empty() {
                 if let Some((lat_deg, lon_col0, dlon)) =
                     projector.constant_lat_affine_lon(ctx, col_offset, sp)
