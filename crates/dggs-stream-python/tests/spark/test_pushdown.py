@@ -83,10 +83,17 @@ def test_pushed_filters_leave_the_plan_and_keep_the_rows(spark, terrain, conditi
 
 
 def test_reusing_a_source_without_pushdown_keeps_final_and_partial_rows(spark, terrain):
-    parts = load(spark, terrain, pushdown=False)
-    assert parts.where("partial_state IS NOT NULL").count() > 0
-
-    got = spark_ds.merge_partials(parts).toArrow()
+    # Enable pushdown on the session so `pushdown=False` must override it, whatever ran before.
+    previous = spark.conf.get(spark_ds._PUSHDOWN_CONF, "false")
+    spark.conf.set(spark_ds._PUSHDOWN_CONF, "true")
+    try:
+        parts = load(spark, terrain, pushdown=False)
+        partial = parts.where("partial_state IS NOT NULL")
+        assert "Filter" in plan(partial), plan(partial)
+        assert partial.count() > 0
+        got = spark_ds.merge_partials(parts).toArrow()
+    finally:
+        spark.conf.set(spark_ds._PUSHDOWN_CONF, previous)
     expected = pa.table(dggs_stream.RasterArrowStream(terrain, resolutions=[7, 8, 9]))
 
     def keyed(table):
