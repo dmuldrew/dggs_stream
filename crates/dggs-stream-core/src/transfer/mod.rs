@@ -47,10 +47,10 @@ use crate::raster::mosaic::MosaicReader;
 /// `Overlay`.
 ///
 /// Centre assignment is never chosen by ratio. Measured with
-/// `scripts/benchmark_transfer_modes.py` (see `docs/transfer-modes.md`), it was at most
-/// about 2.6x faster than overlay between 1:1 and 16:1, and there left up to 14% of the
-/// cells empty and put their areas 4-38% off; above roughly 10:1 (H3) to 60:1 (S2),
-/// overlay was also faster.
+/// `scripts/benchmark_transfer_modes.py` (see `docs/transfer-modes.md`), it was 2.2-3.9x
+/// faster than overlay at about 1:1, where it left 9-26% of the cells empty and put their
+/// areas 16-35% off, and still 1.7-2.7x faster at 16:1 on S2 and HEALPix; on H3 and A5
+/// overlay was also faster from about 12:1.
 pub const AUTO_INTERPOLATE_MAX_RATIO: f64 = 1.0;
 
 /// Above this cell diameter bound (`GridSpec::max_cell_diameter_km`, about four times a

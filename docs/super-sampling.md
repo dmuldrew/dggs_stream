@@ -6,10 +6,11 @@
 > pixels (interpolation at cell centres) or exact area weighting, see
 > [Transfer Modes](transfer-modes.md); those modes replace sampling and can't be combined with it.
 > In the [mode comparison](transfer-modes.md#comparing-the-modes), sampling rarely came out
-> ahead: from about 6 pixels per cell up, `overlay` was both faster and exact, and at about one
-> pixel per cell `interpolate` was faster and more accurate. Its one niche was cells somewhat
-> finer than the pixels, where `16point` approximated overlay at under 40% of its time. Otherwise
-> reach for it only where a transfer mode can't run.
+> ahead. From about 4 pixels per cell up, `rgss` cost 1.2–5.7× and `16point` 2.7–18.5× as much
+> as centre assignment, while overlay is exact for 1–4 µs per cell and, on H3 and A5, faster than
+> centre assignment from about 12 pixels per cell. Sampling's niche is cells a quarter to half a
+> pixel across, where `16point` ran in 40–85% of overlay's time and stayed closer to it than
+> interpolation did. Otherwise reach for it only where a transfer mode can't run.
 
 When a raster pixel lies across the boundary between two or more H3 hexagons, single-point center sampling assigns 100% of the pixel's value to whichever cell contains the center point. 
 

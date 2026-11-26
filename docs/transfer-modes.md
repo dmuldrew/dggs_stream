@@ -21,15 +21,15 @@ mean.
 | `auto` | `interpolate` or `overlay`, whichever suits the raster and the resolutions | You don't want to work it out yourself |
 | `assign_centers` (default) | Every pixel whose centre falls inside the cell | Speed matters more than edge accuracy at about one to a few pixels per cell, where it is fastest |
 | `interpolate` | One value, interpolated at the cell's centre | Cells are **smaller** than the pixels |
-| `overlay` | Every pixel the cell overlaps, weighted by the part of the pixel inside the cell | Cells are much larger than pixels (where it is also the fastest mode), edges should cut pixels exactly, or totals or ground areas must come out right |
+| `overlay` | Every pixel the cell overlaps, weighted by the part of the pixel inside the cell | Cells are larger than pixels, edges should cut pixels exactly, or totals or ground areas must come out right; with many pixels per cell it can also be the fastest mode |
 
 ```text
         cell area / pixel area
   0 ──────────── 1 ─────────────────────────────────────────────────▶
   │ interpolate  │                       overlay
-  │ (cells are   │  exact at every size; from about 10–60 pixels per cell
-  │  sub-pixel)  │  also the fastest mode. assign_centers is faster below
-  │              │  that, at the cost of 4–38% per-cell area errors
+  │ (cells are   │  exact at every size. assign_centers is up to 2–4x faster from
+  │  sub-pixel)  │  about 1 to 12 pixels per cell (more on S2 and HEALPix), at the
+  │              │  cost of 4–38% per-cell area errors and some empty cells
 ```
 
 Within a mode, [choosing a kernel](#choosing-a-kernel) and
@@ -53,9 +53,10 @@ given), compares it with the mean cell area at each requested resolution, and pi
 | Categorical | any | weighted `overlay`: class codes can't be blended, and `nearest` is only a lookup at the cell's centre, while overlay gives every class its share of the cell |
 
 Centre assignment is never chosen by ratio. The [mode comparison](#comparing-the-modes) found it
-at most about 2.6× faster than overlay from 1 to 16 pixels per cell, where it left up to 14% of
-the cells empty and put their areas 4–38% off; from about 10 (H3) to 60 (S2) pixels per cell,
-overlay was faster too. Ask for `assign_centers` explicitly when speed matters more than edges.
+2.2–3.9× faster than overlay at about one pixel per cell, where it left 9–26% of the cells empty
+and put their areas 16–35% off, and still 1.7–2.7× faster at 16 pixels per cell on S2 and
+HEALPix; on H3 and A5 overlay was also faster from about 12 pixels per cell. Ask for
+`assign_centers` explicitly when speed matters more than edges.
 
 Scan options take precedence over the ratio:
 
@@ -111,8 +112,8 @@ Each pixel (or each sub-pixel sample, see [Super-Sampling](super-sampling.md)) i
 cell that holds its centre and aggregated there. This is the single-pass streaming kernel the rest
 of the documentation describes, with the lowest memory use. It indexes every pixel, so its time
 grows with the raster's size whatever the resolution: it is the fastest mode at about one to a
-few pixels per cell, and slower than `overlay` once cells hold dozens of pixels
-([comparison](#comparing-the-modes)).
+few pixels per cell. Overlay overtakes it from about 12 pixels per cell on H3 and A5, but not by
+64 pixels per cell on S2 and HEALPix ([comparison](#comparing-the-modes)).
 
 A pixel straddling a cell edge goes wholly to one side. With many pixels per cell this evens out;
 with a few it doesn't, and with cells finer than the pixels most cells contain no pixel centre
@@ -237,10 +238,12 @@ Then check the questions that change the answer:
 - **Will you add counts across cells?** Not with `overlay_weighted = false`: a pixel on an edge
   counts in every cell it touches. Use it to flag cells, not to total them.
 - **Are the cells near pixel size?** Overlay is right at any size. From about 1 to 16 pixels per
-  cell, centre assignment is 1.2–2.6× faster, but each cell's area comes out 4–38% off on average
-  (see [comparing the modes](#comparing-the-modes)); means are close only where values vary
-  smoothly. That is why `transfer = "auto"` runs overlay there. Above about 10–60 pixels per cell,
-  overlay is both exact and faster.
+  cell, centre assignment is up to 2.2–3.9× faster, but each cell's area comes out 4–38% off on
+  average and up to a quarter of the cells can be empty at about one pixel per cell (see
+  [comparing the modes](#comparing-the-modes)); means are close only where values vary smoothly.
+  That is why `transfer = "auto"` runs overlay there. With more pixels per cell overlay is both
+  exact and, on H3 and A5, faster; on S2 and HEALPix centre assignment stayed faster through 64
+  pixels per cell.
 - **Very coarse cells.** Above 500 km across, overlay takes whole pixels by centre (and
   ground-area overlay refuses), so the choice between overlay and centre assignment stops
   mattering.
@@ -509,15 +512,14 @@ pixel, so cells spanning many pixels cost less than centre assignment.
 weighted overlay, which clips every cell against every pixel exactly. It needs only Python's
 standard library and one release example, and writes its own tiled, Deflate-compressed Float32
 GeoTIFFs in EPSG:4326 near 37.5° N. Continuous rasters hold a 0–100 west–east gradient plus a
-50-unit, 0.01° checkerboard, so cells see both smooth variation and sharp edges; categorical
-rasters hold eight classes, the checkerboard's two colours in four west–east bands.
+50-unit checkerboard, so cells see both smooth variation and sharp edges; categorical rasters
+hold eight classes, the checkerboard's two colours in four west–east bands.
 
 ```sh
 cargo build --release -p dggs-stream-core --example transfer_compare
-python3 scripts/benchmark_transfer_modes.py --runs 5 --markdown                       # fixed pixel size
-python3 scripts/benchmark_transfer_modes.py --sweep ratio --runs 5 --markdown         # fixed cells, S2
-python3 scripts/benchmark_transfer_modes.py --sweep ratio --grid h3 --resolution 11 --markdown
-python3 scripts/benchmark_transfer_modes.py --sweep ratio --kind categorical --markdown
+python3 scripts/benchmark_transfer_modes.py --runs 5 --markdown                       # fixed pixel size, H3
+python3 scripts/benchmark_transfer_modes.py --sweep ratio --grid s2 --resolution 13 --markdown
+python3 scripts/benchmark_transfer_modes.py --sweep ratio --grid a5 --resolution 12 --kind categorical --markdown
 ```
 
 The columns:
@@ -538,7 +540,9 @@ Xeon (2.1 GHz) Linux VM with default worker settings. Peak RSS is the scan proce
 H3 resolutions 7–13 over rasters with one pixel size (1/2048°, about 2,350 m²): 2,048 pixels
 square at resolutions 7–9, then 1,024, 512, 256 and 128. The ratio changes 7× per resolution and
 the cell count grows with it, so this shows how each mode scales with the raster and with the
-number of cells. `auto` runs `overlay` at resolutions 7–10 and `bilinear` at 11–13.
+number of cells. Its checkerboard squares are a fixed 0.01° (about 1 km), so the value errors depend on how
+that compares with each resolution's cells: compare modes within a resolution, not errors across
+resolutions. The fixed-cell-count sweeps below scale the field with the cell. `auto` runs `overlay` at resolutions 7–10 and `bilinear` at 11–13.
 
 | H3 res | Pixels per cell | Mode | Cells | Scan ms | Peak RSS MiB | Cells missing | Mean abs. error | Area error |
 | ---: | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -586,104 +590,287 @@ number of cells. `auto` runs `overlay` at resolutions 7–10 and `bilinear` at 1
 | 13 | 0.019 | `bilinear` | 833,971 | 413 | 28 | 0.3% | 1.009 | — |
 
 
+On H3, with 45 to 2,200 pixels per cell (resolutions 7–9), overlay ran 2.5–20× faster than
+centre assignment. Whole-pixel runs inside a cell are summed without indexing each pixel, while
+centre assignment indexes all 4.2 million pixels whatever the resolution (about 475 ms here).
+Overlay used two to three times the memory (24–47 MiB against 13–15). Whether it wins at a given
+ratio depends on the grid, as the next section shows.
+
 #### Fixed cell count
 
-One resolution over a fixed region of about 60,000 cells, with only the pixel size changing
-between rows (`--sweep ratio`), in steps fine enough to place the thresholds. `auto runs` is the
-mode the current rule picks.
+One resolution per grid over a fixed region of about 60,000 cells (H3 resolution 11, S2 level 13,
+A5 resolution 12, HEALPix depth 12), with only the pixel size changing between rows
+(`--sweep ratio`). The checkerboard squares are one cell edge wide on every grid
+(`--feature-cells 1`), so the field varies on the same scale relative to the cell everywhere and
+value errors can be compared across grids; area errors never depend on the field. Rows are target
+ratios; the actual ratio is within 2%. Continuous and categorical scans run on all four grids.
 
-**S2 level 13 (about 1.27 km²), continuous, about 69,400 cells**
+**Centre assignment's scan time divided by overlay's.** Below 1, centre assignment is faster; bold
+marks overlay faster.
 
-| Pixels per cell | `center` ms | `center` missing | `center` error | `center` area error | `16point` ms | `16point` error | `overlay` ms | `bilinear` ms | `bilinear` error | `auto` runs |
+| Pixels per cell | H3 cont. | S2 cont. | A5 cont. | HEALPix cont. | H3 cat. | S2 cat. | A5 cat. | HEALPix cat. |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.25 | 0.18 | 0.14 | 0.21 | 0.13 | 0.14 | 0.12 | 0.14 | 0.10 |
+| 0.5 | 0.25 | 0.23 | 0.24 | 0.19 | 0.21 | 0.23 | 0.21 | 0.20 |
+| 1 | 0.34 | 0.45 | 0.35 | 0.26 | 0.36 | 0.40 | 0.34 | 0.27 |
+| 1.5 | 0.54 | 0.61 | 0.55 | 0.33 | 0.47 | 0.50 | 0.45 | 0.33 |
+| 2 | 0.53 | 0.55 | **1.09** | 0.40 | 0.50 | 0.45 | 0.67 | 0.40 |
+| 3 | 0.53 | 0.45 | 0.89 | 0.32 | 0.54 | 0.49 | 0.59 | 0.36 |
+| 4 | 0.58 | 0.46 | 0.94 | 0.35 | 0.55 | 0.48 | 0.66 | 0.35 |
+| 6 | 0.65 | 0.54 | **1.42** | 0.42 | 0.72 | 0.61 | 0.99 | 0.39 |
+| 8 | 0.85 | 0.51 | 0.82 | 0.42 | 0.76 | 0.51 | **1.15** | 0.38 |
+| 12 | **1.09** | 0.65 | **1.34** | 0.41 | **1.11** | 0.47 | **3.07** | 0.38 |
+| 16 | **1.29** | 0.59 | **1.55** | 0.46 | **1.12** | 0.48 | **3.32** | 0.37 |
+| 24 | **1.69** | 0.61 | **4.43** | 0.45 | **1.25** | 0.64 | **4.07** | 0.45 |
+| 32 | **1.67** | 0.70 | **4.68** | 0.56 | **1.76** | 0.66 | **4.08** | 0.49 |
+| 64 | **2.90** | 0.92 | **5.58** | 0.64 | **2.73** | 0.80 | **5.63** | 0.65 |
+
+
+**Centre assignment's accuracy against overlay**, as the range over the four grids and both kinds
+(class-fraction error over the four categorical sweeps, mean absolute error over the four
+continuous ones):
+
+| Pixels per cell | Cells missing | Area error | Class-fraction error | Mean abs. error |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.25 | 74.3–78.6% | 285.3–362.6% | 0.000–0.002 | 0.0–0.1 |
+| 0.5 | 48.3–56.9% | 91.8–130.1% | 0.077–0.119 | 3.8–5.9 |
+| 1 | 8.8–26.2% | 16.3–34.6% | 0.270–0.326 | 13.5–16.3 |
+| 1.5 | 0.4–7.6% | 31.9–34.8% | 0.203–0.271 | 10.1–13.5 |
+| 2 | 0.4–0.8% | 4.9–37.9% | 0.116–0.199 | 5.7–9.9 |
+| 3 | 0.2–0.6% | 20.0–29.6% | 0.098–0.132 | 4.8–6.6 |
+| 4 | 0.1–0.5% | 9.6–23.5% | 0.083–0.108 | 4.1–5.4 |
+| 6 | 0.0–0.4% | 13.1–20.2% | 0.057–0.082 | 2.8–4.1 |
+| 8 | 0.0–0.4% | 3.7–11.3% | 0.047–0.057 | 2.3–2.8 |
+| 12 | 0.0–0.3% | 7.4–14.2% | 0.034–0.051 | 1.7–2.5 |
+| 16 | 0.0–0.3% | 3.8–9.4% | 0.033–0.040 | 1.6–2.0 |
+| 24 | 0.0–0.2% | 3.1–5.1% | 0.021–0.033 | 1.1–1.6 |
+| 32 | 0.0–0.2% | 2.6–7.0% | 0.015–0.024 | 0.8–1.2 |
+| 64 | 0.0–0.1% | 1.9–2.8% | 0.011–0.017 | 0.6–0.8 |
+
+
+The full tables follow. Each compares `center`, `16point` (the densest sampling preset),
+`overlay` and the interpolation `auto` would use, and names the mode `auto` ran.
+
+<details>
+<summary>H3 resolution 11, continuous, 57,917 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` mean abs. error | `center` area error | `16point` ms | `16point` mean abs. error | `overlay` ms | `bilinear` ms | `bilinear` mean abs. error | `auto` runs |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| 0.245 | 10.7 | 78.6% | 0.006 | 362.6% | 41.7 | 1.439 | 74.3 | 24.1 | 3.096 | `bilinear` |
-| 0.492 | 16.8 | 56.9% | 2.714 | 130.1% | 57.1 | 1.517 | 65.8 | 18.1 | 3.161 | `bilinear` |
-| 0.987 | 30.4 | 14.4% | 14.761 | 16.3% | 66.7 | 1.995 | 71.0 | 18.1 | 2.048 | `bilinear` |
-| 1.48 | 49.1 | 0.4% | 14.767 | 33.8% | 85.1 | 1.425 | 73.3 | 22.4 | 3.405 | `overlay` |
-| 1.97 | 36.0 | 0.4% | 10.885 | 37.9% | 92.8 | 1.049 | 77.0 | 20.3 | 4.523 | `overlay` |
-| 2.96 | 34.0 | 0.3% | 6.869 | 29.6% | 115.0 | 0.911 | 68.9 | 19.0 | 6.446 | `overlay` |
-| 3.95 | 42.5 | 0.3% | 5.154 | 15.2% | 154.2 | 0.749 | 74.6 | 21.8 | 8.204 | `overlay` |
-| 5.92 | 43.4 | 0.2% | 4.144 | 20.2% | 225.3 | 0.514 | 84.6 | 22.3 | 9.844 | `overlay` |
-| 7.9 | 47.1 | 0.2% | 2.676 | 9.1% | 256.0 | 0.469 | 86.0 | 20.8 | 10.935 | `overlay` |
-| 11.9 | 51.3 | 0.1% | 2.650 | 14.2% | 415.8 | 0.431 | 94.8 | 21.3 | 12.363 | `overlay` |
-| 15.8 | 48.5 | 0.1% | 1.746 | 3.8% | 466.0 | 0.341 | 82.8 | 22.5 | 13.255 | `overlay` |
-| 23.7 | 60.7 | 0.1% | 1.485 | 3.1% | 664.6 | 0.274 | 103.6 | 25.2 | 13.947 | `overlay` |
-| 31.6 | 68.7 | 0.1% | 1.154 | 7.0% | 912.0 | 0.230 | 90.1 | 22.3 | 15.014 | `overlay` |
-| 63.2 | 118.3 | 0.1% | 0.763 | 2.2% | 1,696.2 | 0.162 | 120.3 | 36.6 | 16.652 | `overlay` |
+| 0.25 | 20.7 | 74.3% | 0.02 | 285.3% | 62.1 | 0.07 | 112.2 | 27.5 | 0.19 | `bilinear` |
+| 0.5 | 26.9 | 48.3% | 5.26 | 91.8% | 85.9 | 1.52 | 109.4 | 27.9 | 3.18 | `bilinear` |
+| 1 | 37.2 | 8.8% | 16.20 | 16.6% | 127.3 | 1.63 | 107.9 | 29.1 | 0.91 | `overlay` |
+| 1.5 | 59.3 | 0.8% | 10.08 | 31.9% | 161.0 | 1.03 | 109.7 | 28.4 | 3.26 | `overlay` |
+| 2 | 59.8 | 0.7% | 6.65 | 19.8% | 186.3 | 0.79 | 112.0 | 28.0 | 4.90 | `overlay` |
+| 3 | 60.8 | 0.6% | 4.83 | 20.2% | 266.6 | 0.63 | 114.5 | 29.3 | 7.08 | `overlay` |
+| 4 | 70.6 | 0.5% | 4.39 | 9.6% | 331.5 | 0.56 | 121.2 | 32.2 | 8.52 | `overlay` |
+| 6 | 90.5 | 0.4% | 2.81 | 13.1% | 478.0 | 0.33 | 138.2 | 29.4 | 10.29 | `overlay` |
+| 8 | 97.7 | 0.4% | 2.36 | 11.3% | 576.2 | 0.38 | 114.9 | 29.8 | 11.35 | `overlay` |
+| 12 | 144.0 | 0.3% | 1.68 | 8.4% | 840.2 | 0.17 | 132.4 | 29.2 | 12.74 | `overlay` |
+| 16 | 154.5 | 0.3% | 1.63 | 5.3% | 1032.9 | 0.13 | 119.5 | 32.2 | 13.58 | `overlay` |
+| 24 | 214.6 | 0.2% | 1.05 | 4.3% | 1512.3 | 0.13 | 127.0 | 30.4 | 14.59 | `overlay` |
+| 32 | 246.5 | 0.2% | 0.76 | 4.7% | 2094.2 | 0.10 | 147.6 | 35.2 | 15.20 | `overlay` |
+| 64 | 465.9 | 0.1% | 0.56 | 2.0% | 3821.6 | 0.05 | 160.7 | 36.5 | 16.40 | `overlay` |
 
-**H3 resolution 11 (about 2,150 m²), continuous, about 57,900 cells**
+</details>
 
-| Pixels per cell | `center` ms | `center` missing | `center` error | `center` area error | `16point` ms | `16point` error | `overlay` ms | `bilinear` ms | `bilinear` error | `auto` runs |
+<details>
+<summary>H3 resolution 11, categorical, 57,917 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` class-fraction error | `center` area error | `16point` ms | `16point` class-fraction error | `overlay` ms | `nearest` ms | `nearest` class-fraction error | `auto` runs |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| 0.249 | 20.5 | 74.3% | 0.095 | 285.3% | 65.5 | 0.408 | 125.3 | 32.6 | 1.179 | `bilinear` |
-| 0.501 | 32.7 | 48.3% | 0.643 | 91.8% | 89.8 | 0.216 | 129.4 | 35.2 | 0.490 | `bilinear` |
-| 1 | 47.8 | 8.8% | 1.002 | 16.6% | 140.6 | 0.136 | 126.6 | 29.0 | 0.136 | `overlay` |
-| 1.51 | 64.2 | 0.8% | 0.794 | 31.9% | 187.0 | 0.109 | 128.9 | 38.6 | 0.209 | `overlay` |
-| 2 | 69.7 | 0.7% | 0.654 | 19.8% | 223.6 | 0.081 | 130.7 | 33.3 | 0.321 | `overlay` |
-| 3.01 | 74.0 | 0.6% | 0.464 | 20.2% | 287.3 | 0.063 | 124.0 | 31.7 | 0.459 | `overlay` |
-| 4.02 | 73.5 | 0.5% | 0.403 | 9.6% | 347.3 | 0.051 | 115.7 | 30.6 | 0.546 | `overlay` |
-| 6.03 | 94.4 | 0.4% | 0.277 | 13.1% | 509.9 | 0.034 | 141.8 | 33.3 | 0.646 | `overlay` |
-| 8.04 | 118.2 | 0.4% | 0.209 | 11.3% | 607.4 | 0.024 | 145.6 | 32.8 | 0.707 | `overlay` |
-| 12.1 | 153.1 | 0.3% | 0.156 | 8.4% | 895.9 | 0.020 | 125.4 | 30.4 | 0.780 | `overlay` |
-| 16.1 | 179.8 | 0.3% | 0.133 | 5.3% | 1,182.0 | 0.015 | 148.2 | 41.0 | 0.822 | `overlay` |
-| 24.1 | 257.7 | 0.2% | 0.108 | 4.3% | 1,641.8 | 0.007 | 133.8 | 38.8 | 0.874 | `overlay` |
-| 32.2 | 330.2 | 0.2% | 0.080 | 4.7% | 2,135.5 | 0.006 | 142.4 | 33.5 | 0.903 | `overlay` |
-| 64.3 | 475.6 | 0.1% | 0.051 | 2.0% | 4,013.3 | 0.004 | 169.1 | 37.6 | 0.962 | `overlay` |
+| 0.25 | 18.4 | 74.3% | 0.001 | 285.3% | 71.0 | 0.002 | 134.2 | 30.0 | 0.005 | `overlay` |
+| 0.5 | 26.7 | 48.3% | 0.106 | 91.8% | 92.7 | 0.031 | 128.5 | 35.7 | 0.188 | `overlay` |
+| 1 | 43.7 | 8.8% | 0.324 | 16.6% | 132.6 | 0.033 | 121.7 | 30.8 | 0.387 | `overlay` |
+| 1.5 | 65.9 | 0.8% | 0.203 | 31.9% | 178.0 | 0.021 | 140.5 | 32.2 | 0.389 | `overlay` |
+| 2 | 67.9 | 0.7% | 0.134 | 19.8% | 208.5 | 0.016 | 135.9 | 32.8 | 0.390 | `overlay` |
+| 3 | 68.8 | 0.6% | 0.098 | 20.2% | 266.3 | 0.013 | 128.2 | 31.7 | 0.390 | `overlay` |
+| 4 | 70.5 | 0.5% | 0.088 | 9.6% | 333.4 | 0.011 | 127.8 | 40.1 | 0.390 | `overlay` |
+| 6 | 94.4 | 0.4% | 0.057 | 13.1% | 507.6 | 0.007 | 131.5 | 36.6 | 0.390 | `overlay` |
+| 8 | 109.8 | 0.4% | 0.047 | 11.3% | 624.8 | 0.008 | 144.2 | 35.0 | 0.390 | `overlay` |
+| 12 | 152.3 | 0.3% | 0.034 | 8.4% | 908.0 | 0.003 | 137.7 | 32.7 | 0.391 | `overlay` |
+| 16 | 166.8 | 0.3% | 0.033 | 5.3% | 1083.8 | 0.003 | 149.1 | 33.5 | 0.390 | `overlay` |
+| 24 | 201.9 | 0.2% | 0.021 | 4.3% | 1559.3 | 0.003 | 161.5 | 34.9 | 0.390 | `overlay` |
+| 32 | 282.1 | 0.2% | 0.015 | 4.7% | 2103.1 | 0.002 | 160.5 | 34.0 | 0.390 | `overlay` |
+| 64 | 437.8 | 0.1% | 0.011 | 2.0% | 3911.8 | 0.001 | 160.4 | 39.4 | 0.390 | `overlay` |
 
-**S2 level 13, categorical (eight classes), about 69,400 cells; error is the class-fraction distance**
+</details>
 
-| Pixels per cell | `center` ms | `center` missing | `center` error | `center` area error | `16point` ms | `16point` error | `overlay` ms | `nearest` ms | `nearest` error | `auto` runs |
+<details>
+<summary>S2 resolution 13, continuous, 69,420 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` mean abs. error | `center` area error | `16point` ms | `16point` mean abs. error | `overlay` ms | `bilinear` ms | `bilinear` mean abs. error | `auto` runs |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| 0.245 | 10.1 | 78.6% | 0.000 | 362.6% | 43.9 | 0.029 | 78.3 | 21.5 | 0.071 | `overlay` |
-| 0.492 | 17.5 | 56.9% | 0.055 | 130.1% | 57.2 | 0.031 | 87.0 | 18.3 | 0.108 | `overlay` |
-| 0.987 | 32.5 | 14.4% | 0.296 | 16.3% | 75.8 | 0.040 | 86.6 | 18.8 | 0.323 | `overlay` |
-| 1.48 | 43.0 | 0.4% | 0.296 | 33.8% | 89.5 | 0.029 | 81.6 | 22.0 | 0.394 | `overlay` |
-| 1.97 | 37.4 | 0.4% | 0.218 | 37.9% | 113.4 | 0.021 | 78.2 | 21.9 | 0.392 | `overlay` |
-| 2.96 | 41.2 | 0.3% | 0.138 | 29.6% | 144.4 | 0.018 | 83.2 | 22.9 | 0.397 | `overlay` |
-| 3.95 | 46.7 | 0.3% | 0.104 | 15.2% | 170.7 | 0.015 | 103.1 | 22.8 | 0.394 | `overlay` |
-| 5.92 | 49.0 | 0.2% | 0.084 | 20.2% | 224.9 | 0.010 | 105.9 | 26.2 | 0.395 | `overlay` |
-| 7.9 | 46.7 | 0.2% | 0.054 | 9.1% | 303.7 | 0.009 | 116.8 | 26.3 | 0.395 | `overlay` |
-| 11.9 | 43.3 | 0.1% | 0.053 | 14.2% | 373.9 | 0.009 | 106.1 | 23.3 | 0.395 | `overlay` |
-| 15.8 | 51.9 | 0.1% | 0.036 | 3.8% | 553.2 | 0.007 | 100.6 | 25.7 | 0.393 | `overlay` |
-| 23.7 | 63.9 | 0.1% | 0.030 | 3.1% | 736.4 | 0.006 | 102.3 | 23.9 | 0.396 | `overlay` |
-| 31.6 | 71.7 | 0.1% | 0.023 | 7.0% | 914.4 | 0.005 | 110.9 | 23.8 | 0.394 | `overlay` |
-| 63.2 | 105.8 | 0.1% | 0.015 | 2.2% | 1,942.3 | 0.003 | 138.3 | 31.6 | 0.395 | `overlay` |
+| 0.25 | 8.6 | 78.6% | 0.00 | 362.6% | 38.2 | 0.10 | 60.1 | 16.9 | 0.17 | `bilinear` |
+| 0.5 | 14.3 | 56.9% | 3.84 | 130.1% | 45.0 | 2.05 | 61.6 | 18.1 | 3.91 | `bilinear` |
+| 1 | 28.5 | 14.4% | 16.27 | 16.3% | 64.1 | 1.95 | 63.3 | 16.3 | 2.49 | `bilinear` |
+| 1.5 | 43.1 | 0.4% | 13.50 | 33.8% | 76.6 | 1.47 | 70.2 | 21.4 | 3.05 | `overlay` |
+| 2 | 34.4 | 0.4% | 9.92 | 37.9% | 82.1 | 1.10 | 62.9 | 18.2 | 4.22 | `overlay` |
+| 3 | 31.9 | 0.3% | 6.58 | 29.6% | 111.5 | 1.06 | 70.8 | 18.8 | 6.27 | `overlay` |
+| 4 | 31.9 | 0.3% | 5.38 | 15.2% | 132.2 | 0.84 | 68.9 | 18.8 | 7.90 | `overlay` |
+| 6 | 38.4 | 0.2% | 4.08 | 20.2% | 188.8 | 0.58 | 70.8 | 18.5 | 9.50 | `overlay` |
+| 8 | 39.0 | 0.2% | 2.82 | 9.1% | 252.2 | 0.51 | 75.7 | 19.4 | 10.40 | `overlay` |
+| 12 | 46.4 | 0.1% | 2.52 | 14.2% | 339.6 | 0.48 | 70.9 | 19.5 | 11.89 | `overlay` |
+| 16 | 47.8 | 0.1% | 1.95 | 3.8% | 441.0 | 0.38 | 80.7 | 22.0 | 13.08 | `overlay` |
+| 24 | 48.3 | 0.1% | 1.63 | 3.1% | 611.0 | 0.30 | 79.7 | 21.4 | 13.20 | `overlay` |
+| 32 | 59.6 | 0.1% | 1.21 | 7.0% | 875.8 | 0.25 | 85.4 | 22.1 | 13.83 | `overlay` |
+| 64 | 91.2 | 0.1% | 0.84 | 2.2% | 1636.4 | 0.18 | 98.9 | 27.7 | 14.64 | `overlay` |
+
+</details>
+
+<details>
+<summary>S2 resolution 13, categorical, 69,420 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` class-fraction error | `center` area error | `16point` ms | `16point` class-fraction error | `overlay` ms | `nearest` ms | `nearest` class-fraction error | `auto` runs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 0.25 | 8.9 | 78.6% | 0.000 | 362.6% | 41.8 | 0.002 | 73.9 | 18.5 | 0.006 | `overlay` |
+| 0.5 | 16.9 | 56.9% | 0.077 | 130.1% | 52.7 | 0.041 | 71.8 | 18.6 | 0.170 | `overlay` |
+| 1 | 32.5 | 14.4% | 0.326 | 16.3% | 71.9 | 0.040 | 81.0 | 19.1 | 0.358 | `overlay` |
+| 1.5 | 38.5 | 0.4% | 0.271 | 33.8% | 85.5 | 0.030 | 76.2 | 19.4 | 0.359 | `overlay` |
+| 2 | 36.2 | 0.4% | 0.199 | 37.9% | 93.5 | 0.022 | 80.3 | 19.1 | 0.356 | `overlay` |
+| 3 | 40.2 | 0.3% | 0.132 | 29.6% | 128.1 | 0.021 | 81.6 | 20.7 | 0.355 | `overlay` |
+| 4 | 40.0 | 0.3% | 0.108 | 15.2% | 173.4 | 0.017 | 82.7 | 22.0 | 0.358 | `overlay` |
+| 6 | 49.0 | 0.2% | 0.082 | 20.2% | 206.6 | 0.012 | 80.8 | 23.5 | 0.352 | `overlay` |
+| 8 | 42.8 | 0.2% | 0.057 | 9.1% | 254.5 | 0.010 | 83.2 | 20.1 | 0.353 | `overlay` |
+| 12 | 42.5 | 0.1% | 0.051 | 14.2% | 379.0 | 0.010 | 90.0 | 22.1 | 0.353 | `overlay` |
+| 16 | 48.8 | 0.1% | 0.040 | 3.8% | 511.2 | 0.008 | 101.1 | 26.6 | 0.360 | `overlay` |
+| 24 | 58.6 | 0.1% | 0.033 | 3.1% | 676.9 | 0.006 | 92.0 | 24.4 | 0.352 | `overlay` |
+| 32 | 69.1 | 0.1% | 0.024 | 7.0% | 850.0 | 0.005 | 105.2 | 23.1 | 0.350 | `overlay` |
+| 64 | 94.1 | 0.1% | 0.017 | 2.2% | 1737.5 | 0.004 | 117.4 | 26.8 | 0.346 | `overlay` |
+
+</details>
+
+<details>
+<summary>A5 resolution 12, continuous, 61,720 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` mean abs. error | `center` area error | `16point` ms | `16point` mean abs. error | `overlay` ms | `bilinear` ms | `bilinear` mean abs. error | `auto` runs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 0.25 | 35.7 | 75.9% | 0.09 | 310.6% | 133.7 | 0.08 | 172.1 | 20.2 | 0.16 | `bilinear` |
+| 0.5 | 43.2 | 53.6% | 5.88 | 113.5% | 148.2 | 1.92 | 176.3 | 21.8 | 2.96 | `bilinear` |
+| 1 | 58.6 | 26.2% | 13.46 | 34.6% | 235.0 | 1.70 | 169.6 | 20.4 | 2.50 | `bilinear` |
+| 1.5 | 93.9 | 7.6% | 10.87 | 34.8% | 434.1 | 1.10 | 170.9 | 21.8 | 4.62 | `overlay` |
+| 2 | 195.0 | 0.8% | 7.73 | 15.6% | 802.0 | 0.98 | 179.3 | 21.9 | 5.89 | `overlay` |
+| 3 | 176.8 | 0.6% | 5.38 | 20.0% | 1208.7 | 0.71 | 197.6 | 23.4 | 7.89 | `overlay` |
+| 4 | 164.0 | 0.5% | 4.10 | 23.5% | 1551.5 | 0.56 | 174.8 | 21.8 | 9.53 | `overlay` |
+| 6 | 258.5 | 0.4% | 3.39 | 13.7% | 2048.0 | 0.40 | 181.6 | 23.1 | 11.25 | `overlay` |
+| 8 | 161.5 | 0.4% | 2.70 | 7.5% | 2371.7 | 0.32 | 196.3 | 22.6 | 12.31 | `overlay` |
+| 12 | 268.9 | 0.3% | 1.83 | 9.7% | 2958.4 | 0.23 | 200.1 | 24.0 | 13.68 | `overlay` |
+| 16 | 299.4 | 0.3% | 1.72 | 5.8% | 3564.1 | 0.17 | 193.2 | 26.3 | 14.49 | `overlay` |
+| 24 | 901.3 | 0.2% | 1.12 | 5.1% | 4448.5 | 0.12 | 203.4 | 24.5 | 15.48 | `overlay` |
+| 32 | 929.4 | 0.2% | 0.99 | 3.6% | 5285.3 | 0.09 | 198.7 | 25.8 | 16.08 | `overlay` |
+| 64 | 1284.9 | 0.1% | 0.56 | 1.9% | 7777.0 | 0.05 | 230.3 | 31.2 | 17.27 | `overlay` |
+
+</details>
+
+<details>
+<summary>A5 resolution 12, categorical, 61,720 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` class-fraction error | `center` area error | `16point` ms | `16point` class-fraction error | `overlay` ms | `nearest` ms | `nearest` class-fraction error | `auto` runs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 0.25 | 26.0 | 75.9% | 0.002 | 310.6% | 116.1 | 0.002 | 182.9 | 21.8 | 0.006 | `overlay` |
+| 0.5 | 38.3 | 53.6% | 0.119 | 113.5% | 141.0 | 0.039 | 185.3 | 22.2 | 0.195 | `overlay` |
+| 1 | 60.3 | 26.2% | 0.270 | 34.6% | 202.8 | 0.034 | 178.2 | 22.7 | 0.405 | `overlay` |
+| 1.5 | 87.6 | 7.6% | 0.219 | 34.8% | 530.8 | 0.022 | 195.8 | 25.8 | 0.406 | `overlay` |
+| 2 | 120.2 | 0.8% | 0.156 | 15.6% | 793.3 | 0.020 | 179.6 | 23.2 | 0.403 | `overlay` |
+| 3 | 114.1 | 0.6% | 0.109 | 20.0% | 1186.8 | 0.014 | 194.1 | 25.9 | 0.399 | `overlay` |
+| 4 | 124.9 | 0.5% | 0.083 | 23.5% | 1497.2 | 0.011 | 189.2 | 23.0 | 0.407 | `overlay` |
+| 6 | 192.1 | 0.4% | 0.068 | 13.7% | 2048.8 | 0.008 | 193.4 | 24.7 | 0.407 | `overlay` |
+| 8 | 240.5 | 0.4% | 0.055 | 7.5% | 2421.1 | 0.006 | 209.3 | 28.2 | 0.406 | `overlay` |
+| 12 | 655.4 | 0.3% | 0.037 | 9.7% | 3045.2 | 0.005 | 213.3 | 28.3 | 0.407 | `overlay` |
+| 16 | 723.0 | 0.3% | 0.035 | 5.8% | 3690.1 | 0.004 | 218.0 | 25.3 | 0.408 | `overlay` |
+| 24 | 875.0 | 0.2% | 0.023 | 5.1% | 4660.2 | 0.002 | 214.8 | 26.8 | 0.407 | `overlay` |
+| 32 | 965.7 | 0.2% | 0.020 | 3.6% | 5492.0 | 0.002 | 236.8 | 28.9 | 0.407 | `overlay` |
+| 64 | 1305.3 | 0.1% | 0.011 | 1.9% | 7938.5 | 0.001 | 231.8 | 32.0 | 0.408 | `overlay` |
+
+</details>
+
+<details>
+<summary>HEALPix resolution 12, continuous, 61,740 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` mean abs. error | `center` area error | `16point` ms | `16point` mean abs. error | `overlay` ms | `bilinear` ms | `bilinear` mean abs. error | `auto` runs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 0.25 | 9.9 | 75.9% | 0.01 | 311.4% | 33.1 | 0.05 | 78.2 | 13.9 | 0.21 | `bilinear` |
+| 0.5 | 14.1 | 51.5% | 4.66 | 104.7% | 41.3 | 1.90 | 73.4 | 13.2 | 3.80 | `bilinear` |
+| 1 | 20.3 | 18.7% | 14.18 | 22.3% | 45.1 | 1.64 | 79.4 | 14.0 | 0.57 | `bilinear` |
+| 1.5 | 26.5 | 4.8% | 10.46 | 34.4% | 45.6 | 1.06 | 79.4 | 14.5 | 3.08 | `overlay` |
+| 2 | 35.2 | 0.5% | 5.71 | 4.9% | 61.4 | 0.86 | 87.4 | 18.1 | 5.77 | `overlay` |
+| 3 | 29.0 | 0.2% | 5.55 | 21.1% | 72.9 | 0.76 | 91.5 | 16.2 | 7.10 | `overlay` |
+| 4 | 29.1 | 0.1% | 4.57 | 17.1% | 83.7 | 0.67 | 83.4 | 16.2 | 8.32 | `overlay` |
+| 6 | 34.1 | 0.0% | 3.22 | 15.1% | 110.4 | 0.49 | 80.7 | 14.9 | 10.22 | `overlay` |
+| 8 | 34.8 | 0.0% | 2.31 | 3.7% | 131.8 | 0.39 | 83.7 | 14.9 | 11.00 | `overlay` |
+| 12 | 36.5 | 0.0% | 1.91 | 7.4% | 174.1 | 0.34 | 88.7 | 15.2 | 13.33 | `overlay` |
+| 16 | 42.1 | 0.0% | 1.64 | 9.4% | 222.9 | 0.29 | 91.9 | 16.1 | 13.39 | `overlay` |
+| 24 | 47.7 | 0.0% | 1.17 | 4.6% | 337.3 | 0.21 | 105.3 | 16.4 | 14.60 | `overlay` |
+| 32 | 56.4 | 0.0% | 0.94 | 2.6% | 408.3 | 0.16 | 100.2 | 19.5 | 14.98 | `overlay` |
+| 64 | 79.8 | 0.0% | 0.69 | 2.8% | 754.9 | 0.09 | 125.6 | 23.2 | 16.09 | `overlay` |
+
+</details>
+
+<details>
+<summary>HEALPix resolution 12, categorical, 61,740 cells</summary>
+
+| Pixels per cell | `center` ms | `center` missing | `center` class-fraction error | `center` area error | `16point` ms | `16point` class-fraction error | `overlay` ms | `nearest` ms | `nearest` class-fraction error | `auto` runs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 0.25 | 8.9 | 75.9% | 0.000 | 311.4% | 33.9 | 0.002 | 85.0 | 15.3 | 0.005 | `overlay` |
+| 0.5 | 17.9 | 51.5% | 0.093 | 104.7% | 46.2 | 0.038 | 89.5 | 14.9 | 0.172 | `overlay` |
+| 1 | 22.9 | 18.7% | 0.284 | 22.3% | 60.9 | 0.033 | 83.9 | 14.4 | 0.385 | `overlay` |
+| 1.5 | 28.0 | 4.8% | 0.210 | 34.4% | 47.8 | 0.021 | 85.5 | 16.3 | 0.385 | `overlay` |
+| 2 | 34.5 | 0.5% | 0.116 | 4.9% | 58.6 | 0.017 | 87.3 | 15.3 | 0.379 | `overlay` |
+| 3 | 33.5 | 0.2% | 0.112 | 21.1% | 76.1 | 0.015 | 93.4 | 16.6 | 0.386 | `overlay` |
+| 4 | 32.4 | 0.1% | 0.092 | 17.1% | 87.1 | 0.014 | 91.9 | 16.4 | 0.386 | `overlay` |
+| 6 | 35.7 | 0.0% | 0.065 | 15.1% | 115.4 | 0.010 | 90.9 | 15.8 | 0.386 | `overlay` |
+| 8 | 34.3 | 0.0% | 0.047 | 3.7% | 140.9 | 0.008 | 89.7 | 16.6 | 0.387 | `overlay` |
+| 12 | 38.6 | 0.0% | 0.038 | 7.4% | 191.1 | 0.007 | 101.6 | 16.7 | 0.383 | `overlay` |
+| 16 | 38.3 | 0.0% | 0.033 | 9.4% | 239.3 | 0.006 | 102.2 | 16.9 | 0.387 | `overlay` |
+| 24 | 47.6 | 0.0% | 0.024 | 4.6% | 343.0 | 0.004 | 106.4 | 19.4 | 0.386 | `overlay` |
+| 32 | 55.9 | 0.0% | 0.019 | 2.6% | 437.4 | 0.003 | 114.4 | 19.0 | 0.387 | `overlay` |
+| 64 | 98.2 | 0.0% | 0.014 | 2.8% | 854.8 | 0.002 | 150.6 | 23.1 | 0.387 | `overlay` |
+
+</details>
 
 #### What the numbers show
 
-- **Overlay costs about 1–2 µs per cell, almost independent of the ratio**, so it is exact at every
-  size for a nearly flat cost: 66–120 ms for 69,000 S2 cells and 116–169 ms for 58,000 H3 cells
-  from a quarter of a pixel to 64 pixels per cell. It used up to three times the memory of
-  centre assignment (24–61 MiB against 12–40).
-- **Centre assignment indexes every pixel, so its cost grows with the ratio.** Overlay became
-  faster from about 10 pixels per cell on H3 and about 60 on S2 (S2 indexes a pixel more
-  cheaply), and 2.5–20× faster with hundreds or thousands of pixels per cell.
-- **Between 1 and 16 pixels per cell, centre assignment is fast but coarse.** It was 1.2–2.6×
-  faster than overlay, but put each cell's area 4–38% off on average, left up to 14% of the cells
-  empty at about one pixel per cell, and had its largest mean errors between 1 and 6 pixels per
-  cell. On categorical rasters its class fractions were 0.04–0.30 away from overlay's.
-- **Below one pixel per cell, `bilinear` is the fast way to fill every cell.** It ran in a quarter
-  to a third of overlay's time and left about 1% of the cells empty, against 14–98% for centre
-  assignment. Overlay and `bilinear` answer different questions here: overlay gives each tiny
-  cell the pixels under it, a step function, while `bilinear` gives a smooth surface, so their
-  difference near the checkerboard's 50-unit steps is not an error of either.
-- **For categorical rasters, `nearest` is fast but blunt.** It looks up one class at the cell's
-  centre, so its class fractions were 0.07–0.11 from overlay's at a quarter to half a pixel per
-  cell and 0.32–0.40 from about a pixel up, where overlay splits cells between classes. Overlay
-  cost about 4× as much (78–87 ms against 18–22 ms below one pixel per cell).
-- **Sub-pixel sampling rarely came out ahead.** Above a few pixels per cell, `overlay` was both
-  faster and exact; `rgss` cost 2–4× centre assignment and `16point` 5–14×. Its one niche is
-  somewhat below one pixel per cell, where `16point` reached nearly every cell and stayed closer to
-  overlay than `bilinear` or `nearest`, in 40–95% of overlay's time.
+- **Centre assignment is fastest from about one to a few pixels per cell, by 2.2–3.9×, and
+  coarse.** At about one pixel per cell it ran in 26–45% of overlay's time. At that size it left
+  9–26% of the cells empty (H3 9%, S2 14%, HEALPix 19%, A5 26%) and put cell areas 16–35% off.
+  At every ratio from 1 to 16 pixels per cell the mean area error was 4–38%, while the
+  class-fraction error fell from 0.27–0.33 to 0.03–0.04 and the continuous mean error from 13–16
+  to about 2 on a 0–150 field.
+- **Where overlay becomes faster depends on the grid.** From about 12 pixels per cell on H3 and
+  A5, overlay was faster than centre assignment, 1.1–5.6× at 12–64 pixels per cell. On S2 and
+  HEALPix, centre assignment stayed faster through the largest ratio tested: overlay cost 1.1–1.3×
+  as much at 64 pixels per cell on S2 and 1.5–1.6× on HEALPix. Centre assignment indexes every
+  pixel, so how its cost grows depends on how expensive a grid is to index. A5's timings were also
+  the noisiest, so its crossover, between 6 and 12, is approximate.
+- **Overlay's cost is steady.** It took 0.9–3.8 µs per cell on the four grids (S2 cheapest, A5
+  dearest), rising at most 1.8× across a 256× range of ratios. It used about 1.5–3× the memory of
+  centre assignment (26–52 MiB against 12–35 on these scans).
+- **Below one pixel per cell, interpolation fills every cell for an eighth to a third of overlay's
+  time.** `bilinear` and `nearest` left about 1% of the cells empty (those whose centre lies off
+  the raster), against 48–57% for centre assignment at 0.5 pixels per cell and 74–79% at 0.25. They answer a
+  different question from overlay: overlay gives each tiny cell the pixels under it, a step
+  function, while `bilinear` gives a smooth surface, so their difference is not an error of
+  either.
+- **`nearest` is fast but blunt for classes.** It looks up one class at the cell centre, so its
+  class fractions were 0.17–0.20 from overlay's at half a pixel per cell and 0.35–0.41 from about
+  one pixel up, on all four grids, however many pixels the cell held.
+- **Sub-pixel sampling rarely comes out ahead.** From about 4 pixels per cell up, `rgss` cost
+  1.2–5.7× centre assignment and `16point` 2.7–18.5×, and overlay was exact for 1–4 µs per cell.
+  Its one niche is a quarter to half a pixel per cell, where `16point` ran in 40–85% of overlay's
+  time and stayed closer to it than interpolation did (class-fraction error 0.04 against 0.17–0.20
+  for `nearest` at half a pixel per cell), while missing 0–0.6% of the cells.
 
 These results set [`transfer = "auto"`](#transfer--auto): `bilinear` below 1:1 for continuous
-scans, weighted `overlay` from 1:1 up and for categorical scans at every ratio. `auto` gives up
-at most about 2.6× in speed against centre assignment, in the band where centre assignment's
-errors are largest.
+scans, weighted `overlay` from 1:1 up and for categorical scans at every ratio. That costs up to
+2.2–3.9× in speed against centre assignment at about one pixel per cell, and 1.7–2.7× at 16 pixels
+per cell on S2 and HEALPix, in return for no empty cells and exact areas and class shares.
+On H3 and A5, `auto` is also the faster choice from about 12 pixels per cell. Where speed matters
+more than edges, ask for `assign_centers`.
 
-Caveats: one machine, synthetic fields, H3 and S2 only, single-band scans of local files, and
-default worker pools (overlay clips cells on the ambient Rayon pool). Pixel-dense real rasters,
-remote COGs and the other grids may shift the crossovers.
+Caveats: one machine, synthetic fields, single-band scans of local files, and default worker pools
+(overlay clips cells on the ambient Rayon pool). Value errors depend on how fast the field varies
+within a cell: the squares here are one cell wide, the hardest case for centre assignment, while
+a smooth field would make it look better; area and empty-cell errors do not depend on the field.
+Pixel-dense real rasters and remote COGs may shift the crossovers.
 
 ### Parallel overlap calculation
 

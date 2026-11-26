@@ -20,7 +20,7 @@ Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) a
 | :--- | :--- | :--- |
 | `assign_centers` (default) | The pixels whose centres it holds | Cells about a pixel in size, where it is fastest |
 | `interpolate` | The value interpolated at its centre | Cells finer than the pixels |
-| `overlay` | Every pixel it overlaps, weighted by the part inside it, with modes that [conserve totals](docs/transfer-modes.md#mass-preserving-mass_preserve), [weight by true ground area](docs/transfer-modes.md#ground-area-overlay-ground_area) on lon/lat rasters, or [measure class areas](docs/transfer-modes.md#categorical-overlay-class-areas) | Many pixels per cell (where it is also [fastest](docs/transfer-modes.md#comparing-the-modes)), or when edge pixels, totals or km² must be exact |
+| `overlay` | Every pixel it overlaps, weighted by the part inside it, with modes that [conserve totals](docs/transfer-modes.md#mass-preserving-mass_preserve), [weight by true ground area](docs/transfer-modes.md#ground-area-overlay-ground_area) on lon/lat rasters, or [measure class areas](docs/transfer-modes.md#categorical-overlay-class-areas) | Cells larger than the pixels, or when edge pixels, totals or km² must be exact; with many pixels per cell it can also be the [fastest](docs/transfer-modes.md#comparing-the-modes) |
 | `auto` | `interpolate` for continuous rasters with cells finer than the pixels, `overlay` otherwise | You'd rather not choose; pair it with `resolutions="auto"` for pixel-sized cells |
 
 The modes differ in which side does the looking:
