@@ -20,6 +20,7 @@ builds two binaries:
 ```text
 dggs-stream-cli ipc     <input> [options]        Stream RH3IPC01 batches to stdout or -o <file>
 dggs-stream-cli jsonl   <input> [options]        Stream JSONEachRow (NDJSON) to stdout or -o <file>
+dggs-stream-cli polyfill <input.geojson|-> [options]  Write feature-to-cell rows as JSON Lines
 dggs-stream-cli parquet <input> -o <out> [opts]  Write GeoParquet
 dggs-stream-cli pmtiles <input> -o <out> [opts]  Write a PMTiles v3 archive
 dggs-stream-cli parquet-to-pmtiles <in.parquet> -o <out> [--h3-column NAME]
@@ -28,7 +29,7 @@ dggs-stream-cli plan    <input> [options]        Print partition specs (JSON Lin
 dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outputs into final cells
 ```
 
-`<input>` can be a path, glob, comma-separated list or VRT (it may also be given with
+For raster commands, `<input>` can be a path, glob, comma-separated list or VRT (it may also be given with
 `-i/--input`). Mosaic overlaps use the `cutline` rule.
 
 | Option | Applies to | Meaning |
@@ -56,6 +57,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
 | `--ground-area` | `ipc`, `jsonl` | Compute area-weighted continuous statistics for one single-band, north-up EPSG:4326 raster. With `--transfer overlay`, integrate over partial pixels. |
+| `--compression <codec>` | `parquet` | snappy (default), zstd, lz4 (raw), gzip, brotli or none. Applies to each file in a parent-partitioned dataset and to multiband output. |
 | `--bands <list or all>` | `ipc`, `jsonl`, `parquet` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,wkb,band_3_mean,band_1_count`. |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl`, multi-band `parquet` | Column projection, in the given order. Include `wkb` when projecting GeoParquet. |
 | `--limit <N>` | `ipc`, `jsonl`, multi-band `parquet` | Maximum rows |
@@ -74,6 +76,23 @@ their coordinate transform failed (see [transform-failure diagnostics](core.md#t
 Column names come from the core schemas (see the
 [overview](README.md#output-schemas)); `--columns` with a name that does not
 exist in the selected schema fails before any raster is read.
+
+## Vector polygon fill
+
+```sh
+dggs-stream-cli polyfill parcels.geojson --grid s2 -r 12 --containment covers -o cells.jsonl
+```
+
+Supply WGS84 longitude/latitude GeoJSON polygons, multipolygons, Features or FeatureCollections.
+Use a single Feature per line and `-` for stdin to process large inputs one feature at a time.
+A FeatureCollection is read as one JSON document. The command writes one row per feature and
+cell with `feature_id`, `resolution`, and the grid's numeric and hexadecimal index columns.
+It preserves string and numeric feature IDs and uses the zero-based input feature position
+when the ID is missing. Null geometry yields zero rows. Cells are sorted and deduplicated
+within each feature. Overlapping features retain their separate rows.
+
+Select one integer resolution (default 8) and one of the four [containment modes](../grids.md#polygon-fill)
+with `--containment` (default `center`). The default grid is H3.
 
 ## Output Formats
 

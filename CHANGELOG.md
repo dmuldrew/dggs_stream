@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CLI `polyfill` writes GeoJSON polygons as feature-to-cell JSON Lines on H3, A5, S2 and HEALPix.
+- CLI `parquet --compression` selects Snappy, Zstandard, raw LZ4, gzip, Brotli or uncompressed output for ordinary, multiband and parent-partitioned files.
+
 - Opt-in `transfer = "auto"` (`TransferMode::Auto` in core, `--transfer auto` in CLI, `transfer="auto"` in Python/Polars/DuckDB/Sedona): inspects local ground pixel size against requested cell areas (choosing `interpolate` below 1:1 with `nearest` for categorical and `bilinear` for continuous, `assign_centers` near 1:1, and weighted `overlay` at >= 16:1 or mixed fine/coarse scans) while respecting incompatible scan options (`compact`, `spectral_formula`, sub-pixel sampling, partitioning, `valid_coverage_threshold`, `histogram_weight="area"`, `ground_area`, and `bands`).
 - Ordinary and ground-area overlay adaptively trace native grid edges in raster pixel coordinates before clipping on all four grids. Cells with a pole vertex keep their straight pole sides but trace the rest, so a polar cell no longer counts pixels between its chord and the curve its non-polar neighbour follows.
 

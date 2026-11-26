@@ -288,12 +288,15 @@ pub fn h3_polygon_to_cells_wkb_into(
     mode: ContainmentMode,
     out: &mut Vec<u64>,
 ) -> Result<(), PolygonToCellsError> {
-    out.clear();
-    let resolution = u8::try_from(res)
-        .ok()
-        .and_then(|r| Resolution::try_from(r).ok())
-        .ok_or(PolygonToCellsError::InvalidResolution(res))?;
-    let multi = wkb_to_multipolygon(wkb).map_err(PolygonToCellsError::InvalidGeometry)?;
+    grid_polygon_to_cells_wkb_into(GridKind::H3, wkb, res, mode, out)
+}
+
+fn fill_h3(
+    multi: geo_types::MultiPolygon<f64>,
+    resolution: Resolution,
+    mode: ContainmentMode,
+    out: &mut Vec<u64>,
+) -> Result<(), PolygonToCellsError> {
     if multi.0.is_empty() {
         return Ok(());
     }
@@ -377,23 +380,43 @@ pub fn grid_polygon_to_cells_wkb_into(
     mode: ContainmentMode,
     out: &mut Vec<u64>,
 ) -> Result<(), PolygonToCellsError> {
-    match grid.spec().polygon_fill {
-        PolygonFill::H3Tiler => h3_polygon_to_cells_wkb_into(wkb, res, mode, out),
-        PolygonFill::A5Native => a5_polygon_to_cells_wkb_into(wkb, res, mode, out),
-        PolygonFill::NestedDescent => {
-            out.clear();
-            let level = u8::try_from(res)
-                .ok()
-                .filter(|&r| r <= grid.max_resolution())
-                .ok_or(PolygonToCellsError::InvalidResolution(res))?;
-            let multi = wkb_to_multipolygon(wkb).map_err(PolygonToCellsError::InvalidGeometry)?;
-            let result = crate::polygon_fill::fill_nested_grid(grid, &multi, level, mode, out);
-            if result.is_err() {
-                out.clear();
-            }
-            result
-        }
+    out.clear();
+    let level = u8::try_from(res)
+        .ok()
+        .filter(|&r| r <= grid.max_resolution())
+        .ok_or(PolygonToCellsError::InvalidResolution(res))?;
+    let multi = wkb_to_multipolygon(wkb).map_err(PolygonToCellsError::InvalidGeometry)?;
+    grid_polygon_to_cells_into(grid, multi, level, mode, out)
+}
+
+/// Fill a WGS84 longitude/latitude multipolygon, replacing the output with sorted, unique cells.
+pub fn grid_polygon_to_cells_into(
+    grid: GridKind,
+    multi: geo_types::MultiPolygon<f64>,
+    level: u8,
+    mode: ContainmentMode,
+    out: &mut Vec<u64>,
+) -> Result<(), PolygonToCellsError> {
+    out.clear();
+    if level > grid.max_resolution() {
+        return Err(PolygonToCellsError::InvalidResolution(i64::from(level)));
     }
+    let result = match grid.spec().polygon_fill {
+        PolygonFill::H3Tiler => fill_h3(
+            multi,
+            Resolution::try_from(level).expect("validated H3 resolution"),
+            mode,
+            out,
+        ),
+        PolygonFill::A5Native => a5_fill_polygons(&multi, i64::from(level), mode, out),
+        PolygonFill::NestedDescent => {
+            crate::polygon_fill::fill_nested_grid(grid, &multi, level, mode, out)
+        }
+    };
+    if result.is_err() {
+        out.clear();
+    }
+    result
 }
 
 /// Convert a 64-bit A5 cell index into its canonical lowercase hexadecimal string.
@@ -520,25 +543,15 @@ pub fn a5_polygon_to_cells_wkb_into(
     mode: ContainmentMode,
     out: &mut Vec<u64>,
 ) -> Result<(), PolygonToCellsError> {
-    out.clear();
-    let result = a5_fill_polygons(wkb, res, mode, out);
-    if result.is_err() {
-        // Earlier polygons of a multipolygon may already be in `out`.
-        out.clear();
-    }
-    result
+    grid_polygon_to_cells_wkb_into(GridKind::A5, wkb, res, mode, out)
 }
 
 fn a5_fill_polygons(
-    wkb: &[u8],
+    multi: &geo_types::MultiPolygon<f64>,
     res: i64,
     mode: ContainmentMode,
     out: &mut Vec<u64>,
 ) -> Result<(), PolygonToCellsError> {
-    if !(0..=30).contains(&res) {
-        return Err(PolygonToCellsError::InvalidResolution(res));
-    }
-    let multi = wkb_to_multipolygon(wkb).map_err(PolygonToCellsError::InvalidGeometry)?;
     if multi.0.is_empty() {
         return Ok(());
     }
