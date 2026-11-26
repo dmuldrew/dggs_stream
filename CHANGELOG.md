@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Generalized `SamplingPattern` to `TransferMode::Interpolate` via a stack-allocated, constant-Jacobian `CellPolygonSampler` (`aggregator::sampling`), enabling area-preserving sub-cell polygon quadrature (`rgss`, `5point`, `gaussian`, `hex`, `8rooks`, `9point`, `16point`) across all four grids (`H3`, `A5`, `S2`, `HEALPix`), updating `TransferMode::Auto` to keep non-default `sampling` when resolving to `Interpolate`, and exposing `--sampling <PRESET>` on `dggs-stream-cli` (leaving `TransferMode::Overlay` rejecting non-default `sampling`).
 - Spark scans accept `grid` and both merge APIs infer the grid from the cell index column. Spark represents cell IDs as signed `BIGINT` values with the original 64 bits. The Spark classes now use `Raster` in place of `RasterH3` in their names.
 - Shared Rust APIs use grid-neutral names for Sedona scalar functions and polygon fills, DuckDB raster scan state, and Parquet row-group sorting (`sort_by_cell_id`).
 - The native Python ABI uses the `dggs_stream_py_` prefix. Rebuild the native library when using the updated Python wrapper.

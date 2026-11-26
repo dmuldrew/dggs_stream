@@ -10,12 +10,12 @@ in its own way; the [table at the end](#option-names-by-engine) lists every spel
 `transfer` chooses how pixels become cell values.
 
 [Transfer Modes](transfer-modes.md) covers each mode in depth: the interpolation kernels,
-overlay weighting and mass preservation, and how `transfer` differs from sub-pixel `sampling`.
+overlay weighting and mass preservation, and how [`sampling`](super-sampling.md) applies to pixels (`assign_centers`) vs. cells (`interpolate`).
 
 | Mode | What a cell gets | When to use it |
 | :--- | :--- | :--- |
 | `assign_centers` (default) | Every pixel goes to the cell that holds its centre (or its sub-pixel sample points, see [Super-Sampling](super-sampling.md)); the cell aggregates them | Cells about the size of pixels or larger. This is the single-pass streaming kernel, unchanged. |
-| `interpolate` | The value interpolated at the cell's centre, for each cell whose centre lies on the raster | Cells finer than the pixels, which `assign_centers` would leave empty or sparse |
+| `interpolate` | Value interpolated at the cell's centre, or across a sub-cell polygon [`sampling`](super-sampling.md) stencil, for each cell whose centre lies on the raster | Cells finer than or comparable to pixels (`<= 4×`), which `assign_centers` leaves sparse, or when intra-cell spread is needed on a smooth field |
 | `overlay` | The pixels the cell overlaps, each weighted by the exact fraction of it the cell covers | Cells comparable to or larger than pixels, when edge pixels should count partially |
 
 Modifiers:
@@ -24,6 +24,10 @@ Modifiers:
   Bilinear leaves out NoData taps and renormalises the rest. Bicubic and Lanczos fall back
   to bilinear when any of their taps is NoData. A cell is missing only when all four bilinear
   taps are NoData. Taps past the raster's edge repeat the edge pixel.
+- `sampling` (with `assign_centers` or `interpolate`): `center` (the default), `rgss`, `8rooks`,
+  `16point`, `5point`, `gaussian`, `hex`, or `9point` (see [Super-Sampling](super-sampling.md)).
+  Samples sub-pixel offsets inside each pixel for `assign_centers`, and area-preserving sub-cell
+  positions inside each cell polygon (`CellPolygonSampler`) for `interpolate`. Rejected by `overlay`.
 - `overlay_weighted` (with `overlay`): `false` counts every touched pixel once instead of by
   its overlap.
 - `mass_preserve` (with `overlay`): normalises each pixel's weights so that the `sum` column
@@ -39,7 +43,7 @@ How they run:
   coarsest two or three resolutions of each grid.
 - **Categorical scans.** They accept `overlay`, and `interpolate` only with `nearest`; classes
   can't be interpolated.
-- **Combinations refused.** Transfer modes exclude compaction, spectral formulas and sub-pixel sampling.
+- **Combinations refused.** Transfer modes exclude compaction and spectral formulas; `overlay` also refuses non-`'center'` `sampling` (which is already analytical in `overlay`).
   Partitioned Python and Spark scans support ordinary single-band continuous weighted overlay.
   See [Spark weighted overlay](engines/spark.md#partitioned-weighted-overlay).
 - **PostgreSQL.** It does not expose transfer modes yet.
@@ -150,6 +154,7 @@ The code is in [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs)
 | grid | `--grid` | per-grid functions, or `grid :=` | `grid=` | per-grid functions, a grid-name argument, `with_grid` | per-grid functions |
 | automatic resolution | `-r auto[±N]` | `resolutions := 'auto'` | `resolutions="auto"`, `auto_resolution()` | `'auto'` | `{grid}_auto_resolution()` |
 | transfer mode | `--transfer`, `--interpolation`, `--overlay-weighted`, `--mass-preserve` | `transfer :=`, `interpolation :=`, `overlay_weighted :=`, `mass_preserve :=` | `transfer=`, `interpolation=`, `overlay_weighted=`, `mass_preserve=` | `'transfer=overlay'`-style arguments, `with_transfer` | — |
+| sampling pattern | `--sampling` | `sampling :=` | `sampling=` | `'sampling=rgss'`-style arguments, `with_sampling` | — |
 | minimum valid overlay fraction | `--valid-coverage-threshold` | `valid_coverage_threshold :=` | `valid_coverage_threshold=` | — | — |
 | histogram | `--histogram`, `--histogram-weight`, `--histogram-normalize` (`ipc`, `jsonl`; implies `-c`) | `histogram :=`, `histogram_weight :=`, `histogram_normalize :=` | `histogram=`, `histogram_weight=`, `histogram_normalize=` | `'histogram=...'` arguments, `with_histogram` | — |
 | NoData policy and rounding | `--nodata-policy`, `--emit-nodata-value`, `--decimals` | `nodata_policy :=`, `emit_nodata_value :=`, `decimals :=` | `nodata_policy=`, `emit_nodata_value=`, `decimals=` | `'nodata_policy=emit'`-style arguments, `with_output_policy` | `nodata_policy`, `emit_nodata_value`, `decimals` arguments |

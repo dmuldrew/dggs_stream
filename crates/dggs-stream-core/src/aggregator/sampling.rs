@@ -1,16 +1,20 @@
+//! Quadrature offsets in `[0, 1]^2` used both for sub-pixel sampling
+//! (`TransferMode::AssignCenters`) and area-preserving sub-cell polygon
+//! sampling (`TransferMode::Interpolate`).
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DggsStreamError, Result};
 
-/// Represents a single sub-pixel sample offset within the pixel unit box [0.0, 1.0] x [0.0, 1.0]
+/// A single quadrature offset within the unit reference square `[0.0, 1.0]^2`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SamplePoint {
-    pub dx: f64,     // X offset in [0.0, 1.0] (0.5 is pixel center)
-    pub dy: f64,     // Y offset in [0.0, 1.0] (0.5 is pixel center)
+    pub dx: f64,     // X offset in [0.0, 1.0] (0.5 is center)
+    pub dy: f64,     // Y offset in [0.0, 1.0] (0.5 is center)
     pub weight: f64, // Proportional weight (e.g. 0.2)
 }
 
-/// Collection of sub-pixel sample points and weights
+/// Collection of quadrature sample points and weights over `[0.0, 1.0]^2`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SamplingPattern {
     pub points: Vec<SamplePoint>,
@@ -209,13 +213,163 @@ impl SamplingPattern {
         })
     }
 
-    /// Whether this can use the unit-weight pixel-center fast path
+    /// Whether this can use the unit-weight single-center fast path.
     #[inline(always)]
     pub fn is_single_point(&self) -> bool {
         self.points.len() == 1
             && self.points[0].dx == 0.5
             && self.points[0].dy == 0.5
             && self.points[0].weight == 1.0
+    }
+
+    /// Return a copy whose point weights sum to `1.0`.
+    pub fn normalized(&self) -> Self {
+        let total: f64 = self.points.iter().map(|p| p.weight).sum();
+        if !total.is_finite() || total <= 0.0 || (total - 1.0).abs() <= 1e-12 {
+            return self.clone();
+        }
+        let inv = 1.0 / total;
+        Self {
+            points: self
+                .points
+                .iter()
+                .map(|&p| SamplePoint {
+                    dx: p.dx,
+                    dy: p.dy,
+                    weight: p.weight * inv,
+                })
+                .collect(),
+        }
+    }
+
+    /// Maximum normalized Chebyshev radius from `(0.5, 0.5)` across all sample points, in `[0.0, 1.0]`.
+    pub fn max_radius(&self) -> f64 {
+        self.points
+            .iter()
+            .map(|p| (2.0 * p.dx - 1.0).abs().max((2.0 * p.dy - 1.0).abs()))
+            .fold(0.0_f64, f64::max)
+    }
+}
+
+/// Constant-Jacobian, area-preserving map from `[0, 1]^2` quadrature offsets onto a
+/// star-shaped polygon (`3..=10` vertices) in projected pixel coordinates `(col, row)`.
+#[derive(Debug, Clone, Copy)]
+pub struct CellPolygonSampler {
+    center: (f64, f64),
+    offsets: [(f64, f64); 10],
+    cum_area: [f64; 11],
+    len: usize,
+}
+
+impl CellPolygonSampler {
+    /// Construct a sampler anchored at `center` over the unclosed polygon `ring` (`3..=10` vertices).
+    ///
+    /// Retries around the vertex centroid if `center` does not strictly see every edge positively
+    /// (or negatively) under projection curvature/shear. Returns `None` if neither star center is valid.
+    pub fn new(center: (f64, f64), ring: &[(f64, f64)]) -> Option<Self> {
+        let n = ring.len();
+        if !(3..=10).contains(&n)
+            || !center.0.is_finite()
+            || !center.1.is_finite()
+            || ring.iter().any(|&(x, y)| !x.is_finite() || !y.is_finite())
+        {
+            return None;
+        }
+        if let Some(sampler) = Self::try_star(center, ring) {
+            return Some(sampler);
+        }
+        let inv_n = 1.0 / (n as f64);
+        let (mut sx, mut sy) = (0.0, 0.0);
+        for &(x, y) in ring {
+            sx += x;
+            sy += y;
+        }
+        let centroid = (sx * inv_n, sy * inv_n);
+        Self::try_star(centroid, ring)
+    }
+
+    fn try_star(star_center: (f64, f64), ring: &[(f64, f64)]) -> Option<Self> {
+        let n = ring.len();
+        let mut offsets = [(0.0, 0.0); 10];
+        for (dst, &(vx, vy)) in offsets[..n].iter_mut().zip(ring) {
+            *dst = (vx - star_center.0, vy - star_center.1);
+        }
+        let mut cum_area = [0.0; 11];
+        let mut sign = 0i8;
+        let mut total_twice = 0.0;
+        for i in 0..n {
+            let (ax, ay) = offsets[i];
+            let (bx, by) = offsets[(i + 1) % n];
+            let cross = ax * by - ay * bx;
+            if !cross.is_finite() || cross == 0.0 {
+                return None;
+            }
+            let s = if cross > 0.0 { 1 } else { -1 };
+            if sign == 0 {
+                sign = s;
+            } else if sign != s {
+                return None;
+            }
+            total_twice += cross.abs();
+            cum_area[i + 1] = total_twice;
+        }
+        if !total_twice.is_finite() || total_twice <= 1e-16 {
+            return None;
+        }
+        let inv_total = 1.0 / total_twice;
+        for slot in &mut cum_area[1..n] {
+            *slot *= inv_total;
+        }
+        cum_area[n] = 1.0;
+        Some(Self {
+            center: star_center,
+            offsets,
+            cum_area,
+            len: n,
+        })
+    }
+
+    /// Map a unit-square offset `(dx, dy)` in `[0, 1]^2` into projected pixel coordinates `(col, row)`.
+    #[inline]
+    pub fn sample(&self, dx: f64, dy: f64) -> (f64, f64) {
+        let a = (2.0 * dx - 1.0).clamp(-1.0, 1.0);
+        let b = (2.0 * dy - 1.0).clamp(-1.0, 1.0);
+        if a == 0.0 && b == 0.0 {
+            return self.center;
+        }
+        let (abs_a, abs_b) = (a.abs(), b.abs());
+        let (r, mut s) = if abs_a >= abs_b {
+            if a > 0.0 {
+                (abs_a, (b / abs_a + 1.0) * 0.125)
+            } else {
+                (abs_a, 0.5 + (1.0 - b / abs_a) * 0.125)
+            }
+        } else if b > 0.0 {
+            (abs_b, 0.25 + (1.0 - a / abs_b) * 0.125)
+        } else {
+            (abs_b, 0.75 + (a / abs_b + 1.0) * 0.125)
+        };
+        if !(0.0..1.0).contains(&s) {
+            s = s.rem_euclid(1.0);
+            if s >= 1.0 {
+                s = 0.0;
+            }
+        }
+        let mut idx = self.len - 1;
+        for k in 0..self.len - 1 {
+            if s < self.cum_area[k + 1] {
+                idx = k;
+                break;
+            }
+        }
+        let span = (self.cum_area[idx + 1] - self.cum_area[idx]).max(1e-30);
+        let t = ((s - self.cum_area[idx]) / span).clamp(0.0, 1.0);
+        let u0 = self.offsets[idx];
+        let u1 = self.offsets[(idx + 1) % self.len];
+        (
+            self.center.0 + r * (u0.0 + t * (u1.0 - u0.0)),
+            self.center.1 + r * (u0.1 + t * (u1.1 - u0.1)),
+        )
     }
 }
 
@@ -307,6 +461,166 @@ mod tests {
                 len,
                 "{name}"
             );
+        }
+    }
+
+    fn point_in_polygon(pt: (f64, f64), ring: &[(f64, f64)]) -> bool {
+        let mut inside = false;
+        let n = ring.len();
+        let mut j = n - 1;
+        for i in 0..n {
+            let (xi, yi) = ring[i];
+            let (xj, yj) = ring[j];
+            let cross_y = (yi > pt.1) != (yj > pt.1);
+            if cross_y && pt.0 < (xj - xi) * (pt.1 - yi) / (yj - yi) + xi {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
+
+    #[test]
+    fn test_cell_polygon_sampler_containment_and_center() {
+        let triangle = [(0.0, 0.0), (4.0, 0.5), (1.2, 3.6)];
+        let diamond_cw = [(10.0, 10.0), (12.0, 8.0), (14.0, 10.0), (12.0, 12.0)];
+        let pentagon = [(2.0, 0.0), (4.2, 1.5), (3.4, 4.1), (0.6, 3.8), (-0.2, 1.4)];
+        let hexagon = [
+            (1.0, 0.0),
+            (0.5, 0.8660254),
+            (-0.5, 0.8660254),
+            (-1.0, 0.0),
+            (-0.5, -0.8660254),
+            (0.5, -0.8660254),
+        ];
+        type ShapeSpec<'a> = (&'a str, (f64, f64), &'a [(f64, f64)]);
+        let shapes: &[ShapeSpec<'_>] = &[
+            ("triangle", (1.7, 1.3), &triangle),
+            ("diamond_cw", (12.0, 10.0), &diamond_cw),
+            ("pentagon", (2.0, 2.1), &pentagon),
+            ("hexagon", (0.0, 0.0), &hexagon),
+        ];
+        let presets = [
+            SamplingPattern::rgss(),
+            SamplingPattern::five_point(),
+            SamplingPattern::gaussian_five_point(),
+            SamplingPattern::hex_seven_point(),
+            SamplingPattern::eight_rooks(),
+            SamplingPattern::nine_point(),
+            SamplingPattern::sixteen_point(),
+        ];
+
+        for &(name, center, ring) in shapes {
+            let sampler = CellPolygonSampler::new(center, ring).unwrap();
+            assert_eq!(sampler.sample(0.5, 0.5), center, "{name} center");
+            for preset in &presets {
+                for sp in &preset.points {
+                    let pt = sampler.sample(sp.dx, sp.dy);
+                    assert!(
+                        point_in_polygon(pt, ring),
+                        "{name} missed preset point ({}, {}) -> {:?}",
+                        sp.dx,
+                        sp.dy,
+                        pt
+                    );
+                }
+            }
+            for iy in 0..32 {
+                let dy = (iy as f64 + 0.5) / 32.0;
+                for ix in 0..32 {
+                    let dx = (ix as f64 + 0.5) / 32.0;
+                    let pt = sampler.sample(dx, dy);
+                    assert!(
+                        point_in_polygon(pt, ring),
+                        "{name} missed grid point ({dx}, {dy}) -> {pt:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_cell_polygon_sampler_quadrature_moments_and_linearity() {
+        // Irregular pentagon: verify uniform [0, 1]^2 quadrature integrates 1, x, y, x^2, x*y
+        // to the exact analytic shoelace moments (confirms constant Jacobian).
+        let pentagon = [(1.2, 0.4), (4.1, 1.3), (3.5, 4.2), (0.9, 3.7), (0.1, 1.9)];
+        let sampler = CellPolygonSampler::new((2.0, 2.3), &pentagon).unwrap();
+
+        let (mut area, mut ix, mut iy, mut ix2, mut ixy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for j in 0..pentagon.len() {
+            let (x0, y0) = pentagon[j];
+            let (x1, y1) = pentagon[(j + 1) % pentagon.len()];
+            let c = x0 * y1 - x1 * y0;
+            area += 0.5 * c;
+            ix += c * (x0 + x1) / 6.0;
+            iy += c * (y0 + y1) / 6.0;
+            ix2 += c * (x0 * x0 + x0 * x1 + x1 * x1) / 12.0;
+            ixy += c * (x0 * y1 + 2.0 * x0 * y0 + 2.0 * x1 * y1 + x1 * y0) / 24.0;
+        }
+        let ex = ix / area;
+        let ey = iy / area;
+        let ex2 = ix2 / area;
+        let exy = ixy / area;
+
+        let n = 64;
+        let w = 1.0 / ((n * n) as f64);
+        let (mut sx, mut sy, mut sx2, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+        for r in 0..n {
+            let dy = (r as f64 + 0.5) / (n as f64);
+            for c in 0..n {
+                let dx = (c as f64 + 0.5) / (n as f64);
+                let (px, py) = sampler.sample(dx, dy);
+                sx += w * px;
+                sy += w * py;
+                sx2 += w * px * px;
+                sxy += w * px * py;
+            }
+        }
+        assert!((sx - ex).abs() < 1e-3, "E[x] {sx} vs {ex}");
+        assert!((sy - ey).abs() < 1e-3, "E[y] {sy} vs {ey}");
+        assert!((sx2 - ex2).abs() < 5e-3, "E[x^2] {sx2} vs {ex2}");
+        assert!((sxy - exy).abs() < 5e-3, "E[x*y] {sxy} vs {exy}");
+
+        // Symmetric presets preserve linear functions exactly on centrally symmetric polygons.
+        let quad = [(1.0, 2.0), (5.0, 3.0), (4.0, 7.0), (0.0, 6.0)];
+        let q_center = (2.5, 4.5);
+        let q_sampler = CellPolygonSampler::new(q_center, &quad).unwrap();
+        let hex: Vec<(f64, f64)> = (0..6)
+            .map(|k| {
+                let a = (k as f64) * std::f64::consts::PI / 3.0;
+                (3.0 + 2.0 * a.cos(), -1.5 + 2.0 * a.sin())
+            })
+            .collect();
+        let h_center = (3.0, -1.5);
+        let h_sampler = CellPolygonSampler::new(h_center, &hex).unwrap();
+        let linear = |x: f64, y: f64| 3.5 * x - 1.75 * y + 12.0;
+
+        for (label, sampler, (cx, cy)) in
+            [("quad", q_sampler, q_center), ("hex", h_sampler, h_center)]
+        {
+            let exact = linear(cx, cy);
+            for (pname, preset) in [
+                ("rgss", SamplingPattern::rgss()),
+                ("5point", SamplingPattern::five_point()),
+                ("gaussian", SamplingPattern::gaussian_five_point()),
+                ("8rooks", SamplingPattern::eight_rooks()),
+                ("9point", SamplingPattern::nine_point()),
+                ("16point", SamplingPattern::sixteen_point()),
+            ] {
+                let norm = preset.normalized();
+                let est: f64 = norm
+                    .points
+                    .iter()
+                    .map(|p| {
+                        let (px, py) = sampler.sample(p.dx, p.dy);
+                        p.weight * linear(px, py)
+                    })
+                    .sum();
+                assert!(
+                    (est - exact).abs() < 1e-11,
+                    "{label} {pname}: est={est} exact={exact}"
+                );
+            }
         }
     }
 }
