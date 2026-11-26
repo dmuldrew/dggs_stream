@@ -371,8 +371,29 @@ def test_scan_budget_validation(dggs_stream, gradient_tif, option):
     for value in (0, -1, 2**62):
         with pytest.raises(RuntimeError, match=option):
             dggs_stream.RasterArrowStream(gradient_tif, **{option: value}).to_dict()
-    with pytest.raises(RuntimeError, match="require transfer=assign_centers"):
-        dggs_stream.RasterArrowStream(gradient_tif, transfer="overlay", **{option: 1}).to_dict()
+    if option == "aggregation_budget_mb":
+        with pytest.raises(RuntimeError, match="applies only to transfer='assign_centers'"):
+            dggs_stream.RasterArrowStream(gradient_tif, transfer="overlay", **{option: 1}).to_dict()
+    else:  # the decode budget bounds decoded chunks in every transfer mode
+        expected = sort(dggs_stream.read_raster(gradient_tif, RES, transfer="overlay"))
+        actual = sort(dggs_stream.read_raster(gradient_tif, RES, transfer="overlay", **{option: 1}))
+        assert actual.equals(expected)
+
+
+def test_aggregation_budget_checks_the_mode_auto_picks(dggs_stream, gradient_tif):
+    # Coarse cells over the gradient raster: `auto` overlays, so the budget would go unused.
+    with pytest.raises(RuntimeError, match="transfer='auto' chose 'overlay'"):
+        dggs_stream.RasterArrowStream(
+            gradient_tif, 6, transfer="auto", aggregation_budget_mb=1
+        ).to_dict()
+    # Sub-pixel sampling makes `auto` assign centres, where the budget applies. A small
+    # budget can change the order cells are merged in, so compare to rounding.
+    from polars.testing import assert_frame_equal
+
+    budgeted = dggs_stream.read_raster(
+        gradient_tif, 6, transfer="auto", sampling="rgss", aggregation_budget_mb=1
+    )
+    assert_frame_equal(sort(budgeted), sort(dggs_stream.read_raster(gradient_tif, 6, sampling="rgss")))
 
 
 @pytest.mark.parametrize("dtype", ["f32", "f16"])

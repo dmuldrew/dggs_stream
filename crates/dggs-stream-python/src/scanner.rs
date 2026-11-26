@@ -1,5 +1,6 @@
 //! [`PyRasterScanner`]: schema resolution, batch iteration and Arrow / JSON export.
 
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -189,16 +190,29 @@ impl PyRasterScanner {
         if let Some(spec) = &self.config.histogram {
             mr_cfg.set_histogram(spec.clone())?;
         }
-        if (self.config.aggregation_budget_bytes.is_some()
-            || self.config.decode_budget_bytes.is_some())
-            && !matches!(
-                mr_cfg.transfer,
-                TransferMode::AssignCenters | TransferMode::Auto
-            )
-        {
-            return Err(DggsStreamError::InvalidParameter(
-                "aggregation_budget_mb and decode_budget_mb require transfer=assign_centers".into(),
-            ));
+        // `decode_budget_mb` bounds decoded chunks in every transfer mode. The aggregation
+        // budget belongs to the centre-assignment kernel alone, so refuse it with any other
+        // mode rather than ignore it, resolving `auto` first: its choice depends on the
+        // raster, and since it now overlays from 1:1 a budget would usually go unused.
+        if self.config.aggregation_budget_bytes.is_some() {
+            let requested = mr_cfg.transfer;
+            if requested.is_auto() {
+                mr_cfg.transfer = self.resolve_auto_transfer(&paths, &mr_cfg);
+            }
+            if !mr_cfg.transfer.is_assign_centers() {
+                let chosen = if requested.is_auto() {
+                    format!(
+                        " (transfer='auto' chose '{}' for this raster and resolution)",
+                        mr_cfg.transfer.as_str()
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(DggsStreamError::InvalidParameter(format!(
+                    "aggregation_budget_mb applies only to transfer='assign_centers'{chosen}; \
+                     pass transfer='assign_centers' or drop aggregation_budget_mb"
+                )));
+            }
         }
         if let Some(bytes) = self.config.aggregation_budget_bytes {
             mr_cfg.aggregation_budget_bytes = bytes;
@@ -290,6 +304,33 @@ impl PyRasterScanner {
                 self.config.limit,
             )?;
             Ok((reader.schema(), Box::new(reader)))
+        }
+    }
+
+    /// Resolve `transfer = "auto"` as the streamers would for this scan, so options that
+    /// depend on the concrete mode can be checked before reading. A raster that can't be
+    /// opened (or a bbox that misses it) resolves to centre assignment, and the reader
+    /// reports the real error.
+    fn resolve_auto_transfer(
+        &self,
+        paths: &[PathBuf],
+        cfg: &MultiResolutionConfig,
+    ) -> TransferMode {
+        let Ok(mosaic) =
+            MosaicReader::open(paths, cfg.bbox, cfg.custom_crs.as_deref(), cfg.overlap_rule)
+        else {
+            return TransferMode::AssignCenters;
+        };
+        let mut probe = cfg.clone();
+        probe.partition = self.config.partition.clone();
+        if self.config.ground_area {
+            probe.transfer.resolve_for_ground_area(&mosaic, &probe)
+        } else if self.config.bands.is_some() {
+            probe.transfer.resolve_for_multiband(&mosaic, &probe)
+        } else {
+            probe
+                .transfer
+                .resolve_for_mosaic(&mosaic, &probe, self.config.categorical)
         }
     }
 

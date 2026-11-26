@@ -1189,9 +1189,11 @@ def scan_raster(
       Requires one north-up, single-band EPSG:4326 raster.
     - `bands`: select ordered bands from one raster, e.g. `[3, 1]` for
       `band_3_mean` and `band_1_mean` in a continuous center-assignment scan.
-    - `aggregation_budget_mb`, `decode_budget_mb`: positive whole MiB for center
-      assignment. Aggregation may spill to disk. The decode budget controls prefetched
-      sample buffers and permits one oversized chunk to proceed alone.
+    - `aggregation_budget_mb`, `decode_budget_mb`: positive whole MiB. The aggregation
+      budget applies to center assignment, where aggregation may spill to disk; any other
+      transfer mode refuses it, including one `transfer="auto"` resolves to. The decode
+      budget applies in every mode: it controls prefetched sample buffers and permits one
+      oversized chunk to proceed alone.
     - `sampling`: sub-pixel sampling pattern, one of `center` (default), `5point`,
       `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`.
     - `overlap_rule`: how overlapping mosaic tiles are resolved: `cutline` (default),
