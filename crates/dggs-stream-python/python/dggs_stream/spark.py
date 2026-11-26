@@ -385,6 +385,10 @@ def register(spark, pushdown: Optional[bool] = None) -> None:
     `spark.sql.python.filterPushdown.enabled` (false by default); `True` sets it and uses
     pushdown; `False` registers the source without it. Register again after changing that
     setting: Spark rejects a pushdown reader while it is false.
+
+    Spark 4.1.4 and 4.3.0 can reuse a pushed filter on another query built from
+    the same source DataFrame (SPARK-58551). Use `pushdown=False` before loading
+    a DataFrame for reuse, or load a fresh DataFrame for each query.
     """
     _require_pyspark()
     from pyspark.sql.functions import udtf

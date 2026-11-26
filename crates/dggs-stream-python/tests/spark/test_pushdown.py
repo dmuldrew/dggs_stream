@@ -82,6 +82,20 @@ def test_pushed_filters_leave_the_plan_and_keep_the_rows(spark, terrain, conditi
     assert expected  # every condition keeps some rows
 
 
+def test_reusing_a_source_without_pushdown_keeps_final_and_partial_rows(spark, terrain):
+    parts = load(spark, terrain, pushdown=False)
+    assert parts.where("partial_state IS NOT NULL").count() > 0
+
+    got = spark_ds.merge_partials(parts).toArrow()
+    expected = pa.table(dggs_stream.RasterArrowStream(terrain, resolutions=[7, 8, 9]))
+
+    def keyed(table):
+        return {(row["resolution"], row["h3_index"], False): [row] for row in table.to_pylist()}
+
+    assert got.num_rows == expected.num_rows > 0
+    assert_same_rows(keyed(got), keyed(expected))
+
+
 def test_resolution_filter_on_a_view_merges_like_a_narrower_scan(spark, terrain):
     """Pushed through SQL too; merging the pushed scan equals a res-9-only scan."""
     spark_ds.register(spark, pushdown=True)
