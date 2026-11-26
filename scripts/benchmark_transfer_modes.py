@@ -19,7 +19,10 @@ Two sweeps:
   ratio changes by 7x per resolution.
 - `--sweep ratio`: one grid and resolution (default S2 level 13, about 1.27 km2) over a
   fixed region of about `--cells` cells, with the pixel size chosen for each requested
-  cell-to-pixel area ratio. Only the pixel size changes between rows.
+  cell-to-pixel area ratio. Only the pixel size changes between rows. The checkerboard
+  squares are `--feature-cells` cell edges wide (default 1), so the field varies on the
+  same scale relative to the cell on every grid and resolution; value errors are only
+  comparable across grids that way. Area errors do not depend on the field.
 
 Accuracy uses weighted overlay, which clips every cell against every pixel exactly, as
 the reference. Continuous scans report the share of overlay's cells the mode leaves out,
@@ -63,20 +66,22 @@ def mean_cell_area(grid, res):
         return EARTH_M2 / (2 + 120 * 7**res)
     if grid == "s2":
         return EARTH_M2 / (6 * 4**res)
-    if grid in ("healpix", "a5"):
+    if grid == "healpix":
         return EARTH_M2 / (12 * 4**res)
+    if grid == "a5":  # 12 pentagons at resolution 0, then 60 * 4**(res - 1)
+        return EARTH_M2 / (12 if res == 0 else 60 * 4 ** (res - 1))
     raise ValueError(grid)
 
 
-def make_field(kind, west, width_deg):
+def make_field(kind, west, width_deg, checker_deg=0.01):
     def continuous(lon, lat):
         gradient = 100.0 * (lon - west) / width_deg
-        checker = (math.floor(lon / 0.01) + math.floor(lat / 0.01)) % 2
+        checker = (math.floor(lon / checker_deg) + math.floor(lat / checker_deg)) % 2
         return gradient + 50.0 * checker
 
     def categorical(lon, lat):
         band = min(3, int(4 * (lon - west) / width_deg))
-        checker = (math.floor(lon / 0.01) + math.floor(lat / 0.01)) % 2
+        checker = (math.floor(lon / checker_deg) + math.floor(lat / checker_deg)) % 2
         return float(1 + checker + 2 * band)
 
     return continuous if kind == "continuous" else categorical
@@ -229,7 +234,12 @@ def build_cases(args, tmp):
     region_m2 = args.cells * cell_m2
     # A square region in degrees, wide enough to hold about --cells cells.
     side_deg = math.sqrt(region_m2 / (M_PER_DEG_LON * M_PER_DEG_LAT))
-    field = make_field(args.kind, WEST, side_deg)
+    # Checkerboard squares are --feature-cells cell edges wide, so every grid and resolution
+    # sees the same ratio of feature size to cell size. A fixed size would make a fine grid's
+    # cells nearly uniform and a coarse grid's cells straddle every edge, and the value
+    # errors would then measure the test field rather than the modes.
+    checker_deg = args.feature_cells * math.sqrt(cell_m2) / math.sqrt(M_PER_DEG_LON * M_PER_DEG_LAT)
+    field = make_field(args.kind, WEST, side_deg, checker_deg)
     for ratio in (float(r) for r in args.ratios.split(",")):
         pixel_m2 = cell_m2 / ratio
         pixel_deg = math.sqrt(pixel_m2 / (M_PER_DEG_LON * M_PER_DEG_LAT))
@@ -247,7 +257,8 @@ def main():
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--sweep", choices=["pixels", "ratio"], default="pixels")
     parser.add_argument("--kind", choices=["continuous", "categorical"], default="continuous")
-    parser.add_argument("--grid", default=None, help="h3 for --sweep pixels; default s2 for ratio")
+    parser.add_argument("--grid", default=None, choices=["h3", "a5", "s2", "healpix"],
+                        help="h3 for --sweep pixels; default s2 for ratio")
     parser.add_argument("--resolutions", default=",".join(map(str, PIXEL_CASES)),
                         help="--sweep pixels: H3 resolutions to run (7-13)")
     parser.add_argument("--resolution", type=int, default=13, help="--sweep ratio: resolution")
@@ -255,6 +266,8 @@ def main():
                         help="--sweep ratio: cell-to-pixel area ratios")
     parser.add_argument("--cells", type=int, default=40_000,
                         help="--sweep ratio: approximate cells in the region")
+    parser.add_argument("--feature-cells", type=float, default=1.0,
+                        help="--sweep ratio: checkerboard square width in cell edge lengths")
     parser.add_argument("--modes", default=None, help="Comma-separated modes")
     parser.add_argument("--markdown", action="store_true", help="Print a Markdown table")
     args = parser.parse_args()
