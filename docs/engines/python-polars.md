@@ -480,21 +480,21 @@ gdf = gpd.GeoDataFrame(
 
 The wrapper calls these exports from `libdggs_stream_python`
 ([`src/ffi/`](../../crates/dggs-stream-python/src/ffi/mod.rs)). All entry points catch panics and
-return errors through an out-parameter string freed with `raster_h3_py_free_string`.
+return errors through an out-parameter string freed with `dggs_stream_py_free_string`.
 
 | Export | Purpose |
 | :--- | :--- |
-| `raster_h3_py_create_arrow_schema` / `_free_arrow_schema` | Build / release an `ArrowSchema` |
-| `raster_h3_py_create_arrow_stream` / `_free_arrow_stream` | Build / release an `ArrowArrayStream` for a scan |
-| `raster_h3_py_open_batch_reader` / `_batch_reader_next` / `_free_batch_reader` | Incremental reader; each `next` returns a one-batch stream, or null at EOF |
-| `raster_h3_py_scan_json` | Whole scan as a JSON object of columns (`to_dict`) |
-| `raster_h3_py_plan_partitions`, `raster_h3_py_create_arrow_{schema,stream}_partitioned`, `raster_h3_py_open_batch_reader_partitioned` | Partition planning and partitioned scans (`partition=`) |
-| `raster_h3_py_merge_partials` | Merge partial rows; moves its input `ArrowArrayStream` |
-| `raster_h3_py_create_arrow_stream_v2`, `raster_h3_py_open_batch_reader_v2`, `raster_h3_py_scan_json_v2`, `raster_h3_py_create_arrow_schema_v2`, `raster_h3_py_plan_partitions_v2`, `raster_h3_py_merge_partials_v2` | The calls above with an optional partition and an `options` JSON object (`band`, `sampling`, `overlap_rule`, `spectral_formula`, `*_band`, `quantiles`, `remap`, `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`); unknown keys are rejected. Older symbols keep their signatures, and `raster_h3_py_merge_partials` applies no filters or quantiles |
-| `raster_h3_py_quantile_columns` | Output column names of a `quantiles` specification (JSON array) |
-| `raster_h3_py_parquet_to_pmtiles` | Parquet → PMTiles transcoding (returns `-1` on error) |
-| `raster_h3_py_h3_*` | Scalar helpers |
-| `raster_h3_py_export_parquet`, `raster_h3_py_export_pmtiles` | File exporters (return `-1` on error) |
+| `dggs_stream_py_create_arrow_schema` / `_free_arrow_schema` | Build / release an `ArrowSchema` |
+| `dggs_stream_py_create_arrow_stream` / `_free_arrow_stream` | Build / release an `ArrowArrayStream` for a scan |
+| `dggs_stream_py_open_batch_reader` / `_batch_reader_next` / `_free_batch_reader` | Incremental reader; each `next` returns a one-batch stream, or null at EOF |
+| `dggs_stream_py_scan_json` | Whole scan as a JSON object of columns (`to_dict`) |
+| `dggs_stream_py_plan_partitions`, `dggs_stream_py_create_arrow_{schema,stream}_partitioned`, `dggs_stream_py_open_batch_reader_partitioned` | Partition planning and partitioned scans (`partition=`) |
+| `dggs_stream_py_merge_partials` | Merge partial rows; moves its input `ArrowArrayStream` |
+| `dggs_stream_py_create_arrow_stream_v2`, `dggs_stream_py_open_batch_reader_v2`, `dggs_stream_py_scan_json_v2`, `dggs_stream_py_create_arrow_schema_v2`, `dggs_stream_py_plan_partitions_v2`, `dggs_stream_py_merge_partials_v2` | The calls above with an optional partition and an `options` JSON object (`band`, `sampling`, `overlap_rule`, `spectral_formula`, `*_band`, `quantiles`, `remap`, `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`); unknown keys are rejected. Older symbols keep their signatures, and `dggs_stream_py_merge_partials` applies no filters or quantiles |
+| `dggs_stream_py_quantile_columns` | Output column names of a `quantiles` specification (JSON array) |
+| `dggs_stream_py_parquet_to_pmtiles` | Parquet → PMTiles transcoding (returns `-1` on error) |
+| `dggs_stream_py_h3_*` | Scalar helpers |
+| `dggs_stream_py_export_parquet`, `dggs_stream_py_export_pmtiles` | File exporters (return `-1` on error) |
 
 PyCapsule destructors free the native struct. A consumer that imports the stream moves it
 out and clears `release`; otherwise dropping the struct calls `release`, so an unconsumed

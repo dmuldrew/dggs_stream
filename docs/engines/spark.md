@@ -27,7 +27,7 @@ flowchart LR
     D --> TN["Task N"]
     T1 & T2 & TN --> F["Final cells<br/>(partial_state IS NULL)"]
     T1 & T2 & TN --> P["Edge cells<br/>(partial_state set)"]
-    P --> S["Shuffle by h3_index<br/>merge_partials()"]
+    P --> S["Shuffle by cell index<br/>merge_partials()"]
     F & S --> C["Cells"]
 ```
 
@@ -37,7 +37,7 @@ flowchart LR
 2. **Scan one partition per task.** `RasterArrowStream(path, resolutions, partition=spec)`
    aggregates that partition's pixels and adds a nullable `partial_state` column.
 3. **Keep final cells, merge edge cells.** Rows with a null `partial_state` are complete.
-   The others are cells that another partition also reaches: shuffle them by `h3_index` so
+   The others are cells that another partition also reaches: shuffle them by cell index so
    every share of a cell meets in one task, and combine them with
    `dggs_stream.merge_partials`. Edge cells are typically a few percent of the output.
 
@@ -123,19 +123,21 @@ SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20')
 - **One Spark partition per raster partition.** The driver plans with `plan_partitions`
   (metadata only); each Spark task scans one spec, so `df.rdd.getNumPartitions()` is the
   number of planned partitions.
-- **Schema.** The scan's columns with Spark's signed types (`h3_index` `bigint`,
-  `resolution` `smallint`) plus `partial_state` (`binary`).
-- **`merge_partials(df, ...)`** shuffles the rows by `h3_index` once, passes final rows
-  through and merges the partial ones with `dggs_stream.merge_partials`. For an explicitly
-  cached input DataFrame, final rows bypass the exchange and only partial rows shuffle. The raster is scanned
+- **Schema.** The scan's columns with Spark's signed types (grid index as `bigint`,
+  `resolution` as `smallint`) plus `partial_state` (`binary`). The grid index retains all
+  64 bits, so some cell IDs appear as negative numbers in Spark.
+- **`merge_partials(df, ...)`** infers the grid from its index column. It shuffles rows
+  by that column, passes final rows through and merges the partial rows with
+  `dggs_stream.merge_partials`. For an explicitly cached input DataFrame, only partial
+  rows shuffle. The raster is scanned
   once. Pass the scan's `categorical`, `columns`, `quantiles` and filters; `read` does this
   for you. Merge each raster's DataFrame on its own.
 - **`dggs_stream_merge(TABLE(t) [, 'name=value, ...'])`** is the same merge as a SQL table
-  function (a Python UDTF). It hashes rows into `buckets` groups by `h3_index` (default 64)
+  function (a Python UDTF). It hashes rows into `buckets` groups by the grid's index column (default 64)
   and merges each group in one call. Options: `quantiles`, `min_count`, `min_mean`,
   `max_mean`, `min_majority_fraction`, `categorical` (recognised from the columns when
   omitted) and `buckets`; the output columns are the input's without `partial_state`.
-- **Options** have the names and meanings of `RasterArrowStream`: `resolutions`,
+- **Options** have the names and meanings of `RasterArrowStream`: `grid` (default `h3`), `resolutions`,
   `target_chunks` (default 256), `categorical`, `columns`, `crs`, `nodata`, `bbox`, `band`,
   `sampling`, `transfer`, `valid_coverage_threshold`, `overlap_rule`, `spectral_formula` and its `*_band` options, `quantiles`,
   `remap`, `min_count`, `min_mean`, `max_mean`, `min_majority_fraction`,
@@ -157,11 +159,9 @@ SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20')
 The path is one `dggs_stream` source: a file, URL, VRT or glob mosaic (a mosaic is planned
 and merged as one raster).
 
-The data source and its merge are H3-only for now: they key partial cells on `h3_index`,
-so the `grid` option and the other grids ([Grids](../grids.md)) are not available through
-`dggs_stream.spark`. A partitioned scan of another grid can use the Python package directly
-(`plan_partitions`, `RasterArrowStream(..., grid=..., partition=...)` and
-`merge_partials(..., grid=...)`), as in the `mapInArrow` pipeline below. Partitioned transfer supports single-band continuous weighted overlay.
+Set `grid` to `a5`, `s2` or `healpix` for another [grid](../grids.md). For projected scans,
+keep the grid's index column and `resolution` so the merge can identify each cell.
+Partitioned transfer supports single-band continuous weighted overlay.
 
 ## A partitioned scan with `mapInArrow`
 
@@ -343,7 +343,7 @@ can start.
 [`examples/sedona_spark/tests/`](../../examples/sedona_spark/tests) runs the data source,
 the `dggs_stream_merge` table function and the demo's `mapInArrow` pipeline on local Spark 4.0
 with Sedona, and [`crates/dggs-stream-python/tests/spark/`](../../crates/dggs-stream-python/tests/spark)
-checks filter pushdown on Spark 4.1. Every result is compared with an unpartitioned scan.
+checks filter pushdown and grid-aware merges on Spark 4.1. Every result is compared with an unpartitioned scan.
 The `sedona-spark` CI job builds the `sedona` image and runs both suites in it (the second
 with PySpark 4.1 installed beside the image's Spark 4.0). To run it
 locally:

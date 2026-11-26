@@ -1,4 +1,4 @@
-//! Shared C-ABI call helpers, plus `raster_h3_py_scan_json` compared with core readers.
+//! Shared C-ABI call helpers, plus `dggs_stream_py_scan_json` compared with core readers.
 
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CStr, CString};
@@ -9,7 +9,7 @@ use dggs_stream_core::aggregator::multi_horizon::MultiResolutionConfig;
 use dggs_stream_core::columnar::{
     CategoricalBatchReader, CategoricalFormat, ColumnArray, ContinuousBatchReader, RecordBatch,
 };
-use dggs_stream_python::{raster_h3_py_free_string, raster_h3_py_scan_json};
+use dggs_stream_python::{dggs_stream_py_free_string, dggs_stream_py_scan_json};
 use tempfile::NamedTempFile;
 
 use crate::helpers::TestGeoTiffBuilder;
@@ -31,7 +31,7 @@ pub fn classes_tif() -> (NamedTempFile, PathBuf) {
 /// Takes ownership of an `out_err` string set by the library.
 ///
 /// # Safety
-/// `err` must be null or a string allocated by `raster_h3_py_*`.
+/// `err` must be null or a string allocated by `dggs_stream_py_*`.
 pub unsafe fn take_err(err: *mut c_char) -> Option<String> {
     if err.is_null() {
         return None;
@@ -42,7 +42,7 @@ pub unsafe fn take_err(err: *mut c_char) -> Option<String> {
         .to_string_lossy()
         .into_owned();
     // SAFETY: as above.
-    unsafe { raster_h3_py_free_string(err) };
+    unsafe { dggs_stream_py_free_string(err) };
     Some(msg)
 }
 
@@ -136,14 +136,14 @@ impl Scan {
         }
     }
 
-    /// Calls `raster_h3_py_scan_json`, returning the parsed object or the error message.
+    /// Calls `dggs_stream_py_scan_json`, returning the parsed object or the error message.
     pub fn json(&self) -> Result<serde_json::Map<String, serde_json::Value>, String> {
         let a = self.c_args();
         // SAFETY: string arguments are live `CString`s owned by this frame (or null), and
         // the returned JSON string is copied and then freed exactly once.
         unsafe {
             let mut err: *mut c_char = ptr::null_mut();
-            let out = raster_h3_py_scan_json(
+            let out = dggs_stream_py_scan_json(
                 a.ptr(0),
                 a.ptr(1),
                 i32::from(self.categorical),
@@ -161,7 +161,7 @@ impl Scan {
             }
             assert!(err.is_null());
             let text = CStr::from_ptr(out).to_str().unwrap().to_string();
-            raster_h3_py_free_string(out);
+            dggs_stream_py_free_string(out);
             match serde_json::from_str(&text).unwrap() {
                 serde_json::Value::Object(m) => Ok(m),
                 other => panic!("scan_json must return an object, got {other}"),
@@ -375,7 +375,7 @@ fn scan_json_errors_set_out_err() {
     // SAFETY: every pointer is null, which the function accepts, including a null
     // `out_err`.
     let result = unsafe {
-        raster_h3_py_scan_json(
+        dggs_stream_py_scan_json(
             ptr::null(),
             ptr::null(),
             0,
@@ -436,7 +436,7 @@ fn create_arrow_schema_rejects_unknown_format() {
     // SAFETY: `format` is a live `CString`, `columns` is null, and `err` is a writable
     // `char **` the function may fill.
     let schema = unsafe {
-        dggs_stream_python::raster_h3_py_create_arrow_schema(
+        dggs_stream_python::dggs_stream_py_create_arrow_schema(
             1,
             format.as_ptr(),
             ptr::null(),

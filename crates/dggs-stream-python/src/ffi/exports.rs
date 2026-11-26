@@ -22,12 +22,12 @@ use crate::ffi::{ffi_call, opt_cstr, set_c_err};
 /// C-ABI direct Parquet exporter (`h3_raster_to_parquet`). Returns number of hexagons written, or `-1` on error.
 ///
 /// Kept with its original signature for callers built against earlier releases; see
-/// [`raster_h3_py_export_parquet_with_stats`] for the transform-failure count.
+/// [`dggs_stream_py_export_parquet_with_stats`] for the transform-failure count.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_export_parquet(
+pub unsafe extern "C" fn dggs_stream_py_export_parquet(
     input_path: *const c_char,
     output_path: *const c_char,
     resolutions: *const c_char,
@@ -39,7 +39,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet(
     // SAFETY: forwards the caller's arguments unchanged (same contract), with a null
     // `out_transform_failures`, which the callee accepts.
     unsafe {
-        raster_h3_py_export_parquet_with_stats(
+        dggs_stream_py_export_parquet_with_stats(
             input_path,
             output_path,
             resolutions,
@@ -52,14 +52,14 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet(
     }
 }
 
-/// [`raster_h3_py_export_parquet`] that also writes the number of valid sample points
+/// [`dggs_stream_py_export_parquet`] that also writes the number of valid sample points
 /// dropped by failed coordinate transforms to `out_transform_failures` (when non-null).
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL;
 /// `out_transform_failures` must be NULL or point to a writable `u64`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_export_parquet_with_stats(
+pub unsafe extern "C" fn dggs_stream_py_export_parquet_with_stats(
     input_path: *const c_char,
     output_path: *const c_char,
     resolutions: *const c_char,
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_with_stats(
     // SAFETY: forwards the caller's arguments unchanged (same contract) with a null
     // `options`, which the callee accepts.
     unsafe {
-        raster_h3_py_export_parquet_v2(
+        dggs_stream_py_export_parquet_v2(
             input_path,
             output_path,
             resolutions,
@@ -173,7 +173,7 @@ unsafe fn finish_export(
     }
 }
 
-/// [`raster_h3_py_export_parquet_with_stats`] with an `options` JSON object (NULL for
+/// [`dggs_stream_py_export_parquet_with_stats`] with an `options` JSON object (NULL for
 /// none): `grid` (`h3`, `a5`, `s2` or `healpix`) selects the grid, which names the cell
 /// columns and bounds `resolutions`.
 ///
@@ -182,7 +182,7 @@ unsafe fn finish_export(
 /// `out_transform_failures` must be NULL or point to a writable `u64`; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
+pub unsafe extern "C" fn dggs_stream_py_export_parquet_v2(
     input_path: *const c_char,
     output_path: *const c_char,
     resolutions: *const c_char,
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
 ) -> i64 {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract), as
     // `opt_cstr` requires; the out-pointers meet `finish_export`'s contract, and error
-    // strings are freed by the caller with `raster_h3_py_free_string`.
+    // strings are freed by the caller with `dggs_stream_py_free_string`.
     unsafe {
         let failures = Arc::new(AtomicU64::new(0));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<usize> {
@@ -283,12 +283,12 @@ pub unsafe extern "C" fn raster_h3_py_export_parquet_v2(
 /// C-ABI direct PMTiles v3 exporter (`h3_raster_to_pmtiles`). Returns number of hexagons written, or `-1` on error.
 ///
 /// Kept with its original signature for callers built against earlier releases; see
-/// [`raster_h3_py_export_pmtiles_with_stats`] for the transform-failure count.
+/// [`dggs_stream_py_export_pmtiles_with_stats`] for the transform-failure count.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_export_pmtiles(
+pub unsafe extern "C" fn dggs_stream_py_export_pmtiles(
     input_path: *const c_char,
     output_path: *const c_char,
     resolutions: *const c_char,
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles(
     // SAFETY: forwards the caller's arguments unchanged (same contract), with a null
     // `out_transform_failures`, which the callee accepts.
     unsafe {
-        raster_h3_py_export_pmtiles_with_stats(
+        dggs_stream_py_export_pmtiles_with_stats(
             input_path,
             output_path,
             resolutions,
@@ -311,14 +311,14 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles(
     }
 }
 
-/// [`raster_h3_py_export_pmtiles`] that also writes the number of valid sample points
+/// [`dggs_stream_py_export_pmtiles`] that also writes the number of valid sample points
 /// dropped by failed coordinate transforms to `out_transform_failures` (when non-null).
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL;
 /// `out_transform_failures` must be NULL or point to a writable `u64`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_export_pmtiles_with_stats(
+pub unsafe extern "C" fn dggs_stream_py_export_pmtiles_with_stats(
     input_path: *const c_char,
     output_path: *const c_char,
     resolutions: *const c_char,
@@ -330,7 +330,7 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_with_stats(
     // SAFETY: forwards the caller's arguments unchanged (same contract) with a null
     // `options`, which the callee accepts.
     unsafe {
-        raster_h3_py_export_pmtiles_v2(
+        dggs_stream_py_export_pmtiles_v2(
             input_path,
             output_path,
             resolutions,
@@ -343,15 +343,15 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_with_stats(
     }
 }
 
-/// [`raster_h3_py_export_pmtiles_with_stats`] with the `options` JSON object of
-/// [`raster_h3_py_export_parquet_v2`].
+/// [`dggs_stream_py_export_pmtiles_with_stats`] with the `options` JSON object of
+/// [`dggs_stream_py_export_parquet_v2`].
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL;
 /// `out_transform_failures` must be NULL or point to a writable `u64`; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
+pub unsafe extern "C" fn dggs_stream_py_export_pmtiles_v2(
     input_path: *const c_char,
     output_path: *const c_char,
     resolutions: *const c_char,
@@ -363,7 +363,7 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
 ) -> i64 {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract), as
     // `opt_cstr` requires; the out-pointers meet `finish_export`'s contract, and error
-    // strings are freed by the caller with `raster_h3_py_free_string`.
+    // strings are freed by the caller with `dggs_stream_py_free_string`.
     unsafe {
         let failures = Arc::new(AtomicU64::new(0));
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<usize> {
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn raster_h3_py_export_pmtiles_v2(
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles(
+pub unsafe extern "C" fn dggs_stream_py_parquet_to_pmtiles(
     parquet_path: *const c_char,
     pmtiles_path: *const c_char,
     h3_column: *const c_char,
@@ -431,7 +431,7 @@ pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles(
     // SAFETY: forwards the caller's arguments unchanged (same contract) with a null
     // `grid`, which the callee accepts.
     unsafe {
-        raster_h3_py_parquet_to_pmtiles_v2(
+        dggs_stream_py_parquet_to_pmtiles_v2(
             parquet_path,
             pmtiles_path,
             h3_column,
@@ -441,7 +441,7 @@ pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles(
     }
 }
 
-/// [`raster_h3_py_parquet_to_pmtiles`] with the cells' `grid` (`h3`, `a5`, `s2` or
+/// [`dggs_stream_py_parquet_to_pmtiles`] with the cells' `grid` (`h3`, `a5`, `s2` or
 /// `healpix`) given explicitly, for a cell column whose name does not identify it. NULL
 /// keeps the auto-detection.
 ///
@@ -449,7 +449,7 @@ pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles(
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_parquet_to_pmtiles_v2(
+pub unsafe extern "C" fn dggs_stream_py_parquet_to_pmtiles_v2(
     parquet_path: *const c_char,
     pmtiles_path: *const c_char,
     cell_column: *const c_char,

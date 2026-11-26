@@ -13,7 +13,7 @@ H3 scalar functions on `dggs_stream_core::columnar` types (`ColumnSchema`, `Reco
 `ColumnArray`) without DataFusion. The sections up to [Recipes](#recipes) describe that layer;
 DataFusion code normally reaches it through the adapter instead. Its traits are deliberately not
 named like DataFusion's: `RasterScan` (implemented by the two table providers),
-`RasterScanExec` (their execution plans) and `H3ScalarFn` (the scalar functions).
+`RasterScanExec` (their execution plans) and `CellScalarFn` (the scalar functions).
 
 > Previously this layer was the separate `dggs-stream-datafusion` crate, which used DataFusion's
 > trait names without depending on DataFusion. It moved into `dggs-stream-sedona`, its only
@@ -136,7 +136,7 @@ The scan emits the full compacted table instead.
 
 ## Scalar UDFs
 
-`H3ScalarFn` has `name()`, `aliases()`, `return_type(&[ArrowDataType])` and
+`CellScalarFn` has `name()`, `aliases()`, `return_type(&[ArrowDataType])` and
 `invoke(&[ColumnArray]) -> ColumnArray`. Input validity propagates to the output.
 
 | UDF | Signature(s) | Aliases |

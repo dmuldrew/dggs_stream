@@ -194,7 +194,7 @@ impl TableProvider for RasterTable {
             Some(p) => Arc::new(self.schema.project(p)?),
             None => Arc::clone(&self.schema),
         };
-        let partition = Arc::new(RasterH3Partition {
+        let partition = Arc::new(RasterPartition {
             plan: Arc::from(plan),
             schema: Arc::clone(&output_schema),
         });
@@ -210,20 +210,20 @@ impl TableProvider for RasterTable {
 }
 
 /// One aggregation run, streamed as a single DataFusion partition.
-struct RasterH3Partition {
+struct RasterPartition {
     plan: Arc<dyn crate::scan::RasterScanExec>,
     schema: arrow::datatypes::SchemaRef,
 }
 
-impl fmt::Debug for RasterH3Partition {
+impl fmt::Debug for RasterPartition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RasterH3Partition")
+        f.debug_struct("RasterPartition")
             .field("schema", &self.schema)
             .finish_non_exhaustive()
     }
 }
 
-impl PartitionStream for RasterH3Partition {
+impl PartitionStream for RasterPartition {
     fn schema(&self) -> &arrow::datatypes::SchemaRef {
         &self.schema
     }

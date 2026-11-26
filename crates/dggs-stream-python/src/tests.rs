@@ -77,7 +77,7 @@ fn test_py_scanner_arrow_c_stream_and_c_abi() {
     // the returned stream is a fresh box that is drained and then freed exactly once.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let stream_ptr = raster_h3_py_create_arrow_stream(
+        let stream_ptr = dggs_stream_py_create_arrow_stream(
             path_c.as_ptr(),
             res_c.as_ptr(),
             0,
@@ -97,9 +97,9 @@ fn test_py_scanner_arrow_c_stream_and_c_abi() {
         assert_eq!(schema.fields.len(), 3);
         let rows: usize = batches.iter().map(|b| b.num_rows).sum();
         assert!(rows > 0 && rows <= 5);
-        raster_h3_py_free_arrow_stream(stream_ptr);
+        dggs_stream_py_free_arrow_stream(stream_ptr);
 
-        let json_ptr = raster_h3_py_scan_json(
+        let json_ptr = dggs_stream_py_scan_json(
             path_c.as_ptr(),
             res_c.as_ptr(),
             0,
@@ -116,7 +116,7 @@ fn test_py_scanner_arrow_c_stream_and_c_abi() {
         let json_s = CStr::from_ptr(json_ptr).to_string_lossy().into_owned();
         assert!(json_s.contains("\"h3_index\""));
         assert!(json_s.contains("25.5"));
-        raster_h3_py_free_string(json_ptr);
+        dggs_stream_py_free_string(json_ptr);
     }
 }
 
@@ -124,9 +124,9 @@ fn test_py_scanner_arrow_c_stream_and_c_abi() {
 fn test_py_h3_to_wkb_fits_antimeridian_multipolygon() {
     // Res-5 cell crossing 180°: a two-part MultiPolygon larger than 192 bytes.
     let cell = 0x0859_b406_3fff_ffffu64;
-    let mut buf = vec![0u8; raster_h3_py_wkb_buf_len()];
+    let mut buf = vec![0u8; dggs_stream_py_wkb_buf_len()];
     // SAFETY: `buf` provides `buf.len()` writable bytes.
-    let written = unsafe { raster_h3_py_h3_to_wkb(cell, buf.as_mut_ptr(), buf.len()) };
+    let written = unsafe { dggs_stream_py_h3_to_wkb(cell, buf.as_mut_ptr(), buf.len()) };
     assert!(written > 192, "wrote {written} bytes");
     assert_eq!(u32::from_le_bytes(buf[1..5].try_into().unwrap()), 6);
 }
@@ -139,13 +139,13 @@ fn test_py_h3_to_wkb_fits_odd_res_pentagon() {
     assert!(n > 6, "expected >6 boundary vertices, got {n}");
     let mut buf = [0u8; dggs_stream_core::encoding::WKB_BUF_LEN];
     // SAFETY: `buf` provides `buf.len()` writable bytes.
-    let written = unsafe { raster_h3_py_h3_to_wkb(cell, buf.as_mut_ptr(), buf.len()) };
+    let written = unsafe { dggs_stream_py_h3_to_wkb(cell, buf.as_mut_ptr(), buf.len()) };
     assert_eq!(written, 13 + 16 * (n + 1));
     assert!(written > 128);
     let mut small = [0u8; 128];
     assert_eq!(
         // SAFETY: `small` provides `small.len()` writable bytes.
-        unsafe { raster_h3_py_h3_to_wkb(cell, small.as_mut_ptr(), small.len()) },
+        unsafe { dggs_stream_py_h3_to_wkb(cell, small.as_mut_ptr(), small.len()) },
         0
     );
 }

@@ -15,19 +15,19 @@ use crate::config::PyScanConfig;
 use crate::ffi::args::{
     build_py_scan_config, build_py_scan_config_v2, parse_c_partition, placeholder_partition,
 };
-use crate::ffi::v2::raster_h3_py_plan_partitions_v2;
+use crate::ffi::v2::dggs_stream_py_plan_partitions_v2;
 use crate::ffi::{ffi_call, set_c_err};
 use crate::scanner::{PyBatchReader, PyRasterScanner};
 
 /// Plan the partitions of a raster scan: a JSON array of partition objects, each of which
 /// can be passed (re-serialized) to the `_partitioned` scan entry points. `crs` and `bbox`
-/// must match the scans'. Free the string with `raster_h3_py_free_string`.
+/// must match the scans'. Free the string with `dggs_stream_py_free_string`.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_plan_partitions(
+pub unsafe extern "C" fn dggs_stream_py_plan_partitions(
     path: *const c_char,
     crs: *const c_char,
     bbox: *const c_char,
@@ -35,23 +35,25 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions(
     out_err: *mut *mut c_char,
 ) -> *mut c_char {
     // SAFETY: forwards the caller's arguments, which meet the `_v2` contract, with no options.
-    unsafe { raster_h3_py_plan_partitions_v2(path, crs, bbox, target_chunks, ptr::null(), out_err) }
+    unsafe {
+        dggs_stream_py_plan_partitions_v2(path, crs, bbox, target_chunks, ptr::null(), out_err)
+    }
 }
 
-/// [`raster_h3_py_create_arrow_schema`](crate::raster_h3_py_create_arrow_schema) for a partitioned scan: the projected columns plus
+/// [`dggs_stream_py_create_arrow_schema`](crate::dggs_stream_py_create_arrow_schema) for a partitioned scan: the projected columns plus
 /// `partial_state`.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_schema_partitioned(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_schema_partitioned(
     categorical: c_int,
     format: *const c_char,
     columns: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut ArrowSchema {
-    // SAFETY: as for `raster_h3_py_create_arrow_schema`; the returned box is freed by
-    // `raster_h3_py_free_arrow_schema`.
+    // SAFETY: as for `dggs_stream_py_create_arrow_schema`; the returned box is freed by
+    // `dggs_stream_py_free_arrow_schema`.
     unsafe {
         ffi_call("create_arrow_schema_partitioned", out_err, || {
             let cfg = build_py_scan_config(
@@ -80,13 +82,13 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_schema_partitioned(
     }
 }
 
-/// [`raster_h3_py_create_arrow_stream_ex`](crate::raster_h3_py_create_arrow_stream_ex) scanning one partition (`partition`: a JSON
-/// object from `raster_h3_py_plan_partitions`). `limit` must be negative (none).
+/// [`dggs_stream_py_create_arrow_stream_ex`](crate::dggs_stream_py_create_arrow_stream_ex) scanning one partition (`partition`: a JSON
+/// object from `dggs_stream_py_plan_partitions`). `limit` must be negative (none).
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_partitioned(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_stream_partitioned(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -101,8 +103,8 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_partitioned(
     partition: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut ArrowArrayStream {
-    // SAFETY: as for `raster_h3_py_create_arrow_stream_ex`; the returned box is freed by
-    // `raster_h3_py_free_arrow_stream`.
+    // SAFETY: as for `dggs_stream_py_create_arrow_stream_ex`; the returned box is freed by
+    // `dggs_stream_py_free_arrow_stream`.
     unsafe {
         ffi_call("create_arrow_stream_partitioned", out_err, || {
             let mut cfg = build_py_scan_config(
@@ -127,13 +129,13 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_partitioned(
     }
 }
 
-/// [`raster_h3_py_open_batch_reader_ex`](crate::raster_h3_py_open_batch_reader_ex) scanning one partition; see
-/// [`raster_h3_py_create_arrow_stream_partitioned`].
+/// [`dggs_stream_py_open_batch_reader_ex`](crate::dggs_stream_py_open_batch_reader_ex) scanning one partition; see
+/// [`dggs_stream_py_create_arrow_stream_partitioned`].
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_open_batch_reader_partitioned(
+pub unsafe extern "C" fn dggs_stream_py_open_batch_reader_partitioned(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -149,8 +151,8 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_partitioned(
     partition: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut PyBatchReader {
-    // SAFETY: as for `raster_h3_py_open_batch_reader_ex`; the returned box is freed by
-    // `raster_h3_py_free_batch_reader`.
+    // SAFETY: as for `dggs_stream_py_open_batch_reader_ex`; the returned box is freed by
+    // `dggs_stream_py_free_batch_reader`.
     unsafe {
         ffi_call("open_batch_reader_partitioned", out_err, || {
             let mut cfg = build_py_scan_config(
@@ -189,31 +191,31 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_partitioned(
 /// `input` is an `ArrowArrayStream` of `resolution` (UInt8), `h3_index` (UInt64) and
 /// `partial_state` (Binary, no nulls) columns. It is moved: on return the caller's struct is
 /// marked released, whatever the outcome. `categorical` and `columns` must match the scans'.
-/// Returns a stream of the merged, filtered rows (free with `raster_h3_py_free_arrow_stream`).
+/// Returns a stream of the merged, filtered rows (free with `dggs_stream_py_free_arrow_stream`).
 ///
 /// # Safety
 /// `input` must be null or point to a valid `ArrowArrayStream`; the other pointer arguments
 /// must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_merge_partials(
+pub unsafe extern "C" fn dggs_stream_py_merge_partials(
     input: *mut ArrowArrayStream,
     categorical: c_int,
     columns: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut ArrowArrayStream {
     // SAFETY: forwards the caller's arguments, which meet the `_v2` contract, with no options.
-    unsafe { raster_h3_py_merge_partials_v2(input, categorical, columns, ptr::null(), out_err) }
+    unsafe { dggs_stream_py_merge_partials_v2(input, categorical, columns, ptr::null(), out_err) }
 }
 
-/// [`raster_h3_py_merge_partials`] with the scans' `options` JSON object (NULL for none), so
+/// [`dggs_stream_py_merge_partials`] with the scans' `options` JSON object (NULL for none), so
 /// merged cells get the same filters (`min_count`, `min_mean`, `max_mean`,
 /// `min_majority_fraction`) and quantile columns as the scans' final rows. Options that only
 /// affect reading pixels are validated and otherwise ignored.
 ///
 /// # Safety
-/// As for [`raster_h3_py_merge_partials`]; `options` must be NULL or NUL-terminated.
+/// As for [`dggs_stream_py_merge_partials`]; `options` must be NULL or NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_merge_partials_v2(
+pub unsafe extern "C" fn dggs_stream_py_merge_partials_v2(
     input: *mut ArrowArrayStream,
     categorical: c_int,
     columns: *const c_char,

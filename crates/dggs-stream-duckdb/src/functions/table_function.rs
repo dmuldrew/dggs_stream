@@ -23,7 +23,7 @@ use dggs_stream_core::columnar::multiband::{resolve_bands, wide_schema, MultiBan
 use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
 
 /// User-data bound during table function query compilation
-pub struct RasterH3BindData {
+pub struct ContinuousRasterBindData {
     pub common: CommonRasterParams,
     pub bands: Option<Vec<usize>>,
     pub ground_area: bool,
@@ -37,7 +37,7 @@ pub struct RasterH3BindData {
 }
 
 /// Global scan state holding the streaming multi-core horizon aggregator and concurrent batch queue
-pub enum RasterH3GlobalData {
+pub enum ContinuousRasterGlobalData {
     Single(Box<SingleBandGlobal>),
     Wide(Box<Mutex<MultiBandBatchReader>>),
     GroundArea(Box<Mutex<GroundAreaBatchReader>>),
@@ -57,7 +57,7 @@ pub struct SingleBandGlobal {
 }
 
 /// Thread-local state for parallel DuckDB execution threads (scratch buffers for hex string and WKB encoding)
-pub type RasterH3LocalData = TableFunctionLocalData;
+pub type ContinuousRasterLocalData = TableFunctionLocalData;
 
 /// Write one statistic of every row; a cell without samples and without a NoData value
 /// is NULL.
@@ -122,8 +122,8 @@ fn quantile_start_column(emit_geom: bool) -> usize {
 pub(crate) struct ContinuousTable;
 
 impl RasterTable for ContinuousTable {
-    type Bind = RasterH3BindData;
-    type Global = RasterH3GlobalData;
+    type Bind = ContinuousRasterBindData;
+    type Global = ContinuousRasterGlobalData;
 
     const NAMES: &'static [&'static str] = &[
         "h3_raster_continuous_aggregate",
@@ -156,7 +156,10 @@ impl RasterTable for ContinuousTable {
         }
     }
 
-    unsafe fn bind(bind: &BindHelper, common: CommonRasterParams) -> Option<RasterH3BindData> {
+    unsafe fn bind(
+        bind: &BindHelper,
+        common: CommonRasterParams,
+    ) -> Option<ContinuousRasterBindData> {
         let band = |name: &str, default: i64| {
             bind.get_named_int(name)
                 .filter(|&b| b > 0)
@@ -287,7 +290,7 @@ impl RasterTable for ContinuousTable {
 
             None
         };
-        Some(RasterH3BindData {
+        Some(ContinuousRasterBindData {
             ground_area,
             bands,
             common,
@@ -300,16 +303,16 @@ impl RasterTable for ContinuousTable {
         })
     }
 
-    fn common(bind: &RasterH3BindData) -> &CommonRasterParams {
+    fn common(bind: &ContinuousRasterBindData) -> &CommonRasterParams {
         &bind.common
     }
 
     fn init(
-        bind: &RasterH3BindData,
+        bind: &ContinuousRasterBindData,
         mosaic: Arc<MosaicReader>,
         projected_columns: Vec<usize>,
         mut config: MultiResolutionConfig,
-    ) -> Result<RasterH3GlobalData, String> {
+    ) -> Result<ContinuousRasterGlobalData, String> {
         config.apply_scale_offset = bind.common.scale_offset;
         config.spectral_formula = bind.spectral_formula;
         config.min_count = bind.min_count;
@@ -333,7 +336,9 @@ impl RasterTable for ContinuousTable {
                 None,
             )
             .map_err(|e| e.to_string())?;
-            return Ok(RasterH3GlobalData::GroundArea(Box::new(Mutex::new(reader))));
+            return Ok(ContinuousRasterGlobalData::GroundArea(Box::new(
+                Mutex::new(reader),
+            )));
         }
         if let Some(bands) = &bind.bands {
             config.quantiles = bind.quantiles.clone();
@@ -360,7 +365,9 @@ impl RasterTable for ContinuousTable {
                 None,
             )
             .map_err(|e| e.to_string())?;
-            return Ok(RasterH3GlobalData::Wide(Box::new(Mutex::new(reader))));
+            return Ok(ContinuousRasterGlobalData::Wide(Box::new(Mutex::new(
+                reader,
+            ))));
         }
         // Build per-cell sketches only if the query selects a quantile column;
         // DuckDB includes filter columns in the projection, so WHERE clauses on
@@ -379,34 +386,36 @@ impl RasterTable for ContinuousTable {
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)
             .map_err(|e| format!("Failed to initialize multi-streamer: {}", e))?;
 
-        Ok(RasterH3GlobalData::Single(Box::new(SingleBandGlobal {
-            policy,
-            grid: bind.common.grid,
-            streamer: Mutex::new(streamer),
-            record_queue: ConcurrentRecordQueue::new(),
-            projected_columns,
-            quantiles: bind.quantiles.clone(),
-            emit_geom: bind.common.emit_geom,
-            partial_state_column: bind.partition.as_ref().map(|_| q_end_col),
-        })))
+        Ok(ContinuousRasterGlobalData::Single(Box::new(
+            SingleBandGlobal {
+                policy,
+                grid: bind.common.grid,
+                streamer: Mutex::new(streamer),
+                record_queue: ConcurrentRecordQueue::new(),
+                projected_columns,
+                quantiles: bind.quantiles.clone(),
+                emit_geom: bind.common.emit_geom,
+                partial_state_column: bind.partition.as_ref().map(|_| q_end_col),
+            },
+        )))
     }
 
-    unsafe fn scan(global: &RasterH3GlobalData, ctx: &mut ScanContext<'_>) {
+    unsafe fn scan(global: &ContinuousRasterGlobalData, ctx: &mut ScanContext<'_>) {
         // SAFETY: `ctx` carries the live scan handles (caller contract). `writer` wraps
         // the output chunk, whose columns follow `projected_columns` in order, and each
         // arm writes values of exactly the physical type that column was declared with
         // at bind time (see the column map).
         unsafe {
             let global = match global {
-                RasterH3GlobalData::Wide(reader) => {
+                ContinuousRasterGlobalData::Wide(reader) => {
                     scan_columns(reader, ctx);
                     return;
                 }
-                RasterH3GlobalData::GroundArea(reader) => {
+                ContinuousRasterGlobalData::GroundArea(reader) => {
                     scan_columns(reader, ctx);
                     return;
                 }
-                RasterH3GlobalData::Single(single) => single,
+                ContinuousRasterGlobalData::Single(single) => single,
             };
             let proj_cols = &global.projected_columns;
             let Some((batch, mut writer)) = ctx.next_batch(
@@ -602,8 +611,8 @@ where
 pub(crate) struct A5ContinuousTable;
 
 impl RasterTable for A5ContinuousTable {
-    type Bind = RasterH3BindData;
-    type Global = RasterH3GlobalData;
+    type Bind = ContinuousRasterBindData;
+    type Global = ContinuousRasterGlobalData;
 
     const NAMES: &'static [&'static str] = &[
         "a5_raster_continuous_aggregate",
@@ -621,25 +630,28 @@ impl RasterTable for A5ContinuousTable {
         unsafe { ContinuousTable::register_named_parameters(tf) }
     }
 
-    unsafe fn bind(bind: &BindHelper, common: CommonRasterParams) -> Option<RasterH3BindData> {
+    unsafe fn bind(
+        bind: &BindHelper,
+        common: CommonRasterParams,
+    ) -> Option<ContinuousRasterBindData> {
         // SAFETY: forwarded with the same contract.
         unsafe { ContinuousTable::bind(bind, common) }
     }
 
-    fn common(bind: &RasterH3BindData) -> &CommonRasterParams {
+    fn common(bind: &ContinuousRasterBindData) -> &CommonRasterParams {
         ContinuousTable::common(bind)
     }
 
     fn init(
-        bind: &RasterH3BindData,
+        bind: &ContinuousRasterBindData,
         mosaic: Arc<MosaicReader>,
         projected_columns: Vec<usize>,
         config: MultiResolutionConfig,
-    ) -> Result<RasterH3GlobalData, String> {
+    ) -> Result<ContinuousRasterGlobalData, String> {
         ContinuousTable::init(bind, mosaic, projected_columns, config)
     }
 
-    unsafe fn scan(global: &RasterH3GlobalData, ctx: &mut ScanContext<'_>) {
+    unsafe fn scan(global: &ContinuousRasterGlobalData, ctx: &mut ScanContext<'_>) {
         // SAFETY: forwarded with the same contract.
         unsafe { ContinuousTable::scan(global, ctx) }
     }
@@ -652,8 +664,8 @@ macro_rules! grid_continuous_table {
         pub(crate) struct $table;
 
         impl RasterTable for $table {
-            type Bind = RasterH3BindData;
-            type Global = RasterH3GlobalData;
+            type Bind = ContinuousRasterBindData;
+            type Global = ContinuousRasterGlobalData;
 
             const NAMES: &'static [&'static str] = &[$function, $($alias),+];
             const FUNCTION: &'static str = $function;
@@ -665,25 +677,25 @@ macro_rules! grid_continuous_table {
                 unsafe { ContinuousTable::register_named_parameters(tf) }
             }
 
-            unsafe fn bind(bind: &BindHelper, common: CommonRasterParams) -> Option<RasterH3BindData> {
+            unsafe fn bind(bind: &BindHelper, common: CommonRasterParams) -> Option<ContinuousRasterBindData> {
                 // SAFETY: forwarded with the same contract.
                 unsafe { ContinuousTable::bind(bind, common) }
             }
 
-            fn common(bind: &RasterH3BindData) -> &CommonRasterParams {
+            fn common(bind: &ContinuousRasterBindData) -> &CommonRasterParams {
                 ContinuousTable::common(bind)
             }
 
             fn init(
-                bind: &RasterH3BindData,
+                bind: &ContinuousRasterBindData,
                 mosaic: Arc<MosaicReader>,
                 projected_columns: Vec<usize>,
                 config: MultiResolutionConfig,
-            ) -> Result<RasterH3GlobalData, String> {
+            ) -> Result<ContinuousRasterGlobalData, String> {
                 ContinuousTable::init(bind, mosaic, projected_columns, config)
             }
 
-            unsafe fn scan(global: &RasterH3GlobalData, ctx: &mut ScanContext<'_>) {
+            unsafe fn scan(global: &ContinuousRasterGlobalData, ctx: &mut ScanContext<'_>) {
                 // SAFETY: forwarded with the same contract.
                 unsafe { ContinuousTable::scan(global, ctx) }
             }

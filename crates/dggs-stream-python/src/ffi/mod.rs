@@ -48,7 +48,7 @@ unsafe fn opt_cstr(ptr: *const c_char) -> Option<String> {
 unsafe fn set_c_err(out_err: *mut *mut c_char, msg: &str) {
     // SAFETY: non-null `out_err` is a writable `char **` (caller contract). Ownership of
     // the `CString::into_raw` string passes to the caller, who frees it with
-    // `raster_h3_py_free_string`.
+    // `dggs_stream_py_free_string`.
     unsafe {
         if !out_err.is_null() {
             let c = CString::new(msg).unwrap_or_default();
@@ -82,12 +82,12 @@ unsafe fn ffi_call<T>(
     }
 }
 
-/// Free a C string returned by `raster_h3_py_*`.
+/// Free a C string returned by `dggs_stream_py_*`.
 ///
 /// # Safety
 /// `ptr` must be null or a pointer returned by `CString::into_raw` from this crate.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn dggs_stream_py_free_string(ptr: *mut c_char) {
     // SAFETY: every string this crate returns comes from `CString::into_raw`; non-null
     // `ptr` is one of them, freed once (caller contract).
     unsafe {

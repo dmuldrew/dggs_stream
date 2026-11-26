@@ -40,20 +40,20 @@ pub struct RowGroupExtent {
 /// Pre-scanned geographical and resolution extent of a Parquet row group
 pub fn scan_row_group_h3_extent(
     rg: &dyn RowGroupReader,
-    h3_idx: usize,
+    cell_col_idx: usize,
     rg_idx: usize,
 ) -> Result<Option<RowGroupExtent>, Box<dyn std::error::Error + Send + Sync>> {
-    scan_row_group_grid_extent(GridKind::H3, rg, h3_idx, rg_idx)
+    scan_row_group_grid_extent(GridKind::H3, rg, cell_col_idx, rg_idx)
 }
 
 /// Pre-scanned geographical and resolution extent of a Parquet row group for `grid`
 pub fn scan_row_group_grid_extent(
     grid: GridKind,
     rg: &dyn RowGroupReader,
-    h3_idx: usize,
+    cell_col_idx: usize,
     rg_idx: usize,
 ) -> Result<Option<RowGroupExtent>, Box<dyn std::error::Error + Send + Sync>> {
-    let col_reader = match rg.get_column_reader(h3_idx) {
+    let col_reader = match rg.get_column_reader(cell_col_idx) {
         Ok(c) => c,
         Err(_) => return Ok(None),
     };
@@ -62,9 +62,9 @@ pub fn scan_row_group_grid_extent(
     let mut min_res = 255u8;
     let mut resolutions = 0u32;
 
-    let mut process_h3 = |h3: u64| {
-        if let Some(res) = grid.resolution(h3) {
-            bounds.record_cell_for(grid, h3);
+    let mut record_cell = |cell_id: u64| {
+        if let Some(res) = grid.resolution(cell_id) {
+            bounds.record_cell_for(grid, cell_id);
             if res < min_res {
                 min_res = res;
             }
@@ -87,12 +87,16 @@ pub fn scan_row_group_grid_extent(
                     break;
                 }
                 for &v in &vals {
-                    process_h3(v as u64);
+                    record_cell(v as u64);
                 }
             }
         }
         parquet::column::reader::ColumnReader::Int32ColumnReader(mut r) => {
-            let unsigned = rg.metadata().schema_descr().column(h3_idx).converted_type()
+            let unsigned = rg
+                .metadata()
+                .schema_descr()
+                .column(cell_col_idx)
+                .converted_type()
                 == ConvertedType::UINT_32;
             let mut vals = Vec::with_capacity(8192);
             loop {
@@ -103,7 +107,7 @@ pub fn scan_row_group_grid_extent(
                     break;
                 }
                 for &v in &vals {
-                    process_h3(if unsigned {
+                    record_cell(if unsigned {
                         u64::from(v as u32)
                     } else {
                         v as u64
@@ -122,8 +126,8 @@ pub fn scan_row_group_grid_extent(
                 }
                 for v in &vals {
                     if let Ok(s) = std::str::from_utf8(v.data()) {
-                        if let Some(h3) = parse_hex_u64(s) {
-                            process_h3(h3);
+                        if let Some(cell_id) = parse_hex_u64(s) {
+                            record_cell(cell_id);
                         }
                     }
                 }
@@ -140,8 +144,8 @@ pub fn scan_row_group_grid_extent(
                 }
                 for v in &vals {
                     if let Ok(s) = std::str::from_utf8(v.data()) {
-                        if let Some(h3) = parse_hex_u64(s) {
-                            process_h3(h3);
+                        if let Some(cell_id) = parse_hex_u64(s) {
+                            record_cell(cell_id);
                         }
                     }
                 }
@@ -175,9 +179,9 @@ pub fn scan_row_group_grid_extent(
 pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
     parquet_path: P1,
     pmtiles_path: P2,
-    h3_column_name: Option<&str>,
+    cell_column_name: Option<&str>,
 ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
-    process_parquet_to_pmtiles_for(parquet_path, pmtiles_path, h3_column_name, None)
+    process_parquet_to_pmtiles_for(parquet_path, pmtiles_path, cell_column_name, None)
 }
 
 /// [`process_parquet_to_pmtiles`] for a file whose cells belong to `grid`. `None` takes
@@ -186,7 +190,7 @@ pub fn process_parquet_to_pmtiles<P1: AsRef<Path>, P2: AsRef<Path>>(
 pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
     parquet_path: P1,
     pmtiles_path: P2,
-    h3_column_name: Option<&str>,
+    cell_column_name: Option<&str>,
     grid: Option<GridKind>,
 ) -> Result<PmtilesExportSummary, Box<dyn std::error::Error + Send + Sync>> {
     let grid_override = grid;
@@ -195,8 +199,8 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
     let num_rgs = reader.num_row_groups();
     let schema = reader.metadata().file_metadata().schema_descr();
 
-    // Identify H3 index column
-    let h3_idx = if let Some(target) = h3_column_name {
+    // Identify the cell index column
+    let cell_col_idx = if let Some(target) = cell_column_name {
         schema
             .columns()
             .iter()
@@ -234,7 +238,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
     let grid = grid_override.unwrap_or_else(|| {
         schema
             .columns()
-            .get(h3_idx)
+            .get(cell_col_idx)
             .and_then(|f| GridKind::from_cell_column_name(f.name()))
             .unwrap_or(GridKind::H3)
     });
@@ -243,7 +247,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
     let mut rg_extents = Vec::with_capacity(num_rgs);
     for rg_i in 0..num_rgs {
         if let Ok(rg) = reader.get_row_group(rg_i) {
-            if let Ok(Some(ext)) = scan_row_group_grid_extent(grid, &*rg, h3_idx, rg_i) {
+            if let Ok(Some(ext)) = scan_row_group_grid_extent(grid, &*rg, cell_col_idx, rg_i) {
                 rg_extents.push(ext);
             }
         }
@@ -299,7 +303,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
     fields_map.insert(hex_col.to_string(), json!("String"));
     fields_map.insert("resolution".to_string(), json!("Number"));
     for (idx, col) in schema.columns().iter().enumerate() {
-        if idx == h3_idx {
+        if idx == cell_col_idx {
             continue;
         }
         let type_str = match col.physical_type() {
@@ -344,46 +348,46 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
                 }
             };
 
-            let mut h3_val_u64 = None;
-            if let Some((_, field_val)) = row.get_column_iter().nth(h3_idx) {
+            let mut parsed_cell_id = None;
+            if let Some((_, field_val)) = row.get_column_iter().nth(cell_col_idx) {
                 match field_val {
-                    parquet::record::Field::ULong(u) => h3_val_u64 = Some(*u),
-                    parquet::record::Field::Long(i) => h3_val_u64 = Some(*i as u64),
-                    parquet::record::Field::UInt(u) => h3_val_u64 = Some(u64::from(*u)),
-                    parquet::record::Field::Int(i) => h3_val_u64 = Some(*i as u64),
-                    parquet::record::Field::UShort(u) => h3_val_u64 = Some(u64::from(*u)),
-                    parquet::record::Field::Short(i) => h3_val_u64 = Some(*i as u64),
-                    parquet::record::Field::UByte(u) => h3_val_u64 = Some(u64::from(*u)),
-                    parquet::record::Field::Byte(i) => h3_val_u64 = Some(*i as u64),
+                    parquet::record::Field::ULong(u) => parsed_cell_id = Some(*u),
+                    parquet::record::Field::Long(i) => parsed_cell_id = Some(*i as u64),
+                    parquet::record::Field::UInt(u) => parsed_cell_id = Some(u64::from(*u)),
+                    parquet::record::Field::Int(i) => parsed_cell_id = Some(*i as u64),
+                    parquet::record::Field::UShort(u) => parsed_cell_id = Some(u64::from(*u)),
+                    parquet::record::Field::Short(i) => parsed_cell_id = Some(*i as u64),
+                    parquet::record::Field::UByte(u) => parsed_cell_id = Some(u64::from(*u)),
+                    parquet::record::Field::Byte(i) => parsed_cell_id = Some(*i as u64),
                     parquet::record::Field::Str(s) => {
-                        h3_val_u64 = parse_hex_u64(s);
+                        parsed_cell_id = parse_hex_u64(s);
                     }
                     parquet::record::Field::Bytes(b) => {
                         if let Ok(s) = std::str::from_utf8(b.data()) {
-                            h3_val_u64 = parse_hex_u64(s);
+                            parsed_cell_id = parse_hex_u64(s);
                         }
                     }
                     _ => {}
                 }
             }
 
-            let h3_u64 = match h3_val_u64 {
-                Some(h) => h,
+            let cell_id = match parsed_cell_id {
+                Some(cell_id) => cell_id,
                 None => {
                     invalid_dropped += 1;
                     continue;
                 }
             };
 
-            let Some((c_lat, c_lon)) = grid.center_lat_lng(h3_u64) else {
+            let Some((c_lat, c_lon)) = grid.center_lat_lng(cell_id) else {
                 invalid_dropped += 1;
                 continue;
             };
-            let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, h3_u64) else {
+            let Some((v_merc, v_count)) = cell_boundary_mercator_for(grid, cell_id) else {
                 invalid_dropped += 1;
                 continue;
             };
-            let Some(res_u8) = grid.resolution(h3_u64) else {
+            let Some(res_u8) = grid.resolution(cell_id) else {
                 invalid_dropped += 1;
                 continue;
             };
@@ -399,7 +403,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
 
             let mut properties = Vec::with_capacity(col_names.len().saturating_sub(1) + 3);
             for (col_i, (_, field_val)) in row.get_column_iter().enumerate() {
-                if col_i == h3_idx {
+                if col_i == cell_col_idx {
                     continue;
                 }
                 let mvt_val = match field_val {
@@ -423,17 +427,17 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
             }
 
             if !properties.iter().any(|(k, _)| k == idx_col) {
-                properties.push((Cow::Borrowed(idx_col), MvtValue::UInt(h3_u64)));
+                properties.push((Cow::Borrowed(idx_col), MvtValue::UInt(cell_id)));
             }
             if !properties.iter().any(|(k, _)| k == hex_col) {
-                properties.push((Cow::Borrowed(hex_col), MvtValue::from_hex_u64(h3_u64)));
+                properties.push((Cow::Borrowed(hex_col), MvtValue::from_hex_u64(cell_id)));
             }
             if !properties.iter().any(|(k, _)| k == "resolution") {
                 properties.push((Cow::Borrowed("resolution"), MvtValue::UInt(res_u8 as u64)));
             }
 
             accumulator.add_hexagon_mercator_zooms(
-                h3_u64,
+                cell_id,
                 center_merc,
                 vertices_merc,
                 zooms,

@@ -5,10 +5,10 @@ use std::ffi::c_char;
 use std::ptr;
 
 use dggs_stream_python::{
-    raster_h3_py_batch_reader_next, raster_h3_py_batch_reader_transform_failures,
-    raster_h3_py_create_arrow_stream_ex, raster_h3_py_free_arrow_stream,
-    raster_h3_py_free_batch_reader, raster_h3_py_free_string, raster_h3_py_open_batch_reader_ex,
-    raster_h3_py_scan_json_ex,
+    dggs_stream_py_batch_reader_next, dggs_stream_py_batch_reader_transform_failures,
+    dggs_stream_py_create_arrow_stream_ex, dggs_stream_py_free_arrow_stream,
+    dggs_stream_py_free_batch_reader, dggs_stream_py_free_string,
+    dggs_stream_py_open_batch_reader_ex, dggs_stream_py_scan_json_ex,
 };
 
 use crate::c_abi::{take_err, Scan};
@@ -34,7 +34,7 @@ fn batch_reader(scan: &Scan, strict: bool) -> (u64, Option<String>) {
     // stream it returns are freed exactly once.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let reader = raster_h3_py_open_batch_reader_ex(
+        let reader = dggs_stream_py_open_batch_reader_ex(
             a.ptr(0),
             a.ptr(1),
             0,
@@ -52,14 +52,14 @@ fn batch_reader(scan: &Scan, strict: bool) -> (u64, Option<String>) {
         assert!(!reader.is_null(), "{:?}", take_err(err));
         let error = loop {
             let mut err: *mut c_char = ptr::null_mut();
-            let stream = raster_h3_py_batch_reader_next(reader, &mut err);
+            let stream = dggs_stream_py_batch_reader_next(reader, &mut err);
             if stream.is_null() {
                 break take_err(err);
             }
-            raster_h3_py_free_arrow_stream(stream);
+            dggs_stream_py_free_arrow_stream(stream);
         };
-        let failures = raster_h3_py_batch_reader_transform_failures(reader);
-        raster_h3_py_free_batch_reader(reader);
+        let failures = dggs_stream_py_batch_reader_transform_failures(reader);
+        dggs_stream_py_free_batch_reader(reader);
         (failures, error)
     }
 }
@@ -73,7 +73,7 @@ fn batch_reader_counts_or_rejects_transform_failures() {
     assert!(err.contains("strict_transforms"), "{err}");
     assert!(failures > 0);
     // SAFETY: a null reader is accepted and reports no failures.
-    let null_failures = unsafe { raster_h3_py_batch_reader_transform_failures(ptr::null()) };
+    let null_failures = unsafe { dggs_stream_py_batch_reader_transform_failures(ptr::null()) };
     assert_eq!(null_failures, 0);
 }
 
@@ -88,7 +88,7 @@ fn scan_json_counts_or_rejects_transform_failures() {
         // `failures` and `err` are writable out-pointers; the JSON string and any error
         // string are freed exactly once.
         unsafe {
-            let json = raster_h3_py_scan_json_ex(
+            let json = dggs_stream_py_scan_json_ex(
                 a.ptr(0),
                 a.ptr(1),
                 0,
@@ -111,7 +111,7 @@ fn scan_json_counts_or_rejects_transform_failures() {
                 assert!(failures > 0);
             } else {
                 assert!(!json.is_null(), "{err:?}");
-                raster_h3_py_free_string(json);
+                dggs_stream_py_free_string(json);
                 assert_eq!(failures, 50);
             }
         }
@@ -126,7 +126,7 @@ fn strict_arrow_stream_fails_while_reading() {
     // a writable out-pointer; the stream is drained once and freed once.
     unsafe {
         let mut err: *mut c_char = ptr::null_mut();
-        let stream = raster_h3_py_create_arrow_stream_ex(
+        let stream = dggs_stream_py_create_arrow_stream_ex(
             a.ptr(0),
             a.ptr(1),
             0,
@@ -142,7 +142,7 @@ fn strict_arrow_stream_fails_while_reading() {
         );
         assert!(!stream.is_null(), "{:?}", take_err(err));
         let result = (*stream).collect_batches();
-        raster_h3_py_free_arrow_stream(stream);
+        dggs_stream_py_free_arrow_stream(stream);
         let err = result.expect_err("strict stream must fail").to_string();
         assert!(err.contains("strict_transforms"), "{err}");
     }

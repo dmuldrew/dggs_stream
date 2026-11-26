@@ -31,7 +31,7 @@ pub struct PyBatchReader {
     pub(crate) transform_failures: Arc<AtomicU64>,
 }
 
-/// Scanner backing the Python `RasterH3Scanner` object (`__arrow_c_schema__` and `__arrow_c_stream__`).
+/// Scanner backing the Python `RasterArrowStream` object (`__arrow_c_schema__` and `__arrow_c_stream__`).
 #[derive(Debug, Clone)]
 pub struct PyRasterScanner {
     pub config: PyScanConfig,

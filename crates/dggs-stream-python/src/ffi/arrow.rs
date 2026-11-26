@@ -17,7 +17,7 @@ use crate::scanner::PyRasterScanner;
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_schema(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_schema(
     categorical: c_int,
     format: *const c_char,
     columns: *const c_char,
@@ -25,8 +25,8 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_schema(
 ) -> *mut ArrowSchema {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract), as
     // `opt_cstr` requires; `out_err` is null or a writable `char **` (as `set_c_err`
-    // requires), and error strings are freed by the caller with `raster_h3_py_free_string`.
-    // The returned box is freed by `raster_h3_py_free_arrow_schema`.
+    // requires), and error strings are freed by the caller with `dggs_stream_py_free_string`.
+    // The returned box is freed by `dggs_stream_py_free_arrow_schema`.
     unsafe {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let fmt = parse_c_format(format)?;
@@ -60,14 +60,14 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_schema(
     }
 }
 
-/// Free a heap-boxed `ArrowSchema` allocated by `raster_h3_py_create_arrow_schema`.
+/// Free a heap-boxed `ArrowSchema` allocated by `dggs_stream_py_create_arrow_schema`.
 ///
 /// # Safety
-/// `ptr` must be null or returned by `raster_h3_py_create_arrow_schema`.
+/// `ptr` must be null or returned by `dggs_stream_py_create_arrow_schema`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_free_arrow_schema(ptr: *mut ArrowSchema) {
+pub unsafe extern "C" fn dggs_stream_py_free_arrow_schema(ptr: *mut ArrowSchema) {
     // SAFETY: non-null `ptr` came from `Box::into_raw` in
-    // `raster_h3_py_create_arrow_schema` and is freed once (caller contract); dropping it
+    // `dggs_stream_py_create_arrow_schema` and is freed once (caller contract); dropping it
     // runs the schema's own release callback.
     unsafe {
         if !ptr.is_null() {
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn raster_h3_py_free_arrow_schema(ptr: *mut ArrowSchema) {
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_stream(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_stream(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream(
 ) -> *mut ArrowArrayStream {
     // SAFETY: forwards the caller's arguments, which meet the `_ex` contract.
     unsafe {
-        raster_h3_py_create_arrow_stream_ex(
+        dggs_stream_py_create_arrow_stream_ex(
             path,
             resolutions,
             categorical,
@@ -113,13 +113,13 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream(
     }
 }
 
-/// [`raster_h3_py_create_arrow_stream`] with `strict_transforms`: when non-zero, the
+/// [`dggs_stream_py_create_arrow_stream`] with `strict_transforms`: when non-zero, the
 /// stream fails as soon as a valid sample point cannot be transformed to WGS84.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_ex(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_stream_ex(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -135,8 +135,8 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_ex(
 ) -> *mut ArrowArrayStream {
     // SAFETY: every C string argument is null or NUL-terminated (caller contract), as
     // `opt_cstr` requires; `out_err` is null or a writable `char **` (as `set_c_err`
-    // requires), and error strings are freed by the caller with `raster_h3_py_free_string`.
-    // The returned box is freed by `raster_h3_py_free_arrow_stream`.
+    // requires), and error strings are freed by the caller with `dggs_stream_py_free_string`.
+    // The returned box is freed by `dggs_stream_py_free_arrow_stream`.
     unsafe {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cfg = build_py_scan_config(
@@ -171,14 +171,14 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_ex(
     }
 }
 
-/// Free a heap-boxed `ArrowArrayStream` allocated by `raster_h3_py_create_arrow_stream`.
+/// Free a heap-boxed `ArrowArrayStream` allocated by `dggs_stream_py_create_arrow_stream`.
 ///
 /// # Safety
-/// `ptr` must be null or returned by `raster_h3_py_create_arrow_stream`.
+/// `ptr` must be null or returned by `dggs_stream_py_create_arrow_stream`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_free_arrow_stream(ptr: *mut ArrowArrayStream) {
+pub unsafe extern "C" fn dggs_stream_py_free_arrow_stream(ptr: *mut ArrowArrayStream) {
     // SAFETY: non-null `ptr` came from `Box::into_raw` in
-    // `raster_h3_py_create_arrow_stream` and is freed once (caller contract); dropping it
+    // `dggs_stream_py_create_arrow_stream` and is freed once (caller contract); dropping it
     // releases the stream unless a consumer already moved it out.
     unsafe {
         if !ptr.is_null() {

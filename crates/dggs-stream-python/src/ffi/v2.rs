@@ -20,8 +20,8 @@ use crate::ffi::args::{
 use crate::ffi::{ffi_call, opt_cstr};
 use crate::scanner::{PyBatchReader, PyRasterScanner};
 
-/// [`raster_h3_py_create_arrow_stream_ex`](crate::raster_h3_py_create_arrow_stream_ex) that also takes `partition` (NULL for a whole
-/// scan, else a JSON object from `raster_h3_py_plan_partitions_v2`) and `options`, a JSON
+/// [`dggs_stream_py_create_arrow_stream_ex`](crate::dggs_stream_py_create_arrow_stream_ex) that also takes `partition` (NULL for a whole
+/// scan, else a JSON object from `dggs_stream_py_plan_partitions_v2`) and `options`, a JSON
 /// object of further scan options (NULL for none): `band`, `sampling`, `overlap_rule`,
 /// `min_majority_fraction`, `spectral_formula` and `nir_band` / `red_band` /
 /// `green_band` / `blue_band` / `swir_band`.
@@ -30,7 +30,7 @@ use crate::scanner::{PyBatchReader, PyRasterScanner};
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_v2(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_stream_v2(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -48,7 +48,7 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_v2(
 ) -> *mut ArrowArrayStream {
     // SAFETY: the C string arguments are null or NUL-terminated and `out_err` is null or a
     // writable `char **` (caller contract). The returned box is freed by
-    // `raster_h3_py_free_arrow_stream`.
+    // `dggs_stream_py_free_arrow_stream`.
     unsafe {
         ffi_call("create_arrow_stream_v2", out_err, || {
             let mut cfg = build_py_scan_config_v2(
@@ -73,14 +73,14 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_stream_v2(
     }
 }
 
-/// [`raster_h3_py_open_batch_reader_ex`](crate::raster_h3_py_open_batch_reader_ex) with the `partition` and `options` arguments of
-/// [`raster_h3_py_create_arrow_stream_v2`].
+/// [`dggs_stream_py_open_batch_reader_ex`](crate::dggs_stream_py_open_batch_reader_ex) with the `partition` and `options` arguments of
+/// [`dggs_stream_py_create_arrow_stream_v2`].
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_open_batch_reader_v2(
+pub unsafe extern "C" fn dggs_stream_py_open_batch_reader_v2(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -97,8 +97,8 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_v2(
     options: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut PyBatchReader {
-    // SAFETY: as for `raster_h3_py_create_arrow_stream_v2`; the returned box is freed by
-    // `raster_h3_py_free_batch_reader`.
+    // SAFETY: as for `dggs_stream_py_create_arrow_stream_v2`; the returned box is freed by
+    // `dggs_stream_py_free_batch_reader`.
     unsafe {
         ffi_call("open_batch_reader_v2", out_err, || {
             let mut cfg = build_py_scan_config_v2(
@@ -132,15 +132,15 @@ pub unsafe extern "C" fn raster_h3_py_open_batch_reader_v2(
     }
 }
 
-/// [`raster_h3_py_scan_json_ex`](crate::raster_h3_py_scan_json_ex) with the `options` argument of
-/// [`raster_h3_py_create_arrow_stream_v2`].
+/// [`dggs_stream_py_scan_json_ex`](crate::dggs_stream_py_scan_json_ex) with the `options` argument of
+/// [`dggs_stream_py_create_arrow_stream_v2`].
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL;
 /// `out_transform_failures` must be NULL or point to a writable `u64`; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_scan_json_v2(
+pub unsafe extern "C" fn dggs_stream_py_scan_json_v2(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -156,8 +156,8 @@ pub unsafe extern "C" fn raster_h3_py_scan_json_v2(
     out_transform_failures: *mut u64,
     out_err: *mut *mut c_char,
 ) -> *mut c_char {
-    // SAFETY: as for `raster_h3_py_scan_json_ex`; the returned JSON string is freed with
-    // `raster_h3_py_free_string`.
+    // SAFETY: as for `dggs_stream_py_scan_json_ex`; the returned JSON string is freed with
+    // `dggs_stream_py_free_string`.
     unsafe {
         let failures = Arc::new(AtomicU64::new(0));
         let out = ffi_call("scan_json_v2", out_err, || {
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn raster_h3_py_scan_json_v2(
     }
 }
 
-/// [`raster_h3_py_plan_partitions`](crate::raster_h3_py_plan_partitions) with an `options` JSON object (NULL for none). Only
+/// [`dggs_stream_py_plan_partitions`](crate::dggs_stream_py_plan_partitions) with an `options` JSON object (NULL for none). Only
 /// `overlap_rule` affects the plan, but the object must match the scans' so the partition
 /// fingerprints agree; the other options are validated and otherwise ignored.
 ///
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn raster_h3_py_scan_json_v2(
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
+pub unsafe extern "C" fn dggs_stream_py_plan_partitions_v2(
     path: *const c_char,
     crs: *const c_char,
     bbox: *const c_char,
@@ -257,14 +257,14 @@ pub unsafe extern "C" fn raster_h3_py_plan_partitions_v2(
     }
 }
 
-/// [`raster_h3_py_create_arrow_schema`](crate::raster_h3_py_create_arrow_schema) honouring the `options` JSON object (quantile
+/// [`dggs_stream_py_create_arrow_schema`](crate::dggs_stream_py_create_arrow_schema) honouring the `options` JSON object (quantile
 /// columns change the schema); `partitioned` non-zero adds the `partial_state` column.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
-/// NULL or a writable `char **`. Free the result with `raster_h3_py_free_arrow_schema`.
+/// NULL or a writable `char **`. Free the result with `dggs_stream_py_free_arrow_schema`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_create_arrow_schema_v2(
+pub unsafe extern "C" fn dggs_stream_py_create_arrow_schema_v2(
     categorical: c_int,
     format: *const c_char,
     columns: *const c_char,
@@ -302,12 +302,12 @@ pub unsafe extern "C" fn raster_h3_py_create_arrow_schema_v2(
 }
 
 /// The output column names of a `quantiles` specification, as a JSON array of strings, in
-/// output order. Free the string with `raster_h3_py_free_string`.
+/// output order. Free the string with `dggs_stream_py_free_string`.
 ///
 /// # Safety
 /// `spec` must be NULL or NUL-terminated; `out_err` must be NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_quantile_columns(
+pub unsafe extern "C" fn dggs_stream_py_quantile_columns(
     spec: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut c_char {
@@ -327,17 +327,17 @@ pub unsafe extern "C" fn raster_h3_py_quantile_columns(
     }
 }
 
-/// Run the scan of [`raster_h3_py_scan_json_v2`] to completion, discarding its rows, and
+/// Run the scan of [`dggs_stream_py_scan_json_v2`] to completion, discarding its rows, and
 /// return where the time went: a JSON object with `rows` and `profile` (the fields of
 /// `dggs_stream_core::run_profile::ProfileReport`: per-phase wall and CPU time, pixels read
 /// and indexed, cells, stalls, spill and compaction counters, peak bytes). Free the
-/// string with `raster_h3_py_free_string`.
+/// string with `dggs_stream_py_free_string`.
 ///
 /// # Safety
 /// Pointer arguments must be valid NUL-terminated C strings or NULL; `out_err` must be
 /// NULL or a writable `char **`.
 #[no_mangle]
-pub unsafe extern "C" fn raster_h3_py_profile_scan_v2(
+pub unsafe extern "C" fn dggs_stream_py_profile_scan_v2(
     path: *const c_char,
     resolutions: *const c_char,
     categorical: c_int,
@@ -351,7 +351,7 @@ pub unsafe extern "C" fn raster_h3_py_profile_scan_v2(
     options: *const c_char,
     out_err: *mut *mut c_char,
 ) -> *mut c_char {
-    // SAFETY: as for `raster_h3_py_scan_json_v2`.
+    // SAFETY: as for `dggs_stream_py_scan_json_v2`.
     unsafe {
         ffi_call("profile_scan_v2", out_err, || {
             let mut cfg = build_py_scan_config_v2(

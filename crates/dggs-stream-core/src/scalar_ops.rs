@@ -224,11 +224,11 @@ pub fn h3_cell_to_parent_str(hex: &str, parent_res: i64) -> Option<String> {
 /// for the requested resolution fails fast instead of exhausting memory.
 pub const H3_POLYGON_TO_CELLS_MAX_CELLS: usize = 10_000_000;
 
-/// Containment modes accepted by [`h3_polygon_to_cells_wkb`], as `(name, mode)` pairs.
+/// Containment modes accepted by polygon fills, as `(name, mode)` pairs.
 ///
 /// The first group are h3o's names; `center`, `full` and `overlapping` are the H3 C library
 /// (`polygonToCellsExperimental`) names for the same behaviour.
-pub const H3_CONTAINMENT_MODES: [(&str, ContainmentMode); 7] = [
+pub const POLYGON_CONTAINMENT_MODES: [(&str, ContainmentMode); 7] = [
     ("contains_centroid", ContainmentMode::ContainsCentroid),
     ("contains_boundary", ContainmentMode::ContainsBoundary),
     ("intersects_boundary", ContainmentMode::IntersectsBoundary),
@@ -239,10 +239,10 @@ pub const H3_CONTAINMENT_MODES: [(&str, ContainmentMode); 7] = [
 ];
 
 /// Parse a containment mode name (case-insensitive, `-` and `_` interchangeable).
-/// See [`H3_CONTAINMENT_MODES`] for the accepted names.
+/// See [`POLYGON_CONTAINMENT_MODES`] for the accepted names.
 pub fn parse_containment_mode(s: &str) -> Option<ContainmentMode> {
     let norm = s.trim().to_ascii_lowercase().replace('-', "_");
-    H3_CONTAINMENT_MODES
+    POLYGON_CONTAINMENT_MODES
         .iter()
         .find(|(name, _)| *name == norm)
         .map(|&(_, mode)| mode)
