@@ -688,3 +688,55 @@ fn first_rule_handles_mixed_longitude_branches() {
         }
     }
 }
+
+/// `ParquetWriter::process_raster_source_to_parquet` must open mosaics with
+/// the config's overlap rule (and remote factory), for both value kinds.
+#[test]
+fn parquet_source_export_honours_the_overlap_rule() {
+    use dggs_stream_core::parquet::{ParquetExportConfig, ParquetWriter};
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::record::RowAccessor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let low = dir.path().join("low.tif");
+    let high = dir.path().join("high.tif");
+    for (path, value) in [(&low, 1.0f32), (&high, 3.0f32)] {
+        TestGeoTiffBuilder::new(10, 10)
+            .origin(10.0, 10.0)
+            .pixel_size(0.01)
+            .write_constant(path, value)
+            .unwrap();
+    }
+    let sources = format!("{},{}", low.display(), high.display());
+    let out = dir.path().join("out.parquet");
+    // Identical footprints: First keeps only `low` (100 x 1), Average keeps
+    // both (100 x 1 + 100 x 3).
+    for (rule, expected_sum) in [(OverlapRule::First, 100.0), (OverlapRule::Average, 400.0)] {
+        let mut cfg = MultiResolutionConfig::single(7);
+        cfg.overlap_rule = rule;
+        let rows = ParquetWriter::process_raster_source_to_parquet(
+            &sources,
+            &out,
+            cfg,
+            ParquetExportConfig {
+                omit_redundant_columns: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(rows > 0);
+        let reader = SerializedFileReader::new(File::open(&out).unwrap()).unwrap();
+        let schema = reader.metadata().file_metadata().schema_descr();
+        let sum_col = schema
+            .columns()
+            .iter()
+            .position(|c| c.name() == "sum_value")
+            .expect("sum_value column");
+        let sum: f64 = reader
+            .get_row_iter(None)
+            .unwrap()
+            .map(|row| row.unwrap().get_double(sum_col).unwrap())
+            .sum();
+        assert!((sum - expected_sum).abs() < 1e-9, "{rule:?}: {sum}");
+    }
+}

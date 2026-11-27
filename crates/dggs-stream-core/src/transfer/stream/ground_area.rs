@@ -224,7 +224,11 @@ pub(crate) fn ground_area_overlay_tile(
                         Counter::PixelsRead,
                         block.rows.len() as u64 * block.cols.len() as u64,
                     );
-                    profile.time(Phase::Kernel, run)
+                    let result = profile.time(Phase::Kernel, run);
+                    // Decoded chunks held by the window cache. A prefetcher
+                    // runs only when the whole window fits the budget.
+                    profile.peak(Counter::PeakDecodedBytes, cache.peak_bytes() as u64);
+                    result
                 }
                 None => run(),
             };

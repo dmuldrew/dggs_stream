@@ -1225,6 +1225,97 @@ fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
     assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
 }
 
+/// The single-run counterpart of the wrapped case above: a bbox inside one
+/// pixel of a 36,000-column raster lists only the cells near that pixel and
+/// counts exactly that whole pixel.
+#[test]
+fn ground_area_small_bbox_selects_one_whole_pixel_on_a_wide_raster() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(36000, 2)
+        .origin(-180.0, 0.01)
+        .pixel_size(0.01)
+        .create_f32_tempfile(|_, r| if r == 0 { 3.0 } else { 8.0 });
+    let mut cfg = config(GridKind::S2, 18, TransferMode::OVERLAY);
+    cfg.bbox = Some([10.004, 0.004, 10.006, 0.006]);
+    let rows = dggs_stream_core::transfer::scan_ground_area_overlay(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &cfg,
+    )
+    .unwrap();
+    let mut pixels = 0.0;
+    for row in rows {
+        let (_, _, a) = row.unwrap();
+        pixels += a.pixel_count();
+        assert!((a.area_stats().mean() - 3.0).abs() < 1e-12);
+    }
+    assert!((pixels - 1.0).abs() < 1e-8, "{pixels}");
+}
+
+/// Ground-area overlay keeps at most `decode_budget_bytes` of decoded chunks
+/// (or one chunk, when a chunk alone exceeds the budget), and the budget does
+/// not change results.
+#[test]
+fn ground_area_overlay_stays_within_the_decode_budget() {
+    use crate::helpers::{write_tiled, Crs};
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    // 512 x 64 pixels in 16 x 16 tiles: one chunk row is 32 tiles of 1 KiB
+    // native f32, which the default budget holds whole.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled.tif");
+    let crs = Crs::Geographic {
+        lon: 10.0,
+        lat: 0.32,
+        pixel_deg: 0.01,
+    };
+    write_tiled(&path, (512, 64), (16, 16), crs, "-9999", |c, r| {
+        (1 + (c * 7 + r * 3) % 13) as f32
+    });
+    const DENSE_CHUNK_BYTES: u64 = 16 * 16 * 8;
+
+    let run = |budget: Option<usize>| {
+        let mut cfg = config(GridKind::S2, 12, TransferMode::OVERLAY);
+        if let Some(budget) = budget {
+            cfg.decode_budget_bytes = budget;
+        }
+        let profile = RunProfile::new();
+        cfg.profile = Some(Arc::clone(&profile));
+        let mut cells = BTreeMap::new();
+        for row in
+            scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).unwrap()
+        {
+            let (res, cell, a) = row.unwrap();
+            cells.insert(
+                (res, cell),
+                (a.pixel_count(), a.retained_area_m2(), a.area_stats().sum),
+            );
+        }
+        (cells, profile.report().peak_decoded_bytes)
+    };
+
+    let (reference, default_peak) = run(None);
+    assert!(reference.len() > 50, "{} cells", reference.len());
+    assert!(
+        default_peak > 4 * DENSE_CHUNK_BYTES,
+        "the default budget should hold several chunks: {default_peak}"
+    );
+    for budget in [4 * DENSE_CHUNK_BYTES as usize, 1] {
+        let (bounded, peak) = run(Some(budget));
+        assert!(
+            peak <= (budget as u64).max(DENSE_CHUNK_BYTES),
+            "budget {budget}: peak {peak} bytes"
+        );
+        assert_eq!(bounded.len(), reference.len(), "budget {budget}");
+        for (key, (count, area, sum)) in &reference {
+            let (c, a, s) = bounded[key];
+            assert!((c - count).abs() <= 1e-9 * count.max(1.0), "{key:?}");
+            assert!((a - area).abs() <= 1e-9 * area.max(1.0), "{key:?}");
+            assert!((s - sum).abs() <= 1e-9 * sum.abs().max(1.0), "{key:?}");
+        }
+    }
+}
+
 #[test]
 fn auto_transfer_resolves_across_scales_and_constraints() {
     let (_tmp, cont_path) = TestGeoTiffBuilder::new(W, H)
