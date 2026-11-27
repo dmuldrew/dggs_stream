@@ -1231,3 +1231,100 @@ fn overview_matches_independent_gdal_extraction() {
         scan(&source, "7", "overlay", &[]).0
     );
 }
+
+/// Serve `body` over loopback HTTP with `Range` support until the process exits.
+fn serve_with_ranges(body: Vec<u8>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/overview-mask.tif",
+        listener.local_addr().unwrap()
+    );
+    let body = std::sync::Arc::new(body);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut method = String::new();
+                let mut range = None;
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    let header = line.trim_end().to_owned();
+                    line.clear();
+                    if header.is_empty() {
+                        break;
+                    }
+                    if method.is_empty() {
+                        method = header.split(' ').next().unwrap().to_owned();
+                    } else if let Some(spec) = header
+                        .to_ascii_lowercase()
+                        .strip_prefix("range: bytes=")
+                        .map(str::to_owned)
+                    {
+                        let (a, b) = spec.split_once('-').unwrap();
+                        let last = body.len() - 1;
+                        range = Some((
+                            a.parse::<usize>().unwrap_or(0),
+                            b.parse::<usize>().map_or(last, |b| b.min(last)),
+                        ));
+                    }
+                }
+                let mut out = stream;
+                let total = body.len();
+                let (status, extra, slice) = match range {
+                    Some((a, b)) if a <= b => (
+                        "206 Partial Content",
+                        format!("Content-Range: bytes {a}-{b}/{total}\r\n"),
+                        &body[a..=b],
+                    ),
+                    _ => ("200 OK", String::new(), &body[..]),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nAccept-Ranges: bytes\r\n{extra}Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    slice.len()
+                );
+                let _ = out.write_all(head.as_bytes());
+                if method != "HEAD" {
+                    let _ = out.write_all(slice);
+                }
+            });
+        }
+    });
+    url
+}
+
+#[test]
+fn remote_overview_matches_independent_gdal_extraction() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dggs-stream-core/tests/fixtures");
+    let url = serve_with_ranges(std::fs::read(fixtures.join("overview-mask.tif")).unwrap());
+    let reference = fixtures.join("overview-mask-level2.tif");
+    for mode in ["assign_centers", "interpolate"] {
+        let scan = |input: &str, flags: &[&str]| {
+            let mut args = vec![
+                "jsonl",
+                input,
+                "-r",
+                "7",
+                "--transfer",
+                mode,
+                "--columns",
+                "h3_index,resolution,count,sum",
+            ];
+            args.extend_from_slice(flags);
+            let result = run_ok(&args);
+            let mut rows: Vec<String> = String::from_utf8(result.stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            rows.sort();
+            assert!(!rows.is_empty());
+            (rows, String::from_utf8(result.stderr).unwrap())
+        };
+        let (remote, message) = scan(&url, &["--overview", "auto"]);
+        assert!(message.contains("32x16"), "{message}");
+        assert_eq!(remote, scan(s(&reference), &[]).0, "{mode}");
+    }
+}

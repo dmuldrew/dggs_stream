@@ -91,6 +91,9 @@ pub struct CliStreamOptions {
     /// pixels map onto cells (default: each pixel into the cell holding its centre;
     /// `auto` chooses from the cell-to-pixel area ratio and scan options).
     pub transfer: TransferMode,
+    /// `--overview auto`: approximate `assign_centers` and `interpolate` scans from the
+    /// coarsest compatible COG overview whose pixels fit the smallest requested cell area.
+    /// Native pixels are used by default, when no overview qualifies, and for overlay.
     pub auto_overview: bool,
     /// `--sampling`: quadrature pattern for `assign_centers` (sub-pixel) and `interpolate`
     /// (sub-cell polygon quadrature), defaulting to single-center sampling.
