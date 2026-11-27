@@ -96,6 +96,21 @@ impl Server {
             .collect()
     }
 
+    /// Install `host` into the server's extension directory as `name`.
+    fn install_extension_file(&self, host: &Path, name: &str) {
+        let out = Command::new("docker")
+            .args(["exec", &self.container, "pg_config", "--sharedir"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "pg_config --sharedir failed");
+        let sharedir = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        run_ok(Command::new("docker").args([
+            "cp",
+            &host.to_string_lossy(),
+            &format!("{}:{sharedir}/extension/{name}", self.container),
+        ]));
+    }
+
     fn logs(&self) -> String {
         let out = Command::new("docker")
             .args(["logs", &self.container])
@@ -384,6 +399,66 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
         legacy,
         ["0.7.0", "$libdir/raster_h3_pg", cell_hex.as_str()],
         "raster_h3 under its former name"
+    );
+
+    // A true upgrade: install raster_h3 0.4.0 from its historical install script (no
+    // longer shipped), run every upgrade script with ALTER EXTENSION UPDATE, and compare
+    // the result with a fresh 0.7.0 install. Upgraded functions keep the library path
+    // 0.4.0 recorded, `$libdir/raster_h3_pg`.
+    server.install_extension_file(
+        &repo_root().join("tests/fixtures/pg/raster_h3--0.4.0.sql"),
+        "raster_h3--0.4.0.sql",
+    );
+    for script in [
+        "raster_h3--0.4.0--0.5.0.sql",
+        "raster_h3--0.5.0--0.6.0.sql",
+        "raster_h3--0.6.0--0.7.0.sql",
+    ] {
+        server.install_extension_file(
+            &repo_root().join("crates/dggs-stream-pg/sql").join(script),
+            script,
+        );
+    }
+    // Every function of the extension: signature, result type, volatility, strictness,
+    // parallel safety and C symbol.
+    const FUNCTIONS: &str =
+        "SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') -> '
+                || pg_get_function_result(p.oid) || ' ' || p.provolatile || p.proisstrict::text
+                || p.proparallel || ' ' || p.prosrc
+         FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
+         JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'raster_h3'
+         ORDER BY 1;";
+    let fresh = server.query(&format!(
+        "CREATE DATABASE upgrade_fresh;
+         \\c upgrade_fresh
+         CREATE EXTENSION raster_h3;
+         {FUNCTIONS}"
+    ));
+    let upgraded = server.query(&format!(
+        "CREATE DATABASE upgrade_from_040;
+         \\c upgrade_from_040
+         CREATE EXTENSION raster_h3 VERSION '0.4.0';
+         ALTER EXTENSION raster_h3 UPDATE;
+         {FUNCTIONS}"
+    ));
+    assert!(
+        fresh.len() > 10,
+        "PG {major}: fresh raster_h3 functions: {fresh:?}"
+    );
+    assert_eq!(
+        upgraded, fresh,
+        "PG {major}: raster_h3 upgraded from 0.4.0 differs from a fresh 0.7.0 install"
+    );
+    let upgraded_state = server.query(&format!(
+        "\\c upgrade_from_040
+         SELECT extversion FROM pg_extension WHERE extname = 'raster_h3';
+         SELECT DISTINCT probin FROM pg_proc WHERE proname = 'h3_to_string';
+         SELECT h3_to_string({cell});"
+    ));
+    assert_eq!(
+        upgraded_state,
+        ["0.7.0", "$libdir/raster_h3_pg", cell_hex.as_str()],
+        "PG {major}: raster_h3 upgraded from 0.4.0"
     );
 
     // No backend crashed along the way.
