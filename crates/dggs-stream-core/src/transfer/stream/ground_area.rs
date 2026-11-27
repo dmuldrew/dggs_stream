@@ -34,6 +34,10 @@ use std::ops::Range;
 /// weighted sum is the integrated quantity. A bbox selects whole pixels by center.
 /// Coarse resolutions and pole-containing candidate cells requiring the ordinary
 /// overlay's center fallback are unsupported.
+///
+/// All resolutions share one pass, and cells are yielded in completion order, so
+/// resolutions interleave. Take a prefix only if any subset of completed cells
+/// will do.
 pub fn scan_ground_area_overlay(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,

@@ -95,6 +95,13 @@ in ellipsoidal area with latitude along the resulting segments. See the
 cell diameter above 500 km or a candidate cell enclosing a pole. It processes
 row windows serially and supports weighted overlay with omitted NoData.
 
+With several resolutions, one pass serves them all and each cell is emitted as
+soon as it completes, so rows of different resolutions interleave. The full row
+set does not depend on this order, but a limited read (for example SQL `LIMIT n`
+without `ORDER BY`, or `GroundAreaBatchReader` stopped after one batch) returns
+whichever cells completed first, not the cells of the first resolution. Sort
+explicitly when the subset matters.
+
 ## Pipeline
 
 The sample-unpacking boundary checks TIFF chunk dimensions, arithmetic overflow, source
