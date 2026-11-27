@@ -1199,8 +1199,10 @@ def scan_raster(
       transfer mode refuses it, including one `transfer="auto"` resolves to. The decode
       budget applies in every mode: it controls prefetched sample buffers and permits one
       oversized chunk to proceed alone.
-    - `sampling`: sub-pixel sampling pattern, one of `center` (default), `5point`,
-      `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`.
+    - `sampling`: quadrature pattern, one of `center` (default), `5point`,
+      `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`. Samples sub-pixel
+      positions in `"assign_centers"` and area-preserving sub-cell polygon positions
+      in `"interpolate"`.
     - `overlap_rule`: how overlapping mosaic tiles are resolved: `cutline` (default),
       `first` or `average`.
     - `min_majority_fraction` (categorical): drop cells whose majority class covers less
@@ -1234,8 +1236,8 @@ def scan_raster(
       pixel once); `count` is then the overlapped area in pixels. With
       `mass_preserve=True` each pixel's weights are normalised to sum to one, so the
       `sum` column adds up to the raster's total. Categorical scans take `"overlay"`
-      and `"interpolate"` with `interpolation="nearest"`. Not combinable with `sampling`,
-      `spectral_formula` or partitions.
+      and `"interpolate"` with `interpolation="nearest"`. Not combinable with
+      `spectral_formula` or partitions (`"overlay"` also rejects non-default `sampling`).
     - `valid_coverage_threshold`: minimum valid fraction (0 to 1) of the selected
       raster overlap. Mass-preserving overlay retains all contributions.
 

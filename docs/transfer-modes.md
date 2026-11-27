@@ -7,7 +7,7 @@ grid (H3, A5, S2, HEALPix) and in every engine except PostgreSQL. This page cove
 
 1. [Choosing a mode](#choosing-a-mode), or [letting the engine choose](#let-the-engine-choose-auto)
 2. [`assign_centers`](#assign_centers-the-default), the default
-3. [`interpolate`](#interpolate-the-value-at-each-cells-centre), for cells finer than the pixels
+3. [`interpolate`](#interpolate-the-value-at-each-cells-centre), for cells finer than the pixels, optionally with sub-cell `sampling`
 4. [The overlay modes](#the-overlay-modes), for exact cell edges, conserved totals and true ground areas
 5. [What can't be combined](#what-cant-be-combined) and [usage by engine](#usage-by-engine)
 
@@ -60,8 +60,9 @@ HEALPix; on H3 and A5 overlay was also faster from about 12 pixels per cell. Ask
 
 Scan options take precedence over the ratio:
 
-- `compact`, `spectral_formula` and sub-pixel `sampling` work only with centre assignment, so
-  `auto` runs `assign_centers`.
+- `compact` and `spectral_formula` work only with centre assignment, so `auto` runs
+  `assign_centers`. A non-`center` `sampling` keeps `interpolate` below 1:1 (as sub-cell points)
+  and otherwise runs `assign_centers`, since `overlay` refuses it.
 - `valid_coverage_threshold` and `histogram_weight = "area"` need overlap areas, so `auto` runs
   weighted `overlay`.
 - Partitioned scans (`plan_partitions`, Spark) run `assign_centers`. Pass `transfer = "overlay"`
@@ -121,11 +122,21 @@ and are missing from the output. Use `overlay` or `interpolate` for those cases.
 
 `assign`, `centers` and `centres` are accepted as names too.
 
-## `interpolate`: the value at each cell's centre
+## `interpolate`: the value at (or across) each cell
 
 Every cell whose centre lies on the raster gets the raster's value at that centre, interpolated
-from the surrounding pixels. Each cell is filled exactly once, so `count` is 1 and `mean`, `min`,
-`max` and `sum` all hold the interpolated value.
+from the surrounding pixels. By default (`sampling = 'center'`), each cell is evaluated once at its
+centre, so `count` is 1, `mean`, `min`, `max` and `sum` all hold that interpolated value, and
+`stddev` is `0`.
+
+With a non-default [`sampling`](super-sampling.md) pattern (`'rgss'`, `'8rooks'`, `'16point'`, etc.),
+`interpolate` projects the cell's boundary polygon into pixel space once and maps the `[0, 1]^2`
+offsets across the cell interior with constant-Jacobian star-triangle mapping (`CellPolygonSampler`).
+Each valid sample point adds its normalized weight to the cell, so a fully covered cell keeps
+`count = 1.0` (edge or partial-NoData cells receive their valid tap weight in `(0, 1]`), while `min`,
+`max`, `stddev`, and `quantiles` reflect intra-cell variation across the smooth interpolated surface.
+Pairing `interpolation = 'bicubic'` with `'rgss'` or `'16point'` also reduces cell `mean` error around
+the `1×–4×` pixel-to-cell crossover compared to both 1-point `center` interpolation and `overlay`.
 
 `interpolation` picks the kernel:
 
@@ -411,7 +422,7 @@ kernel from the default, and can't be combined with:
 
 | Option | Why |
 | :--- | :--- |
-| `sampling` other than `center` | The transfer mode replaces sub-pixel sampling |
+| `sampling` other than `center` with `overlay` | Overlay already integrates each pixel's exact overlap; `assign_centers` and `interpolate` accept `sampling` |
 | `compact` | Not supported by the transfer kernel |
 | `spectral_formula` | Not supported by the transfer kernel |
 | Partitioned scans, except single-band continuous weighted overlay | Only that case [merges across partitions](#partitioned-overlay) |
@@ -424,13 +435,11 @@ rejected, with a message asking for a coarser resolution.
 
 ### `transfer` vs. `sampling`
 
-The two work in opposite directions:
+`sampling` (`'rgss'`, `'8rooks'`, `'16point'`, ...) works as a quadrature pattern in `[0, 1]^2` and pairs with **two** transfer modes in opposite directions:
 
-- `sampling` (`'rgss'`, `'5point'`, ...) works **from the pixels**: it takes several points inside
-  each pixel and assigns each to the cell holding it, for anti-aliased edges in the default mode.
-  It approximates what `overlay` computes exactly.
-- `transfer = 'interpolate'` works **from the cells**: it reads the raster's value at each cell's
-  centre.
+- **With `assign_centers` (sub-pixel sampling):** evaluates multiple points inside each **pixel** and assigns each sample's weight to the cell containing it. Useful when `assign_centers` features are required (`spectral_formula`, compaction, partitions, `> 500 km` cells); otherwise `overlay` computes pixel splitting analytically.
+- **With `interpolate` (sub-cell sampling):** maps the pattern inside each **cell** polygon and interpolates the raster at each sample point. Useful around `1×–4×` px/cell on smooth fields (with `bicubic`) and whenever intra-cell `stddev`/`min`/`max`/`quantiles` are needed.
+- **With `overlay`:** refused (non-`'center'` `sampling` is rejected with an error).
 
 `transfer = 'sample'` is not a mode; it is rejected with a pointer to `'interpolate'` and to
 `sampling`.

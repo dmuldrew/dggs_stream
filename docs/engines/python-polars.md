@@ -72,7 +72,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `band` | `int` | `None` (1) | 1-indexed band to aggregate |
 | `bands` | sequence of integers | `None` | Ordered one-based bands from one interleaved or band-separated TIFF. Continuous center-assignment scans share the grid columns and return statistics per band. |
 | `ground_area` | `bool` | `None` (off) | Weight values by WGS84 ellipsoidal area. Center assignment uses the full pixel. Weighted overlay uses the clipped intersection with each cell and accepts `valid_coverage_threshold` in terms of valid area divided by selected overlap area. Needs one north-up, single-band EPSG:4326 raster, omitted NoData and the default center sampling; incompatible with `bands`, quantiles, formulas, partitions and mass normalization. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` in place of the usual statistics; `min_count` filters on the sum of valid pixel fractions. A `bbox` that misses the raster is an error, as in ordinary scans. |
-| `sampling` | `str` | `None` (`"center"`) | Sub-pixel sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point` |
+| `sampling` | `str` | `None` (`"center"`) | Sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`. Sub-pixel points with `assign_centers`; sub-cell points inside each cell polygon with `transfer="interpolate"`; refused by `overlay` |
 | `overlap_rule` | `str` | `None` (`"cutline"`) | Mosaic overlaps: `cutline`, `first` or `average` |
 | `min_majority_fraction` | `float` | `None` | Categorical only: drop cells whose majority class covers less than this fraction |
 | `spectral_formula` | `str` | `None` | Continuous only: `ndvi`, `ndwi`, `nbr` or `evi`, from `nir_band` (4), `red_band` (3), `green_band` (2), `blue_band` (1), `swir_band` (6) |
@@ -342,6 +342,12 @@ ndvi = dggs_stream.scan_raster(
 # Anti-aliased cell edges: four rotated-grid samples per pixel
 lf = dggs_stream.scan_raster("dem.tif", 10, sampling="rgss")
 
+# Cells about the size of pixels: 16 bicubic samples across each cell, so stddev, min and
+# max describe the field inside the cell
+lf = dggs_stream.scan_raster(
+    "dem.tif", 10, transfer="interpolate", interpolation="bicubic", sampling="16point",
+)
+
 # Mosaic where earlier files win in overlaps; categorical cells with a clear majority
 lf = dggs_stream.scan_raster(
     "newest.tif,older.tif", 8, categorical=True,
@@ -354,7 +360,7 @@ It requires a resolution with a maximum cell diameter of at most 500 km and reje
 
 The names and defaults match the DuckDB parameters; see the
 [scan options](../polars-api-reference.md#keyword-parameters) and
-[sub-pixel sampling](../super-sampling.md).
+[sub-pixel and sub-cell sampling](../super-sampling.md).
 
 ### Partitioned scans (Spark and other distributed engines)
 

@@ -29,7 +29,7 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `nodata` | `DOUBLE` | `None` (auto) | Custom NoData sentinel value to exclude from aggregations. |
 | `scale_offset` | `BOOLEAN` | `true` | Convert stored values to physical values with each band's GDAL `SCALE`/`OFFSET` before statistics and spectral indices. `false` aggregates raw stored values. See [Band calibration and validity](#band-calibration-and-validity). |
 | `chunk_size` | `BIGINT` | `512` | Strip/tile buffer window size in rows. |
-| `sampling` | `VARCHAR` | `'center'` | Sub-pixel super-sampling preset (`'center'`, `'rgss'`, `'hex'`, `'gaussian'`, `'5point'`, `'8rooks'`, `'9point'`, `'16point'`). Unknown names are rejected. |
+| `sampling` | `VARCHAR` | `'center'` | Quadrature sampling preset (`'center'`, `'rgss'`, `'hex'`, `'gaussian'`, `'5point'`, `'8rooks'`, `'9point'`, `'16point'`). Applies sub-pixel for `'assign_centers'` and sub-cell for `'interpolate'`; rejected by `'overlay'`. Unknown names are rejected. See [Super-Sampling](super-sampling.md). |
 | `min_lon`, `min_lat`, `max_lon`, `max_lat` | `DOUBLE` | `None` | Region of Interest (ROI) bounding box coordinates for chunk pruning. |
 | `bbox` | `VARCHAR` | `None` | Bounding box as a single string: `'min_lon,min_lat,max_lon,max_lat'` (alternative to individual coordinate parameters). |
 | `h3_cell` | `BIGINT` | `None` | Single H3 cell index for predicate pushdown (only process chunks intersecting this cell). |
@@ -168,7 +168,7 @@ Every engine reads these from the GeoTIFF and applies them the same way:
 | `nodata` | `DOUBLE` | `None` (auto) | Custom NoData sentinel value. |
 | `scale_offset` | `BOOLEAN` | `true` | Accepted for symmetry and ignored: class codes are never scaled. |
 | `chunk_size` | `BIGINT` | `512` | Strip/tile buffer window size in rows. |
-| `sampling` | `VARCHAR` | `'center'` | Sub-pixel super-sampling preset (`'center'`, `'rgss'`, `'hex'`, etc.). |
+| `sampling` | `VARCHAR` | `'center'` | Quadrature sampling preset (`'center'`, `'rgss'`, `'hex'`, `'gaussian'`, `'5point'`, `'8rooks'`, `'9point'`, `'16point'`). Sub-pixel for `'assign_centers'`, sub-cell for `'interpolate'`; rejected by `'overlay'`. See [Super-Sampling](super-sampling.md). |
 | `min_lon`, `min_lat`, `max_lon`, `max_lat` | `DOUBLE` | `None` | Bounding box coordinates for spatial Region of Interest (ROI) chunk pruning. |
 | `bbox` | `VARCHAR` | `None` | Bounding box as a single string: `'min_lon,min_lat,max_lon,max_lat'`. |
 | `h3_cell` | `BIGINT` | `None` | Single H3 cell index for predicate pushdown. |

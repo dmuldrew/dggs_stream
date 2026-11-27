@@ -14,7 +14,7 @@ mode in depth; in short:
 | :--- | :--- | :--- |
 | `auto` | One of the three below, chosen from the cell-to-pixel area ratio and the other options | You'd rather not choose |
 | `assign_centers` (default) | Every pixel whose centre it holds (or sub-pixel samples, see [Super-Sampling](super-sampling.md)) | Cells about the size of pixels, where it is the fastest kernel ([comparison](transfer-modes.md#comparing-the-modes)) |
-| `interpolate` | The value interpolated at its centre (`interpolation`: `nearest`, `bilinear`, `bicubic`, `lanczos`) | Cells finer than the pixels |
+| `interpolate` | The value interpolated at its centre (`interpolation`: `nearest`, `bilinear`, `bicubic`, `lanczos`), or across sub-cell [`sampling`](super-sampling.md) points inside the cell | Cells finer than or comparable to the pixels; sub-cell sampling adds intra-cell spread |
 | `overlay` | Every pixel it overlaps, weighted by the fraction it covers | Many pixels per cell, exact edges, conserved totals |
 
 The [overlay modes](transfer-modes.md#the-overlay-modes) refine `overlay`:
@@ -23,8 +23,8 @@ The [overlay modes](transfer-modes.md#the-overlay-modes) refine `overlay`:
 `valid_coverage_threshold` drops cells with too little valid data. Categorical scans accept
 `overlay` (class areas) and `interpolate` with `nearest` only.
 
-Transfer modes exclude compaction, spectral formulas and sub-pixel sampling; partitioned scans
-support only single-band continuous weighted overlay
+Transfer modes exclude compaction and spectral formulas, and `overlay` refuses non-`center`
+`sampling` (`interpolate` uses it for sub-cell points); partitioned scans support only single-band continuous weighted overlay
 ([Spark](engines/spark.md#partitioned-weighted-overlay)). PostgreSQL does not expose them yet.
 The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands of
 rows, `interp.rs` holds the interpolation kernels, `clip.rs` does the exact polygon–pixel overlap,
@@ -132,6 +132,7 @@ The code is in [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs)
 | grid | `--grid` | per-grid functions, or `grid :=` | `grid=` | per-grid functions, a grid-name argument, `with_grid` | per-grid functions |
 | automatic resolution | `-r auto[±N]` | `resolutions := 'auto'` | `resolutions="auto"`, `auto_resolution()` | `'auto'` | `{grid}_auto_resolution()` |
 | transfer mode | `--transfer`, `--interpolation`, `--overlay-weighted`, `--mass-preserve` | `transfer :=`, `interpolation :=`, `overlay_weighted :=`, `mass_preserve :=` | `transfer=`, `interpolation=`, `overlay_weighted=`, `mass_preserve=` | `'transfer=overlay'`-style arguments, `with_transfer` | — |
+| sampling pattern | `--sampling` | `sampling :=` | `sampling=` | `with_sampling` on the providers (no SQL argument) | — |
 | minimum valid overlay fraction | `--valid-coverage-threshold` | `valid_coverage_threshold :=` | `valid_coverage_threshold=` | — | — |
 | histogram | `--histogram`, `--histogram-weight`, `--histogram-normalize` (`ipc`, `jsonl`; implies `-c`) | `histogram :=`, `histogram_weight :=`, `histogram_normalize :=` | `histogram=`, `histogram_weight=`, `histogram_normalize=` | `'histogram=...'` arguments, `with_histogram` | — |
 | NoData policy and rounding | `--nodata-policy`, `--emit-nodata-value`, `--decimals` | `nodata_policy :=`, `emit_nodata_value :=`, `decimals :=` | `nodata_policy=`, `emit_nodata_value=`, `decimals=` | `'nodata_policy=emit'`-style arguments, `with_output_policy` | `nodata_policy`, `emit_nodata_value`, `decimals` arguments |
