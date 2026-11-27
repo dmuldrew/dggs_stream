@@ -31,7 +31,7 @@ RUN cargo build --release --workspace && \
         --input target/release/libdggs_stream.so \
         --output target/release/dggs_stream.duckdb_extension \
         --platform "${PLAT}" \
-        --duckdb-version v1.2.0
+        --duckdb-version "${DUCKDB_VERSION}"
 
 # ==============================================================================
 # Stage 2: Runtime Environment with DuckDB CLI

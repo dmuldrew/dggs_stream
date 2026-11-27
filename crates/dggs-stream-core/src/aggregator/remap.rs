@@ -271,14 +271,15 @@ fn parse_target(s: &str) -> Result<Option<i64>> {
 fn parse_source_rules(src: &str, target: Option<i64>, rules: &mut Vec<RemapRule>) -> Result<()> {
     // 1. Check for list in brackets: [101, 102, 103]. Nested single-element
     //    wrappers are collapsed iteratively so a pathological input like
-    //    '[[[[…]]]]' cannot exhaust the call stack.
+    //    '[[[[…]]]]' cannot exhaust the call stack. Peeling a layer only
+    //    removes brackets and whitespace, so the inner text holds a comma
+    //    exactly when `src` does: test that once rather than rescanning the
+    //    inner text per layer, which made deep comma-free nesting quadratic.
     let mut trimmed = src.trim();
-    while trimmed.starts_with('[') && trimmed.ends_with(']') {
+    let has_comma = trimmed.contains(',');
+    while !has_comma && trimmed.starts_with('[') && trimmed.ends_with(']') {
         let inner = trimmed[1..trimmed.len() - 1].trim();
-        if !(inner.starts_with('[')
-            && inner.ends_with(']')
-            && !inner[1..inner.len() - 1].contains(','))
-        {
+        if !(inner.starts_with('[') && inner.ends_with(']')) {
             break;
         }
         trimmed = inner;
@@ -371,6 +372,35 @@ fn split_entries(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_comma_free_nesting_parses_in_linear_time() {
+        // 200k layers: the old per-layer comma rescan made this ~2e10 byte
+        // comparisons; the linear peel finishes immediately.
+        let depth = 200_000;
+        let src = format!("{}7{}", "[".repeat(depth), "]".repeat(depth));
+        let mut rules = Vec::new();
+        parse_source_rules(&src, Some(1), &mut rules).expect("nested single value");
+        assert!(matches!(rules.as_slice(), [RemapRule::Exact(7, Some(1))]));
+
+        let spaced = format!("{}7{}", "[ ".repeat(depth), " ]".repeat(depth));
+        rules.clear();
+        parse_source_rules(&spaced, None, &mut rules).expect("nested with spaces");
+        assert!(matches!(rules.as_slice(), [RemapRule::Exact(7, None)]));
+    }
+
+    #[test]
+    fn nested_lists_with_commas_keep_their_existing_handling() {
+        let mut rules = Vec::new();
+        parse_source_rules("[1, 2]", Some(3), &mut rules).expect("flat list");
+        assert!(matches!(
+            rules.as_slice(),
+            [RemapRule::Exact(1, Some(3)), RemapRule::Exact(2, Some(3))]
+        ));
+        // A list wrapped in a second bracket pair is not unwrapped; its
+        // halves are not valid tokens.
+        assert!(parse_source_rules("[[1, 2]]", Some(3), &mut Vec::new()).is_err());
+    }
 
     #[test]
     fn test_parse_fuel_models_example() {

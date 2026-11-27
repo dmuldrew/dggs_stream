@@ -146,6 +146,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Remote HTTP reads share one retry budget between transient-status/transport retries and truncated-body retries, so a single probe or range fetch sends at most five requests (plus redirect hops) instead of up to 25.
+- Remap specifications with deeply nested comma-free brackets (`[[[…7…]]]`) now parse in linear time instead of quadratic.
+- The Docker image passes `DUCKDB_VERSION` to the extension footer, so overriding the build arg changes both the platform tag and the footer version.
+
 - A5 `cells_in_bbox` polygon fills now slice wide longitude spans (`MAX_A5_FILL_LON_SPAN = 10.0`, shrunk further at fine resolutions to fit `check_a5_fill_budget`'s spherical cap), densify north/south edges, and pad by the chord sagitta so `overlay`, `ground_area` overlay, and `interpolate` retain every cell across wide, thin raster strips.
 
 - DuckDB `COUNT(*)` over a `bands` scan no longer fails on DuckDB 1.2.0, which projects only its synthetic row-ID column for row counts.

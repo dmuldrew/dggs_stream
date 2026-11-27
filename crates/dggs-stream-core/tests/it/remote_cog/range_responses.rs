@@ -177,6 +177,24 @@ fn persistently_truncated_range_body_fails_after_retries() {
 }
 
 #[test]
+fn status_and_body_retries_share_one_budget() {
+    if !MockHttpServer::is_networking_supported() {
+        eprintln!("Skipping test: localhost networking not permitted in test environment");
+        return;
+    }
+    let data: Vec<u8> = (0..400_000).map(|i| (i % 251) as u8).collect();
+    let server = MockHttpServer::start(data);
+    let source = RemoteHttpSource::open(&format!("{}/test.tif", server.url_base)).unwrap();
+    // Two 503s, then every body is truncated. With independent budgets the
+    // first body attempt alone could take 1 + 4 requests and each of the 4
+    // body retries as many again; the shared budget caps the read at 1 + 4.
+    server.transient_failures.store(2, Ordering::SeqCst);
+    server.body_truncations.store(100, Ordering::SeqCst);
+    assert!(source.fetch_range(200_000, 200_099).is_err());
+    assert_eq!(server.request_count.load(Ordering::SeqCst), 1 + 1 + 4);
+}
+
+#[test]
 fn truncated_probe_body_is_retried() {
     if !MockHttpServer::is_networking_supported() {
         eprintln!("Skipping test: localhost networking not permitted in test environment");
