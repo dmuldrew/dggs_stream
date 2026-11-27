@@ -32,10 +32,14 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 For raster commands, `<input>` can be a path, glob, comma-separated list or VRT (it may also be given with
 `-i/--input`). Mosaic overlaps use the `cutline` rule.
 
+`polyfill` reads GeoJSON, not rasters, and takes only `--grid`, `-r/--resolution` (a single
+resolution), `--containment` and `-o`; it rejects every other option. In the table below, "all"
+means the raster commands.
+
 | Option | Applies to | Meaning |
 | :--- | :--- | :--- |
 | `--grid <h3\|a5\|s2\|healpix>` | all | Grid to index onto (default `h3`); the index columns are `{grid}_index` / `{grid}_hex` |
-| `-r, --resolutions <LIST>` (alias `--resolution`) | all | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29. `auto`, `auto+N`, `auto-N`: the resolution whose cells match the pixel size ([Grids](../grids.md#automatic-resolution)) |
+| `-r, --resolutions <LIST>` (alias `--resolution`) | all; `polyfill` takes one resolution as `-r/--resolution` | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29. `auto`, `auto+N`, `auto-N`: the resolution whose cells match the pixel size ([Grids](../grids.md#automatic-resolution)) |
 | `-c, --categorical` | all | Categorical aggregation |
 | `--format <wide\|long>` | `ipc`, `jsonl` | Categorical layout (default `wide`) |
 | `--crs <CRS>` (alias `--source-crs`) | all | Source CRS override, e.g. `EPSG:4326` |
