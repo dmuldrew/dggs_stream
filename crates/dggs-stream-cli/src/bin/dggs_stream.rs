@@ -96,6 +96,7 @@ fn print_help() {
           -r, --resolutions <LIST>   Grid resolutions (H3: 0..=15, A5 and S2: 0..=30,\n                                     \
                                      HEALPix: 0..=29; default: 8), or `auto` for the\n                                     \
                                      resolution whose cells match the pixel size\n                                     \
+                                     `auto-finer` or `auto-coarser` includes an exact match.\n                                     \
                                      (`auto+1` the closest finer than a pixel,\n                                     \
                                      `auto-1` the closest at least pixel-sized)\n  \
           -c, --categorical          Enable categorical aggregation\n  \

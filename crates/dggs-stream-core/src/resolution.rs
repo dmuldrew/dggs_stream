@@ -4,7 +4,8 @@
 //! The grids number their resolutions on unrelated scales (H3 `0..=15`, A5 and S2
 //! `0..=30`, HEALPix `0..=29`), so "resolution 9" means cells of very different sizes
 //! from one grid to the next. `auto` asks for the same thing on every grid: cells about
-//! the size of a pixel, on whichever side is closer. An offset asks for a side:
+//! the size of a pixel, on whichever side is closer. `auto-finer` and `auto-coarser`
+//! select the closest size on the requested side, including equality. An offset asks for a rank:
 //! `auto+N` is the N-th resolution whose cells are smaller than a pixel and `auto-N` the
 //! N-th whose cells are at least a pixel, counting from the one closest to the pixel
 //! (see [`directional_resolution`](crate::resolution::directional_resolution)).
@@ -25,6 +26,8 @@ const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F);
 pub enum ResolutionSpec {
     /// These resolutions (sorted, without repeats).
     Fixed(Vec<u8>),
+    /// The closest mean cell area on the requested side, including equality.
+    Directional(ResolutionDirection),
     /// With `offset` 0, the resolution whose mean cell area best matches the raster's
     /// ground pixel area. With `offset` N > 0, the N-th resolution whose cells are
     /// smaller than a pixel; with -N, the N-th whose cells are at least a pixel; both
@@ -35,6 +38,37 @@ pub enum ResolutionSpec {
     },
 }
 
+/// Inclusive bounds on the mean cell area for a named auto selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionDirection {
+    /// Largest cell area at most the pixel area.
+    Finer,
+    /// Smallest cell area at least the pixel area.
+    Coarser,
+}
+
+impl ResolutionDirection {
+    fn selector(self) -> &'static str {
+        match self {
+            Self::Finer => "auto-finer",
+            Self::Coarser => "auto-coarser",
+        }
+    }
+
+    fn resolve(self, grid: GridKind, pixel_area: f64) -> Result<u8> {
+        let finest = grid.max_resolution();
+        let mut levels = 0..=finest;
+        let selected = match self {
+            Self::Finer => levels.find(|&r| grid.area_m2(r) <= pixel_area),
+            Self::Coarser => levels.rfind(|&r| grid.area_m2(r) >= pixel_area),
+        };
+        selected.ok_or_else(|| DggsStreamError::InvalidParameter(format!(
+            "{} cannot match pixel area {pixel_area:.4e} m² on {}: mean cell areas range from {:.4e} to {:.4e} m²",
+            self.selector(), grid.label(), grid.area_m2(finest), grid.area_m2(0)
+        )))
+    }
+}
+
 impl ResolutionSpec {
     /// The area match itself.
     pub const AUTO: Self = Self::Auto { offset: 0 };
@@ -43,7 +77,7 @@ impl ResolutionSpec {
     /// its finest or coarsest resolution, so no grid needs more.
     pub const MAX_OFFSET: i32 = 64;
 
-    /// Parse `auto`, `auto+N` / `auto-N` (ASCII case-insensitive, spaces allowed around
+    /// Parse `auto`, `auto-finer`, `auto-coarser`, `auto+N` / `auto-N` (ASCII case-insensitive, spaces allowed around
     /// the sign), or a comma- or space-separated list of resolutions of `grid`.
     pub fn parse(grid: GridKind, text: &str) -> Result<Self> {
         let trimmed = text.trim();
@@ -54,7 +88,7 @@ impl ResolutionSpec {
             .map(Self::Fixed)
             .ok_or_else(|| {
                 DggsStreamError::InvalidParameter(format!(
-                    "Invalid resolutions '{text}': expected 'auto', 'auto+N', 'auto-N' or {} \
+                    "Invalid resolutions '{text}': expected 'auto', 'auto-finer', 'auto-coarser', 'auto+N', 'auto-N' or {} \
                      resolutions between 0 and {}, e.g. 7,8",
                     grid.label(),
                     grid.max_resolution()
@@ -74,9 +108,14 @@ impl ResolutionSpec {
         if rest.is_empty() {
             return Some(Ok(Self::AUTO));
         }
+        for direction in [ResolutionDirection::Finer, ResolutionDirection::Coarser] {
+            if trimmed.eq_ignore_ascii_case(direction.selector()) {
+                return Some(Ok(Self::Directional(direction)));
+            }
+        }
         let bad = || {
             DggsStreamError::InvalidParameter(format!(
-                "Invalid resolution '{text}': expected 'auto', 'auto+N' or 'auto-N' with N \
+                "Invalid resolution '{text}': expected 'auto', 'auto-finer', 'auto-coarser', 'auto+N' or 'auto-N' with N \
                  at most {}",
                 Self::MAX_OFFSET
             ))
@@ -97,13 +136,16 @@ impl ResolutionSpec {
 
     /// Whether the resolution depends on the raster.
     pub fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto { .. })
+        !matches!(self, Self::Fixed(_))
     }
 
     /// The resolutions to scan `mosaic` at on `grid`.
     pub fn resolve(&self, grid: GridKind, mosaic: &MosaicReader) -> Result<Vec<u8>> {
         match self {
             Self::Fixed(resolutions) => Ok(resolutions.clone()),
+            Self::Directional(direction) => Ok(vec![
+                direction.resolve(grid, mosaic_pixel_ground_area_m2(mosaic)?)?
+            ]),
             Self::Auto { offset } => Ok(vec![auto_resolution(grid, mosaic, *offset)?]),
         }
     }
@@ -130,7 +172,7 @@ impl ResolutionSpec {
     ) -> Result<Vec<u8>> {
         match self {
             Self::Fixed(resolutions) => Ok(resolutions.clone()),
-            Self::Auto { .. } => {
+            Self::Auto { .. } | Self::Directional(_) => {
                 let mosaic = MosaicReader::open_with_remote_source_factory(
                     paths,
                     None,
@@ -156,6 +198,7 @@ impl std::fmt::Display for ResolutionSpec {
                 }
                 Ok(())
             }
+            Self::Directional(direction) => f.write_str(direction.selector()),
             Self::Auto { offset: 0 } => f.write_str("auto"),
             Self::Auto { offset } => write!(f, "auto{offset:+}"),
         }
@@ -427,6 +470,8 @@ mod tests {
             assert!(ResolutionSpec::parse(grid, "").is_err());
             for spec in [
                 auto(0),
+                ResolutionSpec::Directional(ResolutionDirection::Finer),
+                ResolutionSpec::Directional(ResolutionDirection::Coarser),
                 auto(3),
                 auto(-1),
                 ResolutionSpec::Fixed(vec![2, 5]),
@@ -465,6 +510,30 @@ mod tests {
             assert_eq!(offset_resolution(grid, 5, 2), 7);
             assert_eq!(offset_resolution(grid, 5, -9), 0);
             assert_eq!(offset_resolution(grid, 5, 64), finest);
+        }
+    }
+
+    #[test]
+    fn named_directions_include_exact_matches_and_bracket_pixel_area() {
+        use ResolutionDirection::{Coarser, Finer};
+        for grid in GridKind::ALL {
+            let finest = grid.max_resolution();
+            for r in 0..=finest {
+                let area = grid.area_m2(r);
+                assert_eq!(Finer.resolve(grid, area).unwrap(), r);
+                assert_eq!(Coarser.resolve(grid, area).unwrap(), r);
+                if r < finest {
+                    let between = (area * grid.area_m2(r + 1)).sqrt();
+                    assert_eq!(Finer.resolve(grid, between).unwrap(), r + 1);
+                    assert_eq!(Coarser.resolve(grid, between).unwrap(), r);
+                }
+            }
+            let small = grid.area_m2(finest) / 2.0;
+            let large = grid.area_m2(0) * 2.0;
+            assert!(Finer.resolve(grid, small).is_err());
+            assert_eq!(Coarser.resolve(grid, small).unwrap(), finest);
+            assert!(Coarser.resolve(grid, large).is_err());
+            assert_eq!(Finer.resolve(grid, large).unwrap(), 0);
         }
     }
 

@@ -72,7 +72,7 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `min_count` | `float \| None` | `None` | Drop cells with fewer samples than this (`count`, or `total_count` for categorical scans). Inclusive: a cell with exactly `min_count` samples is kept. |
 | `min_mean` / `max_mean` | `float \| None` | `None` | Continuous only: drop cells whose `mean` is below / above this value (inclusive). |
 | `min_majority_fraction` | `float \| None` | `None` | Categorical only: drop cells whose majority class covers less than this fraction (0 to 1) of their samples. |
-| `grid` | `str \| None` | `"h3"` | `"h3"`, `"a5"`, `"s2"` or `"healpix"`. Cell columns become `{grid}_index` / `{grid}_hex` and `resolutions` follow that grid's range (`GRIDS[grid]` is the finest). `resolutions` also accepts `"auto"`, `"auto+N"`, `"auto-N"`. See [Grids](grids.md). |
+| `grid` | `str \| None` | `"h3"` | `"h3"`, `"a5"`, `"s2"` or `"healpix"`. Cell columns become `{grid}_index` / `{grid}_hex` and `resolutions` follow that grid's range (`GRIDS[grid]` is the finest). `resolutions` also accepts `"auto"`, `"auto-finer"`, `"auto-coarser"`, `"auto+N"`, `"auto-N"`. See [Grids](grids.md). |
 | `nodata_policy` | `str \| None` | `"omit"` | `"emit"` keeps cells whose samples are all NoData: `count` 0, null statistics. Refused with `min_count`. |
 | `emit_nodata_value` | `float \| None` | `None` | Under `"emit"`, the value of those statistics instead of null. |
 | `decimals` | `int \| None` | `None` | Round floating-point statistics to 0–15 decimals. Polars filters on `mean` and `majority_fraction` are then not pushed into the engine. |

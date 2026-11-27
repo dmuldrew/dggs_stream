@@ -39,7 +39,7 @@ pub(crate) unsafe fn parse_c_resolutions(
         .map(ResolutionSpec::Fixed)
         .ok_or_else(|| {
             DggsStreamError::InvalidParameter(format!(
-                "Invalid resolutions '{s}': expected 'auto', 'auto+N', 'auto-N' or {} \
+                "Invalid resolutions '{s}': expected 'auto', 'auto-finer', 'auto-coarser', 'auto+N', 'auto-N' or {} \
                  resolutions between 0 and {}, e.g. 7,8",
                 grid.label(),
                 grid.max_resolution()
