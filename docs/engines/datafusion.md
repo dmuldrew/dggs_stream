@@ -74,7 +74,7 @@ Schema: `ColumnSchema::continuous(&quantiles)` (see the [overview](README.md#out
 | `with_transform_failure_counter(Arc<AtomicU64>)` | `transform_failure_counter`: receives the number of skipped samples |
 | `with_grid(GridKind)` | `grid`: `H3` (default), `A5`, `S2` or `Healpix`; the cell columns become `{grid}_index` / `{grid}_hex` ([Grids](../grids.md)) |
 | `with_output_policy(OutputPolicy)` | NoData policy, NoData value and `decimals` ([Scan Options](../scan-options.md#nodata-policy-and-rounding)) |
-| `with_transfer(TransferMode)` | `transfer`: `AssignCenters` (default), `Interpolate(Interpolation)` or `Overlay { weighted, mass_preserve }` ([Scan Options](../scan-options.md#transfer-modes)) |
+| `with_transfer(TransferMode)` | `transfer`: `AssignCenters` (default), `Interpolate(Interpolation)` or `Overlay { weighted, mass_preserve }` or `Auto` ([Transfer Modes](../transfer-modes.md)) |
 | `with_profile(Arc<RunProfile>)` | runtime profile of the scan ([Scan Options](../scan-options.md#runtime-profile)) |
 
 ### `CategoricalRasterTableProvider`

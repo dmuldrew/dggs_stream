@@ -357,8 +357,18 @@ def test_auto_resolution(dggs_stream, gradient_tif, classes_tif, tmp_path, grid)
     assert df["count"].sum() == 64 * 48
     assert 0.3 < 64 * 48 / df.height < 4.0
 
-    for text, offset in [("auto+1", 1), ("AUTO-2", -2), ("auto + 1", 1), ("auto+60", 60)]:
-        want = max(0, min(finest, matched + offset))
+    # `auto+1` is the coarsest resolution with cells smaller than a pixel and `auto-1` the
+    # finest with cells at least a pixel: adjacent, with `auto` one of the two.
+    fine = dggs_stream.auto_resolution(gradient_tif, grid, offset=1)
+    coarse = dggs_stream.auto_resolution(gradient_tif, grid, offset=-1)
+    assert fine == coarse + 1
+    assert matched in (fine, coarse)
+    for text, offset, want in [
+        ("auto+1", 1, fine),
+        ("AUTO-2", -2, coarse - 1),
+        ("auto + 1", 1, fine),
+        ("auto+60", 60, finest),
+    ]:
         assert dggs_stream.auto_resolution(gradient_tif, grid, offset=offset) == want
         stream = dggs_stream.RasterArrowStream(gradient_tif, text, grid=grid, limit=1)
         assert frame(pa.table(stream))["resolution"].to_list() == [want]

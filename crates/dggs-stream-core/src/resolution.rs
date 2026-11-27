@@ -4,8 +4,10 @@
 //! The grids number their resolutions on unrelated scales (H3 `0..=15`, A5 and S2
 //! `0..=30`, HEALPix `0..=29`), so "resolution 9" means cells of very different sizes
 //! from one grid to the next. `auto` asks for the same thing on every grid: cells about
-//! the size of a pixel. An offset moves from there in whole resolution steps
-//! (`auto+1` is one step finer, `auto-2` two steps coarser).
+//! the size of a pixel, on whichever side is closer. An offset asks for a side:
+//! `auto+N` is the N-th resolution whose cells are smaller than a pixel and `auto-N` the
+//! N-th whose cells are at least a pixel, counting from the one closest to the pixel
+//! (see [`directional_resolution`](crate::resolution::directional_resolution)).
 
 use std::path::PathBuf;
 
@@ -23,11 +25,12 @@ const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F);
 pub enum ResolutionSpec {
     /// These resolutions (sorted, without repeats).
     Fixed(Vec<u8>),
-    /// The resolution whose mean cell area best matches the raster's ground pixel area,
-    /// moved `offset` resolution steps finer (positive) or coarser (negative) and
-    /// clamped to the grid's range.
+    /// With `offset` 0, the resolution whose mean cell area best matches the raster's
+    /// ground pixel area. With `offset` N > 0, the N-th resolution whose cells are
+    /// smaller than a pixel; with -N, the N-th whose cells are at least a pixel; both
+    /// counted from the one closest to the pixel ([`directional_resolution`]).
     Auto {
-        /// Resolution steps away from the area match.
+        /// 0 for the area match; otherwise the side (sign) and rank (magnitude).
         offset: i32,
     },
 }
@@ -36,7 +39,8 @@ impl ResolutionSpec {
     /// The area match itself.
     pub const AUTO: Self = Self::Auto { offset: 0 };
 
-    /// Largest offset accepted by [`Self::parse`]; any larger one clamps the same way.
+    /// Largest offset accepted by [`Self::parse`]. A rank past the grid's range stops at
+    /// its finest or coarsest resolution, so no grid needs more.
     pub const MAX_OFFSET: i32 = 64;
 
     /// Parse `auto`, `auto+N` / `auto-N` (ASCII case-insensitive, spaces allowed around
@@ -174,7 +178,70 @@ pub fn area_matched_resolution(grid: GridKind, area_m2: f64) -> u8 {
         .unwrap_or(finest)
 }
 
+/// The resolution `auto+N` / `auto-N` (`offset` = ±N) picks for a ground pixel area of
+/// `pixel_area_m2`, and `auto` itself for `offset` 0.
+///
+/// A resolution is on the *finer* side of the pixel when its mean cell area divided by
+/// `pixel_area_m2` is below [`crate::transfer::AUTO_INTERPOLATE_MAX_RATIO`] (1), and on
+/// the *coarser* side otherwise, so a cell exactly the size of a pixel counts as coarser.
+/// That is the comparison `transfer = "auto"` makes, so without a bbox `auto+N` always
+/// gives cells `auto` transfer interpolates (continuous scans) and `auto-N` cells it
+/// overlays.
+///
+/// - `offset` 0: [`area_matched_resolution`], the closest resolution on either side.
+/// - `offset` N > 0: the N-th finer-side resolution, counting from the coarsest of them
+///   (the closest to the pixel). `auto+1` is the same resolution as `auto` when `auto`
+///   is already finer than the pixel, rather than a step past it.
+/// - `offset` -N: the N-th coarser-side resolution, counting from the finest of them.
+///   `auto-1` is `auto` when `auto` already holds at least a pixel.
+/// - An N that runs past the grid's finest (or coarsest) resolution stops there, which
+///   is still on the requested side.
+/// - When the requested side has no resolution at all (`auto+N` on pixels no larger than
+///   the grid's finest cells, `auto-N` on pixels larger than its coarsest), the result
+///   is an error rather than a resolution on the wrong side.
+///
+/// A non-finite or non-positive `pixel_area_m2` is an error for `offset` other than 0.
+pub fn directional_resolution(grid: GridKind, pixel_area_m2: f64, offset: i32) -> Result<u8> {
+    if offset == 0 {
+        return Ok(area_matched_resolution(grid, pixel_area_m2));
+    }
+    if !(pixel_area_m2.is_finite() && pixel_area_m2 > 0.0) {
+        return Err(DggsStreamError::InvalidParameter(format!(
+            "cannot choose a resolution automatically: invalid ground pixel area \
+             {pixel_area_m2} m²"
+        )));
+    }
+    let finest = grid.max_resolution();
+    let finer =
+        |r: u8| grid.area_m2(r) / pixel_area_m2 < crate::transfer::AUTO_INTERPOLATE_MAX_RATIO;
+    let rank = offset.unsigned_abs() - 1;
+    if offset > 0 {
+        let closest = (0..=finest).find(|&r| finer(r)).ok_or_else(|| {
+            DggsStreamError::InvalidParameter(format!(
+                "auto{offset:+} needs {} cells smaller than the raster's pixels \
+                 ({pixel_area_m2:.4e} m²), but the finest resolution, {finest}, averages \
+                 {:.4e} m²; use 'auto' or an explicit resolution",
+                grid.label(),
+                grid.area_m2(finest)
+            ))
+        })?;
+        Ok((u32::from(closest) + rank).min(u32::from(finest)) as u8)
+    } else {
+        let closest = (0..=finest).rev().find(|&r| !finer(r)).ok_or_else(|| {
+            DggsStreamError::InvalidParameter(format!(
+                "auto{offset:+} needs {} cells at least as large as the raster's pixels \
+                 ({pixel_area_m2:.4e} m²), but resolution 0 averages {:.4e} m²; use 'auto' \
+                 or an explicit resolution",
+                grid.label(),
+                grid.area_m2(0)
+            ))
+        })?;
+        Ok(u32::from(closest).saturating_sub(rank) as u8)
+    }
+}
+
 /// `resolution` moved `offset` steps (positive is finer), clamped to `grid`'s range.
+/// `auto+N` / `auto-N` no longer step from `auto`; see [`directional_resolution`].
 pub fn offset_resolution(grid: GridKind, resolution: u8, offset: i32) -> u8 {
     (i32::from(resolution) + offset).clamp(0, i32::from(grid.max_resolution())) as u8
 }
@@ -317,15 +384,11 @@ pub fn mosaic_pixel_ground_area_m2_in_bbox(
     }
 }
 
-/// The `auto` resolution of `mosaic` on `grid`: [`area_matched_resolution`] of its ground
-/// pixel area, moved by `offset` and clamped to the grid's range.
+/// The `auto` (`offset` 0) or `auto±N` resolution of `mosaic` on `grid`, from its ground
+/// pixel area ([`mosaic_pixel_ground_area_m2`]); see [`directional_resolution`].
 pub fn auto_resolution(grid: GridKind, mosaic: &MosaicReader, offset: i32) -> Result<u8> {
     let area = mosaic_pixel_ground_area_m2(mosaic)?;
-    Ok(offset_resolution(
-        grid,
-        area_matched_resolution(grid, area),
-        offset,
-    ))
+    directional_resolution(grid, area, offset)
 }
 
 #[cfg(test)]
@@ -402,6 +465,65 @@ mod tests {
             assert_eq!(offset_resolution(grid, 5, 2), 7);
             assert_eq!(offset_resolution(grid, 5, -9), 0);
             assert_eq!(offset_resolution(grid, 5, 64), finest);
+        }
+    }
+
+    #[test]
+    fn directional_offsets_pick_the_requested_side_of_the_pixel() {
+        for grid in GridKind::ALL {
+            let finest = grid.max_resolution();
+            let dir = |area: f64, offset: i32| directional_resolution(grid, area, offset);
+            for res in 1..finest {
+                let (coarse, fine) = (grid.area_m2(res), grid.area_m2(res + 1));
+                // A pixel strictly between two resolutions: +1 is the finer neighbour and
+                // -1 the coarser, whichever of them `auto` picks.
+                for area in [fine * 1.001, (coarse * fine).sqrt(), coarse * 0.999] {
+                    assert_eq!(dir(area, 1).unwrap(), res + 1, "{grid} {res} {area}");
+                    assert_eq!(dir(area, -1).unwrap(), res, "{grid} {res} {area}");
+                    assert_eq!(dir(area, 2).unwrap(), (res + 2).min(finest), "{grid} {res}");
+                    assert_eq!(dir(area, -2).unwrap(), res - 1, "{grid} {res}");
+                    let auto = dir(area, 0).unwrap();
+                    assert_eq!(auto, area_matched_resolution(grid, area));
+                    assert!(auto == res || auto == res + 1, "{grid} {res}");
+                }
+                // `auto` already finer than the pixel: +1 stays there instead of
+                // overshooting; already coarser: -1 stays there.
+                assert_eq!(dir(fine * 1.001, 0).unwrap(), res + 1);
+                assert_eq!(dir(fine * 1.001, 1).unwrap(), res + 1);
+                assert_eq!(dir(coarse * 0.999, 0).unwrap(), res);
+                assert_eq!(dir(coarse * 0.999, -1).unwrap(), res);
+                // A cell exactly the size of a pixel is on the coarser side, as for
+                // `transfer = "auto"`, which overlays it.
+                assert_eq!(dir(coarse, 0).unwrap(), res);
+                assert_eq!(dir(coarse, -1).unwrap(), res);
+                assert_eq!(dir(coarse, 1).unwrap(), res + 1);
+            }
+            // Ranks past the grid's range stop at its limits, still on the requested side.
+            let mid = grid.area_m2(finest / 2) * 0.999;
+            assert_eq!(dir(mid, 64).unwrap(), finest, "{grid}");
+            assert_eq!(dir(mid, -64).unwrap(), 0, "{grid}");
+            // No resolution on the requested side is an error, not the wrong side.
+            for area in [grid.area_m2(finest), 1e-30] {
+                let err = dir(area, 1).unwrap_err().to_string();
+                assert!(
+                    err.contains("auto+1") && err.contains("smaller"),
+                    "{grid}: {err}"
+                );
+                assert_eq!(dir(area, -1).unwrap(), finest, "{grid}");
+            }
+            let err = dir(1e30, -1).unwrap_err().to_string();
+            assert!(
+                err.contains("auto-1") && err.contains("at least"),
+                "{grid}: {err}"
+            );
+            assert_eq!(dir(1e30, 1).unwrap(), 0, "{grid}");
+            for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                assert!(
+                    dir(bad, 1).is_err() && dir(bad, -1).is_err(),
+                    "{grid} {bad}"
+                );
+                assert_eq!(dir(bad, 0).unwrap(), finest, "{grid} {bad}");
+            }
         }
     }
 

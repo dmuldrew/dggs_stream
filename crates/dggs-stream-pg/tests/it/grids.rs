@@ -255,7 +255,7 @@ fn bigint_scalars_match_core_on_every_grid() {
 )]
 fn auto_resolution_matches_core_on_every_grid() {
     use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-    use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+    use dggs_stream_core::resolution::auto_resolution;
     use dggs_stream_pg::pg_auto_resolution;
     let (_tmp, path) = TestGeoTiffBuilder::new(SIZE, SIZE)
         .pixel_size(0.001)
@@ -273,7 +273,7 @@ fn auto_resolution_matches_core_on_every_grid() {
         for offset in [0, 1, -2, 100, -100] {
             assert_eq!(
                 pg_auto_resolution(grid, path, offset, None).unwrap(),
-                offset_resolution(grid, matched, offset),
+                auto_resolution(grid, &mosaic, offset).unwrap(),
                 "{grid} {offset}"
             );
         }

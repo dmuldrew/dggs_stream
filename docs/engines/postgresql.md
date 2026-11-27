@@ -173,8 +173,9 @@ GROUP BY 1;
 
 `{grid}_auto_resolution(raster_path [, res_offset [, source_crs]])` returns the
 resolution whose cells are closest in area to the raster's ground pixels (`-r auto` in
-the CLI, `resolutions := 'auto'` in DuckDB), moved `res_offset` steps finer (positive) or
-coarser and clamped to the grid's range. Since the grids number their resolutions on
+the CLI, `resolutions := 'auto'` in DuckDB), or with `res_offset` N > 0 the N-th resolution
+whose cells are smaller than a pixel and N < 0 the N-th whose cells are at least pixel-sized,
+clamped to the grid's range. Since the grids number their resolutions on
 unrelated scales, it is the way to get comparable cells on each:
 
 ```sql

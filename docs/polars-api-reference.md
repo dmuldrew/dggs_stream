@@ -76,13 +76,13 @@ Polars and PyArrow are optional dependencies. Without Polars, the scan functions
 | `nodata_policy` | `str \| None` | `"omit"` | `"emit"` keeps cells whose samples are all NoData: `count` 0, null statistics. Refused with `min_count`. |
 | `emit_nodata_value` | `float \| None` | `None` | Under `"emit"`, the value of those statistics instead of null. |
 | `decimals` | `int \| None` | `None` | Round floating-point statistics to 0–15 decimals. Polars filters on `mean` and `majority_fraction` are then not pushed into the engine. |
-| `transfer` | `str \| None` | `"assign_centers"` | `"assign_centers"` (pixel centres), `"interpolate"` (interpolated at cell centres or across sub-cell `sampling`), `"overlay"` (pixels weighted by overlap), or `"auto"`. See [Scan Options](scan-options.md#transfer-modes). |
+| `transfer` | `str \| None` | `"assign_centers"` | `"interpolate"` (value interpolated at each cell centre, or across sub-cell `sampling` points), `"overlay"` (pixels weighted by overlap) or `"auto"` (picks one from the cell-to-pixel area ratio). See [Transfer Modes](transfer-modes.md). |
 | `interpolation` | `str \| None` | `"bilinear"` | With `"interpolate"`: `"nearest"`, `"bilinear"`, `"bicubic"`, `"lanczos"`. |
 | `overlay_weighted` | `bool \| None` | `True` | With `"overlay"`: `False` counts every touched pixel once. |
 | `mass_preserve` | `bool \| None` | `False` | With `"overlay"`: normalise each pixel's weights so `sum` adds up to the raster's total. |
 | `ground_area` | `bool` | Off | For one north-up, single-band EPSG:4326 raster, weight valid values by ellipsoidal area. Center assignment uses whole pixels. With `transfer="overlay"`, partial pixels contribute their intersection area, `valid_coverage_threshold` compares square metres, and `decimals` preserves fractional pixel counts. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` (value × m²), and `area_weighted_mean`. `min_count` filters by pixel count. |
-| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. |
-| `decode_budget_mb` | `int` | `None` (256 MiB) | Center-assignment decoded buffer budget in MiB. A single oversized chunk can proceed alone. |
+| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. Refused with any other transfer mode, including when `transfer="auto"` resolves to one for the raster and resolution, rather than silently ignored. |
+| `decode_budget_mb` | `int` | `None` (256 MiB) | Decoded buffer budget in MiB, in every transfer mode. A single oversized chunk can proceed alone. |
 | `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `histogram` | `str \| Sequence[float] \| None` | `None` | Categorical only: `"values"`, `"N:min:max"` or bin edges. The `histogram` column becomes `List(Struct({class, weight}))` or `List(Struct({lower, upper, weight}))`. |
 | `histogram_weight` | `str \| None` | `"count"` | `"count"` or `"area"` (runs the weighted overlay). |

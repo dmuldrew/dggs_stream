@@ -7,49 +7,27 @@ in its own way; the [table at the end](#option-names-by-engine) lists every spel
 
 ## Transfer modes
 
-`transfer` chooses how pixels become cell values.
-
-[Transfer Modes](transfer-modes.md) covers each mode in depth: the interpolation kernels,
-overlay weighting and mass preservation, and how [`sampling`](super-sampling.md) applies to pixels (`assign_centers`) vs. cells (`interpolate`).
+`transfer` chooses how pixels become cell values. [Transfer Modes](transfer-modes.md) covers each
+mode in depth; in short:
 
 | Mode | What a cell gets | When to use it |
 | :--- | :--- | :--- |
-| `assign_centers` (default) | Every pixel goes to the cell that holds its centre (or its sub-pixel sample points, see [Super-Sampling](super-sampling.md)); the cell aggregates them | Cells about the size of pixels or larger. This is the single-pass streaming kernel, unchanged. |
-| `interpolate` | Value interpolated at the cell's centre, or across a sub-cell polygon [`sampling`](super-sampling.md) stencil, for each cell whose centre lies on the raster | Cells finer than or comparable to pixels (`<= 4×`), which `assign_centers` leaves sparse, or when intra-cell spread is needed on a smooth field |
-| `overlay` | The pixels the cell overlaps, each weighted by the exact fraction of it the cell covers | Cells comparable to or larger than pixels, when edge pixels should count partially |
+| `auto` | One of the three below, chosen from the cell-to-pixel area ratio and the other options | You'd rather not choose |
+| `assign_centers` (default) | Every pixel whose centre it holds (or sub-pixel samples, see [Super-Sampling](super-sampling.md)) | Cells about the size of pixels, where it is the fastest kernel ([comparison](transfer-modes.md#comparing-the-modes)) |
+| `interpolate` | The value interpolated at its centre (`interpolation`: `nearest`, `bilinear`, `bicubic`, `lanczos`), or across sub-cell [`sampling`](super-sampling.md) points inside the cell | Cells finer than or comparable to the pixels; sub-cell sampling adds intra-cell spread |
+| `overlay` | Every pixel it overlaps, weighted by the fraction it covers | Many pixels per cell, exact edges, conserved totals |
 
-Modifiers:
+The [overlay modes](transfer-modes.md#the-overlay-modes) refine `overlay`:
+`overlay_weighted = false` counts every touched pixel once, `mass_preserve` makes the cells'
+`sum` add up to the raster's total, `ground_area` (on EPSG:4326 rasters) weights by true m², and
+`valid_coverage_threshold` drops cells with too little valid data. Categorical scans accept
+`overlay` (class areas) and `interpolate` with `nearest` only.
 
-- `interpolation` (with `interpolate`): `nearest`, `bilinear` (the default), `bicubic` or `lanczos`.
-  Bilinear leaves out NoData taps and renormalises the rest. Bicubic and Lanczos fall back
-  to bilinear when any of their taps is NoData. A cell is missing only when all four bilinear
-  taps are NoData. Taps past the raster's edge repeat the edge pixel.
-- `sampling` (with `assign_centers` or `interpolate`): `center` (the default), `rgss`, `8rooks`,
-  `16point`, `5point`, `gaussian`, `hex`, or `9point` (see [Super-Sampling](super-sampling.md)).
-  Samples sub-pixel offsets inside each pixel for `assign_centers`, and area-preserving sub-cell
-  positions inside each cell polygon (`CellPolygonSampler`) for `interpolate`. Rejected by `overlay`.
-- `overlay_weighted` (with `overlay`): `false` counts every touched pixel once instead of by
-  its overlap.
-- `mass_preserve` (with `overlay`): normalises each pixel's weights so that the `sum` column
-  over all cells equals the raster's total. Use it for counts or other extensive quantities.
-
-How they run:
-- **Bands of rows.** `interpolate` and `overlay` walk the raster in bands of rows. Each holds one
-  band in memory, plus the cells still open across the band's edges.
-- **Pixels that are skipped.** Zero-alpha pixels and pixels marked invalid by an internal TIFF mask are missing in every transfer mode. A
-  `bbox` selects pixels by their centres, so cells larger than the box are kept.
-- **Very large cells.** In `overlay`, cells whose diameter bound is above 500 km take whole
-  pixels by centre, because their edges are far from straight in pixel space. These are the
-  coarsest two or three resolutions of each grid.
-- **Categorical scans.** They accept `overlay`, and `interpolate` only with `nearest`; classes
-  can't be interpolated.
-- **Combinations refused.** Transfer modes exclude compaction and spectral formulas; `overlay` also refuses non-`'center'` `sampling` (which is already analytical in `overlay`).
-  Partitioned Python and Spark scans support ordinary single-band continuous weighted overlay.
-  See [Spark weighted overlay](engines/spark.md#partitioned-weighted-overlay).
-- **PostgreSQL.** It does not expose transfer modes yet.
-
-The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands,
-`interp.rs` holds the interpolation kernels, `clip.rs` does the exact polygon-pixel overlap,
+Transfer modes exclude compaction and spectral formulas, and `overlay` refuses non-`center`
+`sampling` (`interpolate` uses it for sub-cell points); partitioned scans support only single-band continuous weighted overlay
+([Spark](engines/spark.md#partitioned-weighted-overlay)). PostgreSQL does not expose them yet.
+The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands of
+rows, `interp.rs` holds the interpolation kernels, `clip.rs` does the exact polygon–pixel overlap,
 and `stream.rs` holds the band scheduler and the open-cell bookkeeping.
 
 ## Histograms

@@ -1252,16 +1252,17 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         let fine_res = (0..=grid.max_resolution())
             .find(|&r| grid.area_m2(r) < pixel_m2)
             .unwrap();
+        // The finest resolution at or above 1:1, and the finest at or above 16:1.
         let near_res = (0..=grid.max_resolution())
             .rev()
-            .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+            .find(|&r| grid.area_m2(r) >= pixel_m2)
             .unwrap();
         let overlay_res = (0..=grid.max_resolution())
             .rev()
             .find(|&r| grid.area_m2(r) >= 16.0 * pixel_m2)
             .unwrap();
 
-        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> Interpolate(Nearest).
+        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> OVERLAY.
         let auto_cont_fine = scan(&cont_path, &config(grid, fine_res, TransferMode::Auto));
         let exp_cont_fine = scan(
             &cont_path,
@@ -1282,12 +1283,9 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             &config(grid, fine_res, TransferMode::Auto),
         )
         .unwrap();
-        assert_eq!(
-            auto_cat.transfer_mode(),
-            TransferMode::Interpolate(Interpolation::Nearest)
-        );
+        assert_eq!(auto_cat.transfer_mode(), TransferMode::OVERLAY, "{grid}");
 
-        // Near 1:1 -> AssignCenters.
+        // At or just above 1:1 -> OVERLAY, with the same rows as an explicit overlay.
         let s_near = MultiScanHorizonStreamer::new(
             GeoTiffStreamReader::open(&cont_path).unwrap(),
             &config(grid, near_res, TransferMode::Auto),
@@ -1295,7 +1293,12 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         .unwrap();
         assert_eq!(
             s_near.transfer_mode(),
-            TransferMode::AssignCenters,
+            TransferMode::OVERLAY,
+            "{grid} near_res={near_res}"
+        );
+        assert_eq!(
+            scan(&cont_path, &config(grid, near_res, TransferMode::Auto)),
+            scan(&cont_path, &config(grid, near_res, TransferMode::OVERLAY)),
             "{grid} near_res={near_res}"
         );
 
@@ -1311,15 +1314,16 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             "{grid} overlay_res={overlay_res}"
         );
 
-        // valid_coverage_threshold forces OVERLAY even near 1:1.
-        let mut cov_cfg = config(grid, near_res, TransferMode::Auto);
+        // valid_coverage_threshold forces OVERLAY even below 1:1, where a continuous scan
+        // would otherwise interpolate.
+        let mut cov_cfg = config(grid, fine_res, TransferMode::Auto);
         cov_cfg.valid_coverage_threshold = Some(0.5);
         let s_cov =
             MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&cont_path).unwrap(), &cov_cfg)
                 .unwrap();
         assert_eq!(s_cov.transfer_mode(), TransferMode::OVERLAY);
 
-        // Compaction forces AssignCenters even at coarse resolution.
+        // Compaction forces AssignCenters at any ratio.
         if grid == GridKind::H3 {
             let mut cmp_cfg = config(grid, overlay_res, TransferMode::Auto);
             cmp_cfg.compact_h3_children = true;
@@ -2777,27 +2781,84 @@ fn interpolate_subcell_sampling_categorical_projected_and_auto() {
         assert_eq!(streamer.transform_failures(), 0, "{grid}");
     }
 
-    // 3. TransferMode::Auto with non-default sampling resolves to Interpolate below 1:1
-    // and falls back to AssignCenters above 16:1 (never Overlay).
-    let mosaic = Arc::new(MosaicReader::open(&[cat_path], None, None, OverlapRule::First).unwrap());
+    // 3. TransferMode::Auto with non-default sampling never resolves to Overlay, which
+    // refuses sampling: cells finer than the pixels interpolate with sub-cell samples
+    // (nearest for classes), and from 1:1 up it assigns centres with sub-pixel samples.
+    let mosaic = Arc::new(
+        MosaicReader::open(
+            std::slice::from_ref(&cat_path),
+            None,
+            None,
+            OverlapRule::First,
+        )
+        .unwrap(),
+    );
     for grid in GridKind::ALL {
-        let fine = matched(grid, 2);
-        let mut fine_cfg = config(grid, fine, TransferMode::Auto);
+        let mut fine_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
         fine_cfg.sampling = SamplingPattern::rgss();
         assert_eq!(
             TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, false),
             TransferMode::Interpolate(Interpolation::Bilinear),
             "{grid} fine Auto+sampling"
         );
-
-        let coarse = matched(grid, -3);
-        let mut coarse_cfg = config(grid, coarse, TransferMode::Auto);
-        coarse_cfg.sampling = SamplingPattern::rgss();
         assert_eq!(
-            TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, false),
-            TransferMode::AssignCenters,
-            "{grid} coarse Auto+sampling"
+            TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, true),
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid} fine categorical Auto+sampling"
         );
+
+        for offset in [0, -3] {
+            let mut coarse_cfg = config(grid, matched(grid, offset), TransferMode::Auto);
+            coarse_cfg.sampling = SamplingPattern::rgss();
+            for categorical in [false, true] {
+                let resolved =
+                    TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, categorical);
+                // `matched(grid, 0)` can land just under 1:1, where interpolation is right.
+                let expected = if offset == 0 && matches!(resolved, TransferMode::Interpolate(_)) {
+                    resolved
+                } else {
+                    TransferMode::AssignCenters
+                };
+                assert_eq!(
+                    resolved, expected,
+                    "{grid} offset {offset} categorical={categorical} Auto+sampling"
+                );
+            }
+        }
+
+        // A categorical scan resolves the same way end to end, and gives the same cells as
+        // asking for nearest-neighbour interpolation with the preset explicitly.
+        let scan_classes = |cfg: &MultiResolutionConfig| {
+            let reader = GeoTiffStreamReader::open(&cat_path).unwrap();
+            let mut streamer = MultiCategoricalHorizonStreamer::new(reader, cfg).unwrap();
+            let mode = streamer.transfer_mode();
+            let mut out = BTreeMap::new();
+            while streamer
+                .drain_completed_into(256, |_, rec| {
+                    out.insert(rec.cell_id, rec.accumulator.histogram_json());
+                })
+                .unwrap()
+                > 0
+            {}
+            (mode, out)
+        };
+        let mut auto_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
+        auto_cfg.sampling = SamplingPattern::sixteen_point();
+        let mut explicit_cfg = config(
+            grid,
+            matched(grid, 2),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        explicit_cfg.sampling = SamplingPattern::sixteen_point();
+        let (auto_mode, auto_cells) = scan_classes(&auto_cfg);
+        let (_, explicit_cells) = scan_classes(&explicit_cfg);
+        assert_eq!(
+            auto_mode,
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid}"
+        );
+        assert!(!auto_cells.is_empty(), "{grid}");
+        assert_eq!(auto_cells, explicit_cells, "{grid}");
     }
 }
 

@@ -606,7 +606,7 @@ async fn mixed_grid_columns_prefer_the_named_grid() {
 #[tokio::test(flavor = "multi_thread")]
 async fn auto_resolution_matches_cells_to_pixels_on_every_grid() {
     use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-    use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+    use dggs_stream_core::resolution::auto_resolution;
     use dggs_stream_sedona::ResolutionSpec;
     let tif = gradient_tif(SIZE, SIZE);
     let src = source(&tif);
@@ -630,7 +630,7 @@ async fn auto_resolution_matches_cells_to_pixels_on_every_grid() {
     for grid in GridKind::ALL {
         let matched = auto_resolution(grid, &mosaic, 0).unwrap();
         for (text, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2)] {
-            let want = offset_resolution(grid, matched, offset);
+            let want = auto_resolution(grid, &mosaic, offset).unwrap();
             for from in [
                 format!("{grid}_raster_continuous_aggregate('{src}', '{text}')"),
                 format!("h3_raster_continuous_aggregate('{src}', '{grid}', '{text}')"),
