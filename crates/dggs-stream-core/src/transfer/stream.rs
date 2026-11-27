@@ -2746,6 +2746,26 @@ fn build_cell_sampler(
     CellPolygonSampler::new(center_px, &ring_px[..n])
 }
 
+/// Whether a sample of the cell's stencil lies outside the pixels of the tile holding the
+/// cell's centre, yet on raster data: the same tile one longitude period away (a 360°
+/// raster's seam) or another tile of the mosaic. Samples outside every tile are simply
+/// off the data, as on a single raster, and still lower the count.
+fn stencil_reaches_unread_data(ctx: &InterpBlockCtx<'_>, sampler: &CellPolygonSampler) -> bool {
+    let meta = &ctx.tile.reader.metadata;
+    let (width, height) = (f64::from(meta.width), f64::from(meta.height));
+    ctx.sampling.points.iter().any(|sp| {
+        let (sc, sr) = sampler.sample(sp.dx, sp.dy);
+        if sc >= 0.0 && sr >= 0.0 && sc < width && sr < height {
+            return false;
+        }
+        let (x, y) = meta.geotransform.pixel_to_coord(sc, sr);
+        let Ok((lon, lat)) = ctx.tile.crs_transformer.transform_point(x, y) else {
+            return false;
+        };
+        ctx.mosaic.tiles.iter().any(|tile| tile.contains(lon, lat))
+    })
+}
+
 fn interpolate_cell<A: TransferAccumulator>(
     cell: u64,
     ctx: &InterpBlockCtx<'_>,
@@ -2768,13 +2788,15 @@ fn interpolate_cell<A: TransferAccumulator>(
         return InterpOutcome::Skip;
     }
     let mut acc = A::empty(ctx.track_quantiles);
-    if ctx.sampling.is_single_point() {
-        if let Some(value) = interpolate(ctx.window, ctx.method, col, row)
-            .and_then(|v| TransferStream::<A>::mapped(ctx.histogram_bins, ctx.remapper, v))
-        {
-            acc.add(value, 1.0);
-        }
-    } else if let Some(sampler) = build_cell_sampler(ctx, cell, lng, (col, row), turn) {
+    // Sub-cell samples come from the tile holding the cell's centre. A stencil reaching
+    // data this window cannot read (across a 360° raster's seam, or into another tile of
+    // the mosaic) falls back to the centre sample, as pole cells do, rather than dropping
+    // those samples and reporting a partial count.
+    let sampler = (!ctx.sampling.is_single_point())
+        .then(|| build_cell_sampler(ctx, cell, lng, (col, row), turn))
+        .flatten()
+        .filter(|sampler| !stencil_reaches_unread_data(ctx, sampler));
+    if let Some(sampler) = sampler {
         for sp in &ctx.sampling.points {
             let (sc, sr) = sampler.sample(sp.dx, sp.dy);
             if let Some(value) = interpolate(ctx.window, ctx.method, sc, sr)

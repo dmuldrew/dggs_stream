@@ -2863,3 +2863,89 @@ fn interpolate_subcell_sampling_refuses_stencils_beyond_the_window_margin() {
     cfg.sampling = SamplingPattern::center();
     assert!(MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &cfg).is_ok());
 }
+
+#[test]
+fn interpolate_subcell_sampling_keeps_full_counts_across_a_global_seam() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    // A constant, fully valid 360° raster in both longitude layouts. Cells straddling the
+    // raster's west/east edge used to lose the samples beyond it.
+    for west in [-180.0, 0.0] {
+        let (_tmp, path) = TestGeoTiffBuilder::new(720, 360)
+            .origin(west, 90.0)
+            .pixel_size(0.5)
+            .create_f32_tempfile(|_, _| 42.0);
+        for grid in [GridKind::H3, GridKind::Healpix] {
+            let res = if grid == GridKind::H3 { 3 } else { 6 };
+            let mut cfg = config(grid, res, TransferMode::Interpolate(Interpolation::Nearest));
+            cfg.sampling = SamplingPattern::sixteen_point();
+            let cells = scan(&path, &cfg);
+            let mut seam = 0;
+            for (&cell, acc) in &cells {
+                let (lat, lng) = grid.center_lat_lng(cell).unwrap();
+                if lat.abs() > 80.0 {
+                    continue;
+                }
+                let edge = if west == 0.0 { lng } else { 180.0 - lng.abs() };
+                if edge.abs() < 2.0 {
+                    seam += 1;
+                }
+                assert_eq!(acc.count, 1.0, "{west} {grid} {cell} at ({lng}, {lat})");
+                assert_eq!(acc.mean(), 42.0);
+            }
+            assert!(seam > 0, "{west} {grid}: no cells near the seam");
+        }
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_matches_a_single_raster_across_mosaic_tiles() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    let tile = |width, start_col: u32| {
+        TestGeoTiffBuilder::new(width, H)
+            .origin(ORIGIN.0 + PIXEL * f64::from(start_col), ORIGIN.1)
+            .pixel_size(PIXEL)
+            .create_f32_tempfile(|_, _| 42.0)
+    };
+    let (_full, full_path) = tile(W, 0);
+    let (_left, left_path) = tile(W / 2, 0);
+    let (_right, right_path) = tile(W / 2, W / 2);
+    for grid in GridKind::ALL {
+        let mut cfg = config(
+            grid,
+            matched(grid, 0),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        cfg.sampling = SamplingPattern::sixteen_point();
+        let single = scan(&full_path, &cfg);
+        let mosaic = MosaicReader::open(
+            &[left_path.clone(), right_path.clone()],
+            None,
+            None,
+            OverlapRule::First,
+        )
+        .unwrap();
+        let tiled =
+            collect_cells(MultiScanHorizonStreamer::new_mosaic(mosaic.into(), &cfg).unwrap());
+        assert!(single.keys().eq(tiled.keys()), "{grid}");
+        let mut interior = 0;
+        for (cell, acc) in &tiled {
+            assert_eq!(acc.mean(), 42.0);
+            // A full stencil on the single raster stays full across the tile seam. Cells
+            // reaching past the mosaic's outer edge stay partial unless they also reach the
+            // other tile, which makes them fall back to their centre sample.
+            if single[cell].count == 1.0 {
+                interior += 1;
+                assert_eq!(acc.count, 1.0, "{grid} {cell}");
+            } else {
+                assert!(acc.count <= 1.0, "{grid} {cell}");
+            }
+        }
+        assert!(interior > 0, "{grid}");
+        assert!(
+            tiled.values().any(|a| a.count < 1.0),
+            "{grid}: no outer-edge cells"
+        );
+    }
+}
