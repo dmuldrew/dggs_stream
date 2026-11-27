@@ -3,9 +3,11 @@
 //! Usage: transfer_compare TIFF GRID RESOLUTION KIND MODE [CELLS_CSV]
 //!
 //! KIND is `continuous` or `categorical`. MODE is `center` or another sampling preset of
-//! the default kernel (`rgss`, `5point`, `9point`, `16point`, ...), `overlay`, `mass`
-//! (mass-preserving overlay), `nearest`, `bilinear`, `bicubic` or `lanczos`
-//! (interpolation; categorical scans accept only `nearest`), or `auto`.
+//! the default kernel (`rgss`, `5point`, `9point`, `16point`, ...; sub-pixel samples),
+//! `overlay`, `mass` (mass-preserving overlay), `nearest`, `bilinear`, `bicubic` or
+//! `lanczos` (interpolation; categorical scans accept only `nearest`), or `auto`. An
+//! interpolation or `auto` can take a sampling preset after `+`, e.g. `bicubic+16point`
+//! (sub-cell samples) or `auto+rgss`.
 //!
 //! Prints `MODE_RUN CELLS MILLISECONDS PEAK_RSS_KIB RATIO`: the mode actually run (`auto`
 //! reports its choice), the cells emitted, the scan time, the process's peak resident
@@ -17,6 +19,7 @@
 //! `scripts/benchmark_transfer_modes.py` drives it.
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use dggs_stream_core::aggregator::multi_horizon::{
@@ -25,9 +28,9 @@ use dggs_stream_core::aggregator::multi_horizon::{
 use dggs_stream_core::aggregator::SamplingPattern;
 use dggs_stream_core::grid::GridKind;
 use dggs_stream_core::raster::geotiff::GeoTiffStreamReader;
-use dggs_stream_core::raster::mosaic::TileDescriptor;
+use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule, TileDescriptor};
 use dggs_stream_core::resolution::pixel_ground_area_m2;
-use dggs_stream_core::transfer::{resolve_auto_transfer, Interpolation, TransferMode};
+use dggs_stream_core::transfer::{Interpolation, TransferMode};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -55,6 +58,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = MultiResolutionConfig::single(resolution);
     config.grid = grid;
+    // `<interpolation or auto>+<sampling preset>`: the preset applies to the whole mode.
+    let (mode, preset) = match mode.split_once('+') {
+        Some((base, preset)) => {
+            config.sampling = SamplingPattern::parse(preset)?;
+            (base.to_string(), format!("+{preset}"))
+        }
+        None => (mode, String::new()),
+    };
     let label = match mode.as_str() {
         "overlay" => {
             config.transfer = TransferMode::OVERLAY;
@@ -68,24 +79,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "mass".to_string()
         }
         "auto" => {
-            // Resolved here only to report the choice; the scan itself runs `Auto`.
-            let chosen = resolve_auto_transfer(grid, &[resolution], pixel_m2, categorical, true);
+            // Resolved here only to report the choice, by the same rule the streamers use
+            // (sampling included); the scan itself runs `Auto`.
+            let mosaic = MosaicReader::open(
+                std::slice::from_ref(&PathBuf::from(&path)),
+                None,
+                None,
+                OverlapRule::default(),
+            )?;
             config.transfer = TransferMode::Auto;
-            match chosen {
-                TransferMode::Interpolate(method) => {
-                    format!("auto:{}", format!("{method:?}").to_lowercase())
-                }
-                other => format!("auto:{}", other.as_str()),
-            }
+            let chosen = TransferMode::Auto.resolve_for_mosaic(&mosaic, &config, categorical);
+            let name = match chosen {
+                TransferMode::Interpolate(method) => format!("{method:?}").to_lowercase(),
+                other => other.as_str().to_string(),
+            };
+            format!("auto:{name}{preset}")
         }
         name => match Interpolation::parse(name) {
             Some(method) => {
                 config.transfer = TransferMode::Interpolate(method);
+                format!("{name}{preset}")
+            }
+            None if preset.is_empty() => {
+                config.sampling = SamplingPattern::parse(name)?;
                 name.to_string()
             }
             None => {
-                config.sampling = SamplingPattern::parse(name)?;
-                name.to_string()
+                return Err(format!(
+                    "'{name}{preset}': only an interpolation or auto takes +preset"
+                )
+                .into())
             }
         },
     };

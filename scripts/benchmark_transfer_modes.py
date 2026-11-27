@@ -24,6 +24,14 @@ Two sweeps:
   same scale relative to the cell on every grid and resolution; value errors are only
   comparable across grids that way. Area errors do not depend on the field.
 
+`--field smooth` swaps the checkerboard for a sinusoid of the same scale (no edges), and
+`--field-reference F` adds a second reference: overlay on a raster of the same field F
+times finer each way, which approaches the field's true mean (or class shares) over each
+cell. Overlay on the scanned raster is exact if each pixel is an area average; the field
+reference is the right one if pixels are point samples of a smooth field, the case
+interpolation with sub-cell `sampling` targets. Modes like `bicubic+16point` (sub-cell
+samples) and `auto+rgss` combine an interpolation or `auto` with a sampling preset.
+
 Accuracy uses weighted overlay, which clips every cell against every pixel exactly, as
 the reference. Continuous scans report the share of overlay's cells the mode leaves out,
 the mean absolute error of cell means (the field spans 0 to 150) and the mean relative
@@ -73,13 +81,27 @@ def mean_cell_area(grid, res):
     raise ValueError(grid)
 
 
-def make_field(kind, west, width_deg, checker_deg=0.01):
+def make_field(kind, west, width_deg, checker_deg=0.01, shape="checker"):
+    """The test field at a point.
+
+    `checker`: a gradient plus a checkerboard of `checker_deg` squares (sharp edges).
+    `smooth`: a sinusoid whose half-wavelength is `checker_deg` (no edges), the case
+    interpolation reconstructs best. Categorical fields threshold the same shapes.
+    """
+    def smooth(lon, lat):
+        k = math.pi / checker_deg
+        return math.sin(k * (lon - west)) * math.sin(k * (lat - NORTH))
+
     def continuous(lon, lat):
+        if shape == "smooth":
+            return 500.0 + 160.0 * smooth(lon, lat)
         gradient = 100.0 * (lon - west) / width_deg
         checker = (math.floor(lon / checker_deg) + math.floor(lat / checker_deg)) % 2
         return gradient + 50.0 * checker
 
     def categorical(lon, lat):
+        if shape == "smooth":  # four classes with curved boundaries
+            return float(1 + min(3, int(2.0 * (smooth(lon, lat) + 1.0))))
         band = min(3, int(4 * (lon - west) / width_deg))
         checker = (math.floor(lon / checker_deg) + math.floor(lat / checker_deg)) % 2
         return float(1 + checker + 2 * band)
@@ -227,7 +249,7 @@ def build_cases(args, tmp):
             if size not in written:
                 written[size] = Path(tmp) / f"pixels-{size}.tif"
                 write_geotiff(written[size], size, PIXEL_DEG, field)
-            cases.append(("h3", res, written[size]))
+            cases.append(("h3", res, written[size], None))
         return cases
     res = args.resolution
     cell_m2 = mean_cell_area(args.grid, res)
@@ -239,14 +261,21 @@ def build_cases(args, tmp):
     # cells nearly uniform and a coarse grid's cells straddle every edge, and the value
     # errors would then measure the test field rather than the modes.
     checker_deg = args.feature_cells * math.sqrt(cell_m2) / math.sqrt(M_PER_DEG_LON * M_PER_DEG_LAT)
-    field = make_field(args.kind, WEST, side_deg, checker_deg)
+    field = make_field(args.kind, WEST, side_deg, checker_deg, args.field)
     for ratio in (float(r) for r in args.ratios.split(",")):
         pixel_m2 = cell_m2 / ratio
         pixel_deg = math.sqrt(pixel_m2 / (M_PER_DEG_LON * M_PER_DEG_LAT))
         size = max(1, round(side_deg / pixel_deg))
         path = Path(tmp) / f"ratio-{ratio:g}.tif"
         write_geotiff(path, size, side_deg / size, field)
-        cases.append((args.grid, res, path))
+        fine = None
+        if args.field_reference > 1:
+            # The same field sampled F times finer each way: overlay on it approaches the
+            # field's true mean (or class shares) over each cell.
+            fine = Path(tmp) / f"ratio-{ratio:g}-fine.tif"
+            f = args.field_reference
+            write_geotiff(fine, size * f, side_deg / (size * f), field)
+        cases.append((args.grid, res, path, fine))
     return cases
 
 
@@ -267,7 +296,13 @@ def main():
     parser.add_argument("--cells", type=int, default=40_000,
                         help="--sweep ratio: approximate cells in the region")
     parser.add_argument("--feature-cells", type=float, default=1.0,
-                        help="--sweep ratio: checkerboard square width in cell edge lengths")
+                        help="--sweep ratio: checkerboard square (or smooth half-wave) width "
+                             "in cell edge lengths")
+    parser.add_argument("--field", choices=["checker", "smooth"], default="checker",
+                        help="--sweep ratio: test field shape")
+    parser.add_argument("--field-reference", type=int, default=0, metavar="F",
+                        help="--sweep ratio: also score every mode against overlay on a raster "
+                             "of the same field F times finer each way (its true cell means)")
     parser.add_argument("--modes", default=None, help="Comma-separated modes")
     parser.add_argument("--markdown", action="store_true", help="Print a Markdown table")
     args = parser.parse_args()
@@ -279,12 +314,13 @@ def main():
     interp_names = {"nearest", "bilinear", "bicubic", "lanczos"}
 
     columns = ["grid", "resolution", "cell_px_ratio", "mode", "cells", "scan_ms",
-               "peak_rss_mib", "missing_pct", "error", "area_err_pct"]
+               "peak_rss_mib", "missing_pct", "error", "area_err_pct",
+               "field_missing_pct", "field_error"]
     if not args.markdown:
         print(",".join(columns), flush=True)
     rows = []
     with tempfile.TemporaryDirectory() as tmp:
-        for grid, res, raster in build_cases(args, tmp):
+        for grid, res, raster, fine in build_cases(args, tmp):
             raster = str(raster)
             commands = {m: [args.example, raster, grid, str(res), args.kind, m] for m in modes}
             for command in commands.values():  # warm the page cache and binary
@@ -299,14 +335,28 @@ def main():
             subprocess.run([args.example, raster, grid, str(res), args.kind, "overlay",
                             str(reference_csv)], check=True, stdout=subprocess.DEVNULL)
             reference = read_cells(reference_csv, args.kind)
+            field_reference = None
+            if fine is not None:
+                field_csv = Path(tmp) / "field.csv"
+                subprocess.run([args.example, str(fine), grid, str(res), args.kind, "overlay",
+                                str(field_csv)], check=True, stdout=subprocess.DEVNULL)
+                field_reference = read_cells(field_csv, args.kind)
+                field_csv.unlink()
+                os.unlink(fine)
             for m in modes:
                 cells_csv = Path(tmp) / "cells.csv"
                 subprocess.run([*commands[m], str(cells_csv)], check=True,
                                stdout=subprocess.DEVNULL)
                 label = samples[m][0][0]
-                interpolated = m in interp_names or label.split(":")[-1] in interp_names
-                missing, error, area_err = accuracy(
-                    read_cells(cells_csv, args.kind), reference, args.kind, interpolated)
+                base = label.split(":")[-1].split("+")[0]
+                interpolated = base in interp_names
+                cells = read_cells(cells_csv, args.kind)
+                missing, error, area_err = accuracy(cells, reference, args.kind, interpolated)
+                field_missing = field_error = None
+                if field_reference is not None:
+                    field_missing, field_error, _ = accuracy(
+                        cells, field_reference, args.kind, True)
+                del cells
                 rows.append({
                     "grid": grid,
                     "resolution": res,
@@ -318,26 +368,34 @@ def main():
                     "missing_pct": 100 * missing,
                     "error": error,
                     "area_err_pct": None if area_err is None else 100 * area_err,
+                    "field_missing_pct": None if field_missing is None else 100 * field_missing,
+                    "field_error": field_error,
                 })
                 if not args.markdown:
                     r = rows[-1]
                     print(",".join("" if r[k] is None else str(r[k]) for k in columns),
                           flush=True)
                 cells_csv.unlink()
-            del reference
+            del reference, field_reference
             reference_csv.unlink()
 
     if args.markdown:
         error_name = "Mean abs. error" if args.kind == "continuous" else "Class-fraction error"
+        field = args.field_reference > 1
+        extra = " | Error vs. field |" if field else " |"
         print(f"| Grid | Res | Cell / pixel area | Mode | Cells | Scan ms | Peak RSS MiB "
-              f"| Cells missing | {error_name} | Area error |")
-        print("| :--- | ---: | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |")
+              f"| Cells missing | {error_name} | Area error{extra}")
+        print("| :--- | ---: | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |"
+              + (" ---: |" if field else ""))
         for r in rows:
             area = "—" if r["area_err_pct"] is None else f"{r['area_err_pct']:.2f}%"
             error = "—" if r["error"] is None else f"{r['error']:.3f}"
+            tail = " |"
+            if field:
+                tail = " | — |" if r["field_error"] is None else f" | {r['field_error']:.3f} |"
             print(f"| {r['grid']} | {r['resolution']} | {r['cell_px_ratio']:.3g} | {r['mode']} | "
                   f"{r['cells']:,} | {r['scan_ms']:.1f} | {r['peak_rss_mib']:.1f} | "
-                  f"{r['missing_pct']:.1f}% | {error} | {area} |")
+                  f"{r['missing_pct']:.1f}% | {error} | {area}{tail}")
 
 
 if __name__ == "__main__":
