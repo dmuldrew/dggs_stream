@@ -1128,3 +1128,203 @@ fn polyfill_preserves_feature_ids_and_calls_each_grid() {
     run_err(&["polyfill", s(&input), "-o", s(&dest)], "Polygon");
     assert_eq!(std::fs::read_to_string(dest).unwrap(), "previous output");
 }
+
+#[test]
+fn overview_matches_independent_gdal_extraction() {
+    // GDAL average pyramid of a 129x65 image with an internal mask.
+    // The reference is gdal_translate -ovr 1 of that COG.
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dggs-stream-core/tests/fixtures");
+    let source = fixtures.join("overview-mask.tif");
+    let reference = fixtures.join("overview-mask-level2.tif");
+    let scan = |file: &Path, res: &str, mode: &str, flags: &[&str]| {
+        let mut args = vec![
+            "jsonl",
+            s(file),
+            "-r",
+            res,
+            "--transfer",
+            mode,
+            "--columns",
+            "h3_index,resolution,count,sum",
+        ];
+        args.extend_from_slice(flags);
+        let result = run_ok(&args);
+        let mut rows: Vec<String> = String::from_utf8(result.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        rows.sort();
+        assert!(!rows.is_empty());
+        (rows, String::from_utf8(result.stderr).unwrap())
+    };
+    for mode in ["assign_centers", "interpolate"] {
+        let (preview, message) = scan(&source, "7", mode, &["--overview", "auto"]);
+        assert!(message.contains("32x16"), "{message}");
+        assert_eq!(preview, scan(&reference, "7", mode, &[]).0);
+        let native = scan(&source, "7", mode, &[]).0;
+        assert_eq!(
+            native,
+            scan(&source, "7", mode, &["--overview", "native"]).0
+        );
+        assert_ne!(native, preview);
+    }
+    for extra in [
+        vec![
+            "-c",
+            "--format",
+            "long",
+            "--columns",
+            "h3_index,category,count",
+        ],
+        vec![
+            "--bands",
+            "1",
+            "--columns",
+            "h3_index,band_1_mean,band_1_count",
+        ],
+        vec![
+            "--bbox",
+            "-121.95,38.95,-121.90,38.98",
+            "--columns",
+            "h3_index,count,sum",
+        ],
+    ] {
+        let compare = |path, policy| {
+            let mut args = vec!["jsonl", path, "-r", "7", "--overview", policy];
+            args.extend(&extra);
+            let mut rows = String::from_utf8(run_ok(&args).stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            rows.sort();
+            assert!(!rows.is_empty());
+            rows
+        };
+        assert_eq!(
+            compare(s(&source), "auto"),
+            compare(s(&reference), "native")
+        );
+    }
+    for selector in ["auto-finer", "auto-coarser"] {
+        let resolutions = |policy| {
+            scan(&source, selector, "assign_centers", &["--overview", policy])
+                .0
+                .into_iter()
+                .map(|row| {
+                    serde_json::from_str::<serde_json::Value>(&row).unwrap()["resolution"]
+                        .as_u64()
+                        .unwrap()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let native = resolutions("native");
+        assert_eq!(native.len(), 1);
+        assert_eq!(resolutions("auto"), native, "{selector}");
+    }
+    let (fine, message) = scan(&source, "7,11", "assign_centers", &["--overview", "auto"]);
+    assert!(message.contains("selected IFD 0"));
+    assert_eq!(fine, scan(&source, "7,11", "assign_centers", &[]).0);
+    assert_eq!(
+        scan(&source, "7", "overlay", &["--overview", "auto"]).0,
+        scan(&source, "7", "overlay", &[]).0
+    );
+}
+
+/// Serve `body` over loopback HTTP with `Range` support until the process exits.
+fn serve_with_ranges(body: Vec<u8>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://{}/overview-mask.tif",
+        listener.local_addr().unwrap()
+    );
+    let body = std::sync::Arc::new(body);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut method = String::new();
+                let mut range = None;
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    let header = line.trim_end().to_owned();
+                    line.clear();
+                    if header.is_empty() {
+                        break;
+                    }
+                    if method.is_empty() {
+                        method = header.split(' ').next().unwrap().to_owned();
+                    } else if let Some(spec) = header
+                        .to_ascii_lowercase()
+                        .strip_prefix("range: bytes=")
+                        .map(str::to_owned)
+                    {
+                        let (a, b) = spec.split_once('-').unwrap();
+                        let last = body.len() - 1;
+                        range = Some((
+                            a.parse::<usize>().unwrap_or(0),
+                            b.parse::<usize>().map_or(last, |b| b.min(last)),
+                        ));
+                    }
+                }
+                let mut out = stream;
+                let total = body.len();
+                let (status, extra, slice) = match range {
+                    Some((a, b)) if a <= b => (
+                        "206 Partial Content",
+                        format!("Content-Range: bytes {a}-{b}/{total}\r\n"),
+                        &body[a..=b],
+                    ),
+                    _ => ("200 OK", String::new(), &body[..]),
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nAccept-Ranges: bytes\r\n{extra}Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    slice.len()
+                );
+                let _ = out.write_all(head.as_bytes());
+                if method != "HEAD" {
+                    let _ = out.write_all(slice);
+                }
+            });
+        }
+    });
+    url
+}
+
+#[test]
+fn remote_overview_matches_independent_gdal_extraction() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dggs-stream-core/tests/fixtures");
+    let url = serve_with_ranges(std::fs::read(fixtures.join("overview-mask.tif")).unwrap());
+    let reference = fixtures.join("overview-mask-level2.tif");
+    for mode in ["assign_centers", "interpolate"] {
+        let scan = |input: &str, flags: &[&str]| {
+            let mut args = vec![
+                "jsonl",
+                input,
+                "-r",
+                "7",
+                "--transfer",
+                mode,
+                "--columns",
+                "h3_index,resolution,count,sum",
+            ];
+            args.extend_from_slice(flags);
+            let result = run_ok(&args);
+            let mut rows: Vec<String> = String::from_utf8(result.stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            rows.sort();
+            assert!(!rows.is_empty());
+            (rows, String::from_utf8(result.stderr).unwrap())
+        };
+        let (remote, message) = scan(&url, &["--overview", "auto"]);
+        assert!(message.contains("32x16"), "{message}");
+        assert_eq!(remote, scan(s(&reference), &[]).0, "{mode}");
+    }
+}

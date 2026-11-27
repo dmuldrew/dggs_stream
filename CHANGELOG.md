@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CLI raster scans and exports accept `--overview auto` for approximate COG previews with center assignment and interpolation. Native pixels remain the default.
 - Named automatic resolutions `auto-finer` (the largest mean cell area at most the ground pixel area) and `auto-coarser` (the smallest at least it), both including an exact match, in every engine that accepts `auto` (`ResolutionSpec::Directional` in core). A grid that cannot meet the bound is an error naming the pixel area and the grid's cell-area range.
 - `PmtilesExportSummary::capped_cells` reports the `(cell, zoom)` pairs skipped by the per-cell tile cap, which `ExternalFeatureExport`, `PmtilesTiler::export_features` and the Parquet transcoder previously wrote only to the archive metadata (`cells_over_tile_cap`). Code that builds the summary with a struct literal must add the field. `convert_to_pmtiles` prints the count when nonzero.
 - CLI `polyfill` writes GeoJSON polygons as feature-to-cell JSON Lines on H3, A5, S2 and HEALPix.

@@ -75,7 +75,7 @@ impl InternalMask {
         }
     }
 
-    fn parse(tags: &mut IfdDecoder<'_>, w: u32, h: u32) -> Result<Self> {
+    pub(super) fn parse(tags: &mut IfdDecoder<'_>, w: u32, h: u32) -> Result<Self> {
         if tags.get_tag_u32(Tag::PhotometricInterpretation)? != 4
             || tags
                 .find_tag_unsigned::<u16>(Tag::BitsPerSample)?

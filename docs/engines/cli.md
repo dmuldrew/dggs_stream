@@ -48,6 +48,7 @@ means the raster commands.
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
 | `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Transfer Modes](../transfer-modes.md)). `auto` picks bilinear `interpolate` for continuous scans with cells finer than the pixels and weighted `overlay` otherwise (categorical scans always overlay); with a non-`center` `--sampling` it picks `assign_centers` in place of `overlay`; it is reported on stderr |
+| `--overview <native\|auto>` | raster scans and exports | Select native pixels (default) or a reduced COG image for approximate center assignment or interpolation. |
 | `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer interpolate` | Interpolation (default `bilinear`) |
 | `--sampling <center\|rgss\|5point\|gaussian\|hex\|8rooks\|9point\|16point>` | `assign_centers`, `--transfer interpolate`, `--transfer auto` | Quadrature sampling pattern ([Super-Sampling](../super-sampling.md)): sub-pixel for `assign_centers`, sub-cell polygon sampling for `interpolate` (`--transfer overlay` rejects non-`'center'`) |
 | `--overlay-weighted <true\|false>` | `--transfer overlay` | `false` counts every touched pixel once |
@@ -81,6 +82,35 @@ their coordinate transform failed (see [transform-failure diagnostics](core.md#t
 Column names come from the core schemas (see the
 [overview](README.md#output-schemas)); `--columns` with a name that does not
 exist in the selected schema fails before any raster is read.
+
+## Approximate reads from COG overviews
+
+```sh
+dggs-stream-cli jsonl imagery.tif --grid h3 -r 8 --overview auto --columns h3_hex,count,mean
+```
+
+For each input tile, `--overview auto` selects the coarsest compatible internal image whose
+estimated ground pixel area fits within the smallest requested mean cell area. It measures
+native pixels near the bbox centre when supplied. Stderr reports the selected TIFF image
+directory (IFD) and dimensions for each tile. IFD 0 is the native image. Auto transfer and
+auto resolution are determined from native pixels before this selection.
+
+The reader uses reduced images in the primary TIFF directory chain, as written by GDAL's
+COG driver. A masked base image requires a matching overview mask. If no suitable image is
+available, the scan uses native pixels. Overlay always uses native pixels. Partition plans
+refer to native chunks and cannot be combined with automatic overview selection.
+
+Each overview pixel counts as one observation in `assign_centers`. Cell coverage, sums,
+extrema and class frequencies can change. Interpolation samples the chosen image, so even
+nearest-neighbour values can differ. For categorical previews, use overviews built with a
+class-preserving method such as nearest or mode. The CLI uses the samples stored in the COG.
+
+To compare HTTP response bytes, wall time, cell counts, and mean differences on a local
+pyramid, run the loopback benchmark with a release build:
+
+```sh
+python3 scripts/benchmark_cog_overview.py target/release/dggs-stream-cli imagery.tif --resolution 8
+```
 
 ## Vector polygon fill
 

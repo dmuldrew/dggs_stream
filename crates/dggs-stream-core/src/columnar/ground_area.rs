@@ -103,12 +103,13 @@ impl GroundAreaBatchReader {
     ) -> Result<Self> {
         Self::open_with(
             || {
+                let resolved = config.transfer.resolve_for_ground_area(&mosaic, config);
+                let mosaic = mosaic.for_overview_scan(config, resolved)?;
                 let [tile] = mosaic.tiles.as_slice() else {
                     return Err(DggsStreamError::InvalidParameter(
                         "ground_area requires one raster".into(),
                     ));
                 };
-                let resolved = config.transfer.resolve_for_ground_area(&mosaic, config);
                 let mut resolved_cfg;
                 let cfg = if resolved == config.transfer {
                     config

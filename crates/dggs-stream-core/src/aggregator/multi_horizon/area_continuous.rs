@@ -333,6 +333,15 @@ pub fn scan_ground_area(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,
 ) -> Result<MultiHorizonStreamer<GroundAreaKernel>> {
+    let reader = if config.auto_overview {
+        config.validate()?;
+        let mut tile =
+            crate::raster::mosaic::TileDescriptor::new(0, reader, config.custom_crs.as_deref())?;
+        tile.select_overview(config)?;
+        tile.reader
+    } else {
+        reader
+    };
     let kernel = GroundAreaKernel::for_reader(&reader, config)?;
     MultiHorizonStreamer::new(reader, config, kernel)
 }

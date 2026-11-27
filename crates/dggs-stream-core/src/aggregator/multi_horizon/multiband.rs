@@ -81,6 +81,21 @@ impl MultiBandStreamer {
         config: &MultiResolutionConfig,
         bands: Bands<'_>,
     ) -> Result<Self> {
+        let mut preview_config;
+        let config = if config.auto_overview {
+            let native = Arc::new(crate::raster::mosaic::MosaicReader::from_single_reader(
+                reader,
+                config.bbox,
+                config.custom_crs.as_deref(),
+            )?);
+            preview_config = config.clone();
+            preview_config.transfer = config.transfer.resolve_for_multiband(&native, config);
+            let mosaic = native.for_overview_scan(config, preview_config.transfer)?;
+            reader = mosaic.tiles[0].reader.clone();
+            &preview_config
+        } else {
+            config
+        };
         let spp = usize::from(reader.metadata.samples_per_pixel);
         let bands: Vec<usize> = match bands {
             Bands::All => (1..=spp).collect(),

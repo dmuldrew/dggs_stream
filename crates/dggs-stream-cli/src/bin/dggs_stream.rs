@@ -139,6 +139,7 @@ fn print_help() {
                                      serialization; pixels, cells, stalls) on stderr\n  \
           --decode-workers <N>       Background TIFF decode threads (>=1)\n  \
           --aggregation-workers <N>  Aggregation/overlay worker threads (>=1)\n  \
+          --overview <native|auto>   Read native pixels (default) or use a COG overview for approximate center scans\n  \
           --raw-values               Skip GDAL band scale/offset calibration\n  \
           --bbox <minx,miny,maxx,maxy> WGS84 bounding box filter\n  \
           --columns <col1,col2,...>  Column projection pushdown\n  \

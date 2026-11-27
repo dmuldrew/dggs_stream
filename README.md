@@ -468,6 +468,7 @@ dggs-stream-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 5
 dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet --compression zstd   # snappy by default
 dggs-stream-cli polyfill parcels.geojson --grid s2 -r 12 -o cells.jsonl     # feature-to-cell rows
 dggs-stream-cli jsonl dem.tif --grid healpix -r auto --transfer auto   # choices reported on stderr
+dggs-stream-cli jsonl dem_cog.tif -r 8 --overview auto   # approximate: read a COG overview (default is native pixels)
 ```
 
 **Raster scans without a `SessionContext`** (`dggs_stream_sedona::scan`)
