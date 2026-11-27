@@ -394,7 +394,9 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
                             if read(&row[c..c + 1]).is_none() {
                                 continue;
                             }
-                            let Some(point) = B::make_point(exact.at(c), lat) else {
+                            // Counted like the scalar path's per-sample transform.
+                            let lon = super::profile::measure_transform(|| exact.at(c));
+                            let Some(point) = B::make_point(lon, lat) else {
                                 super::profile::transform_failed();
                                 if let Some(s) = span_start.take() {
                                     runs.add_span(&row[s..c], engine);

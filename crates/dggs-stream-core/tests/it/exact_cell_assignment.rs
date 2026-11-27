@@ -438,3 +438,82 @@ fn boundary_assignments_do_not_depend_on_worker_partitioning() {
         }
     }
 }
+
+/// North-up WGS84 and Web Mercator rows take the row-shared coordinate path for H3.
+/// Straddling H3 cell vertices in one-ULP pixel steps, every pixel must land in the
+/// cell its own centre indexes to, at each requested resolution.
+#[test]
+fn h3_affine_rows_match_direct_indexing_at_cell_vertices() {
+    use dggs_stream_core::crs::transformer::CrsTransformer;
+    use dggs_stream_core::GridKind;
+
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 16;
+    let resolutions = [7u8, 11];
+    for (lon, lat) in [(-122.0, 39.0), (179.99, -17.0)] {
+        let cell = GridKind::H3.cell_at(lat, lon, 11).unwrap();
+        let mut vertices = [(0.0, 0.0); 10];
+        let n = GridKind::H3.boundary_lng_lat(cell, &mut vertices);
+        for &(v_lon, v_lat) in &vertices[..n] {
+            for epsg in [4326u16, 3857] {
+                let crs = CrsTransformer::from_crs_or_epsg(Some(u32::from(epsg)), None).unwrap();
+                let (x, y) = if epsg == 3857 {
+                    (
+                        6_378_137.0 * v_lon.to_radians(),
+                        6_378_137.0 * v_lat.to_radians().tan().asinh(),
+                    )
+                } else {
+                    (v_lon, v_lat)
+                };
+                let (_file, path) = TestGeoTiffBuilder::new(WIDTH, HEIGHT)
+                    .epsg(epsg)
+                    .create_f32_tempfile(|col, row| (1 + col + row * WIDTH) as f32);
+                let mut reader = GeoTiffStreamReader::open(&path).unwrap();
+                let gt = &mut reader.metadata.geotransform;
+                let (a, e) = (x.next_up() - x, y.next_down() - y);
+                (gt.a, gt.b, gt.d, gt.e) = (a, 0.0, 0.0, e);
+                gt.c0 = x - (f64::from(WIDTH) / 2.0 + 0.5) * a;
+                gt.f0 = y - (f64::from(HEIGHT) / 2.0 + 0.5) * e;
+                let gt = *gt;
+
+                let mut expected = HashMap::new();
+                for row in 0..HEIGHT {
+                    for col in 0..WIDTH {
+                        let (px, py) =
+                            gt.pixel_to_coord(f64::from(col) + 0.5, f64::from(row) + 0.5);
+                        let (p_lon, p_lat) = crs.transform_point(px, py).unwrap();
+                        for &res in &resolutions {
+                            let cell = u64::from(
+                                LatLng::new(p_lat, p_lon)
+                                    .unwrap()
+                                    .to_cell(Resolution::try_from(res).unwrap()),
+                            );
+                            expected.insert((res, i64::from(1 + col + row * WIDTH)), cell);
+                        }
+                    }
+                }
+
+                let config = MultiResolutionConfig::new(resolutions.to_vec());
+                let mut streamer = MultiCategoricalHorizonStreamer::new(reader, &config).unwrap();
+                let mut actual = HashMap::new();
+                loop {
+                    let batch = streamer.fetch_next_batch(64).unwrap();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for rec in batch {
+                        rec.accumulator.for_each_class(|class, _| {
+                            assert!(actual
+                                .insert((rec.resolution, class), rec.cell_id)
+                                .is_none());
+                        });
+                    }
+                }
+                assert_eq!(
+                    actual, expected,
+                    "EPSG:{epsg} vertex ({v_lon}, {v_lat}) of {cell:x}"
+                );
+            }
+        }
+    }
+}
