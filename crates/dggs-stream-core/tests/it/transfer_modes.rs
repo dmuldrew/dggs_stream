@@ -1750,7 +1750,11 @@ fn overlay_slice_accumulation_matches_per_pixel_accumulation_on_all_grids() {
                     mass_preserve,
                 },
             );
+            // Spans with four workers (the parallel direct / prepared paths,
+            // including `mass_preserve`) against serial per-pixel accumulation.
+            cfg.aggregation_workers = Some(4);
             let spans = scan(&path, &cfg);
+            cfg.aggregation_workers = Some(1);
             cfg.min_mean = Some(-1.0e300);
             let per_pixel = scan(&path, &cfg);
             let label = format!("{grid} weighted={weighted} mass_preserve={mass_preserve}");
@@ -1889,6 +1893,99 @@ fn multi_resolution_overlay_and_interpolate_decode_single_pass() {
             m_rep.windows, s_rep.windows,
             "mode={mode:?}: expected single-pass window count"
         );
+    }
+}
+
+/// Multi-resolution overlay over many planned windows: coarse cells, each
+/// taller than a window, stay pending across windows planned for the finest
+/// resolution and must still match per-resolution scans, for both ordinary
+/// and ground-area overlay.
+#[test]
+fn multi_resolution_overlay_matches_single_scans_across_many_windows() {
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    // Windows hold about 150,000 finest-resolution cells. With 0.01 degree
+    // pixels (about 9 H3 resolution-9 cells each) and 256 columns, that is
+    // one 32-row tile row per window: 4 windows over 128 rows. Resolution-3
+    // cells (about 1.2 degrees across) span every window.
+    const PX: f64 = 0.01;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled_windows.tif");
+    crate::helpers::write_tiled(
+        &path,
+        (256, 128),
+        (32, 32),
+        crate::helpers::Crs::Geographic {
+            lon: ORIGIN.0,
+            lat: ORIGIN.1,
+            pixel_deg: PX,
+        },
+        "-9999",
+        |x, y| -> f32 {
+            if (x * 7 + y * 5).is_multiple_of(97) {
+                -9999.0
+            } else {
+                plane(
+                    ORIGIN.0 + (f64::from(x) + 0.5) * PX,
+                    ORIGIN.1 - (f64::from(y) + 0.5) * PX,
+                ) as f32
+            }
+        },
+    );
+    let resolutions = vec![3u8, 6, 9];
+
+    let mode = TransferMode::OVERLAY;
+    let mut multi_cfg = MultiResolutionConfig::new(resolutions.clone());
+    multi_cfg.transfer = mode;
+    let profile = RunProfile::new();
+    multi_cfg.profile = Some(Arc::clone(&profile));
+    let multi = collect_multi_scan(&path, &multi_cfg);
+    let windows = profile.report().windows;
+    assert!(windows >= 4, "expected several windows, got {windows}");
+
+    let mut expected = BTreeMap::new();
+    for &res in &resolutions {
+        expected.extend(collect_multi_scan(&path, &config(GridKind::H3, res, mode)));
+    }
+    assert_eq!(
+        multi.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, a) in &multi {
+        assert_continuous_close(a, &expected[key], &format!("{key:?}"));
+    }
+    assert!(multi.keys().any(|&(res, _)| res == 3));
+
+    // Ground-area overlay: one pass over all resolutions.
+    let ground = |resolutions: Vec<u8>| {
+        let mut cfg = MultiResolutionConfig::new(resolutions);
+        cfg.transfer = TransferMode::OVERLAY;
+        let mut cells = BTreeMap::new();
+        for row in
+            scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).unwrap()
+        {
+            let (res, cell, a) = row.unwrap();
+            let summary = (a.pixel_count(), a.retained_area_m2(), a.area_stats().sum);
+            assert!(cells.insert((res, cell), summary).is_none());
+        }
+        cells
+    };
+    let multi = ground(resolutions.clone());
+    let mut expected = BTreeMap::new();
+    for &res in &resolutions {
+        expected.extend(ground(vec![res]));
+    }
+    assert_eq!(
+        multi.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, (c, a, s)) in &multi {
+        let (ec, ea, es) = expected[key];
+        assert!((c - ec).abs() <= 1e-9 * ec.max(1.0), "{key:?}");
+        assert!((a - ea).abs() <= 1e-9 * ea.max(1.0), "{key:?}");
+        assert!((s - es).abs() <= 1e-9 * es.abs().max(1.0), "{key:?}");
     }
 }
 
