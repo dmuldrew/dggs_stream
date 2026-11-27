@@ -27,6 +27,8 @@ With `transfer = 'interpolate'` and `sampling != 'center'`, each cell whose cent
 - **Smooth continuous crossover (`~1×–4×` px/cell):** Pairing `interpolation = 'bicubic'` with `'rgss'` (4-pt) or `'16point'` (16-pt) integrates the smooth interpolated surface across the cell instead of piecewise-constant pixel squares, beating both 1-point `'center'` interpolation and `overlay` on smooth curved fields.
 - **Intra-cell spread (`stddev`, `min`, `max`, `quantiles`):** Single-point `'center'` `interpolate` produces only 1 observation per cell (`stddev = 0`, `min == max == mean`). Sub-cell quadrature recovers intra-cell variation across `rgss` / `8rooks` / `16point` while keeping cell `count <= 1.0`.
 - **Categorical sub-cell fractions:** With categorical data and `interpolation = 'nearest'`, dense sub-cell sampling (e.g., `'16point'`) estimates each class's fraction within the cell (converging toward `overlay` as sample count increases).
+- **Cells containing a pole** on geographic (EPSG:4326) and Web Mercator rasters fall back to a single sample at the cell centre, so they report one observation (`stddev = 0`) rather than a sub-cell spread.
+- **Stencils wider than a block's window:** the scan is refused when a cell's stencil at the coarsest requested resolution would reach more rows beyond its block than the window budget holds (very wide rasters with cells many pixels across), rather than returning cells with missing samples. Use a finer resolution, `overlay`, or `sampling = 'center'`.
 - **Very fine cells (`<= 0.5×` px/cell):** If you only need cell `mean` (not `stddev`/`min`/`max`/`quantiles`), 1-point `'center'` with `'bicubic'` gives essentially the same `mean` at 4×–16× higher throughput.
 
 ## Sampling Preset Reference Table

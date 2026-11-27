@@ -222,24 +222,44 @@ impl SamplingPattern {
             && self.points[0].weight == 1.0
     }
 
-    /// Return a copy whose point weights sum to `1.0`.
+    /// Return a copy whose point weights sum to exactly `1.0` when added in order, as the
+    /// accumulators add them, so a stencil whose samples are all valid reaches a count of
+    /// `1.0` (e.g. passes an inclusive `min_count = 1`). The floating-point residual goes
+    /// to the last weight; a stencil that loses samples still sums to less than one.
     pub fn normalized(&self) -> Self {
         let total: f64 = self.points.iter().map(|p| p.weight).sum();
-        if !total.is_finite() || total <= 0.0 || (total - 1.0).abs() <= 1e-12 {
+        if !total.is_finite() || total <= 0.0 {
             return self.clone();
         }
         let inv = 1.0 / total;
-        Self {
-            points: self
-                .points
-                .iter()
-                .map(|&p| SamplePoint {
-                    dx: p.dx,
-                    dy: p.dy,
-                    weight: p.weight * inv,
-                })
-                .collect(),
+        let mut points: Vec<SamplePoint> = self
+            .points
+            .iter()
+            .map(|&p| SamplePoint {
+                dx: p.dx,
+                dy: p.dy,
+                weight: p.weight * inv,
+            })
+            .collect();
+        if let Some((last, head)) = points.split_last_mut() {
+            let partial = head.iter().fold(0.0_f64, |sum, p| sum + p.weight);
+            let mut weight = 1.0 - partial;
+            for _ in 0..4 {
+                let sum = partial + weight;
+                if sum == 1.0 {
+                    break;
+                }
+                weight = if sum < 1.0 {
+                    weight.next_up()
+                } else {
+                    weight.next_down()
+                };
+            }
+            if weight > 0.0 && partial + weight == 1.0 {
+                last.weight = weight;
+            }
         }
+        Self { points }
     }
 
     /// Maximum normalized Chebyshev radius from `(0.5, 0.5)` across all sample points, in `[0.0, 1.0]`.
@@ -622,5 +642,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn normalized_weights_sum_to_exactly_one_in_accumulation_order() {
+        for name in [
+            "center", "rgss", "5point", "gaussian", "hex", "8rooks", "9point", "16point",
+        ] {
+            let norm = SamplingPattern::parse(name).unwrap().normalized();
+            assert!(norm.points.iter().all(|p| p.weight > 0.0), "{name}");
+            // The accumulators start from the first weight and add the rest in order.
+            let sum = norm.points.iter().fold(0.0_f64, |s, p| s + p.weight);
+            assert_eq!(sum, 1.0, "{name}");
+            // Losing a sample keeps the stencil below one.
+            let partial = norm.points[..norm.points.len() - 1]
+                .iter()
+                .fold(0.0_f64, |s, p| s + p.weight);
+            assert!(norm.points.len() == 1 || partial < 1.0, "{name}");
+        }
+        // Weights already summing to one within rounding (7 x 1/7) are corrected too.
+        let hex = SamplingPattern::hex_seven_point();
+        assert_ne!(hex.points.iter().fold(0.0_f64, |s, p| s + p.weight), 1.0);
     }
 }

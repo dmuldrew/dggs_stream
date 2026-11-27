@@ -655,6 +655,32 @@ impl<A: TransferAccumulator> TransferStream<A> {
             return invalid("replaces sub-pixel sampling: leave sampling at 'center'");
         }
         let sampling = config.sampling.normalized();
+        if let (TransferMode::Interpolate(method), Some(&coarsest_res)) =
+            (mode, config.resolutions.iter().min())
+        {
+            // A stencil reaching past the rows a block's window can hold would lose its
+            // outer samples and report partial counts, so refuse it instead.
+            for tile in &mosaic.tiles {
+                let reach = interpolate_reach(
+                    tile,
+                    config.grid,
+                    coarsest_res,
+                    method,
+                    &sampling,
+                    bands.len(),
+                );
+                if reach.needed_rows > reach.rows {
+                    return invalid(&format!(
+                        "with sub-cell sampling reaches {} rows beyond a block at resolution {coarsest_res}, more than \
+                         the {}-row window margin of this {}-pixel-wide raster allows: use a \
+                         finer resolution, transfer='overlay', or sampling='center'",
+                        reach.needed_rows,
+                        reach.rows,
+                        tile.reader.metadata.width
+                    ));
+                }
+            }
+        }
         let allow_chunk_row_window = matches!(
             mode,
             TransferMode::Overlay {
@@ -1988,14 +2014,39 @@ fn interpolate_margins(
     sampling: &SamplingPattern,
     band_count: usize,
 ) -> (u32, u32) {
+    let reach = interpolate_reach(tile, grid, coarsest_res, method, sampling, band_count);
+    (reach.rows, reach.cols)
+}
+
+/// The row and column margins of an `Interpolate` block, and the row margin the sub-cell
+/// stencil needs before the window budget caps it.
+struct InterpolateReach {
+    rows: u32,
+    cols: u32,
+    needed_rows: u32,
+}
+
+fn interpolate_reach(
+    tile: &TileDescriptor,
+    grid: GridKind,
+    coarsest_res: u8,
+    method: Interpolation,
+    sampling: &SamplingPattern,
+    band_count: usize,
+) -> InterpolateReach {
     let base = method.margin();
+    let uniform = |m: u32| InterpolateReach {
+        rows: m,
+        cols: m,
+        needed_rows: m,
+    };
     if sampling.is_single_point() {
-        return (base, base);
+        return uniform(base);
     }
     let meta = &tile.reader.metadata;
     let (width, height) = (meta.width, meta.height);
     if width == 0 || height == 0 {
-        return (base, base);
+        return uniform(base);
     }
     let gt = &meta.geotransform;
     let (col, row) = (f64::from(width / 2), f64::from(height / 2));
@@ -2037,10 +2088,12 @@ fn interpolate_margins(
     let (col_step_m, row_step_m) = match step_sizes() {
         Some(steps) => steps,
         None => {
-            return (
-                base.saturating_add(16).min(height),
-                base.saturating_add(16).min(width),
-            )
+            let rows = base.saturating_add(16).min(height);
+            return InterpolateReach {
+                rows,
+                cols: base.saturating_add(16).min(width),
+                needed_rows: rows,
+            };
         }
     };
     let cell_radius_m =
@@ -2048,13 +2101,14 @@ fn interpolate_margins(
     let extra_cols = ((1.5 * cell_radius_m / col_step_m.max(1e-6)).ceil() as u32).min(width);
     let max_extra_rows =
         ((MAX_WINDOW_VALUES / band_count.max(1) / (width as usize)) / 4).max(16) as u32;
-    let extra_rows = ((1.5 * cell_radius_m / row_step_m.max(1e-6)).ceil() as u32)
-        .min(max_extra_rows)
-        .min(height);
-    (
-        base.saturating_add(extra_rows),
-        base.saturating_add(extra_cols),
-    )
+    let needed_extra_rows =
+        ((1.5 * cell_radius_m / row_step_m.max(1e-6)).ceil() as u32).min(height);
+    let extra_rows = needed_extra_rows.min(max_extra_rows);
+    InterpolateReach {
+        rows: base.saturating_add(extra_rows),
+        cols: base.saturating_add(extra_cols),
+        needed_rows: base.saturating_add(needed_extra_rows),
+    }
 }
 
 /// Cut one tile into blocks for `mode` sized by `resolution`, with `any_coarse` controlling

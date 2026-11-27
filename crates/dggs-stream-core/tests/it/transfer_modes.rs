@@ -2800,3 +2800,66 @@ fn interpolate_subcell_sampling_categorical_projected_and_auto() {
         );
     }
 }
+
+#[test]
+fn interpolate_subcell_sampling_keeps_fully_valid_cells_at_min_count_one() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|_, _| 42.0);
+    for grid in GridKind::ALL {
+        let res = matched(grid, 0);
+        for name in [
+            "rgss", "5point", "gaussian", "hex", "8rooks", "9point", "16point",
+        ] {
+            let mut cfg = config(grid, res, TransferMode::Interpolate(Interpolation::Nearest));
+            cfg.sampling = SamplingPattern::parse(name).unwrap();
+            let all = scan(&path, &cfg);
+            cfg.min_count = Some(1.0);
+            let kept = scan(&path, &cfg);
+            let mut interior = 0;
+            for (&cell, acc) in &all {
+                let (lat, lng) = grid.center_lat_lng(cell).unwrap();
+                let col = (lng - ORIGIN.0) / PIXEL;
+                let row = (ORIGIN.1 - lat) / PIXEL;
+                if col > 4.0 && col < f64::from(W) - 4.0 && row > 4.0 && row < f64::from(H) - 4.0 {
+                    interior += 1;
+                    assert_eq!(acc.count, 1.0, "{grid} {name} {cell}");
+                    assert!(
+                        kept.contains_key(&cell),
+                        "{grid} {name} {cell} dropped by min_count=1"
+                    );
+                }
+            }
+            assert!(interior > 0, "{grid} {name}");
+        }
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_refuses_stencils_beyond_the_window_margin() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    // 65,536 columns cap a block's row margin at 16 rows, while resolution-6 hexagons
+    // (about 60 pixels across here) need more, so their stencils would lose samples.
+    let (_tmp, path) = TestGeoTiffBuilder::new(65_536, 64)
+        .origin(-170.0, 37.8)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|_, _| 42.0);
+    let mut cfg = config(
+        GridKind::H3,
+        6,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
+    cfg.sampling = SamplingPattern::sixteen_point();
+    let err = MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &cfg)
+        .err()
+        .expect("a stencil beyond the window margin must be refused")
+        .to_string();
+    assert!(err.contains("window margin"), "{err}");
+
+    cfg.sampling = SamplingPattern::center();
+    assert!(MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &cfg).is_ok());
+}

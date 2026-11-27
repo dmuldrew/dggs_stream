@@ -245,6 +245,13 @@ SELECT h3_index, mean
 FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto+2',
                                     transfer := 'interpolate', interpolation := 'bicubic');
 
+-- Cells about the size of pixels: 16 bicubic samples across each cell polygon, so stddev,
+-- min and max describe the field inside the cell (see Super-Sampling)
+SELECT h3_index, mean, stddev
+FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto',
+                                    transfer := 'interpolate', interpolation := 'bicubic',
+                                    sampling := '16point');
+
 -- Population: each pixel split across the cells it overlaps; sum adds up to the raster total
 SELECT h3_index, sum AS population
 FROM h3_raster_continuous_aggregate('population.tif', resolution := 7,
