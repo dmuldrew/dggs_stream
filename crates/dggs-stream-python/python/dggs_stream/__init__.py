@@ -1174,7 +1174,8 @@ def scan_raster(
 
     `resolutions` is an int, a list of ints, or `"auto"`: the resolution whose cells are
     closest in area to the raster's ground pixels (measured at the raster's centre through
-    its geotransform and CRS). `"auto+1"` is the closest resolution whose cells are
+    its geotransform and CRS). `"auto-finer"` and `"auto-coarser"` select the closest
+    cell size on the requested side, including equality. `"auto+1"` is the closest resolution whose cells are
     smaller than a pixel, `"auto-1"` the closest whose cells are at least pixel-sized
     (`"auto+2"`, `"auto-2"` one step further on the same side); past the grid's range
     the result clamps, and a side with no resolution is an error. Since the grids number their

@@ -222,7 +222,8 @@ FROM h3_raster_continuous_aggregate(
 
 Each grid has its own functions, named like the H3 ones, and the H3 table functions also
 take `grid :=`. `resolutions := 'auto'` picks the resolution whose cells match the pixel
-size on whichever grid ([Grids](../grids.md)).
+size on whichever grid; `'auto-finer'` takes the largest cells at most a pixel and
+`'auto-coarser'` the smallest at least a pixel ([Grids](../grids.md#automatic-resolution)).
 
 ```sql
 SELECT s2_index, s2_hex, mean

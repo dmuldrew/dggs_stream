@@ -1601,7 +1601,7 @@ fn parse_export_args(
     let mut auto = None;
     if let Some((flag, v)) = raw_resolutions {
         let expected = format!(
-            "'auto', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
+            "'auto', 'auto-finer', 'auto-coarser', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
             opts.grid.label(),
             opts.grid.max_resolution()
         );
@@ -2741,7 +2741,14 @@ mod tests {
         .unwrap();
         for grid in GridKind::ALL {
             let matched = auto_resolution(grid, &mosaic, 0).unwrap();
-            for (arg, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2), ("auto+64", 64)] {
+            for (arg, offset) in [
+                ("auto", 0),
+                ("AUTO+1", 1),
+                ("AUTO-FINER", 1),
+                ("auto-coarser", -1),
+                ("auto-2", -2),
+                ("auto+64", 64),
+            ] {
                 let args: Vec<String> = [
                     input,
                     "--crs",
