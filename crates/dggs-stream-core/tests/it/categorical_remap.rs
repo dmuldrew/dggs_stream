@@ -281,3 +281,19 @@ fn test_nested_bracket_and_hyphen_specs_stream_like_plain_specs() {
     assert_eq!(plain.1.get(&2), Some(&1250.0));
     assert_eq!(plain.1.get(&42), Some(&1250.0));
 }
+
+/// Deeply nested single-value brackets parse through the public parser in linear time
+/// (a per-layer comma rescan made this quadratic), and a bracketed list is still a list.
+#[test]
+fn deeply_nested_single_value_sources_parse_through_the_public_parser() {
+    let depth = 200_000;
+    let spec = format!("{}7{}: 1", "[".repeat(depth), "]".repeat(depth));
+    let started = std::time::Instant::now();
+    let remapper = CategoryRemapper::parse(&spec).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(remapper.remap(7), Some(1));
+    assert_eq!(remapper.remap(8), Some(8));
+
+    let list = CategoryRemapper::parse("[4, 5]: 2").unwrap();
+    assert_eq!((list.remap(4), list.remap(5)), (Some(2), Some(2)));
+}

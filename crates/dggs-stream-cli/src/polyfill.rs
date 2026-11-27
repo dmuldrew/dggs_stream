@@ -11,6 +11,8 @@ use geo_types::{Coord, LineString, MultiPolygon, Polygon};
 use geojson::{Feature, GeoJson, GeometryValue};
 use serde_json::{json, Value};
 
+/// Parsed `polyfill` arguments: the GeoJSON source (`-` for stdin), grid, single
+/// resolution and containment mode.
 pub struct Options {
     input: String,
     grid: GridKind,
@@ -22,6 +24,10 @@ fn invalid(message: impl Into<String>) -> DggsStreamError {
     DggsStreamError::InvalidParameter(message.into())
 }
 
+/// Parse the arguments after `polyfill`: one input path (or `-`), `--grid`, `-r/--resolution`,
+/// `--containment` and `-o/--output`. Returns the options and the output path, `None` for
+/// stdout. Any other argument, a missing input or a resolution beyond the grid's range is an
+/// error.
 pub fn parse_args(args: &[String]) -> Result<(Options, Option<String>)> {
     let mut input = None;
     let mut output = None;
@@ -99,12 +105,33 @@ fn polygon(rings: geojson::PolygonType) -> std::result::Result<Polygon<f64>, &'s
     ))
 }
 
+/// Fill every Polygon and MultiPolygon feature of `opts.input` (a Feature, FeatureCollection,
+/// bare Geometry or a stream of them) and write one JSON object per `(feature, cell)` to
+/// `writer`: `feature_id` (the feature's `id`, or its ordinal), the grid's hex and index
+/// columns and `resolution`. Features without geometry are skipped; other geometry types and
+/// invalid coordinates are errors naming the feature's ordinal. Returns the rows written.
 pub fn run(opts: &Options, writer: &mut dyn Write) -> Result<usize> {
     let input: Box<dyn Read> = if opts.input == "-" {
         Box::new(io::stdin().lock())
     } else {
         Box::new(File::open(&opts.input)?)
     };
+    // Row keys in sorted order, as serde_json writes an object: where the grid's column
+    // names fall relative to `feature_id` and `resolution` depends on the grid.
+    #[derive(Clone, Copy)]
+    enum Field {
+        Id,
+        Hex,
+        Index,
+        Resolution,
+    }
+    let mut fields = [
+        ("feature_id", Field::Id),
+        (opts.grid.hex_column_name(), Field::Hex),
+        (opts.grid.index_column_name(), Field::Index),
+        ("resolution", Field::Resolution),
+    ];
+    fields.sort_unstable_by_key(|&(name, _)| name);
     let mut cells = Vec::new();
     let mut features = 0usize;
     let mut rows = 0usize;
@@ -129,13 +156,26 @@ pub fn run(opts: &Options, writer: &mut dyn Write) -> Result<usize> {
             .map_err(|message| context(message.into()))?;
         grid_polygon_to_cells_into(opts.grid, polygons, opts.resolution, opts.mode, &mut cells)
             .map_err(|e| context(e.to_string()))?;
+        // Serialize the ID once and format each row straight into the writer.
         let id = feature
             .id
             .map_or_else(|| Value::from(ordinal), |id| json!(id));
+        let id = serde_json::to_string(&id).map_err(io::Error::from)?;
         for &cell in &cells {
-            let record = json!({"feature_id": id, "resolution": opts.resolution, (opts.grid.index_column_name()): cell, (opts.grid.hex_column_name()): format!("{cell:x}")});
-            serde_json::to_writer(&mut *writer, &record).map_err(io::Error::from)?;
-            writer.write_all(b"\n")?;
+            writer.write_all(b"{")?;
+            for (i, &(name, field)) in fields.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b",")?;
+                }
+                write!(writer, "\"{name}\":")?;
+                match field {
+                    Field::Id => writer.write_all(id.as_bytes())?,
+                    Field::Hex => write!(writer, "\"{cell:x}\"")?,
+                    Field::Index => write!(writer, "{cell}")?,
+                    Field::Resolution => write!(writer, "{}", opts.resolution)?,
+                }
+            }
+            writer.write_all(b"}\n")?;
         }
         rows += cells.len();
         Ok(())

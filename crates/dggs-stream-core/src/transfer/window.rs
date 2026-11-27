@@ -49,6 +49,8 @@ pub struct ChunkCache {
     byte_budget: Option<usize>,
     mask: MaskChunkCache,
     chunks: HashMap<u32, CachedChunk>,
+    /// Most decoded chunk bytes held at once (for `PeakDecodedBytes`).
+    peak_bytes: usize,
 }
 
 impl ChunkCache {
@@ -57,6 +59,11 @@ impl ChunkCache {
             byte_budget: Some(bytes),
             ..Self::default()
         }
+    }
+
+    /// Most decoded chunk bytes this cache has held at once.
+    pub(in crate::transfer) fn peak_bytes(&self) -> usize {
+        self.peak_bytes
     }
 
     /// Forget every chunk (when moving to another tile).
@@ -603,6 +610,7 @@ impl RowWindow {
                         data: Arc::clone(&data),
                     });
                     cached_bytes += bytes;
+                    cache.peak_bytes = cache.peak_bytes.max(cached_bytes);
                     cache.chunks.insert(
                         index,
                         CachedChunk::NativeSingleBand {
@@ -637,6 +645,7 @@ impl RowWindow {
                     }
                     copy_dense_to_window(&out, bounds, &rows, width, plane_len, &mut values);
                     cached_bytes += out.capacity() * size_of::<f64>();
+                    cache.peak_bytes = cache.peak_bytes.max(cached_bytes);
                     cache.chunks.insert(
                         index,
                         CachedChunk::DenseF64 {

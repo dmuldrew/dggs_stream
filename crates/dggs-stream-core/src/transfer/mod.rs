@@ -5,15 +5,17 @@
 //!   single-pass horizon kernel in [`crate::aggregator::multi_horizon`]; nothing in
 //!   this module runs for it.
 //! - [`TransferMode::Interpolate`](crate::transfer::TransferMode::Interpolate): each cell whose centre lies on the raster takes the raster
-//!   value interpolated at that centre. For cells finer than the pixels, where centre
-//!   assignment leaves most cells empty.
+//!   value interpolated at its centre, or across a sub-cell quadrature [`SamplingPattern`](crate::aggregator::SamplingPattern)
+//!   inside its projected cell polygon. For cells finer than or comparable to the pixels,
+//!   where centre assignment leaves empty cells or misses intra-cell spread.
 //! - [`TransferMode::Overlay`](crate::transfer::TransferMode::Overlay): each cell aggregates the pixels it overlaps, weighted by
 //!   the overlapped fraction of each pixel, computed exactly from the cell's polygon in
 //!   pixel space. With `mass_preserve`, every pixel's weights are normalised to sum to
 //!   one, so the cells' `sum` column adds up to the raster's total.
 //! - [`TransferMode::Auto`](crate::transfer::TransferMode::Auto): resolves on the open raster from `cell_area / pixel_area`
-//!   (`Interpolate` below 1:1, `AssignCenters` near 1:1, weighted `Overlay` at >= 16:1)
-//!   while respecting scan options such as categorical mode, compaction, and coverage.
+//!   (bilinear `Interpolate` for continuous scans below 1:1, weighted `Overlay` otherwise)
+//!   while respecting scan options such as compaction, sampling and partitions, which
+//!   need `AssignCenters`.
 //!
 //! Both non-default modes walk the raster in bands of rows, list the cells of each band
 //! from the band's bounding box, and hold only that band's pixels and the cells still
@@ -39,15 +41,18 @@ use crate::grid::GridKind;
 use crate::histogram::HistogramWeight;
 use crate::raster::mosaic::MosaicReader;
 
-/// Maximum `cell_area / pixel_area` ratio for `transfer = "auto"` to pick cell-centre
-/// interpolation (`Interpolate`): below 1:1, cells are smaller than pixels so centre
-/// assignment leaves empty cells.
+/// `cell_area / pixel_area` below which `transfer = "auto"` interpolates a continuous
+/// scan at cell centres (bilinear): cells smaller than pixels would mostly hold no pixel
+/// centre, and interpolation gives a smooth value per cell at a fraction of overlay's
+/// cost. At and above it, and for categorical scans at every ratio, `auto` runs weighted
+/// `Overlay`.
+///
+/// Centre assignment is never chosen by ratio. Measured with
+/// `scripts/benchmark_transfer_modes.py` (see `docs/transfer-modes.md`), it was 2.2-3.9x
+/// faster than overlay at about 1:1, where it left 9-26% of the cells empty and put their
+/// areas 16-35% off, and still 1.7-2.7x faster at 16:1 on S2 and HEALPix; on H3 and A5
+/// overlay was also faster from about 12:1.
 pub const AUTO_INTERPOLATE_MAX_RATIO: f64 = 1.0;
-
-/// Minimum `cell_area / pixel_area` ratio for `transfer = "auto"` to pick area-weighted
-/// `Overlay`: from 16:1 (roughly 4x linear pixel size) upward, fractional boundary
-/// weights improve accuracy and polygon span clipping avoids per-pixel indexing.
-pub const AUTO_OVERLAY_MIN_RATIO: f64 = 16.0;
 
 /// Above this cell diameter bound (`GridSpec::max_cell_diameter_km`, about four times a
 /// typical edge) `overlay` assigns whole pixels to cells by centre: the edges of such
@@ -122,13 +127,13 @@ impl TransferMode {
                 weighted: overlay_weighted.unwrap_or(true),
                 mass_preserve: mass_preserve.unwrap_or(false),
             },
-            // Not a name: `sampling` is the sub-pixel option of the default mode, and
-            // the cell-centre mode is `interpolate`.
+            // Not a name: `sampling` is an option on `'assign_centers'` and `'interpolate'`,
+            // while the interpolation transfer mode itself is `'interpolate'`.
             Some("sample" | "sampling") => {
                 return Err(invalid(format!(
-                    "Invalid transfer '{}': use 'interpolate' to give each cell the value \
-                     interpolated at its centre (the sub-pixel `sampling` option is separate \
-                     and works with 'assign_centers'); expected {}",
+                    "Invalid transfer '{}': use 'interpolate' to interpolate at each cell \
+                     (`sampling` is a separate option that works with 'assign_centers' and \
+                     'interpolate'); expected {}",
                     name.as_deref().unwrap_or_default(),
                     Self::EXPECTED
                 )))
@@ -216,10 +221,7 @@ impl TransferMode {
         if !self.is_auto() {
             return *self;
         }
-        if config.should_compact_h3_children()
-            || config.spectral_formula.is_some()
-            || !config.sampling.is_single_point()
-        {
+        if config.should_compact_h3_children() || config.spectral_formula.is_some() {
             return Self::AssignCenters;
         }
         if config.valid_coverage_threshold.is_some()
@@ -238,7 +240,12 @@ impl TransferMode {
         else {
             return Self::AssignCenters;
         };
-        resolve_auto_transfer(
+        let resolve = if config.sampling.is_single_point() {
+            resolve_auto_transfer
+        } else {
+            resolve_auto_transfer_sampled
+        };
+        resolve(
             config.grid,
             &config.resolutions,
             pixel_area_m2,
@@ -275,14 +282,61 @@ pub fn nested_overlay_rollup(grid: GridKind, mode: TransferMode, categorical: bo
         )
 }
 
+/// Whether every requested resolution's mean cell is smaller than a pixel of
+/// `pixel_area_m2` (`cell_area / pixel_area` below [`AUTO_INTERPOLATE_MAX_RATIO`]).
+fn cells_finer_than_pixels(grid: GridKind, resolutions: &[u8], pixel_area_m2: f64) -> bool {
+    resolutions
+        .iter()
+        .all(|&r| grid.area_m2(r) / pixel_area_m2 < AUTO_INTERPOLATE_MAX_RATIO)
+}
+
+/// [`resolve_auto_transfer`] for a scan with a non-`center` `sampling` preset, which
+/// `Overlay` refuses, so `auto` chooses between the two modes that accept it:
+///
+/// - When every resolution's cells are finer than the pixels and `allow_interpolate`,
+///   `Interpolate` with sub-cell samples (`Nearest` when `categorical`, `Bilinear`
+///   otherwise). Centre assignment with sub-pixel samples leaves cells empty there
+///   (`rgss` left 13–23% of cells empty at a quarter of a pixel per cell), and for
+///   classes, nearest-neighbour sub-cell samples came 1.5–3x closer to overlay's class
+///   shares than sub-pixel samples with the same preset.
+/// - Otherwise `AssignCenters` with sub-pixel samples, which were as close to overlay as
+///   sub-cell samples or closer for classes at every ratio from 1:1 measured, and closer
+///   for continuous scans at 2:1.
+///
+/// Measured with `scripts/benchmark_transfer_modes.py` (see `docs/transfer-modes.md`).
+pub fn resolve_auto_transfer_sampled(
+    grid: GridKind,
+    resolutions: &[u8],
+    pixel_area_m2: f64,
+    categorical: bool,
+    allow_interpolate: bool,
+) -> TransferMode {
+    if resolutions.is_empty() || !pixel_area_m2.is_finite() || pixel_area_m2 <= 0.0 {
+        return TransferMode::AssignCenters;
+    }
+    if allow_interpolate && cells_finer_than_pixels(grid, resolutions, pixel_area_m2) {
+        TransferMode::Interpolate(if categorical {
+            Interpolation::Nearest
+        } else {
+            Interpolation::Bilinear
+        })
+    } else {
+        TransferMode::AssignCenters
+    }
+}
+
 /// Choose a concrete [`TransferMode`] for `grid` at `resolutions` given `pixel_area_m2`.
 ///
-/// - When all resolutions have `cell_area / pixel_area < 1.0`, selects `Interpolate`
-///   (`Nearest` when `categorical`, `Bilinear` when continuous) if `allow_interpolate`,
-///   or falls back to `AssignCenters`.
-/// - When all resolutions have `cell_area / pixel_area >= 16.0`, or span across `1.0`,
-///   and every cell diameter bound is at most `500 km`, selects [`TransferMode::OVERLAY`].
-/// - Otherwise (near `1:1` or coarse global cells), selects [`TransferMode::AssignCenters`].
+/// - A continuous scan (`!categorical`) whose resolutions all have
+///   `cell_area / pixel_area` below [`AUTO_INTERPOLATE_MAX_RATIO`] selects bilinear
+///   `Interpolate` when `allow_interpolate`.
+/// - Any resolution whose cell diameter bound is above `500 km` selects
+///   [`TransferMode::AssignCenters`]: overlay takes whole pixels by centre there anyway.
+/// - Everything else selects weighted [`TransferMode::OVERLAY`]: continuous scans at or
+///   above 1:1 (or spanning it), categorical scans at every ratio (`Nearest` is only a
+///   centre lookup, while overlay gives each class its share of the cell), and scans
+///   that cannot interpolate (ground area, several bands) below 1:1.
+/// - A missing or invalid pixel area selects [`TransferMode::AssignCenters`].
 pub fn resolve_auto_transfer(
     grid: GridKind,
     resolutions: &[u8],
@@ -297,31 +351,15 @@ pub fn resolve_auto_transfer(
     let any_coarse = resolutions
         .iter()
         .any(|&r| spec.max_cell_diameter_km(r) > COARSE_CELL_DIAMETER_KM);
-    let mut min_ratio = f64::INFINITY;
-    let mut max_ratio = 0.0f64;
-    for &r in resolutions {
-        let ratio = grid.area_m2(r) / pixel_area_m2;
-        min_ratio = min_ratio.min(ratio);
-        max_ratio = max_ratio.max(ratio);
-    }
-    let all_below_one = max_ratio < AUTO_INTERPOLATE_MAX_RATIO;
-    let all_overlay = min_ratio >= AUTO_OVERLAY_MIN_RATIO;
-    let spans_unit =
-        min_ratio < AUTO_INTERPOLATE_MAX_RATIO && max_ratio >= AUTO_INTERPOLATE_MAX_RATIO;
-    if all_below_one {
-        if allow_interpolate {
-            TransferMode::Interpolate(if categorical {
-                Interpolation::Nearest
-            } else {
-                Interpolation::Bilinear
-            })
-        } else {
-            TransferMode::AssignCenters
-        }
-    } else if (all_overlay || spans_unit) && !any_coarse {
-        TransferMode::OVERLAY
-    } else {
+    if allow_interpolate
+        && !categorical
+        && cells_finer_than_pixels(grid, resolutions, pixel_area_m2)
+    {
+        TransferMode::Interpolate(Interpolation::Bilinear)
+    } else if any_coarse {
         TransferMode::AssignCenters
+    } else {
+        TransferMode::OVERLAY
     }
 }
 
@@ -420,40 +458,36 @@ mod tests {
             let res = 8u8.min(grid.max_resolution());
             let cell = grid.area_m2(res);
 
-            // Below 1:1 chooses interpolate (Bilinear for continuous, Nearest for categorical),
-            // or AssignCenters when interpolation is disallowed.
+            // Continuous scans below 1:1 interpolate bilinearly.
             assert_eq!(
                 resolve_auto_transfer(grid, &[res], cell * 2.0, false, true),
                 TransferMode::Interpolate(Interpolation::Bilinear)
             );
-            assert_eq!(
-                resolve_auto_transfer(grid, &[res], cell * 2.0, true, true),
-                TransferMode::Interpolate(Interpolation::Nearest)
-            );
+            // Categorical scans overlay at every ratio, and so do scans that cannot
+            // interpolate (ground area, several bands) below 1:1.
+            for pixel in [cell * 2.0, cell, cell / 10.0, cell / 100.0] {
+                assert_eq!(
+                    resolve_auto_transfer(grid, &[res], pixel, true, true),
+                    TransferMode::OVERLAY,
+                    "{grid} categorical, cell/pixel {}",
+                    cell / pixel
+                );
+            }
             assert_eq!(
                 resolve_auto_transfer(grid, &[res], cell * 2.0, false, false),
-                TransferMode::AssignCenters
-            );
-
-            // Near 1:1 (1..16) chooses AssignCenters.
-            assert_eq!(
-                resolve_auto_transfer(grid, &[res], cell, false, true),
-                TransferMode::AssignCenters
-            );
-            assert_eq!(
-                resolve_auto_transfer(grid, &[res], cell / 10.0, false, true),
-                TransferMode::AssignCenters
-            );
-
-            // At or above 16:1 chooses Overlay (unless cell exceeds 500 km diameter).
-            assert_eq!(
-                resolve_auto_transfer(grid, &[res], cell / 16.0, false, true),
                 TransferMode::OVERLAY
             );
-            assert_eq!(
-                resolve_auto_transfer(grid, &[res], cell / 16.0, true, true),
-                TransferMode::OVERLAY
-            );
+
+            // Continuous scans overlay from exactly 1:1 up; centre assignment is never
+            // chosen by ratio.
+            for pixel in [cell, cell / 1.5, cell / 10.0, cell / 16.0, cell / 1000.0] {
+                assert_eq!(
+                    resolve_auto_transfer(grid, &[res], pixel, false, true),
+                    TransferMode::OVERLAY,
+                    "{grid} continuous, cell/pixel {}",
+                    cell / pixel
+                );
+            }
         }
 
         // Mixed resolutions spanning across 1:1 choose Overlay when below 500 km.
@@ -463,9 +497,18 @@ mod tests {
             resolve_auto_transfer(GridKind::H3, &[r10, 12], pixel_at_11, false, true),
             TransferMode::OVERLAY
         );
-        // Coarse global resolution (> 500 km diameter bound) falls back to AssignCenters.
+        // Coarse global resolution (> 500 km diameter bound) falls back to AssignCenters,
+        // for categorical scans too, and when it is mixed with fine resolutions.
         assert_eq!(
             resolve_auto_transfer(GridKind::H3, &[0], 1e6, false, true),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[0], 1e6, true, true),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            resolve_auto_transfer(GridKind::H3, &[0, 8], 1e6, false, true),
             TransferMode::AssignCenters
         );
         // Degenerate or empty inputs fall back safely to AssignCenters.
@@ -479,6 +522,56 @@ mod tests {
         );
         assert_eq!(
             resolve_auto_transfer(GridKind::H3, &[8], f64::NAN, false, true),
+            TransferMode::AssignCenters
+        );
+    }
+
+    #[test]
+    fn sampled_auto_interpolates_finer_cells_and_assigns_centres_otherwise() {
+        for grid in GridKind::ALL {
+            let res = 8u8.min(grid.max_resolution());
+            let cell = grid.area_m2(res);
+            // Cells finer than the pixels: sub-cell samples, nearest for classes.
+            assert_eq!(
+                resolve_auto_transfer_sampled(grid, &[res], cell * 2.0, false, true),
+                TransferMode::Interpolate(Interpolation::Bilinear),
+                "{grid}"
+            );
+            assert_eq!(
+                resolve_auto_transfer_sampled(grid, &[res], cell * 2.0, true, true),
+                TransferMode::Interpolate(Interpolation::Nearest),
+                "{grid}"
+            );
+            // Scans that cannot interpolate fall back to sub-pixel samples.
+            assert_eq!(
+                resolve_auto_transfer_sampled(grid, &[res], cell * 2.0, true, false),
+                TransferMode::AssignCenters,
+                "{grid}"
+            );
+            // From 1:1 up, sub-pixel samples for both kinds; never overlay.
+            for pixel in [cell, cell / 16.0, cell / 1000.0] {
+                for categorical in [false, true] {
+                    assert_eq!(
+                        resolve_auto_transfer_sampled(grid, &[res], pixel, categorical, true),
+                        TransferMode::AssignCenters,
+                        "{grid} categorical={categorical} cell/pixel {}",
+                        cell / pixel
+                    );
+                }
+            }
+        }
+        // Mixed resolutions interpolate only when every one is finer than the pixels.
+        let pixel_at_11 = GridKind::H3.area_m2(11);
+        assert_eq!(
+            resolve_auto_transfer_sampled(GridKind::H3, &[10, 12], pixel_at_11, true, true),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            resolve_auto_transfer_sampled(GridKind::H3, &[12, 13], pixel_at_11, true, true),
+            TransferMode::Interpolate(Interpolation::Nearest)
+        );
+        assert_eq!(
+            resolve_auto_transfer_sampled(GridKind::H3, &[8], f64::NAN, false, true),
             TransferMode::AssignCenters
         );
     }

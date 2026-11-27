@@ -1,5 +1,5 @@
-# DuckDB version the extension is packaged for and the runtime CLI/library.
-# They must match: DuckDB rejects extensions tagged for another platform name.
+# DuckDB release of the runtime CLI/library. The extension's platform tag follows
+# it, since DuckDB rejects extensions tagged for another platform name.
 ARG DUCKDB_VERSION=v1.2.0
 
 # ==============================================================================
@@ -21,7 +21,14 @@ COPY examples/ ./examples/
 
 # Compile release libraries (every member's cdylib, which the cross-engine tests load),
 # run tests, then build CLI utilities, sample data, and the metadata-tagged extension
-RUN cargo build --release --workspace && \
+# The default build targets DuckDB's stable C API v1.2.0, which DuckDB 1.2 through
+# 1.5 load. DuckDB 2.0 needs the `duckdb-api-v1_5_6` build, which this image does
+# not make (see docs/engines/duckdb.md#extension-builds).
+RUN case "${DUCKDB_VERSION}" in \
+        v1.*) ;; \
+        *) echo "DUCKDB_VERSION=${DUCKDB_VERSION}: this image builds the C API v1.2.0 extension, which DuckDB 2.0 and later cannot load" >&2; exit 1 ;; \
+    esac && \
+    cargo build --release --workspace && \
     cargo test --release --workspace && \
     cargo build --release --examples && \
     cargo run --release --example generate_sample -- sample_sf.tif && \

@@ -24,6 +24,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiScanHorizonStreamer, ScanPartition,
 };
 use dggs_stream_core::aggregator::output_policy::{NodataPolicy, OutputPolicy, MAX_DECIMALS};
+use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::columnar::ipc::{write_ipc_stream, write_jsonl_stream, IpcStreamReader};
 use dggs_stream_core::columnar::partitioned::{
     merge_partial_batches, PartitionedBatchReader, PARTIAL_STATE_COLUMN,
@@ -90,6 +91,9 @@ pub struct CliStreamOptions {
     /// pixels map onto cells (default: each pixel into the cell holding its centre;
     /// `auto` chooses from the cell-to-pixel area ratio and scan options).
     pub transfer: TransferMode,
+    /// `--sampling`: quadrature pattern for `assign_centers` (sub-pixel) and `interpolate`
+    /// (sub-cell polygon quadrature), defaulting to single-center sampling.
+    pub sampling: SamplingPattern,
     /// Minimum valid fraction of selected raster overlap.
     pub valid_coverage_threshold: Option<f64>,
     /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
@@ -127,6 +131,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            sampling: SamplingPattern::default(),
             valid_coverage_threshold: None,
             histogram: None,
             profile: None,
@@ -195,6 +200,7 @@ impl CliStreamOptions {
         config.overlap_rule = OverlapRule::Cutline;
         apply_output_policy(&mut config, &self.output);
         config.transfer = self.transfer;
+        config.sampling = self.sampling.clone();
         config.profile = self.profile.clone();
         config.valid_coverage_threshold = self.valid_coverage_threshold;
         if let Some(n) = self.decode_workers {
@@ -1479,6 +1485,7 @@ fn parse_export_args(
             }
             "--transfer" => transfer = Some(value()?.to_string()),
             "--interpolation" => interpolation = Some(value()?.to_string()),
+            "--sampling" => opts.sampling = SamplingPattern::parse(value()?)?,
             "--overlay-weighted" => {
                 let v = value()?;
                 overlay_weighted = Some(match v.to_ascii_lowercase().as_str() {
@@ -1594,7 +1601,7 @@ fn parse_export_args(
     let mut auto = None;
     if let Some((flag, v)) = raw_resolutions {
         let expected = format!(
-            "'auto', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
+            "'auto', 'auto-finer', 'auto-coarser', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
             opts.grid.label(),
             opts.grid.max_resolution()
         );
@@ -2611,9 +2618,30 @@ mod tests {
             &["--mass-preserve"],
             &["--transfer", "overlay", "--overlay-weighted", "maybe"],
             &["--transfer", "interpolate", "--interpolation", "cubic9"],
+            &["--sampling", "unknown_preset"],
+            &["--transfer", "overlay", "--sampling", "rgss"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }
+        assert!(run(&["--sampling", "rgss"]).is_ok());
+        let interp_rgss = run(&[
+            "-r",
+            "auto+2",
+            "--transfer",
+            "interpolate",
+            "--sampling",
+            "rgss",
+        ])
+        .unwrap();
+        assert!(!interp_rgss.is_empty());
+        assert!(interp_rgss.iter().all(|row| {
+            let c = row["count"].as_f64().unwrap();
+            c > 0.0 && c <= 1.0 + 1e-12 && (row["mean"].as_f64().unwrap() - 2.5).abs() < 1e-9
+        }));
+        assert!(interp_rgss
+            .iter()
+            .any(|row| (row["count"].as_f64().unwrap() - 1.0).abs() < 1e-12));
+        assert!(run(&["-r", "auto+2", "--transfer", "auto", "--sampling", "rgss"]).is_ok());
     }
 
     #[test]
@@ -2635,7 +2663,7 @@ mod tests {
                 .unwrap();
             let near_res = (0..=grid.max_resolution())
                 .rev()
-                .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+                .find(|&r| grid.area_m2(r) >= pixel_m2)
                 .unwrap();
             let overlay_res = (0..=grid.max_resolution())
                 .rev()
@@ -2661,13 +2689,15 @@ mod tests {
                 parse(&["-r", &r_fine, "--transfer", "auto"]),
                 TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Bilinear)
             );
+            // Categorical scans overlay even below 1:1.
             assert_eq!(
                 parse(&["-r", &r_fine, "-c", "--transfer", "auto"]),
-                TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Nearest)
+                TransferMode::OVERLAY
             );
+            // From 1:1 up, continuous scans overlay too.
             assert_eq!(
                 parse(&["-r", &r_near, "--transfer", "auto"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
             assert_eq!(
                 parse(&["-r", &r_over, "--transfer", "auto"]),
@@ -2688,9 +2718,10 @@ mod tests {
                 parse(&["-r", &r_over, "--transfer", "auto", "--ground-area"]),
                 TransferMode::OVERLAY
             );
+            // Ground area cannot interpolate, so below 1:1 it overlays as well.
             assert_eq!(
                 parse(&["-r", &r_fine, "--transfer", "auto", "--ground-area"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
         }
     }
@@ -2698,7 +2729,7 @@ mod tests {
     #[test]
     fn test_cli_auto_resolution_on_every_grid() {
         use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-        use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+        use dggs_stream_core::resolution::auto_resolution;
         let tif = write_test_tif(32, 32, 5.0);
         let input = tif.path().to_str().unwrap();
         let mosaic = MosaicReader::open(
@@ -2710,7 +2741,14 @@ mod tests {
         .unwrap();
         for grid in GridKind::ALL {
             let matched = auto_resolution(grid, &mosaic, 0).unwrap();
-            for (arg, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2), ("auto+64", 64)] {
+            for (arg, offset) in [
+                ("auto", 0),
+                ("AUTO+1", 1),
+                ("AUTO-FINER", 1),
+                ("auto-coarser", -1),
+                ("auto-2", -2),
+                ("auto+64", 64),
+            ] {
                 let args: Vec<String> = [
                     input,
                     "--crs",
@@ -2726,7 +2764,7 @@ mod tests {
                 let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
                 assert_eq!(
                     opts.resolutions,
-                    vec![offset_resolution(grid, matched, offset)],
+                    vec![auto_resolution(grid, &mosaic, offset).unwrap()],
                     "{grid} {arg}"
                 );
             }

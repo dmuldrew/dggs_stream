@@ -1174,8 +1174,11 @@ def scan_raster(
 
     `resolutions` is an int, a list of ints, or `"auto"`: the resolution whose cells are
     closest in area to the raster's ground pixels (measured at the raster's centre through
-    its geotransform and CRS). `"auto+1"` is one resolution step finer, `"auto-2"` two
-    coarser; the result is clamped to the grid's range. Since the grids number their
+    its geotransform and CRS). `"auto-finer"` and `"auto-coarser"` select the closest
+    cell size on the requested side, including equality. `"auto+1"` is the closest resolution whose cells are
+    smaller than a pixel, `"auto-1"` the closest whose cells are at least pixel-sized
+    (`"auto+2"`, `"auto-2"` one step further on the same side); past the grid's range
+    the result clamps, and a side with no resolution is an error. Since the grids number their
     resolutions on unrelated scales, `"auto"` is the way to ask for comparable cells on
     each. `auto_resolution(path, grid)` returns the resolution it picks.
 
@@ -1194,11 +1197,15 @@ def scan_raster(
       Requires one north-up, single-band EPSG:4326 raster.
     - `bands`: select ordered bands from one raster, e.g. `[3, 1]` for
       `band_3_mean` and `band_1_mean` in a continuous center-assignment scan.
-    - `aggregation_budget_mb`, `decode_budget_mb`: positive whole MiB for center
-      assignment. Aggregation may spill to disk. The decode budget controls prefetched
-      sample buffers and permits one oversized chunk to proceed alone.
-    - `sampling`: sub-pixel sampling pattern, one of `center` (default), `5point`,
-      `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`.
+    - `aggregation_budget_mb`, `decode_budget_mb`: positive whole MiB. The aggregation
+      budget applies to center assignment, where aggregation may spill to disk; any other
+      transfer mode refuses it, including one `transfer="auto"` resolves to. The decode
+      budget applies in every mode: it controls prefetched sample buffers and permits one
+      oversized chunk to proceed alone.
+    - `sampling`: quadrature pattern, one of `center` (default), `5point`,
+      `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`. Samples sub-pixel
+      positions in `"assign_centers"` and area-preserving sub-cell polygon positions
+      in `"interpolate"`.
     - `overlap_rule`: how overlapping mosaic tiles are resolved: `cutline` (default),
       `first` or `average`.
     - `min_majority_fraction` (categorical): drop cells whose majority class covers less
@@ -1232,8 +1239,8 @@ def scan_raster(
       pixel once); `count` is then the overlapped area in pixels. With
       `mass_preserve=True` each pixel's weights are normalised to sum to one, so the
       `sum` column adds up to the raster's total. Categorical scans take `"overlay"`
-      and `"interpolate"` with `interpolation="nearest"`. Not combinable with `sampling`,
-      `spectral_formula` or partitions.
+      and `"interpolate"` with `interpolation="nearest"`. Not combinable with
+      `spectral_formula` or partitions (`"overlay"` also rejects non-default `sampling`).
     - `valid_coverage_threshold`: minimum valid fraction (0 to 1) of the selected
       raster overlap. Mass-preserving overlay retains all contributions.
 
@@ -2244,8 +2251,9 @@ def auto_resolution(
     path: Union[str, Path], grid: str = "h3", *, offset: int = 0, crs: Optional[str] = None
 ) -> int:
     """The resolution `resolutions="auto"` picks for a raster on `grid`: the one whose
-    cells are closest in area to the raster's ground pixels, moved `offset` steps
-    (positive is finer) and clamped to the grid's range. `crs` overrides the raster's CRS.
+    cells are closest in area to the raster's ground pixels (`offset=0`). A positive
+    `offset` N picks the N-th resolution whose cells are smaller than a pixel, a negative
+    one the N-th whose cells are at least pixel-sized, clamped to the grid's range. `crs` overrides the raster's CRS.
     """
     lib, code = _grid_code(grid)
     if not hasattr(lib, "dggs_stream_py_auto_resolution"):

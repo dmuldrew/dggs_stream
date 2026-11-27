@@ -140,6 +140,58 @@ fn v2_scan_accepts_budgets_and_rejects_invalid_sizes() {
 }
 
 #[test]
+fn budgets_follow_the_transfer_mode_auto_resolves_to() {
+    let (_tmp, tif) = gradient_tif();
+    let scan = |options: &str| scan_json(&tif, "9", &CString::new(options).unwrap());
+
+    // The decode budget bounds decoded chunks in every mode: an overlay scan accepts it
+    // and gives the same cells as without it.
+    let overlay = scan(r#"{"transfer":"overlay"}"#).unwrap();
+    let budgeted = scan(r#"{"transfer":"overlay","decode_budget_mb":1}"#).unwrap();
+    assert_eq!(budgeted, overlay);
+
+    // The aggregation budget belongs to centre assignment alone.
+    let err = scan(r#"{"transfer":"overlay","aggregation_budget_mb":1}"#).unwrap_err();
+    assert!(
+        err.contains("applies only to transfer='assign_centers'"),
+        "{err}"
+    );
+
+    // `auto` is resolved before the check: about ten pixels per resolution-9 cell
+    // resolves to overlay, so the budget is refused with the mode named...
+    let err = scan(r#"{"transfer":"auto","aggregation_budget_mb":1}"#).unwrap_err();
+    assert!(err.contains("transfer='auto' chose 'overlay'"), "{err}");
+    // ...while sub-pixel sampling makes `auto` assign centres, where the budget applies.
+    // A small aggregation budget can change the order cells are emitted and merged in,
+    // so compare rows sorted by cell, with numbers equal to rounding.
+    let rows = |columns: &serde_json::Map<String, serde_json::Value>| {
+        let names: Vec<_> = columns.keys().cloned().collect();
+        let len = columns[&names[0]].as_array().unwrap().len();
+        let mut rows: Vec<Vec<serde_json::Value>> = (0..len)
+            .map(|i| names.iter().map(|n| columns[n][i].clone()).collect())
+            .collect();
+        let key = names.iter().position(|n| n == "h3_index").unwrap();
+        rows.sort_by_key(|row| row[key].as_u64());
+        rows
+    };
+    let auto = scan(r#"{"transfer":"auto","sampling":"rgss","aggregation_budget_mb":1}"#).unwrap();
+    let centres = scan(r#"{"sampling":"rgss"}"#).unwrap();
+    assert_eq!(
+        auto.keys().collect::<Vec<_>>(),
+        centres.keys().collect::<Vec<_>>()
+    );
+    let (auto, centres) = (rows(&auto), rows(&centres));
+    assert!(!centres.is_empty());
+    assert_eq!(auto.len(), centres.len());
+    for (a, c) in auto.iter().flatten().zip(centres.iter().flatten()) {
+        match (a.as_f64(), c.as_f64()) {
+            (Some(x), Some(y)) => assert!((x - y).abs() <= 1e-12 * y.abs().max(1.0), "{x} {y}"),
+            _ => assert_eq!(a, c),
+        }
+    }
+}
+
+#[test]
 fn resolutions_are_bounded_by_the_grid() {
     let (_tmp, tif) = gradient_tif();
     for grid in GridKind::ALL {

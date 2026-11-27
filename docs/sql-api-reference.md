@@ -29,14 +29,14 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `nodata` | `DOUBLE` | `None` (auto) | Custom NoData sentinel value to exclude from aggregations. |
 | `scale_offset` | `BOOLEAN` | `true` | Convert stored values to physical values with each band's GDAL `SCALE`/`OFFSET` before statistics and spectral indices. `false` aggregates raw stored values. See [Band calibration and validity](#band-calibration-and-validity). |
 | `chunk_size` | `BIGINT` | `512` | Strip/tile buffer window size in rows. |
-| `sampling` | `VARCHAR` | `'center'` | Sub-pixel super-sampling preset (`'center'`, `'rgss'`, `'hex'`, `'gaussian'`, `'5point'`, `'8rooks'`, `'9point'`, `'16point'`). Unknown names are rejected. |
+| `sampling` | `VARCHAR` | `'center'` | Quadrature sampling preset (`'center'`, `'rgss'`, `'hex'`, `'gaussian'`, `'5point'`, `'8rooks'`, `'9point'`, `'16point'`). Applies sub-pixel for `'assign_centers'` and sub-cell for `'interpolate'`; rejected by `'overlay'`. Unknown names are rejected. See [Super-Sampling](super-sampling.md). |
 | `min_lon`, `min_lat`, `max_lon`, `max_lat` | `DOUBLE` | `None` | Region of Interest (ROI) bounding box coordinates for chunk pruning. |
 | `bbox` | `VARCHAR` | `None` | Bounding box as a single string: `'min_lon,min_lat,max_lon,max_lat'` (alternative to individual coordinate parameters). |
 | `h3_cell` | `BIGINT` | `None` | Single H3 cell index for predicate pushdown (only process chunks intersecting this cell). |
 | `h3_hex` | `VARCHAR` | `None` | Single H3 hex string for predicate pushdown (alternative to `h3_cell`). |
 | `compact` | `BOOLEAN` | `false` | Compact output format (omits `h3_hex` VARCHAR) and merge complete sets of seven H3 children into a parent. Cannot be combined with adjacent requested resolutions, which would duplicate parent cells. |
 | `overlap_rule` | `VARCHAR` | `'cutline'` | Mosaic tile overlap resolution: `'cutline'` (among tiles whose footprint contains the point, the one with the nearest centre pixel by great-circle distance), `'first'` (first tile in input order whose footprint contains the point; its nodata is not filled from later tiles), `'average'` (accumulate every observation, so denser or finer overlapping grids carry more weight). |
-| `workers` / `threads` | `BIGINT` | ambient | Aggregation (kernel) threads. When set, the query runs kernel windows on a dedicated pool of this size, shared by concurrent queries that request the same size. When unset, windows use the caller's Rayon pool, capped at 8 per wave. Ground-area overlay processes windows serially for all worker settings. |
+| `workers` / `threads` | `BIGINT` | ambient | Aggregation (kernel) threads. When set, the query runs kernel windows on a dedicated pool of this size, shared by concurrent queries that request the same size. When unset, windows use the caller's Rayon pool, capped at 8 per wave. Ground-area overlay clips each window's cells on the same pool. |
 | `decode_workers` | `BIGINT` | `4` | Chunk decompression threads. |
 | `fetch_workers` | `BIGINT` | `8` | Concurrent HTTP range requests for remote tiles. |
 | `decode_budget_mb` | `BIGINT` | `256` | Memory for decoded chunks held at once (decoding, queued, being aggregated, idle for reuse), in MiB. Decoding waits for room; a single chunk larger than the budget is decoded only when no other is held. |
@@ -53,11 +53,11 @@ Sections marked **DuckDB 2.0 build** need the extension built against the v1.5.6
 | `quantiles` | `VARCHAR` | `None` | Streaming quantile targets: percentiles such as `'p50,p90,p99.5'` or `'0.05'`, aliases `median`/`q1`/`q2`/`q3`/`iqr`, or presets `'default'`, `'box'` (p25, p50, p75, iqr), `'tails'`, `'deciles'`. Percentiles must be finite and strictly between 0 and 100 (decimals between 0 and 1). Adds one nullable column per target; per-cell sketches are only built when the query selects or filters on one of these columns. |
 | `percentiles` | `VARCHAR` | `None` | Alias for `quantiles`. |
 | `grid` | `VARCHAR` | `'h3'` | Grid to index onto: `'h3'`, `'a5'`, `'s2'` or `'healpix'`. The `a5_`, `s2_` and `healpix_` table functions default to their own grid. The cell columns are then `{grid}_index` / `{grid}_hex`, and `resolution(s)` follow that grid's range (A5 and S2 0–30, HEALPix 0–29). See [Grids](grids.md). |
-| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area, moved N steps finer or coarser. |
+| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto-finer'`, `'auto-coarser'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area; `auto+N` the N-th with cells smaller than a pixel, `auto-N` the N-th with cells at least pixel-sized. |
 | `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`. |
 | `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics instead of NULL. |
 | `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
-| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'interpolate'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'interpolate'` (value interpolated at each cell centre, for cells finer than the pixels), `'overlay'` (pixels weighted by the fraction each cell overlaps) or `'auto'` (picks one from the cell-to-pixel area ratio). See [Transfer Modes](transfer-modes.md). |
 | `interpolation` | `VARCHAR` | `'bilinear'` | With `transfer := 'interpolate'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
 | `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
 | `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |
@@ -168,7 +168,7 @@ Every engine reads these from the GeoTIFF and applies them the same way:
 | `nodata` | `DOUBLE` | `None` (auto) | Custom NoData sentinel value. |
 | `scale_offset` | `BOOLEAN` | `true` | Accepted for symmetry and ignored: class codes are never scaled. |
 | `chunk_size` | `BIGINT` | `512` | Strip/tile buffer window size in rows. |
-| `sampling` | `VARCHAR` | `'center'` | Sub-pixel super-sampling preset (`'center'`, `'rgss'`, `'hex'`, etc.). |
+| `sampling` | `VARCHAR` | `'center'` | Quadrature sampling preset (`'center'`, `'rgss'`, `'hex'`, `'gaussian'`, `'5point'`, `'8rooks'`, `'9point'`, `'16point'`). Sub-pixel for `'assign_centers'`, sub-cell for `'interpolate'`; rejected by `'overlay'`. See [Super-Sampling](super-sampling.md). |
 | `min_lon`, `min_lat`, `max_lon`, `max_lat` | `DOUBLE` | `None` | Bounding box coordinates for spatial Region of Interest (ROI) chunk pruning. |
 | `bbox` | `VARCHAR` | `None` | Bounding box as a single string: `'min_lon,min_lat,max_lon,max_lat'`. |
 | `h3_cell` | `BIGINT` | `None` | Single H3 cell index for predicate pushdown. |
@@ -188,11 +188,11 @@ Every engine reads these from the GeoTIFF and applies them the same way:
 On the DuckDB 2.0 build, `workers`, `fetch_workers` and `decode_budget_mb` can also come from [session options](#session-options-duckdb-20-build); an argument passed here takes precedence.
 | `geom` | `BOOLEAN` | `false` | Emit a `geometry` column with OGC WKB 2D Polygon hexagons. |
 | `grid` | `VARCHAR` | `'h3'` | Grid to index onto: `'h3'`, `'a5'`, `'s2'` or `'healpix'`. The `a5_`, `s2_` and `healpix_` table functions default to their own grid. The cell columns are then `{grid}_index` / `{grid}_hex`, and `resolution(s)` follow that grid's range (A5 and S2 0–30, HEALPix 0–29). See [Grids](grids.md). |
-| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area, moved N steps finer or coarser. |
+| `resolutions := 'auto'` | `VARCHAR` | — | `'auto'`, `'auto-finer'`, `'auto-coarser'`, `'auto+N'` or `'auto-N'`: the resolution whose mean cell area best matches the raster's ground pixel area; `auto+N` the N-th with cells smaller than a pixel, `auto-N` the N-th with cells at least pixel-sized. |
 | `nodata_policy` | `VARCHAR` | `'omit'` | `'emit'` returns every cell a pixel falls in; cells without a valid sample have `count` 0 and NULL statistics. Refused with `min_count` or `compact`; the long format does not return the empty cells. |
 | `emit_nodata_value` | `DOUBLE` | `None` | Under `'emit'`, the value of those statistics (and class) instead of NULL. |
 | `decimals` | `BIGINT` | `None` | Round floating-point statistics to 0–15 decimals (counts and class codes are left alone). |
-| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'interpolate'` (value interpolated at each cell centre, for cells finer than the pixels) or `'overlay'` (pixels weighted by the fraction each cell overlaps). See [Scan Options](scan-options.md#transfer-modes). |
+| `transfer` | `VARCHAR` | `'assign_centers'` | How pixels map onto cells: `'assign_centers'`, `'interpolate'` (value interpolated at each cell centre, for cells finer than the pixels), `'overlay'` (pixels weighted by the fraction each cell overlaps) or `'auto'` (picks one from the cell-to-pixel area ratio). See [Transfer Modes](transfer-modes.md). |
 | `interpolation` | `VARCHAR` | `'bilinear'` | With `transfer := 'interpolate'`: `'nearest'`, `'bilinear'`, `'bicubic'` or `'lanczos'`. |
 | `overlay_weighted` | `BOOLEAN` | `true` | With `transfer := 'overlay'`: `false` counts every touched pixel once. |
 | `mass_preserve` | `BOOLEAN` | `false` | With `transfer := 'overlay'`: normalise each pixel's weights so `sum` adds up to the raster's total. |

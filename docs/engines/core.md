@@ -91,9 +91,18 @@ and NoData pixels in the denominator.
 The geometry adaptively traces grid edges in raster pixel coordinates using a
 sampled tolerance of 1/64 pixel. Partial-pixel integration accounts for the change
 in ellipsoidal area with latitude along the resulting segments. See the
-[overlay geometry](../transfer-modes.md#overlay-area-weighted-aggregation). The scan returns an error for resolutions with a maximum
+[overlay geometry](../transfer-modes.md#overlay-geometry). The scan returns an error for resolutions with a maximum
 cell diameter above 500 km or a candidate cell enclosing a pole. It processes
-row windows serially and supports weighted overlay with omitted NoData.
+row windows in order, clipping the cells of each window in parallel on the pool that
+`aggregation_workers` selects (results are identical for any worker count), and supports
+weighted overlay with omitted NoData.
+
+With several resolutions, one pass serves them all and each cell is emitted as
+soon as it completes, so rows of different resolutions interleave. The full row
+set does not depend on this order, but a limited read (for example SQL `LIMIT n`
+without `ORDER BY`, or `GroundAreaBatchReader` stopped after one batch) returns
+whichever cells completed first, not the cells of the first resolution. Sort
+explicitly when the subset matters.
 
 ## Pipeline
 
@@ -816,10 +825,10 @@ floats become `null`; binary columns (`wkb`) are lowercase hex strings.
 | `ParquetWriter::write_continuous_streamer_to_parquet(streamer, path, ParquetExportConfig)` / `write_categorical_streamer_to_parquet` | Parquet or OGC GeoParquet 1.1 (`config.geoparquet`); the file is published only after the stream completes successfully. |
 | `PmtilesTiler::process_raster_source_to_pmtiles(source, path, config)` / `process_categorical_source_to_pmtiles` | PMTiles v3 archive with one zoom range per requested resolution. See [PMTiles & Multi-Resolution](../pmtiles.md). |
 | `transcode::process_parquet_to_pmtiles` | Pre-aggregated H3 Parquet → PMTiles. An explicit `h3_column_name` that isn't in the schema returns `Err` listing available columns; `None` auto-detects. |
-| `PmtilesTiler::export_features(grid, features, path)` | PMTiles v3 from `CellFeature`s in any order, with bounded memory (external sort by latitude, 256 MiB buffer). Invalid cell IDs are counted in `PmtilesExportSummary::invalid_features_dropped`. |
+| `PmtilesTiler::export_features(grid, features, path)` | PMTiles v3 from `CellFeature`s in any order, with bounded memory (external sort by latitude, 256 MiB buffer). Invalid cell IDs are counted in `PmtilesExportSummary::invalid_features_dropped`, and `(cell, zoom)` pairs skipped by the per-cell tile cap in `PmtilesExportSummary::capped_cells`. |
 | `pmtiles::ExternalFeatureExport::new(budget_bytes, spill_dir)` → `push(feature)` → `finish(path)` / `finish_into(writer)` | The exporter behind `export_features`, with a custom buffer budget, spill directory (created only when a run is spilled) and output; `finish_into` streams the archive to any `std::io::Write`, such as a database file system. Each resolution present fills a band of zooms up to the next finer one (`pyramid::zoom_bands_for_resolutions`). See [zoom bands and the tile cap](../pmtiles.md#zoom-bands-for-h3-tables). |
 | `ExternalFeatureExport::with_zoom_limits(min_zoom, max_zoom)` | Clips those bands to `min_zoom..=max_zoom` (either may be `None`); a resolution whose band lies wholly outside is not tiled. DuckDB `COPY ... (min_zoom, max_zoom)` and SedonaDB's export use it. |
-| `pmtiles::pyramid::for_each_cell_tile_mercator(center, vertices, z, f)` | Calls `f(x, y)` for each tile a cell covers at zoom `z` and returns how many it emitted. A cell covering more than `MAX_TILE_OPS_PER_CELL_ZOOM` (65,536) tiles is skipped and `0` is returned; the tilers report such skips as `cells_over_tile_cap` in the archive metadata. See [Cell Geometry in Vector Tiles](../pmtiles.md#cell-geometry-in-vector-tiles). |
+| `pmtiles::pyramid::for_each_cell_tile_mercator(center, vertices, z, f)` | Calls `f(x, y)` for each tile a cell covers at zoom `z` and returns how many it emitted. A cell covering more than `MAX_TILE_OPS_PER_CELL_ZOOM` (65,536) tiles is skipped and `0` is returned; the tilers report such skips as `cells_over_tile_cap` in the archive metadata, and `PmtilesTiler::export_features`, `ExternalFeatureExport` and the Parquet transcoder also return the count as `PmtilesExportSummary::capped_cells`. See [Cell Geometry in Vector Tiles](../pmtiles.md#cell-geometry-in-vector-tiles). |
 | `PmtilesWriter::new_in(..., spill_dir)` / `finish_into(writer)` | Low-level archive writer: tile spill file in a chosen directory, and the finished archive streamed to any writer (`finish(path)` writes atomically via a temporary file next to `path`). |
 
 ## Errors

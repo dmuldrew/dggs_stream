@@ -731,6 +731,13 @@ fn transfer_modes_refuse_options_of_the_centre_kernel() {
         .unwrap_err()
         .to_string()
         .contains("sampling"));
+    let mut interp_sampling = config(
+        GridKind::H3,
+        9,
+        TransferMode::Interpolate(Interpolation::Bilinear),
+    );
+    interp_sampling.sampling = sampling.sampling.clone();
+    assert!(open(&interp_sampling).is_ok());
     let mut spectral = base.clone();
     spectral.spectral_formula =
         dggs_stream_core::aggregator::multi_horizon::SpectralFormula::parse("ndvi", 4, 3, 2, 1, 6);
@@ -1218,6 +1225,99 @@ fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
     assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
 }
 
+/// The single-run counterpart of the wrapped case above: a bbox inside one
+/// pixel of a 36,000-column raster lists only the cells near that pixel and
+/// counts exactly that whole pixel.
+#[test]
+fn ground_area_small_bbox_selects_one_whole_pixel_on_a_wide_raster() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(36000, 2)
+        .origin(-180.0, 0.01)
+        .pixel_size(0.01)
+        .create_f32_tempfile(|_, r| if r == 0 { 3.0 } else { 8.0 });
+    let mut cfg = config(GridKind::S2, 18, TransferMode::OVERLAY);
+    cfg.bbox = Some([10.004, 0.004, 10.006, 0.006]);
+    let rows = dggs_stream_core::transfer::scan_ground_area_overlay(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &cfg,
+    )
+    .unwrap();
+    let mut pixels = 0.0;
+    for row in rows {
+        let (_, _, a) = row.unwrap();
+        pixels += a.pixel_count();
+        assert!((a.area_stats().mean() - 3.0).abs() < 1e-12);
+    }
+    assert!((pixels - 1.0).abs() < 1e-8, "{pixels}");
+}
+
+/// Ground-area overlay's chunk cache holds at most `decode_budget_bytes` of
+/// decoded chunks (or one chunk, when a chunk alone exceeds the budget), and the
+/// budget does not change results. Both bounded budgets are smaller than a
+/// window, so no prefetcher runs and the cache holds every decoded chunk; the
+/// window's own copy of its rows is bounded by the window size instead.
+#[test]
+fn ground_area_overlay_stays_within_the_decode_budget() {
+    use crate::helpers::{write_tiled, Crs};
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    // 512 x 64 pixels in 16 x 16 tiles: one chunk row is 32 tiles of 1 KiB
+    // native f32, which the default budget holds whole.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled.tif");
+    let crs = Crs::Geographic {
+        lon: 10.0,
+        lat: 0.32,
+        pixel_deg: 0.01,
+    };
+    write_tiled(&path, (512, 64), (16, 16), crs, "-9999", |c, r| {
+        (1 + (c * 7 + r * 3) % 13) as f32
+    });
+    const DENSE_CHUNK_BYTES: u64 = 16 * 16 * 8;
+
+    let run = |budget: Option<usize>| {
+        let mut cfg = config(GridKind::S2, 12, TransferMode::OVERLAY);
+        if let Some(budget) = budget {
+            cfg.decode_budget_bytes = budget;
+        }
+        let profile = RunProfile::new();
+        cfg.profile = Some(Arc::clone(&profile));
+        let mut cells = BTreeMap::new();
+        for row in
+            scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).unwrap()
+        {
+            let (res, cell, a) = row.unwrap();
+            cells.insert(
+                (res, cell),
+                (a.pixel_count(), a.retained_area_m2(), a.area_stats().sum),
+            );
+        }
+        (cells, profile.report().peak_decoded_bytes)
+    };
+
+    let (reference, default_peak) = run(None);
+    assert!(reference.len() > 50, "{} cells", reference.len());
+    assert!(
+        default_peak > 4 * DENSE_CHUNK_BYTES,
+        "the default budget should hold several chunks: {default_peak}"
+    );
+    for budget in [4 * DENSE_CHUNK_BYTES as usize, 1] {
+        let (bounded, peak) = run(Some(budget));
+        assert!(
+            peak <= (budget as u64).max(DENSE_CHUNK_BYTES),
+            "budget {budget}: peak {peak} bytes"
+        );
+        assert_eq!(bounded.len(), reference.len(), "budget {budget}");
+        for (key, (count, area, sum)) in &reference {
+            let (c, a, s) = bounded[key];
+            assert!((c - count).abs() <= 1e-9 * count.max(1.0), "{key:?}");
+            assert!((a - area).abs() <= 1e-9 * area.max(1.0), "{key:?}");
+            assert!((s - sum).abs() <= 1e-9 * sum.abs().max(1.0), "{key:?}");
+        }
+    }
+}
+
 #[test]
 fn auto_transfer_resolves_across_scales_and_constraints() {
     let (_tmp, cont_path) = TestGeoTiffBuilder::new(W, H)
@@ -1245,16 +1345,17 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         let fine_res = (0..=grid.max_resolution())
             .find(|&r| grid.area_m2(r) < pixel_m2)
             .unwrap();
+        // The finest resolution at or above 1:1, and the finest at or above 16:1.
         let near_res = (0..=grid.max_resolution())
             .rev()
-            .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+            .find(|&r| grid.area_m2(r) >= pixel_m2)
             .unwrap();
         let overlay_res = (0..=grid.max_resolution())
             .rev()
             .find(|&r| grid.area_m2(r) >= 16.0 * pixel_m2)
             .unwrap();
 
-        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> Interpolate(Nearest).
+        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> OVERLAY.
         let auto_cont_fine = scan(&cont_path, &config(grid, fine_res, TransferMode::Auto));
         let exp_cont_fine = scan(
             &cont_path,
@@ -1275,12 +1376,9 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             &config(grid, fine_res, TransferMode::Auto),
         )
         .unwrap();
-        assert_eq!(
-            auto_cat.transfer_mode(),
-            TransferMode::Interpolate(Interpolation::Nearest)
-        );
+        assert_eq!(auto_cat.transfer_mode(), TransferMode::OVERLAY, "{grid}");
 
-        // Near 1:1 -> AssignCenters.
+        // At or just above 1:1 -> OVERLAY, with the same rows as an explicit overlay.
         let s_near = MultiScanHorizonStreamer::new(
             GeoTiffStreamReader::open(&cont_path).unwrap(),
             &config(grid, near_res, TransferMode::Auto),
@@ -1288,7 +1386,12 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         .unwrap();
         assert_eq!(
             s_near.transfer_mode(),
-            TransferMode::AssignCenters,
+            TransferMode::OVERLAY,
+            "{grid} near_res={near_res}"
+        );
+        assert_eq!(
+            scan(&cont_path, &config(grid, near_res, TransferMode::Auto)),
+            scan(&cont_path, &config(grid, near_res, TransferMode::OVERLAY)),
             "{grid} near_res={near_res}"
         );
 
@@ -1304,15 +1407,16 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             "{grid} overlay_res={overlay_res}"
         );
 
-        // valid_coverage_threshold forces OVERLAY even near 1:1.
-        let mut cov_cfg = config(grid, near_res, TransferMode::Auto);
+        // valid_coverage_threshold forces OVERLAY even below 1:1, where a continuous scan
+        // would otherwise interpolate.
+        let mut cov_cfg = config(grid, fine_res, TransferMode::Auto);
         cov_cfg.valid_coverage_threshold = Some(0.5);
         let s_cov =
             MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&cont_path).unwrap(), &cov_cfg)
                 .unwrap();
         assert_eq!(s_cov.transfer_mode(), TransferMode::OVERLAY);
 
-        // Compaction forces AssignCenters even at coarse resolution.
+        // Compaction forces AssignCenters at any ratio.
         if grid == GridKind::H3 {
             let mut cmp_cfg = config(grid, overlay_res, TransferMode::Auto);
             cmp_cfg.compact_h3_children = true;
@@ -1652,7 +1756,11 @@ fn overlay_slice_accumulation_matches_per_pixel_accumulation_on_all_grids() {
                     mass_preserve,
                 },
             );
+            // Spans with four workers (the parallel direct / prepared paths,
+            // including `mass_preserve`) against serial per-pixel accumulation.
+            cfg.aggregation_workers = Some(4);
             let spans = scan(&path, &cfg);
+            cfg.aggregation_workers = Some(1);
             cfg.min_mean = Some(-1.0e300);
             let per_pixel = scan(&path, &cfg);
             let label = format!("{grid} weighted={weighted} mass_preserve={mass_preserve}");
@@ -1791,6 +1899,99 @@ fn multi_resolution_overlay_and_interpolate_decode_single_pass() {
             m_rep.windows, s_rep.windows,
             "mode={mode:?}: expected single-pass window count"
         );
+    }
+}
+
+/// Multi-resolution overlay over many planned windows: coarse cells, each
+/// taller than a window, stay pending across windows planned for the finest
+/// resolution and must still match per-resolution scans, for both ordinary
+/// and ground-area overlay.
+#[test]
+fn multi_resolution_overlay_matches_single_scans_across_many_windows() {
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    // Windows hold about 150,000 finest-resolution cells. With 0.01 degree
+    // pixels (about 9 H3 resolution-9 cells each) and 256 columns, that is
+    // one 32-row tile row per window: 4 windows over 128 rows. Resolution-3
+    // cells (about 1.2 degrees across) span every window.
+    const PX: f64 = 0.01;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled_windows.tif");
+    crate::helpers::write_tiled(
+        &path,
+        (256, 128),
+        (32, 32),
+        crate::helpers::Crs::Geographic {
+            lon: ORIGIN.0,
+            lat: ORIGIN.1,
+            pixel_deg: PX,
+        },
+        "-9999",
+        |x, y| -> f32 {
+            if (x * 7 + y * 5).is_multiple_of(97) {
+                -9999.0
+            } else {
+                plane(
+                    ORIGIN.0 + (f64::from(x) + 0.5) * PX,
+                    ORIGIN.1 - (f64::from(y) + 0.5) * PX,
+                ) as f32
+            }
+        },
+    );
+    let resolutions = vec![3u8, 6, 9];
+
+    let mode = TransferMode::OVERLAY;
+    let mut multi_cfg = MultiResolutionConfig::new(resolutions.clone());
+    multi_cfg.transfer = mode;
+    let profile = RunProfile::new();
+    multi_cfg.profile = Some(Arc::clone(&profile));
+    let multi = collect_multi_scan(&path, &multi_cfg);
+    let windows = profile.report().windows;
+    assert!(windows >= 4, "expected several windows, got {windows}");
+
+    let mut expected = BTreeMap::new();
+    for &res in &resolutions {
+        expected.extend(collect_multi_scan(&path, &config(GridKind::H3, res, mode)));
+    }
+    assert_eq!(
+        multi.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, a) in &multi {
+        assert_continuous_close(a, &expected[key], &format!("{key:?}"));
+    }
+    assert!(multi.keys().any(|&(res, _)| res == 3));
+
+    // Ground-area overlay: one pass over all resolutions.
+    let ground = |resolutions: Vec<u8>| {
+        let mut cfg = MultiResolutionConfig::new(resolutions);
+        cfg.transfer = TransferMode::OVERLAY;
+        let mut cells = BTreeMap::new();
+        for row in
+            scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).unwrap()
+        {
+            let (res, cell, a) = row.unwrap();
+            let summary = (a.pixel_count(), a.retained_area_m2(), a.area_stats().sum);
+            assert!(cells.insert((res, cell), summary).is_none());
+        }
+        cells
+    };
+    let multi = ground(resolutions.clone());
+    let mut expected = BTreeMap::new();
+    for &res in &resolutions {
+        expected.extend(ground(vec![res]));
+    }
+    assert_eq!(
+        multi.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, (c, a, s)) in &multi {
+        let (ec, ea, es) = expected[key];
+        assert!((c - ec).abs() <= 1e-9 * ec.max(1.0), "{key:?}");
+        assert!((a - ea).abs() <= 1e-9 * ea.max(1.0), "{key:?}");
+        assert!((s - es).abs() <= 1e-9 * es.abs().max(1.0), "{key:?}");
     }
 }
 
@@ -2539,6 +2740,463 @@ fn nested_rollup_emits_each_parent_once_when_children_wait_for_a_later_tile() {
         assert!(
             (got - total).abs() <= 1e-9 * total.max(1.0),
             "{parent:x}: {got} vs {total}"
+        );
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_reproduces_planes_and_captures_cell_spread() {
+    use crate::helpers::{write_geotiff, Crs, Layout};
+    use dggs_stream_core::aggregator::{QuantileTarget, SamplingPattern};
+
+    let dir = tempfile::tempdir().unwrap();
+    let tiled_path = dir.path().join("plane_tiled.tif");
+    let strip_path = dir.path().join("plane_strip.tif");
+    let crs = Crs::Geographic {
+        lon: ORIGIN.0,
+        lat: ORIGIN.1,
+        pixel_deg: PIXEL,
+    };
+    let linear_val = |x: u32, y: u32| -> f32 {
+        let (lon, lat) = pixel_centre(x, y);
+        plane(lon, lat) as f32
+    };
+    write_geotiff(
+        &tiled_path,
+        (W, H),
+        Layout::Tiles(16, 16),
+        crs,
+        "-9999",
+        linear_val,
+    );
+    write_geotiff(
+        &strip_path,
+        (W, H),
+        Layout::Strips(H),
+        crs,
+        "-9999",
+        linear_val,
+    );
+
+    for grid in GridKind::ALL {
+        let res = matched(grid, 1);
+        for bbox in [
+            None,
+            Some([
+                ORIGIN.0 + 0.01,
+                ORIGIN.1 - 0.038,
+                ORIGIN.0 + 0.05,
+                ORIGIN.1 - 0.01,
+            ]),
+        ] {
+            let mut cfg = config(
+                grid,
+                res,
+                TransferMode::Interpolate(Interpolation::Bilinear),
+            );
+            cfg.sampling = SamplingPattern::rgss();
+            cfg.bbox = bbox;
+
+            let tiled = scan(&tiled_path, &cfg);
+            let strip = scan(&strip_path, &cfg);
+            assert!(!tiled.is_empty(), "{grid}");
+            assert_eq!(tiled.len(), strip.len(), "{grid} tiled vs strip count");
+            for (&cell, acc_t) in &tiled {
+                let acc_s = &strip[&cell];
+                assert!((acc_t.count - acc_s.count).abs() < 1e-12, "{grid} {cell}");
+                assert!(
+                    (acc_t.mean() - acc_s.mean()).abs() < 1e-10,
+                    "{grid} {cell} mean mismatch"
+                );
+                let (lat, lng) = grid.center_lat_lng(cell).unwrap();
+                let col = (lng - ORIGIN.0) / PIXEL;
+                let row = (ORIGIN.1 - lat) / PIXEL;
+                if col > 4.0 && col < f64::from(W) - 4.0 && row > 4.0 && row < f64::from(H) - 4.0 {
+                    assert!((acc_t.count - 1.0).abs() < 1e-12, "{grid} {cell} count");
+                    // A5 pentagons are asymmetric, so polygon centroid differs slightly from
+                    // spherical cell_to_lonlat (~0.01 px); H3/S2/HEALPix match closely.
+                    let plane_tol = if grid == GridKind::A5 { 0.2 } else { 1e-2 };
+                    assert!(
+                        (acc_t.mean() - plane(lng, lat)).abs() < plane_tol,
+                        "{grid} {cell} plane mean={} exact={}",
+                        acc_t.mean(),
+                        plane(lng, lat)
+                    );
+                }
+            }
+        }
+    }
+
+    // Smooth non-linear field: multi-point cell sampling captures intra-cell spread (min, max,
+    // variance, quantiles) and reduces cell-mean error relative to single-point center sampling.
+    let (_tmp, wave_path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| {
+            let x = f64::from(c) * 0.45;
+            let y = f64::from(r) * 0.45;
+            (100.0 + 30.0 * x.sin() * y.cos() + 5.0 * (x - y)) as f32
+        });
+
+    for grid in GridKind::ALL {
+        let res = matched(grid, 0);
+        let overlay = scan(&wave_path, &config(grid, res, TransferMode::OVERLAY));
+
+        let mut bilinear_rgss_cfg = config(
+            grid,
+            res,
+            TransferMode::Interpolate(Interpolation::Bilinear),
+        );
+        bilinear_rgss_cfg.sampling = SamplingPattern::rgss();
+        bilinear_rgss_cfg.quantiles = QuantileTarget::parse_list("p50").unwrap();
+        let rgss_cells = scan(&wave_path, &bilinear_rgss_cfg);
+
+        // With Interpolation::Nearest, Overlay is the exact K->inf limit over each cell polygon.
+        let mut nearest_center_cfg =
+            config(grid, res, TransferMode::Interpolate(Interpolation::Nearest));
+        nearest_center_cfg.sampling = SamplingPattern::center();
+        let nearest_center_cells = scan(&wave_path, &nearest_center_cfg);
+
+        let mut nearest_16_cfg = nearest_center_cfg.clone();
+        nearest_16_cfg.sampling = SamplingPattern::sixteen_point();
+        let nearest_16_cells = scan(&wave_path, &nearest_16_cfg);
+
+        let mut spread_ok = 0usize;
+        let (mut err_center, mut err_q16, mut interior_n) = (0.0, 0.0, 0usize);
+        for (&cell, acc_o) in &overlay {
+            let (lat, lng) = grid.center_lat_lng(cell).unwrap();
+            let col = (lng - ORIGIN.0) / PIXEL;
+            let row = (ORIGIN.1 - lat) / PIXEL;
+            if !(col > 4.0 && col < f64::from(W) - 4.0 && row > 4.0 && row < f64::from(H) - 4.0) {
+                continue;
+            }
+            let acc_c = &nearest_center_cells[&cell];
+            let acc_r = &rgss_cells[&cell];
+            let acc_16 = &nearest_16_cells[&cell];
+            if acc_r.max - acc_r.min > 1e-3 {
+                assert!(acc_r.min < acc_r.mean() && acc_r.mean() < acc_r.max);
+                assert!(acc_r.variance() > 0.0, "{grid} {cell}");
+                let q50 = acc_r.quantile(0.5);
+                assert!(q50.is_finite() && q50 >= acc_r.min - 1e-9 && q50 <= acc_r.max + 1e-9);
+                spread_ok += 1;
+            }
+            err_center += (acc_c.mean() - acc_o.mean()).abs();
+            err_q16 += (acc_16.mean() - acc_o.mean()).abs();
+            interior_n += 1;
+        }
+        assert!(spread_ok > 20, "{grid}: spread_ok={spread_ok}");
+        assert!(interior_n > 20, "{grid}: interior_n={interior_n}");
+        assert!(
+            err_q16 < err_center,
+            "{grid}: expected Nearest+16point MAE ({}) < Nearest+center MAE ({})",
+            err_q16 / interior_n as f64,
+            err_center / interior_n as f64
+        );
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_categorical_projected_and_auto() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+    use std::sync::Arc;
+
+    // 1. Categorical Interpolate(Nearest) + 16point captures multi-class boundary fractions.
+    let (_tmp_cat, cat_path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_tempfile::<u8, _>(|c, r| if c + r < W { 1 } else { 2 });
+
+    for grid in GridKind::ALL {
+        let mut cfg = config(
+            grid,
+            matched(grid, 0),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        cfg.sampling = SamplingPattern::sixteen_point();
+        let reader = GeoTiffStreamReader::open(&cat_path).unwrap();
+        let mut streamer = MultiCategoricalHorizonStreamer::new(reader, &cfg).unwrap();
+        let mut out = BTreeMap::new();
+        while streamer
+            .drain_completed_into(256, |_, rec| {
+                out.insert(rec.cell_id, rec.accumulator);
+            })
+            .unwrap()
+            > 0
+        {}
+        assert!(!out.is_empty(), "{grid}");
+        let boundary_cells = out.values().filter(|a| a.unique_classes() > 1).count();
+        assert!(
+            boundary_cells > 5,
+            "{grid}: expected boundary cells with >1 class, got {boundary_cells}"
+        );
+        let full_cells = out
+            .values()
+            .filter(|a| (a.total_count - 1.0).abs() < 1e-10)
+            .count();
+        assert!(
+            full_cells > out.len() / 2,
+            "{grid}: full_cells={full_cells}"
+        );
+    }
+
+    // 2. Projected UTM GeoTIFF succeeds with zero transform failures under RGSS sampling.
+    let field = |x: f64, y: f64| 0.01 * (x - 500_000.0) + 0.02 * (4_200_000.0 - y);
+    let (_tmp_utm, utm_path) = TestGeoTiffBuilder::new(64, 64)
+        .epsg(32610)
+        .origin(500_000.0, 4_200_000.0)
+        .pixel_size(30.0)
+        .create_f32_tempfile(|c, r| {
+            field(
+                500_000.0 + 30.0 * (f64::from(c) + 0.5),
+                4_200_000.0 - 30.0 * (f64::from(r) + 0.5),
+            ) as f32
+        });
+    for grid in GridKind::ALL {
+        let res = area_matched_resolution(grid, 900.0) + 1;
+        let mut cfg = config(
+            grid,
+            res,
+            TransferMode::Interpolate(Interpolation::Bilinear),
+        );
+        cfg.sampling = SamplingPattern::rgss();
+        let reader = GeoTiffStreamReader::open(&utm_path).unwrap();
+        let mut streamer = MultiScanHorizonStreamer::new(reader, &cfg).unwrap();
+        let mut count = 0usize;
+        while streamer
+            .drain_completed_into(256, |_, _| count += 1)
+            .unwrap()
+            > 0
+        {}
+        assert!(count > 64 * 64, "{grid}: count={count}");
+        assert_eq!(streamer.transform_failures(), 0, "{grid}");
+    }
+
+    // 3. TransferMode::Auto with non-default sampling never resolves to Overlay, which
+    // refuses sampling: cells finer than the pixels interpolate with sub-cell samples
+    // (nearest for classes), and from 1:1 up it assigns centres with sub-pixel samples.
+    let mosaic = Arc::new(
+        MosaicReader::open(
+            std::slice::from_ref(&cat_path),
+            None,
+            None,
+            OverlapRule::First,
+        )
+        .unwrap(),
+    );
+    for grid in GridKind::ALL {
+        let mut fine_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
+        fine_cfg.sampling = SamplingPattern::rgss();
+        assert_eq!(
+            TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, false),
+            TransferMode::Interpolate(Interpolation::Bilinear),
+            "{grid} fine Auto+sampling"
+        );
+        assert_eq!(
+            TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, true),
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid} fine categorical Auto+sampling"
+        );
+
+        for offset in [0, -3] {
+            let mut coarse_cfg = config(grid, matched(grid, offset), TransferMode::Auto);
+            coarse_cfg.sampling = SamplingPattern::rgss();
+            for categorical in [false, true] {
+                let resolved =
+                    TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, categorical);
+                // `matched(grid, 0)` can land just under 1:1, where interpolation is right.
+                let expected = if offset == 0 && matches!(resolved, TransferMode::Interpolate(_)) {
+                    resolved
+                } else {
+                    TransferMode::AssignCenters
+                };
+                assert_eq!(
+                    resolved, expected,
+                    "{grid} offset {offset} categorical={categorical} Auto+sampling"
+                );
+            }
+        }
+
+        // A categorical scan resolves the same way end to end, and gives the same cells as
+        // asking for nearest-neighbour interpolation with the preset explicitly.
+        let scan_classes = |cfg: &MultiResolutionConfig| {
+            let reader = GeoTiffStreamReader::open(&cat_path).unwrap();
+            let mut streamer = MultiCategoricalHorizonStreamer::new(reader, cfg).unwrap();
+            let mode = streamer.transfer_mode();
+            let mut out = BTreeMap::new();
+            while streamer
+                .drain_completed_into(256, |_, rec| {
+                    out.insert(rec.cell_id, rec.accumulator.histogram_json());
+                })
+                .unwrap()
+                > 0
+            {}
+            (mode, out)
+        };
+        let mut auto_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
+        auto_cfg.sampling = SamplingPattern::sixteen_point();
+        let mut explicit_cfg = config(
+            grid,
+            matched(grid, 2),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        explicit_cfg.sampling = SamplingPattern::sixteen_point();
+        let (auto_mode, auto_cells) = scan_classes(&auto_cfg);
+        let (_, explicit_cells) = scan_classes(&explicit_cfg);
+        assert_eq!(
+            auto_mode,
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid}"
+        );
+        assert!(!auto_cells.is_empty(), "{grid}");
+        assert_eq!(auto_cells, explicit_cells, "{grid}");
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_keeps_fully_valid_cells_at_min_count_one() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|_, _| 42.0);
+    for grid in GridKind::ALL {
+        let res = matched(grid, 0);
+        for name in [
+            "rgss", "5point", "gaussian", "hex", "8rooks", "9point", "16point",
+        ] {
+            let mut cfg = config(grid, res, TransferMode::Interpolate(Interpolation::Nearest));
+            cfg.sampling = SamplingPattern::parse(name).unwrap();
+            let all = scan(&path, &cfg);
+            cfg.min_count = Some(1.0);
+            let kept = scan(&path, &cfg);
+            let mut interior = 0;
+            for (&cell, acc) in &all {
+                let (lat, lng) = grid.center_lat_lng(cell).unwrap();
+                let col = (lng - ORIGIN.0) / PIXEL;
+                let row = (ORIGIN.1 - lat) / PIXEL;
+                if col > 4.0 && col < f64::from(W) - 4.0 && row > 4.0 && row < f64::from(H) - 4.0 {
+                    interior += 1;
+                    assert_eq!(acc.count, 1.0, "{grid} {name} {cell}");
+                    assert!(
+                        kept.contains_key(&cell),
+                        "{grid} {name} {cell} dropped by min_count=1"
+                    );
+                }
+            }
+            assert!(interior > 0, "{grid} {name}");
+        }
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_refuses_stencils_beyond_the_window_margin() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    // 65,536 columns cap a block's row margin at 16 rows, while resolution-6 hexagons
+    // (about 60 pixels across here) need more, so their stencils would lose samples.
+    let (_tmp, path) = TestGeoTiffBuilder::new(65_536, 64)
+        .origin(-170.0, 37.8)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|_, _| 42.0);
+    let mut cfg = config(
+        GridKind::H3,
+        6,
+        TransferMode::Interpolate(Interpolation::Nearest),
+    );
+    cfg.sampling = SamplingPattern::sixteen_point();
+    let err = MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &cfg)
+        .err()
+        .expect("a stencil beyond the window margin must be refused")
+        .to_string();
+    assert!(err.contains("window margin"), "{err}");
+
+    cfg.sampling = SamplingPattern::center();
+    assert!(MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&path).unwrap(), &cfg).is_ok());
+}
+
+#[test]
+fn interpolate_subcell_sampling_keeps_full_counts_across_a_global_seam() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    // A constant, fully valid 360° raster in both longitude layouts. Cells straddling the
+    // raster's west/east edge used to lose the samples beyond it.
+    for west in [-180.0, 0.0] {
+        let (_tmp, path) = TestGeoTiffBuilder::new(720, 360)
+            .origin(west, 90.0)
+            .pixel_size(0.5)
+            .create_f32_tempfile(|_, _| 42.0);
+        for grid in [GridKind::H3, GridKind::Healpix] {
+            let res = if grid == GridKind::H3 { 3 } else { 6 };
+            let mut cfg = config(grid, res, TransferMode::Interpolate(Interpolation::Nearest));
+            cfg.sampling = SamplingPattern::sixteen_point();
+            let cells = scan(&path, &cfg);
+            let mut seam = 0;
+            for (&cell, acc) in &cells {
+                let (lat, lng) = grid.center_lat_lng(cell).unwrap();
+                if lat.abs() > 80.0 {
+                    continue;
+                }
+                let edge = if west == 0.0 { lng } else { 180.0 - lng.abs() };
+                if edge.abs() < 2.0 {
+                    seam += 1;
+                }
+                assert_eq!(acc.count, 1.0, "{west} {grid} {cell} at ({lng}, {lat})");
+                assert_eq!(acc.mean(), 42.0);
+            }
+            assert!(seam > 0, "{west} {grid}: no cells near the seam");
+        }
+    }
+}
+
+#[test]
+fn interpolate_subcell_sampling_matches_a_single_raster_across_mosaic_tiles() {
+    use dggs_stream_core::aggregator::SamplingPattern;
+
+    let tile = |width, start_col: u32| {
+        TestGeoTiffBuilder::new(width, H)
+            .origin(ORIGIN.0 + PIXEL * f64::from(start_col), ORIGIN.1)
+            .pixel_size(PIXEL)
+            .create_f32_tempfile(|_, _| 42.0)
+    };
+    let (_full, full_path) = tile(W, 0);
+    let (_left, left_path) = tile(W / 2, 0);
+    let (_right, right_path) = tile(W / 2, W / 2);
+    for grid in GridKind::ALL {
+        let mut cfg = config(
+            grid,
+            matched(grid, 0),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        cfg.sampling = SamplingPattern::sixteen_point();
+        let single = scan(&full_path, &cfg);
+        let mosaic = MosaicReader::open(
+            &[left_path.clone(), right_path.clone()],
+            None,
+            None,
+            OverlapRule::First,
+        )
+        .unwrap();
+        let tiled =
+            collect_cells(MultiScanHorizonStreamer::new_mosaic(mosaic.into(), &cfg).unwrap());
+        assert!(single.keys().eq(tiled.keys()), "{grid}");
+        let mut interior = 0;
+        for (cell, acc) in &tiled {
+            assert_eq!(acc.mean(), 42.0);
+            // A full stencil on the single raster stays full across the tile seam. Cells
+            // reaching past the mosaic's outer edge stay partial unless they also reach the
+            // other tile, which makes them fall back to their centre sample.
+            if single[cell].count == 1.0 {
+                interior += 1;
+                assert_eq!(acc.count, 1.0, "{grid} {cell}");
+            } else {
+                assert!(acc.count <= 1.0, "{grid} {cell}");
+            }
+        }
+        assert!(interior > 0, "{grid}");
+        assert!(
+            tiled.values().any(|a| a.count < 1.0),
+            "{grid}: no outer-edge cells"
         );
     }
 }

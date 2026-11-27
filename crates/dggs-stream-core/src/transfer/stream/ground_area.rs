@@ -34,6 +34,10 @@ use std::ops::Range;
 /// weighted sum is the integrated quantity. A bbox selects whole pixels by center.
 /// Coarse resolutions and pole-containing candidate cells requiring the ordinary
 /// overlay's center fallback are unsupported.
+///
+/// All resolutions share one pass, and cells are yielded in completion order, so
+/// resolutions interleave. Take a prefix only if any subset of completed cells
+/// will do.
 pub fn scan_ground_area_overlay(
     reader: GeoTiffStreamReader,
     config: &MultiResolutionConfig,
@@ -114,6 +118,8 @@ pub(crate) fn ground_area_overlay_tile(
             config.grid,
             config.transfer,
             finest_res,
+            finest_res,
+            &config.sampling,
             false,
             0,
             &tile,
@@ -222,7 +228,13 @@ pub(crate) fn ground_area_overlay_tile(
                         Counter::PixelsRead,
                         block.rows.len() as u64 * block.cols.len() as u64,
                     );
-                    profile.time(Phase::Kernel, run)
+                    let result = profile.time(Phase::Kernel, run);
+                    // Decoded chunks held by the window cache only. A prefetcher
+                    // runs only when the whole window fits the budget, and its
+                    // queue (capped in chunks) is not counted; the window's own
+                    // copy of its rows is bounded by the window size instead.
+                    profile.peak(Counter::PeakDecodedBytes, cache.peak_bytes() as u64);
+                    result
                 }
                 None => run(),
             };

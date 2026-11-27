@@ -97,7 +97,10 @@ fn print_help() {
           -r, --resolutions <LIST>   Grid resolutions (H3: 0..=15, A5 and S2: 0..=30,\n                                     \
                                      HEALPix: 0..=29; default: 8), or `auto` for the\n                                     \
                                      resolution whose cells match the pixel size\n                                     \
-                                     (`auto+1` one step finer, `auto-1` coarser)\n  \
+                                     (`auto+1` the closest finer than a pixel,\n                                     \
+                                     `auto-1` the closest at least pixel-sized);\n                                     \
+                                     `auto-finer` the largest cells at most a pixel,\n                                     \
+                                     `auto-coarser` the smallest at least a pixel\n  \
           -c, --categorical          Enable categorical aggregation\n  \
           --format <wide|long>       Categorical output format (default: wide)\n  \
           --crs <CRS>                Override source CRS (e.g. EPSG:4326)\n  \
@@ -118,6 +121,9 @@ fn print_help() {
                                      overlaps, weighted by overlap area), or auto\n                                     \
                                      (pick from cell-to-pixel area ratio and options)\n  \
           --interpolation <M>        nearest, bilinear (default), bicubic or lanczos\n  \
+          --sampling <PRESET>        Quadrature preset for assign_centers (sub-pixel) or\n                                     \
+                                     interpolate (sub-cell): center (default), rgss,\n                                     \
+                                     5point, gaussian, hex, 8rooks, 9point or 16point\n  \
           --valid-coverage-threshold <F>  Overlay: minimum valid overlap fraction (0..1)\n  \
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
           --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \

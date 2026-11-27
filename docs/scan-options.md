@@ -7,45 +7,27 @@ in its own way; the [table at the end](#option-names-by-engine) lists every spel
 
 ## Transfer modes
 
-`transfer` chooses how pixels become cell values.
-
-[Transfer Modes](transfer-modes.md) covers each mode in depth: the interpolation kernels,
-overlay weighting and mass preservation, and how `transfer` differs from sub-pixel `sampling`.
+`transfer` chooses how pixels become cell values. [Transfer Modes](transfer-modes.md) covers each
+mode in depth; in short:
 
 | Mode | What a cell gets | When to use it |
 | :--- | :--- | :--- |
-| `assign_centers` (default) | Every pixel goes to the cell that holds its centre (or its sub-pixel sample points, see [Super-Sampling](super-sampling.md)); the cell aggregates them | Cells about the size of pixels or larger. This is the single-pass streaming kernel, unchanged. |
-| `interpolate` | The value interpolated at the cell's centre, for each cell whose centre lies on the raster | Cells finer than the pixels, which `assign_centers` would leave empty or sparse |
-| `overlay` | The pixels the cell overlaps, each weighted by the exact fraction of it the cell covers | Cells comparable to or larger than pixels, when edge pixels should count partially |
+| `auto` | One of the three below, chosen from the cell-to-pixel area ratio and the other options | You'd rather not choose |
+| `assign_centers` (default) | Every pixel whose centre it holds (or sub-pixel samples, see [Super-Sampling](super-sampling.md)) | Cells about the size of pixels, where it is the fastest kernel ([comparison](transfer-modes.md#comparing-the-modes)) |
+| `interpolate` | The value interpolated at its centre (`interpolation`: `nearest`, `bilinear`, `bicubic`, `lanczos`), or across sub-cell [`sampling`](super-sampling.md) points inside the cell | Cells finer than or comparable to the pixels; sub-cell sampling adds intra-cell spread |
+| `overlay` | Every pixel it overlaps, weighted by the fraction it covers | Many pixels per cell, exact edges, conserved totals |
 
-Modifiers:
+The [overlay modes](transfer-modes.md#the-overlay-modes) refine `overlay`:
+`overlay_weighted = false` counts every touched pixel once, `mass_preserve` makes the cells'
+`sum` add up to the raster's total, `ground_area` (on EPSG:4326 rasters) weights by true m², and
+`valid_coverage_threshold` drops cells with too little valid data. Categorical scans accept
+`overlay` (class areas) and `interpolate` with `nearest` only.
 
-- `interpolation` (with `interpolate`): `nearest`, `bilinear` (the default), `bicubic` or `lanczos`.
-  Bilinear leaves out NoData taps and renormalises the rest. Bicubic and Lanczos fall back
-  to bilinear when any of their taps is NoData. A cell is missing only when all four bilinear
-  taps are NoData. Taps past the raster's edge repeat the edge pixel.
-- `overlay_weighted` (with `overlay`): `false` counts every touched pixel once instead of by
-  its overlap.
-- `mass_preserve` (with `overlay`): normalises each pixel's weights so that the `sum` column
-  over all cells equals the raster's total. Use it for counts or other extensive quantities.
-
-How they run:
-- **Bands of rows.** `interpolate` and `overlay` walk the raster in bands of rows. Each holds one
-  band in memory, plus the cells still open across the band's edges.
-- **Pixels that are skipped.** Zero-alpha pixels and pixels marked invalid by an internal TIFF mask are missing in every transfer mode. A
-  `bbox` selects pixels by their centres, so cells larger than the box are kept.
-- **Very large cells.** In `overlay`, cells whose diameter bound is above 500 km take whole
-  pixels by centre, because their edges are far from straight in pixel space. These are the
-  coarsest two or three resolutions of each grid.
-- **Categorical scans.** They accept `overlay`, and `interpolate` only with `nearest`; classes
-  can't be interpolated.
-- **Combinations refused.** Transfer modes exclude compaction, spectral formulas and sub-pixel sampling.
-  Partitioned Python and Spark scans support ordinary single-band continuous weighted overlay.
-  See [Spark weighted overlay](engines/spark.md#partitioned-weighted-overlay).
-- **PostgreSQL.** It does not expose transfer modes yet.
-
-The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands,
-`interp.rs` holds the interpolation kernels, `clip.rs` does the exact polygon-pixel overlap,
+Transfer modes exclude compaction and spectral formulas, and `overlay` refuses non-`center`
+`sampling` (`interpolate` uses it for sub-cell points); partitioned scans support only single-band continuous weighted overlay
+([Spark](engines/spark.md#partitioned-weighted-overlay)). PostgreSQL does not expose them yet.
+The code is in [`transfer/`](../crates/dggs-stream-core/src/transfer): `window.rs` reads bands of
+rows, `interp.rs` holds the interpolation kernels, `clip.rs` does the exact polygon–pixel overlap,
 and `stream.rs` holds the band scheduler and the open-cell bookkeeping.
 
 ## Histograms
@@ -150,6 +132,7 @@ The code is in [`run_profile.rs`](../crates/dggs-stream-core/src/run_profile.rs)
 | grid | `--grid` | per-grid functions, or `grid :=` | `grid=` | per-grid functions, a grid-name argument, `with_grid` | per-grid functions |
 | automatic resolution | `-r auto[±N]` | `resolutions := 'auto'` | `resolutions="auto"`, `auto_resolution()` | `'auto'` | `{grid}_auto_resolution()` |
 | transfer mode | `--transfer`, `--interpolation`, `--overlay-weighted`, `--mass-preserve` | `transfer :=`, `interpolation :=`, `overlay_weighted :=`, `mass_preserve :=` | `transfer=`, `interpolation=`, `overlay_weighted=`, `mass_preserve=` | `'transfer=overlay'`-style arguments, `with_transfer` | — |
+| sampling pattern | `--sampling` | `sampling :=` | `sampling=` | `with_sampling` on the providers (no SQL argument) | — |
 | minimum valid overlay fraction | `--valid-coverage-threshold` | `valid_coverage_threshold :=` | `valid_coverage_threshold=` | — | — |
 | histogram | `--histogram`, `--histogram-weight`, `--histogram-normalize` (`ipc`, `jsonl`; implies `-c`) | `histogram :=`, `histogram_weight :=`, `histogram_normalize :=` | `histogram=`, `histogram_weight=`, `histogram_normalize=` | `'histogram=...'` arguments, `with_histogram` | — |
 | NoData policy and rounding | `--nodata-policy`, `--emit-nodata-value`, `--decimals` | `nodata_policy :=`, `emit_nodata_value :=`, `decimals :=` | `nodata_policy=`, `emit_nodata_value=`, `decimals=` | `'nodata_policy=emit'`-style arguments, `with_output_policy` | `nodata_policy`, `emit_nodata_value`, `decimals` arguments |
