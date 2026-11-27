@@ -465,7 +465,8 @@ SELECT h3_hex, mean, count FROM h3_raster_continuous_aggregate('/data/dem.tif', 
 
 ```bash
 dggs-stream-cli jsonl dem.tif -r 8 --columns h3_hex,mean,count --limit 5
-dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet
+dggs-stream-cli parquet dem.tif -r 7,8 -o dem_h3.parquet --compression zstd   # snappy by default
+dggs-stream-cli polyfill parcels.geojson --grid s2 -r 12 -o cells.jsonl     # feature-to-cell rows
 dggs-stream-cli jsonl dem.tif --grid healpix -r auto --transfer auto   # choices reported on stderr
 ```
 
