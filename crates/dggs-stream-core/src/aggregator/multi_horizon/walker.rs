@@ -499,6 +499,14 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
                     }
                 }
             }
+            let row_point = if B::HOIST_POINT_LATITUDE {
+                projector
+                    .constant_lat_affine_lon(ctx, col_offset, sp)
+                    .filter(|(lat, _, _)| (-90.0..=90.0).contains(lat))
+                    .map(|(lat, _, _)| B::point_at_latitude(lat))
+            } else {
+                None
+            };
             for c in cols.clone() {
                 if read(&row[c..c + 1]).is_none() {
                     continue;
@@ -519,7 +527,10 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
                     }
                     continue;
                 }
-                let Some(ll) = B::make_point(lon, lat) else {
+                let Some(ll) = row_point
+                    .as_ref()
+                    .map_or_else(|| B::make_point(lon, lat), |point| point(lon))
+                else {
                     super::profile::transform_failed();
                     if let Some(s) = span_start.take() {
                         runs.add_span(&row[s..c], engine);

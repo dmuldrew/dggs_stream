@@ -1080,6 +1080,13 @@ impl ExactLon {
 /// per-row coordinate hoisting (such as S2 and HEALPix) and coarser requested
 /// resolutions can be derived purely by bit masking/shifting (`parents_from_finest`).
 pub(crate) trait RowBatchBackend: GridBackend {
+    /// Whether preparing the point conversion once per latitude saves work.
+    const HOIST_POINT_LATITUDE: bool = false;
+
+    fn point_at_latitude(lat: f64) -> impl Fn(f64) -> Option<Self::Point> {
+        move |lon| Self::make_point(lon, lat)
+    }
+
     /// Per-row hoisted constants shared across every pixel in a constant-latitude row.
     type RowState: Copy;
 
@@ -1201,6 +1208,26 @@ impl GridBackend for A5Backend {
 
 impl RowBatchBackend for A5Backend {
     type RowState = ();
+    const HOIST_POINT_LATITUDE: bool = true;
+
+    fn point_at_latitude(lat: f64) -> impl Fn(f64) -> Option<Self::Point> {
+        use a5::core::coordinate_transforms::from_lon_lat;
+        // A5's polar angle depends only on latitude and its azimuth only on
+        // longitude. Use the library's conversions for both so the scalar and
+        // row paths round identically, including at pentagon boundaries.
+        let phi = from_lon_lat(a5::LonLat::new(0.0, lat)).phi;
+        let near_pole = a5_near_pole(lat);
+        move |lon| {
+            if !lon.is_finite() {
+                return None;
+            }
+            let theta = from_lon_lat(a5::LonLat::new(wrap_lon_180(lon), 0.0)).theta;
+            Some((
+                a5::coordinate_systems::Spherical::new(theta, phi),
+                near_pole,
+            ))
+        }
+    }
 }
 
 /// 4-bit S2 Hilbert lookup table mapping `(i_nib << 6) | (j_nib << 2) | orientation`
@@ -2238,6 +2265,35 @@ mod tests {
                 .count()
                 == 1
         );
+    }
+
+    #[test]
+    fn a5_row_points_match_scalar_at_cell_vertices_and_poles() {
+        for (lon, lat) in [(0.0, 0.0), (179.9999, 24.0), (-122.0, 39.0), (42.0, 89.99)] {
+            for res in [0, 11, 16, 30] {
+                let cell = GridKind::A5.cell_at(lat, lon, res).unwrap();
+                let mut ring = [(0.0, 0.0); 10];
+                let n = GridKind::A5.boundary_lng_lat(cell, &mut ring);
+                assert!(n >= 3);
+                for &(x, y) in &ring[..n] {
+                    for y in [y.next_down(), y, y.next_up()] {
+                        if !(-90.0..=90.0).contains(&y) {
+                            continue;
+                        }
+                        let point = A5Backend::point_at_latitude(y);
+                        for x in [x.next_down(), x, x.next_up()] {
+                            assert_eq!(point(x), A5Backend::make_point(x, y));
+                        }
+                    }
+                }
+            }
+        }
+        for lat in [-90.0, 90.0] {
+            assert_eq!(
+                A5Backend::point_at_latitude(lat)(180.0),
+                A5Backend::make_point(180.0, lat)
+            );
+        }
     }
 
     #[test]
