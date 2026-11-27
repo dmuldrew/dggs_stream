@@ -2781,27 +2781,84 @@ fn interpolate_subcell_sampling_categorical_projected_and_auto() {
         assert_eq!(streamer.transform_failures(), 0, "{grid}");
     }
 
-    // 3. TransferMode::Auto with non-default sampling resolves to Interpolate below 1:1
-    // and falls back to AssignCenters above 16:1 (never Overlay).
-    let mosaic = Arc::new(MosaicReader::open(&[cat_path], None, None, OverlapRule::First).unwrap());
+    // 3. TransferMode::Auto with non-default sampling never resolves to Overlay, which
+    // refuses sampling: cells finer than the pixels interpolate with sub-cell samples
+    // (nearest for classes), and from 1:1 up it assigns centres with sub-pixel samples.
+    let mosaic = Arc::new(
+        MosaicReader::open(
+            std::slice::from_ref(&cat_path),
+            None,
+            None,
+            OverlapRule::First,
+        )
+        .unwrap(),
+    );
     for grid in GridKind::ALL {
-        let fine = matched(grid, 2);
-        let mut fine_cfg = config(grid, fine, TransferMode::Auto);
+        let mut fine_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
         fine_cfg.sampling = SamplingPattern::rgss();
         assert_eq!(
             TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, false),
             TransferMode::Interpolate(Interpolation::Bilinear),
             "{grid} fine Auto+sampling"
         );
-
-        let coarse = matched(grid, -3);
-        let mut coarse_cfg = config(grid, coarse, TransferMode::Auto);
-        coarse_cfg.sampling = SamplingPattern::rgss();
         assert_eq!(
-            TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, false),
-            TransferMode::AssignCenters,
-            "{grid} coarse Auto+sampling"
+            TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, true),
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid} fine categorical Auto+sampling"
         );
+
+        for offset in [0, -3] {
+            let mut coarse_cfg = config(grid, matched(grid, offset), TransferMode::Auto);
+            coarse_cfg.sampling = SamplingPattern::rgss();
+            for categorical in [false, true] {
+                let resolved =
+                    TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, categorical);
+                // `matched(grid, 0)` can land just under 1:1, where interpolation is right.
+                let expected = if offset == 0 && matches!(resolved, TransferMode::Interpolate(_)) {
+                    resolved
+                } else {
+                    TransferMode::AssignCenters
+                };
+                assert_eq!(
+                    resolved, expected,
+                    "{grid} offset {offset} categorical={categorical} Auto+sampling"
+                );
+            }
+        }
+
+        // A categorical scan resolves the same way end to end, and gives the same cells as
+        // asking for nearest-neighbour interpolation with the preset explicitly.
+        let scan_classes = |cfg: &MultiResolutionConfig| {
+            let reader = GeoTiffStreamReader::open(&cat_path).unwrap();
+            let mut streamer = MultiCategoricalHorizonStreamer::new(reader, cfg).unwrap();
+            let mode = streamer.transfer_mode();
+            let mut out = BTreeMap::new();
+            while streamer
+                .drain_completed_into(256, |_, rec| {
+                    out.insert(rec.cell_id, rec.accumulator.histogram_json());
+                })
+                .unwrap()
+                > 0
+            {}
+            (mode, out)
+        };
+        let mut auto_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
+        auto_cfg.sampling = SamplingPattern::sixteen_point();
+        let mut explicit_cfg = config(
+            grid,
+            matched(grid, 2),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        explicit_cfg.sampling = SamplingPattern::sixteen_point();
+        let (auto_mode, auto_cells) = scan_classes(&auto_cfg);
+        let (_, explicit_cells) = scan_classes(&explicit_cfg);
+        assert_eq!(
+            auto_mode,
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid}"
+        );
+        assert!(!auto_cells.is_empty(), "{grid}");
+        assert_eq!(auto_cells, explicit_cells, "{grid}");
     }
 }
 

@@ -26,10 +26,10 @@ Supports **continuous** surfaces (elevation, temperature, NDVI, precipitation) a
 The modes differ in which side does the looking:
 
 - **From the pixels.** `assign_centers` drops each pixel's centre into one cell. Sub-pixel [`sampling`](docs/super-sampling.md) (`rgss`, `5point`, ...) refines it by dropping several weighted points per pixel, so a pixel on an edge is split roughly by area and cell edges are anti-aliased.
-- **From the cells.** `interpolate` asks the raster for its value at each cell's centre, so every cell gets one, however small.
-- **Exactly, both ways.** `overlay` intersects each cell with each pixel, which is what sampling approximates. Prefer it whenever edges or totals matter. Sampling stays useful where only the default kernel runs: compaction, spectral formulas, and partitioned scans other than single-band continuous overlay.
+- **From the cells.** `interpolate` asks the raster for its value at each cell's centre, or at sub-cell `sampling` points spread across the cell, so every cell gets one, however small.
+- **Exactly, both ways.** `overlay` intersects each cell with each pixel, which is what sampling approximates. Prefer it whenever edges or totals matter. Sub-pixel sampling stays useful where only the default kernel runs: compaction, spectral formulas, and partitioned scans other than single-band continuous overlay. Sub-cell sampling gives interpolated cells a spread and class shares, and with `bicubic` comes closest when pixels are point samples of a smooth field ([comparison](docs/transfer-modes.md#sub-cell-sampling-and-the-two-references)).
 
-`sampling` and `transfer` can't be combined, and `transfer = "sample"` is rejected with a pointer to both.
+`sampling` works with `assign_centers` (points inside each pixel) and `interpolate` (points inside each cell); `overlay` refuses it, since it already integrates each pixel's exact share. `transfer = "sample"` is rejected with a pointer to both.
 
 CRS projection tolerances do not imply the same absolute WGS84 datum accuracy; NAD83 and ETRS89 paths include documented approximations. See [accuracy and weighting contracts](docs/testing.md#accuracy-and-weighting-contracts) for interpretation and regression coverage.
 

@@ -7,7 +7,7 @@ grid (H3, A5, S2, HEALPix) and in every engine except PostgreSQL. This page cove
 
 1. [Choosing a mode](#choosing-a-mode), or [letting the engine choose](#let-the-engine-choose-auto)
 2. [`assign_centers`](#assign_centers-the-default), the default
-3. [`interpolate`](#interpolate-the-value-at-each-cells-centre), for cells finer than the pixels, optionally with sub-cell `sampling`
+3. [`interpolate`](#interpolate-the-value-at-or-across-each-cell), for cells finer than the pixels, optionally with sub-cell `sampling`
 4. [The overlay modes](#the-overlay-modes), for exact cell edges, conserved totals and true ground areas
 5. [What can't be combined](#what-cant-be-combined) and [usage by engine](#usage-by-engine)
 
@@ -61,8 +61,15 @@ HEALPix; on H3 and A5 overlay was also faster from about 12 pixels per cell. Ask
 Scan options take precedence over the ratio:
 
 - `compact` and `spectral_formula` work only with centre assignment, so `auto` runs
-  `assign_centers`. A non-`center` `sampling` keeps `interpolate` below 1:1 (as sub-cell points)
-  and otherwise runs `assign_centers`, since `overlay` refuses it.
+  `assign_centers`.
+- A non-`center` `sampling` rules out `overlay`, which refuses it, so `auto` chooses between the
+  two modes that accept it: when every requested resolution's cells are finer than the pixels,
+  `interpolate` with sub-cell samples (`nearest` for categorical scans, `bilinear` otherwise);
+  otherwise `assign_centers` with sub-pixel samples. Below one pixel per cell, sparse sub-pixel
+  presets leave cells empty and, for classes, sub-pixel samples sat further from overlay's shares
+  than sub-cell ones. From one pixel per cell up, sub-pixel samples were as close to overlay as
+  sub-cell ones or closer for classes, and closer at 2 pixels per cell for continuous scans
+  ([sub-cell sampling](#sub-cell-sampling-and-the-two-references)).
 - `valid_coverage_threshold` and `histogram_weight = "area"` need overlap areas, so `auto` runs
   weighted `overlay`.
 - Partitioned scans (`plan_partitions`, Spark) run `assign_centers`. Pass `transfer = "overlay"`
@@ -135,8 +142,11 @@ offsets across the cell interior with constant-Jacobian star-triangle mapping (`
 Each valid sample point adds its normalized weight to the cell, so a fully covered cell keeps
 `count = 1.0` (edge or partial-NoData cells receive their valid tap weight in `(0, 1]`), while `min`,
 `max`, `stddev`, and `quantiles` reflect intra-cell variation across the smooth interpolated surface.
-Pairing `interpolation = 'bicubic'` with `'rgss'` or `'16point'` also reduces cell `mean` error around
-the `1×–4×` pixel-to-cell crossover compared to both 1-point `center` interpolation and `overlay`.
+Pairing `interpolation = 'bicubic'` with `'rgss'` or `'16point'` gives the closest cell means to the
+field's true cell means when pixels sample a smooth field: in the benchmark, 2–13× closer than
+overlay from 1 to 8 pixels per cell. It does not help against overlay's pixel-area answer, or on
+fields with sharp edges, where overlay and sub-pixel sampling stay closer; see
+[sub-cell sampling](#sub-cell-sampling-and-the-two-references).
 
 `interpolation` picks the kernel:
 
@@ -438,7 +448,7 @@ rejected, with a message asking for a coarser resolution.
 `sampling` (`'rgss'`, `'8rooks'`, `'16point'`, ...) works as a quadrature pattern in `[0, 1]^2` and pairs with **two** transfer modes in opposite directions:
 
 - **With `assign_centers` (sub-pixel sampling):** evaluates multiple points inside each **pixel** and assigns each sample's weight to the cell containing it. Useful when `assign_centers` features are required (`spectral_formula`, compaction, partitions, `> 500 km` cells); otherwise `overlay` computes pixel splitting analytically.
-- **With `interpolate` (sub-cell sampling):** maps the pattern inside each **cell** polygon and interpolates the raster at each sample point. Useful around `1×–4×` px/cell on smooth fields (with `bicubic`) and whenever intra-cell `stddev`/`min`/`max`/`quantiles` are needed.
+- **With `interpolate` (sub-cell sampling):** maps the pattern inside each **cell** polygon and interpolates the raster at each sample point. Useful with `bicubic` from about one pixel per cell up when pixels sample a smooth field, for classes with `nearest` below one pixel per cell, and whenever intra-cell `stddev`/`min`/`max`/`quantiles` are needed ([sub-cell sampling](#sub-cell-sampling-and-the-two-references)).
 - **With `overlay`:** refused (non-`'center'` `sampling` is rejected with an error).
 
 `transfer = 'sample'` is not a mode; it is rejected with a pointer to `'interpolate'` and to
@@ -880,6 +890,128 @@ Caveats: one machine, synthetic fields, single-band scans of local files, and de
 within a cell: the squares here are one cell wide, the hardest case for centre assignment, while
 a smooth field would make it look better; area and empty-cell errors do not depend on the field.
 Pixel-dense real rasters and remote COGs may shift the crossovers.
+
+#### Sub-cell sampling and the two references
+
+Interpolation with a sub-cell [`sampling`](super-sampling.md) preset (`bicubic+16point`,
+`nearest+rgss`, ...) answers a different question from overlay. Overlay treats each pixel as a
+uniform area, so it is exact if pixel values are area averages. Interpolation treats pixels as
+point samples of a continuous field and reconstructs that field between them. The benchmark
+scores both against two references:
+
+- **vs. overlay**: overlay on the scanned raster, the exact answer for pixels as area averages.
+- **vs. field**: overlay on a raster of the same synthetic field 8× finer each way
+  (`--field-reference 8`), which approaches the field's true mean, or class shares, over each
+  cell. This is the right answer when pixels are point samples of the field.
+
+Each sweep ran on H3 resolution 11 and S2 level 13 (about 20,000 cells, three runs) with two
+fields at four cell edges per feature (`--feature-cells 4`): `smooth`, a sinusoid spanning
+340–660, and `checker`, the gradient-plus-checkerboard field spanning 0–150 with sharp edges. The
+tables give the range over the two grids. Mean absolute error of cell means, continuous scans,
+against the field:
+
+| Pixels per cell | Field | `overlay` | `bilinear` | `bicubic` | `bilinear+16point` | `bicubic+16point` | `16point` (sub-pixel) |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.25 | smooth | 24.33–25.99 | 17.90–18.75 | 6.93–7.54 | 19.94–20.23 | 7.65–8.04 | 26.61–30.01 |
+| 0.5 | smooth | 12.11–12.92 | 9.02–9.67 | 2.46–2.71 | 11.39–11.66 | 2.23–2.49 | 13.20–15.24 |
+| 1 | smooth | 4.22–4.50 | 3.27–4.19 | 2.87–2.98 | 5.84–5.99 | 0.40–0.59 | 4.88–6.62 |
+| 2 | smooth | 2.24–2.47 | 0.96–1.52 | 3.21–3.30 | 2.84–2.97 | 0.18–0.21 | 2.47–3.04 |
+| 4 | smooth | 0.94–1.12 | 1.83–1.96 | 3.36–3.43 | 1.30–1.41 | 0.20–0.27 | 1.23–1.96 |
+| 8 | smooth | 0.55 | 2.64–2.65 | 3.42–3.47 | 0.52–0.63 | 0.21–0.28 | 0.67–0.86 |
+| 0.25 | checker | 6.33–9.68 | 7.62–9.90 | 9.19–12.07 | 8.09–10.18 | 9.00–11.66 | 7.02–10.12 |
+| 0.5 | checker | 7.05–7.26 | 7.13–7.36 | 9.12–9.32 | 7.38–7.61 | 8.52–8.79 | 7.21–7.52 |
+| 1 | checker | 4.55–5.70 | 4.57–5.75 | 5.93–7.48 | 4.83–5.75 | 5.60–6.62 | 4.92–5.75 |
+| 2 | checker | 3.63–3.66 | 3.93–4.09 | 5.41–5.57 | 3.73–3.77 | 4.16–4.18 | 3.69–3.84 |
+| 4 | checker | 0.65–2.00 | 2.89–3.16 | 4.23–4.37 | 0.84–2.05 | 1.03–2.25 | 0.77–2.14 |
+| 8 | checker | 1.82–1.85 | 3.74–4.06 | 4.73–4.99 | 1.85–1.87 | 1.99–2.04 | 1.84–1.87 |
+
+The same modes against overlay:
+
+| Pixels per cell | Field | `bilinear` | `bicubic` | `bilinear+16point` | `bicubic+16point` | `16point` (sub-pixel) |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: |
+| 0.25 | smooth | 16.73–18.89 | 17.31–18.89 | 18.41–20.12 | 17.48–19.17 | 6.50–8.36 |
+| 0.5 | smooth | 7.78–8.80 | 10.68–11.37 | 9.41–10.17 | 9.84–10.68 | 3.63–5.29 |
+| 1 | smooth | 1.81–1.84 | 6.15–6.17 | 3.23–3.31 | 3.56–3.85 | 2.23–4.31 |
+| 2 | smooth | 2.39–2.69 | 5.04 | 1.76–2.22 | 2.10–2.34 | 1.05–1.69 |
+| 4 | smooth | 2.62–2.79 | 4.23–4.24 | 0.56–0.76 | 1.05–1.16 | 0.76–1.50 |
+| 8 | smooth | 3.02–3.05 | 3.80–3.87 | 0.27–0.37 | 0.66–0.71 | 0.39–0.67 |
+| 0.25 | checker | 5.04–5.73 | 5.45–6.00 | 5.76–6.27 | 5.58–6.13 | 1.85–2.35 |
+| 0.5 | checker | 2.21–2.49 | 2.99–3.26 | 3.32–3.45 | 3.16–3.41 | 1.01–1.36 |
+| 1 | checker | 0.48–0.59 | 2.46–2.58 | 1.69–1.72 | 1.48–1.68 | 0.65–1.18 |
+| 2 | checker | 1.28–1.63 | 3.07–3.49 | 0.80–0.95 | 0.75–0.87 | 0.37–0.52 |
+| 4 | checker | 2.70–2.81 | 4.02–4.16 | 0.36–0.39 | 0.59–0.62 | 0.24–0.44 |
+| 8 | checker | 3.44–3.67 | 4.46–4.64 | 0.17–0.23 | 0.40–0.44 | 0.12–0.25 |
+
+Categorical scans with cells finer than the pixels, where a sampling preset decides between
+sub-pixel samples (`rgss`, `16point` under centre assignment) and sub-cell samples (`nearest+…`).
+Errors are class-fraction distances. At a quarter of a pixel per cell every mode, overlay
+included, is about as far from the field, because the raster cannot resolve it:
+
+| Pixels per cell | Field | Reference | `rgss` (sub-pixel) | `nearest+rgss` | `16point` (sub-pixel) | `nearest+16point` | `overlay` |
+| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| 0.25 | smooth | cells missing | 13.1–23.0% | 0.8–1.7% | 0.4–0.9% | 0.8–1.7% | 0.0% |
+| 0.25 | smooth | vs. overlay | 0.152–0.160 | 0.055–0.065 | 0.058–0.073 | 0.020–0.029 | — |
+| 0.25 | smooth | vs. field | 0.486–0.493 | 0.440–0.451 | 0.447–0.460 | 0.439–0.449 | 0.439–0.448 |
+| 0.25 | checker | cells missing | 13.1–23.0% | 0.8–1.7% | 0.4–0.9% | 0.8–1.7% | 0.0% |
+| 0.25 | checker | vs. overlay | 0.104–0.108 | 0.036–0.042 | 0.037–0.048 | 0.013–0.019 | — |
+| 0.25 | checker | vs. field | 0.175–0.243 | 0.142–0.209 | 0.146–0.210 | 0.141–0.206 | 0.134–0.202 |
+| 0.5 | smooth | cells missing | 1.1–1.6% | 0.8–1.7% | 0.3–0.6% | 0.8–1.7% | 0.0% |
+| 0.5 | smooth | vs. overlay | 0.117–0.140 | 0.065–0.077 | 0.037–0.052 | 0.024–0.035 | — |
+| 0.5 | smooth | vs. field | 0.334–0.353 | 0.318–0.321 | 0.316–0.326 | 0.313–0.316 | 0.310–0.315 |
+| 0.5 | checker | cells missing | 1.1–1.6% | 0.8–1.7% | 0.3–0.6% | 0.8–1.7% | 0.0% |
+| 0.5 | checker | vs. overlay | 0.066–0.084 | 0.033–0.043 | 0.020–0.028 | 0.013–0.016 | — |
+| 0.5 | checker | vs. field | 0.157–0.169 | 0.148–0.151 | 0.144–0.151 | 0.144–0.149 | 0.141–0.145 |
+
+Categorical scans from one pixel per cell up:
+
+| Pixels per cell | Field | `16point` vs. overlay | `nearest+16point` vs. overlay | `16point` vs. field | `nearest+16point` vs. field | `overlay` vs. field |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: |
+| 1 | smooth | 0.027–0.049 | 0.027–0.048 | 0.195–0.208 | 0.197–0.208 | 0.191–0.196 |
+| 2 | smooth | 0.016–0.023 | 0.029–0.044 | 0.127–0.134 | 0.130–0.137 | 0.125–0.131 |
+| 4 | smooth | 0.010–0.018 | 0.031–0.042 | 0.067–0.075 | 0.074–0.082 | 0.065–0.071 |
+| 8 | smooth | 0.005–0.009 | 0.029–0.038 | 0.057–0.062 | 0.065–0.076 | 0.056–0.060 |
+| 1 | checker | 0.013–0.024 | 0.013–0.023 | 0.103–0.120 | 0.101–0.121 | 0.096–0.119 |
+| 2 | checker | 0.008–0.010 | 0.013–0.017 | 0.074–0.077 | 0.076–0.079 | 0.073 |
+| 4 | checker | 0.005–0.009 | 0.013–0.019 | 0.019–0.045 | 0.023–0.048 | 0.016–0.043 |
+| 8 | checker | 0.003–0.005 | 0.013–0.021 | 0.037–0.038 | 0.039–0.040 | 0.037 |
+
+What this shows:
+
+- **Smooth fields sampled at points favour bicubic.** Against the field, `bicubic+16point` was
+  the closest mode from one pixel per cell up, 2–13× closer than overlay, and below one pixel per
+  cell `bicubic`, with or without sub-cell samples, was 2.4–3.9× closer than `bilinear`. Sub-cell
+  samples made `bilinear` worse below about 4 pixels per cell, since it already flattens the field
+  and averaging flattens it more, and better from there up.
+- **Sharp edges favour overlay.** On the checker field overlay was as close to the field as any
+  mode, or closer, at every ratio. `bicubic+16point` was 9–60% further away and `bicubic` alone
+  further still (ringing at the edges). Sub-pixel `16point` and `bilinear+16point` came within a
+  few percent of overlay from 2 pixels per cell up.
+- **Against overlay, neither kind of sample wins everywhere for continuous scans.** Plain
+  `bilinear` was closest at about one pixel per cell. Of the sampled modes, sub-pixel `16point`
+  was closest below one pixel per cell and at 2 pixels per cell, though sparser sub-pixel presets
+  leave cells empty below one pixel per cell (`rgss`: 13–23% at a quarter of a pixel per cell).
+  From 4 pixels per cell, `bilinear+16point` was as close or closer.
+- **For classes below one pixel per cell, sub-cell samples are the better use of a preset.**
+  `nearest+16point` came 1.5–3× closer to overlay than sub-pixel `16point`, and `nearest+rgss`
+  about 2–3× closer than `rgss`. Both matched overlay against the field and left only edge cells
+  (whose centre lies off the raster) without a value. From one pixel per cell up, sub-pixel
+  `16point` was as close or closer to both references.
+- **Cost.** `bicubic+16point` took 25–44 ms and `nearest+16point` 14–29 ms on these 20,000-cell
+  scans, against 17–52 ms for overlay. Sub-pixel `16point` grew with the ratio, to 78–215 ms at
+  8 pixels per cell.
+
+`transfer = "auto"` follows the overlay reference, which needs no assumption about the data, and
+adds no options of its own. With a sampling preset it uses sub-cell samples where they win
+(cells finer than the pixels, `nearest` for classes) and sub-pixel samples elsewhere. When pixels
+are point samples of a smooth field, such as model output or an interpolated surface, ask for
+`interpolate` with `interpolation = "bicubic"` and `sampling = "16point"` (or `"rgss"`) instead;
+when the field has sharp edges or the pixels are area averages, keep `overlay`.
+
+```sh
+python3 scripts/benchmark_transfer_modes.py --sweep ratio --grid h3 --resolution 11 --field smooth \
+    --feature-cells 4 --field-reference 8 --cells 20000 --runs 3 --ratios 0.25,0.5,1,2,4,8 \
+    --modes overlay,bilinear,bicubic,bilinear+16point,bicubic+16point,16point --markdown
+```
 
 ### Parallel overlap calculation
 
