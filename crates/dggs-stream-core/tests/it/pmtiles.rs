@@ -1204,6 +1204,24 @@ fn test_pmtiles_coarse_zoom_parent_aggregates_all_children() {
     assert_eq!(props["count"], MvtValue::Double(61.0));
     assert_eq!(props["majority"], MvtValue::Int(2));
     assert_eq!(props["majority_fraction"], MvtValue::Double(60.0 / 61.0));
+
+    // The categorical tiler shares the overview bounds accumulator: its header
+    // bounds must cover the overview parent polygon too.
+    let cat_deg =
+        |off: usize| i32::from_le_bytes(cat_full[off..off + 4].try_into().unwrap()) as f64 / 1e7;
+    let (min_lon, min_lat, max_lon, max_lat) =
+        (cat_deg(102), cat_deg(106), cat_deg(110), cat_deg(114));
+    for v in expected_parent.boundary().iter() {
+        assert!(
+            v.lng() >= min_lon - 1e-6
+                && v.lng() <= max_lon + 1e-6
+                && v.lat() >= min_lat - 1e-6
+                && v.lat() <= max_lat + 1e-6,
+            "categorical overview vertex ({}, {}) outside header bbox [{min_lon}, {min_lat}, {max_lon}, {max_lat}]",
+            v.lng(),
+            v.lat()
+        );
+    }
 }
 
 #[test]
@@ -1904,7 +1922,8 @@ fn preindexed_export_reports_capped_cells_in_sparse_bands() {
             .unwrap();
     }
     let path = NamedTempFile::new().unwrap().into_temp_path();
-    exporter.finish(&path).unwrap();
+    let summary = exporter.finish(&path).unwrap();
+    assert_eq!(summary.capped_cells, 1);
     let metadata = read_pmtiles_metadata(path.to_str().unwrap());
     assert_eq!(metadata["cells_over_tile_cap"], 1);
 }

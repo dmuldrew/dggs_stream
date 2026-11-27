@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PmtilesExportSummary::capped_cells` reports the `(cell, zoom)` pairs skipped by the per-cell tile cap, which `ExternalFeatureExport`, `PmtilesTiler::export_features` and the Parquet transcoder previously wrote only to the archive metadata (`cells_over_tile_cap`). Code that builds the summary with a struct literal must add the field. `convert_to_pmtiles` prints the count when nonzero.
 - CLI `polyfill` writes GeoJSON polygons as feature-to-cell JSON Lines on H3, A5, S2 and HEALPix.
 - CLI `parquet --compression` selects Snappy, Zstandard, raw LZ4, gzip, Brotli or uncompressed output for ordinary, multiband and parent-partitioned files.
 - Opt-in `transfer = "auto"` (`TransferMode::Auto` in core, `--transfer auto` in CLI, `transfer="auto"` in Python/Polars/DuckDB/Sedona): inspects local ground pixel size against requested cell areas and runs bilinear `interpolate` for continuous scans whose cells are all smaller than a pixel, and weighted `overlay` otherwise, including categorical scans at every ratio and `ground_area` and `bands` scans, which can't interpolate. Centre assignment is chosen only where an option needs it (`compact`, `spectral_formula`, partitioning) or for cells over 500 km across. With a non-`center` `sampling`, which `overlay` refuses, cells finer than the pixels run `interpolate` with sub-cell samples (`nearest` for categorical scans) and larger cells `assign_centers` with sub-pixel samples; `valid_coverage_threshold` and `histogram_weight="area"` keep overlay. The thresholds come from `scripts/benchmark_transfer_modes.py` on H3, S2, A5 and HEALPix: between 1 and 16 pixels per cell, centre assignment was 2.2–3.9× faster than overlay at about one pixel per cell, but left up to 26% of the cells empty and put cell areas 4–38% off.
@@ -148,6 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The free functions `pmtiles::tiler::evict_and_write_tiles` and `pmtiles::tiler::flush_all_tiles`, which had no callers; use the `TilePyramidAccumulator` methods `evict_and_write_tiles` and `flush_all` instead.
 
 ### Fixed
+
+- Remote HTTP reads share one retry budget between transient-status/transport retries and truncated-body retries, so a single probe or range fetch sends at most five requests (plus redirect hops) instead of up to 25.
+- Remap specifications with deeply nested comma-free brackets (`[[[…7…]]]`) now parse in linear time instead of quadratic.
+- The Docker image documents that the extension footer records the compiled C API version (v1.2.0, loadable by DuckDB 1.2 through 1.5), not the runtime release: `DUCKDB_VERSION` selects the runtime and the platform tag, and a DuckDB 2.0 runtime, which needs the `duckdb-api-v1_5_6` build, now fails the image build with an explanation instead of producing an extension that cannot load.
 
 - A5 `cells_in_bbox` polygon fills now slice wide longitude spans (`MAX_A5_FILL_LON_SPAN = 10.0`, shrunk further at fine resolutions to fit `check_a5_fill_budget`'s spherical cap), densify north/south edges, and pad by the chord sagitta so `overlay`, `ground_area` overlay, and `interpolate` retain every cell across wide, thin raster strips.
 

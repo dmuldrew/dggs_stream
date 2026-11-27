@@ -263,6 +263,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
             valid_features: 0,
             invalid_features_dropped: 0,
             total_tiles: 0,
+            capped_cells: 0,
             min_zoom: 0,
             max_zoom: 0,
         });
@@ -469,6 +470,7 @@ pub fn process_parquet_to_pmtiles_for<P1: AsRef<Path>, P2: AsRef<Path>>(
         valid_features,
         invalid_features_dropped: invalid_dropped,
         total_tiles,
+        capped_cells,
         min_zoom,
         max_zoom,
     })
