@@ -497,6 +497,7 @@ impl ExternalFeatureExport {
             total_tiles: writer.tile_count(),
             min_zoom,
             max_zoom,
+            capped_cells,
         };
         Ok((summary, writer))
     }

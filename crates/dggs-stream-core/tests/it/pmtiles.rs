@@ -1904,7 +1904,8 @@ fn preindexed_export_reports_capped_cells_in_sparse_bands() {
             .unwrap();
     }
     let path = NamedTempFile::new().unwrap().into_temp_path();
-    exporter.finish(&path).unwrap();
+    let summary = exporter.finish(&path).unwrap();
+    assert_eq!(summary.capped_cells, 1);
     let metadata = read_pmtiles_metadata(path.to_str().unwrap());
     assert_eq!(metadata["cells_over_tile_cap"], 1);
 }
