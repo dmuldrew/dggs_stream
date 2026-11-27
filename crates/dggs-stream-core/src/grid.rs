@@ -1063,7 +1063,7 @@ impl ExactLon {
     }
 
     #[inline]
-    fn at(&self, col: usize) -> f64 {
+    pub(crate) fn at(&self, col: usize) -> f64 {
         let x = self.c0 + ((self.col_offset + col) as f64 + self.dx) * self.a;
         if self.mercator {
             crate::crs::transformer::web_mercator_lon(x)
