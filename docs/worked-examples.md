@@ -383,8 +383,8 @@ FROM read_json('bio1_healpix.jsonl')
 GROUP BY ALL
 ORDER BY band_south_deg DESC"
 
-# 4. City-scale cells over the Alps: three depths finer (depth 11, about 10 km², 1/24 of a
-#    pixel here). Too fine for centre assignment, so interpolate, once per kernel.
+# 4. City-scale cells over the Alps: the third depth finer than a pixel (depth 11, about
+#    10 km², 1/24 of a pixel here; `auto` is depth 8, just over a pixel). Too fine for centre assignment, so interpolate, once per kernel.
 for kernel in nearest bicubic; do
   dggs-stream-cli jsonl wc2.1_10m_bio_1.tif --grid healpix -r auto+3 --bbox 5,43,17,49 \
       --transfer interpolate --interpolation $kernel \

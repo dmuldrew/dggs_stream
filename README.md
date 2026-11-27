@@ -102,7 +102,7 @@ Every engine supports all four grids, so the choice depends on the question, not
 - **S2: exact hierarchies and region coverings.** Fine cells roll up into coarse ones with no gaps or overlaps, and cell ids follow a Hilbert curve, so a region becomes a few contiguous id ranges. Cell area varies about 2.1×, so it isn't the grid for area totals.
 - **HEALPix: global and latitude-dependent analysis.** Cells are equal-area and arranged in rings of constant latitude, which makes zonal (latitude-band) averages exact and suits whole-globe climate and astronomy data. It also nests exactly. Cells are less compact near the poles and toward the corners of its base cells.
 
-**Picking a resolution.** Aim for cells a little larger than the raster's pixels; much smaller cells come back empty. `resolutions := 'auto'` in DuckDB (Python `resolutions="auto"`, CLI `-r auto`) picks the resolution whose cells are closest in area to the pixels, and `auto+1` / `auto-1` step finer or coarser.
+**Picking a resolution.** Aim for cells a little larger than the raster's pixels; much smaller cells come back empty. `resolutions := 'auto'` in DuckDB (Python `resolutions="auto"`, CLI `-r auto`) picks the resolution whose cells are closest in area to the pixels; `auto+1` is the closest with cells smaller than a pixel and `auto-1` the closest with cells at least pixel-sized.
 
 [Worked Examples](docs/worked-examples.md) shows each grid on a question that suits it. For the grids' own documentation, see [H3](https://h3geo.org/docs/), [A5](https://a5geo.org/), [S2](https://s2geometry.io/devguide/s2cell_hierarchy) and [HEALPix](https://healpix.sourceforge.io/).
 
@@ -426,7 +426,7 @@ SELECT h3_hex, mean, count
 FROM h3_raster_continuous_aggregate('dem.tif', resolution := 8)
 LIMIT 5;
 
--- Cells three steps coarser than a pixel; 'auto' picks area-weighted overlay for them
+-- The third resolution with cells at least pixel-sized; 'auto' picks area-weighted overlay for them
 SELECT h3_hex, mean, count
 FROM h3_raster_continuous_aggregate('dem.tif', resolutions := 'auto-3', transfer := 'auto');
 

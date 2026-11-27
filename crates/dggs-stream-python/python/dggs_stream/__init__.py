@@ -1174,8 +1174,10 @@ def scan_raster(
 
     `resolutions` is an int, a list of ints, or `"auto"`: the resolution whose cells are
     closest in area to the raster's ground pixels (measured at the raster's centre through
-    its geotransform and CRS). `"auto+1"` is one resolution step finer, `"auto-2"` two
-    coarser; the result is clamped to the grid's range. Since the grids number their
+    its geotransform and CRS). `"auto+1"` is the closest resolution whose cells are
+    smaller than a pixel, `"auto-1"` the closest whose cells are at least pixel-sized
+    (`"auto+2"`, `"auto-2"` one step further on the same side); past the grid's range
+    the result clamps, and a side with no resolution is an error. Since the grids number their
     resolutions on unrelated scales, `"auto"` is the way to ask for comparable cells on
     each. `auto_resolution(path, grid)` returns the resolution it picks.
 
@@ -2248,8 +2250,9 @@ def auto_resolution(
     path: Union[str, Path], grid: str = "h3", *, offset: int = 0, crs: Optional[str] = None
 ) -> int:
     """The resolution `resolutions="auto"` picks for a raster on `grid`: the one whose
-    cells are closest in area to the raster's ground pixels, moved `offset` steps
-    (positive is finer) and clamped to the grid's range. `crs` overrides the raster's CRS.
+    cells are closest in area to the raster's ground pixels (`offset=0`). A positive
+    `offset` N picks the N-th resolution whose cells are smaller than a pixel, a negative
+    one the N-th whose cells are at least pixel-sized, clamped to the grid's range. `crs` overrides the raster's CRS.
     """
     lib, code = _grid_code(grid)
     if not hasattr(lib, "dggs_stream_py_auto_resolution"):

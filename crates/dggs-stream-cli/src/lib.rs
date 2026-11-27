@@ -2710,7 +2710,7 @@ mod tests {
     #[test]
     fn test_cli_auto_resolution_on_every_grid() {
         use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-        use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+        use dggs_stream_core::resolution::auto_resolution;
         let tif = write_test_tif(32, 32, 5.0);
         let input = tif.path().to_str().unwrap();
         let mosaic = MosaicReader::open(
@@ -2738,7 +2738,7 @@ mod tests {
                 let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
                 assert_eq!(
                     opts.resolutions,
-                    vec![offset_resolution(grid, matched, offset)],
+                    vec![auto_resolution(grid, &mosaic, offset).unwrap()],
                     "{grid} {arg}"
                 );
             }

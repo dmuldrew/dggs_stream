@@ -90,20 +90,24 @@ The CLI prints its choice on stderr (`dggs-stream: --transfer auto selected over
 ### `resolutions = "auto"`
 
 `auto` as a resolution picks the one whose mean cell area is closest, in ratio, to the raster's
-ground pixel area, measured at the raster's centre. `auto+N` moves N steps finer and `auto-N` N
-steps coarser, clamped to the grid's range. Because it targets a size rather than an index, it
-gives comparable cells on every grid ([Grids](grids.md#automatic-resolution)).
+ground pixel area, measured at the raster's centre. `auto+N` is the N-th resolution with cells
+smaller than a pixel and `auto-N` the N-th with cells at least pixel-sized, clamped to the
+grid's range. Because it targets a size rather than an index, it gives comparable cells on
+every grid ([Grids](grids.md#automatic-resolution)).
 
-The two combine. The table shows where each offset lands with `transfer = "auto"`; a step is
-×4 in area on A5, S2 and HEALPix and ×7 on H3.
+The two combine: the offset's side is the same threshold `transfer = "auto"` decides by. A
+step is ×4 in area on A5, S2 and HEALPix and ×7 on H3.
 
 | Resolution | Cell area / pixel area | `transfer = "auto"` runs |
 | :--- | :--- | :--- |
-| `auto+1` or finer | below ½ (below 0.38 on H3) | `interpolate` (continuous) |
-| `auto` | about 1 (0.5–2; 0.38–2.6 on H3) | `overlay`, or `interpolate` for a continuous scan whose cells came out just under a pixel |
-| `auto-1` or coarser | 2 or more (2.6 on H3) | weighted `overlay` |
+| `auto+1` | below 1, the closest such (¼–1; 1/7–1 on H3) | `interpolate` (continuous) |
+| `auto+2` and finer | ×4 (×7) smaller per step | `interpolate` (continuous) |
+| `auto` | closest to 1 (½–2; 0.38–2.6 on H3) | `interpolate` below 1, weighted `overlay` from 1 (continuous) |
+| `auto-1` | 1 or more, the closest such (1–4; 1–7 on H3) | weighted `overlay` |
+| `auto-2` and coarser | ×4 (×7) larger per step | weighted `overlay` |
 
-Categorical scans run `overlay` at every offset.
+Categorical scans run `overlay` at every offset. `auto` therefore always equals `auto+1` or
+`auto-1`.
 
 ```bash
 dggs-stream-cli jsonl dem.tif --grid s2 -r auto+1 --transfer auto      # interpolate

@@ -232,7 +232,7 @@ import dggs_stream
 s2 = dggs_stream.scan_raster("dem.tif", "auto", grid="s2").collect()      # s2_index, s2_hex, ...
 print(dggs_stream.auto_resolution("dem.tif", grid="healpix"))
 
-# Two steps coarser than a pixel, with the transfer mode chosen from the size ratio (overlay here)
+# The second resolution with cells at least a pixel, with the transfer mode chosen from the size ratio (overlay here)
 coarse = dggs_stream.scan_raster("dem.tif", "auto-2", transfer="auto")
 
 # Cells finer than the pixels, interpolated; or pixels split by overlap, keeping the total
