@@ -571,6 +571,9 @@ pub struct TransferStream<A: TransferAccumulator> {
     /// reducer, so tests can tell the parallel path from the serial one.
     #[cfg(test)]
     overlap_batches: usize,
+    /// Batches of cells accumulated in parallel by the mass-preserving second pass.
+    #[cfg(test)]
+    accumulate_batches: usize,
     #[cfg(test)]
     overlap_retries: usize,
     /// Overlay clipping passes (one per block and clipped resolution).
@@ -833,6 +836,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             profile: config.profile.clone(),
             #[cfg(test)]
             overlap_batches: 0,
+            #[cfg(test)]
+            accumulate_batches: 0,
             #[cfg(test)]
             overlap_retries: 0,
             #[cfg(test)]
@@ -1694,7 +1699,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             for batch in cell_ends.chunks(DIRECT_BATCH_CELLS) {
                 #[cfg(test)]
                 {
-                    self.overlap_batches += 1;
+                    self.accumulate_batches += 1;
                 }
                 for &(cell, end) in batch {
                     let pending = pending_map.remove(&cell).expect("cell remains pending");
@@ -3560,6 +3565,22 @@ mod tests {
         bbox: Option<[f64; 4]>,
         mass_preserve: bool,
     ) -> (BTreeMap<u64, ContinuousAccumulator>, usize, usize) {
+        let (cells, stream) =
+            overlay_scan_stream(file, grid, resolution, workers, bbox, mass_preserve);
+        (cells, stream.overlap_batches, stream.overlap_retries)
+    }
+
+    fn overlay_scan_stream(
+        file: &tempfile::NamedTempFile,
+        grid: GridKind,
+        resolution: u8,
+        workers: Option<usize>,
+        bbox: Option<[f64; 4]>,
+        mass_preserve: bool,
+    ) -> (
+        BTreeMap<u64, ContinuousAccumulator>,
+        TransferStream<ContinuousAccumulator>,
+    ) {
         let mosaic = Arc::new(
             MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap(),
         );
@@ -3579,7 +3600,7 @@ mod tests {
             .unwrap()
             > 0
         {}
-        (cells, stream.overlap_batches, stream.overlap_retries)
+        (cells, stream)
     }
 
     #[test]
@@ -3810,30 +3831,23 @@ mod tests {
     }
 
     #[test]
-    fn parallel_mass_preserve_conserves_selected_pixels_across_strips() {
+    fn mass_preserve_accumulation_runs_in_parallel_batches() {
+        // Conservation across workers is covered by the transfer_modes integration
+        // suite; this only checks that the second pass really used worker batches.
         let empty_strips = [3, 11];
         let raster = geographic_multi_strip_raster(128, 96, 4, -9999.0, &empty_strips);
         let bbox = Some([-122.468, 37.674, -122.276, 37.834]);
-        let expected_sum: u32 = (8..88)
-            .filter(|r| !empty_strips.contains(&(r / 4)))
-            .flat_map(|r| (16..112).map(move |c| (r, c)))
-            .filter(|(r, c)| (r + c) % 19 != 0)
-            .map(|(r, c)| ((r * 3 + c) % 17 + 1) as u32)
-            .sum();
         for (grid, res) in [
             (GridKind::H3, 8),
             (GridKind::S2, 12),
             (GridKind::Healpix, 12),
         ] {
-            let (serial, _, _) = overlay_scan_in(&raster, grid, res, Some(1), bbox, true);
-            let (parallel, batches, _) = overlay_scan_in(&raster, grid, res, Some(4), bbox, true);
-            assert!(batches > 0);
-            assert_eq!(parallel, serial);
-            let total: f64 = parallel.values().map(|cell| cell.sum).sum();
-            assert!(
-                (total - f64::from(expected_sum)).abs() < 1e-7,
-                "{grid}: {total} vs {expected_sum}"
-            );
+            let (serial, serial_stream) =
+                overlay_scan_stream(&raster, grid, res, Some(1), bbox, true);
+            let (parallel, stream) = overlay_scan_stream(&raster, grid, res, Some(4), bbox, true);
+            assert_eq!(serial_stream.accumulate_batches, 0, "{grid}");
+            assert!(stream.accumulate_batches > 0, "{grid}");
+            assert_eq!(parallel, serial, "{grid}");
         }
     }
 

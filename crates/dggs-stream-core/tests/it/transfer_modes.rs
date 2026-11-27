@@ -3200,3 +3200,56 @@ fn interpolate_subcell_sampling_matches_a_single_raster_across_mosaic_tiles() {
         );
     }
 }
+
+#[test]
+fn mass_preserving_overlay_conserves_selected_pixels_across_workers() {
+    // NoData rows span whole strips, and the bbox selects only part of the
+    // raster. Each cell's observations arrive in the same order for any worker
+    // count, so serial and parallel scans match and the sums equal the selected
+    // pixels' total.
+    const NODATA: f32 = -9999.0;
+    let empty_rows = |r: u32| (12..16).contains(&r) || (44..48).contains(&r);
+    let value = |c: u32, r: u32| {
+        if empty_rows(r) || (r + c) % 19 == 0 {
+            NODATA
+        } else {
+            ((r * 3 + c) % 17 + 1) as f32
+        }
+    };
+    let (_tmp, path) = TestGeoTiffBuilder::new(128, 96)
+        .origin(-122.5, 37.85)
+        .pixel_size(0.002)
+        .gdal_nodata("-9999")
+        .create_f32_tempfile(value);
+    let expected: f64 = (8..88)
+        .flat_map(|r| (16..112).map(move |c| (r, c)))
+        .filter(|&(r, c)| value(c, r) != NODATA)
+        .map(|(r, c)| f64::from(value(c, r)))
+        .sum();
+    for (grid, res) in [
+        (GridKind::H3, 8),
+        (GridKind::S2, 12),
+        (GridKind::Healpix, 12),
+    ] {
+        let mut cfg = config(
+            grid,
+            res,
+            TransferMode::Overlay {
+                weighted: true,
+                mass_preserve: true,
+            },
+        );
+        cfg.bbox = Some([-122.468, 37.674, -122.276, 37.834]);
+        cfg.aggregation_workers = Some(1);
+        let serial = scan(&path, &cfg);
+        cfg.aggregation_workers = Some(4);
+        let parallel = scan(&path, &cfg);
+        assert!(!serial.is_empty());
+        assert_eq!(parallel, serial, "{grid}");
+        let total: f64 = parallel.values().map(|cell| cell.sum).sum();
+        assert!(
+            (total - expected).abs() < 1e-7,
+            "{grid}: {total} vs {expected}"
+        );
+    }
+}
