@@ -1118,8 +1118,9 @@ pub unsafe extern "C" fn pg_srf_continuous_close(srf: *mut PgContinuousSrf) {
 }
 
 /// The resolution of `grid` whose cells are closest in area to the ground pixels of the
-/// raster at `raster_path` (`{grid}_auto_resolution` in SQL), moved `offset` resolution
-/// steps (positive is finer) and clamped to the grid's range.
+/// raster at `raster_path` (`{grid}_auto_resolution` in SQL), or with `offset`
+/// N > 0 the N-th resolution finer than a pixel, N < 0 the N-th at least pixel-sized,
+/// clamped to the grid's range.
 pub fn pg_auto_resolution(
     grid: GridKind,
     raster_path: &str,

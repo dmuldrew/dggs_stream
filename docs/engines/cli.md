@@ -43,8 +43,9 @@ For raster commands, `<input>` can be a path, glob, comma-separated list or VRT 
 | `--nodata-policy <omit\|emit>` | all (ground-area scans require `omit`) | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
-| `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)). `auto` picks `interpolate` for cells finer than pixels, weighted `overlay` for cells much coarser, and `assign_centers` otherwise; it is reported on stderr |
+| `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Transfer Modes](../transfer-modes.md)). `auto` picks bilinear `interpolate` for continuous scans with cells finer than the pixels and weighted `overlay` otherwise (categorical scans always overlay); with a non-`center` `--sampling` it picks `assign_centers` in place of `overlay`; it is reported on stderr |
 | `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer interpolate` | Interpolation (default `bilinear`) |
+| `--sampling <center\|rgss\|5point\|gaussian\|hex\|8rooks\|9point\|16point>` | `assign_centers`, `--transfer interpolate`, `--transfer auto` | Quadrature sampling pattern ([Super-Sampling](../super-sampling.md)): sub-pixel for `assign_centers`, sub-cell polygon sampling for `interpolate` (`--transfer overlay` rejects non-`'center'`) |
 | `--overlay-weighted <true\|false>` | `--transfer overlay` | `false` counts every touched pixel once |
 | `--valid-coverage-threshold <0..1>` | `--transfer overlay` | Minimum valid fraction of selected overlap, measured by area even for unweighted statistics. Mass-preserving scans are exempt. |
 | `--mass-preserve` | `--transfer overlay` | Normalise each pixel's weights so `sum` adds up to the raster's total |
@@ -208,6 +209,8 @@ dggs-stream-cli parquet elevation.tif --grid a5 -r auto-1 -o a5.parquet
 ```bash
 # Cells finer than the pixels: interpolate a value at each cell centre
 dggs-stream-cli jsonl elevation.tif -r auto+2 --transfer interpolate --interpolation bicubic
+# Crossover cells or intra-cell spread: sub-cell quadrature with bicubic interpolation
+dggs-stream-cli jsonl elevation.tif -r auto --transfer interpolate --interpolation bicubic --sampling rgss
 # Population counts: split each pixel across the cells it overlaps, keeping the total
 dggs-stream-cli parquet population.tif -r 7 --transfer overlay --mass-preserve -o pop.parquet
 # Per-cell histogram of a continuous raster in four bins, as fractions

@@ -9,9 +9,10 @@ use dggs_stream_core::aggregator::multi_horizon::{
 use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::{
-    area_matched_resolution, auto_resolution, mosaic_pixel_ground_area_m2, offset_resolution,
+    area_matched_resolution, auto_resolution, directional_resolution, mosaic_pixel_ground_area_m2,
     ResolutionSpec,
 };
+use dggs_stream_core::transfer::{resolve_auto_transfer, Interpolation, TransferMode};
 use dggs_stream_core::GridKind;
 
 use crate::helpers::TestGeoTiffBuilder;
@@ -102,11 +103,40 @@ fn auto_picks_the_area_matched_resolution_on_every_grid() {
         );
         for offset in [-3, -1, 1, 2, 64, -64] {
             let spec = ResolutionSpec::parse(grid, &format!("auto{offset:+}")).unwrap();
-            let expected = offset_resolution(grid, matched, offset);
+            let expected = directional_resolution(grid, area, offset).unwrap();
+            assert_eq!(auto_resolution(grid, &mosaic, offset).unwrap(), expected);
             assert_eq!(spec.resolve(grid, &mosaic).unwrap(), vec![expected]);
             assert_eq!(
                 spec.resolve_paths(grid, &paths, None).unwrap(),
                 vec![expected]
+            );
+        }
+        // `auto+1` is the coarsest resolution finer than the pixel and `auto-1` the finest
+        // at least a pixel: adjacent, with `auto` one of the two, and each on its side.
+        let (fine, coarse) = (
+            auto_resolution(grid, &mosaic, 1).unwrap(),
+            auto_resolution(grid, &mosaic, -1).unwrap(),
+        );
+        assert_eq!(fine, coarse + 1, "{grid}");
+        assert!(matched == fine || matched == coarse, "{grid}");
+        assert!(grid.area_m2(fine) < area, "{grid}");
+        assert!(grid.area_m2(coarse) >= area, "{grid}");
+        assert_eq!(auto_resolution(grid, &mosaic, 2).unwrap(), fine + 1);
+        assert_eq!(auto_resolution(grid, &mosaic, -2).unwrap(), coarse - 1);
+        // Measured the same way, `transfer = "auto"` interpolates `auto+N` cells and
+        // overlays `auto-N` cells.
+        for n in 1..=3 {
+            let fine = auto_resolution(grid, &mosaic, n).unwrap();
+            let coarse = auto_resolution(grid, &mosaic, -n).unwrap();
+            assert_eq!(
+                resolve_auto_transfer(grid, &[fine], area, false, true),
+                TransferMode::Interpolate(Interpolation::Bilinear),
+                "{grid} auto+{n}"
+            );
+            assert_eq!(
+                resolve_auto_transfer(grid, &[coarse], area, false, true),
+                TransferMode::OVERLAY,
+                "{grid} auto-{n}"
             );
         }
         let fixed = ResolutionSpec::parse(grid, "2,5").unwrap();

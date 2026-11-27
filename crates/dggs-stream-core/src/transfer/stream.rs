@@ -19,6 +19,7 @@ use crate::aggregator::multi_horizon::coordinates::is_point_in_bbox;
 use crate::aggregator::multi_horizon::MultiResolutionConfig;
 use crate::aggregator::output_policy::NodataPolicy;
 use crate::aggregator::remap::CategoryRemapper;
+use crate::aggregator::sampling::{CellPolygonSampler, SamplingPattern};
 use crate::aggregator::simd::SimdSpanAccumulate;
 use crate::crs::transformer::CrsTransformer;
 use crate::error::{DggsStreamError, Result};
@@ -533,6 +534,7 @@ pub struct TransferStream<A: TransferAccumulator> {
     /// Index of the finest resolution when rolling up strictly nested `overlay` grids.
     nested_rollup_finest: Option<usize>,
     mode: TransferMode,
+    sampling: SamplingPattern,
     overlap_parallelism: OverlapParallelism,
     selection: BandSelection,
     bands: Vec<usize>,
@@ -635,8 +637,49 @@ impl<A: TransferAccumulator> TransferStream<A> {
         if config.spectral_formula.is_some() {
             return invalid("cannot be combined with a spectral formula");
         }
-        if !config.sampling.is_single_point() {
+        if config.sampling.points.is_empty()
+            || config.sampling.points.iter().any(|p| {
+                !p.dx.is_finite()
+                    || !p.dy.is_finite()
+                    || !(0.0..=1.0).contains(&p.dx)
+                    || !(0.0..=1.0).contains(&p.dy)
+                    || !p.weight.is_finite()
+                    || p.weight <= 0.0
+            })
+        {
+            return Err(DggsStreamError::InvalidParameter(
+                "samples require finite offsets in [0,1] and positive finite weights".into(),
+            ));
+        }
+        if matches!(mode, TransferMode::Overlay { .. }) && !config.sampling.is_single_point() {
             return invalid("replaces sub-pixel sampling: leave sampling at 'center'");
+        }
+        let sampling = config.sampling.normalized();
+        if let (TransferMode::Interpolate(method), Some(&coarsest_res)) =
+            (mode, config.resolutions.iter().min())
+        {
+            // A stencil reaching past the rows a block's window can hold would lose its
+            // outer samples and report partial counts, so refuse it instead.
+            for tile in &mosaic.tiles {
+                let reach = interpolate_reach(
+                    tile,
+                    config.grid,
+                    coarsest_res,
+                    method,
+                    &sampling,
+                    bands.len(),
+                );
+                if reach.needed_rows > reach.rows {
+                    return invalid(&format!(
+                        "with sub-cell sampling reaches {} rows beyond a block at resolution {coarsest_res}, more than \
+                         the {}-row window margin of this {}-pixel-wide raster allows: use a \
+                         finer resolution, transfer='overlay', or sampling='center'",
+                        reach.needed_rows,
+                        reach.rows,
+                        tile.reader.metadata.width
+                    ));
+                }
+            }
         }
         let allow_chunk_row_window = matches!(
             mode,
@@ -650,6 +693,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let mut blocks = Vec::new();
         if !resolutions.is_empty() {
             let finest_res = resolutions.iter().copied().max().unwrap_or(0);
+            let coarsest_res = resolutions.iter().copied().min().unwrap_or(0);
             let any_coarse = resolutions
                 .iter()
                 .any(|&r| grid.spec().max_cell_diameter_km(r) > COARSE_CELL_DIAMETER_KM);
@@ -658,6 +702,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     grid,
                     mode,
                     finest_res,
+                    coarsest_res,
+                    &sampling,
                     any_coarse,
                     tile_idx,
                     tile,
@@ -732,6 +778,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             resolutions,
             nested_rollup_finest,
             mode,
+            sampling,
             bands,
             overlap_parallelism: OverlapParallelism::from_workers(config.aggregation_workers)?,
             selection: BandSelection {
@@ -937,11 +984,15 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     .take_while(|b| b.tile == block.tile)
                     .count();
             let tile = &self.mosaic.tiles[block.tile];
+            let coarsest_res = self.resolutions.iter().copied().min().unwrap_or(0);
             let (misses, blocks_covered) = plan_run_chunk_misses(
                 tile,
                 &self.blocks[block_idx..run_end],
                 &self.bands,
                 self.mode,
+                self.grid,
+                coarsest_res,
+                &self.sampling,
             );
             self.prefetch_run_end = block_idx + blocks_covered;
             if !misses.is_empty()
@@ -974,14 +1025,22 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 let tile = &mosaic.tiles[block.tile];
                 match self.mode {
                     TransferMode::Interpolate(method) => {
-                        let margin = method.margin();
-                        let rows = block.rows.start.saturating_sub(margin)
-                            ..block.rows.end.saturating_add(margin);
-                        let cols = block.cols.start.saturating_sub(margin)
+                        let coarsest_res = self.resolutions.iter().copied().min().unwrap_or(0);
+                        let (row_margin, col_margin) = interpolate_margins(
+                            tile,
+                            self.grid,
+                            coarsest_res,
+                            method,
+                            &self.sampling,
+                            self.bands.len(),
+                        );
+                        let rows = block.rows.start.saturating_sub(row_margin)
+                            ..block.rows.end.saturating_add(row_margin);
+                        let cols = block.cols.start.saturating_sub(col_margin)
                             ..block
                                 .cols
                                 .end
-                                .saturating_add(margin)
+                                .saturating_add(col_margin)
                                 .min(tile.reader.metadata.width);
                         let window = self.load_window(tile, rows, cols)?;
                         for res_idx in 0..self.resolutions.len() {
@@ -1063,6 +1122,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
             resolution,
             ContainmentMode::ContainsCentroid,
         )?;
+        let periodic_lon = periodic_longitude_bounds(tile).is_some();
         let histogram_bins_arc = self.histogram_bins.clone();
         let remapper_arc = self.remapper.clone();
         let ctx = InterpBlockCtx {
@@ -1072,6 +1132,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             tile_idx: block.tile,
             window,
             method,
+            sampling: &self.sampling,
+            periodic_lon,
             rows: block.rows.clone(),
             cols: block.cols.clone(),
             track_quantiles: self.track_quantiles,
@@ -1942,6 +2004,113 @@ fn filter_blocks_by_chunks(
     out
 }
 
+/// Extra `(row_margin, col_margin)` pixels needed around an `Interpolate` block to
+/// cover both the interpolation kernel taps and sub-cell `sampling` offsets within a cell.
+fn interpolate_margins(
+    tile: &TileDescriptor,
+    grid: GridKind,
+    coarsest_res: u8,
+    method: Interpolation,
+    sampling: &SamplingPattern,
+    band_count: usize,
+) -> (u32, u32) {
+    let reach = interpolate_reach(tile, grid, coarsest_res, method, sampling, band_count);
+    (reach.rows, reach.cols)
+}
+
+/// The row and column margins of an `Interpolate` block, and the row margin the sub-cell
+/// stencil needs before the window budget caps it.
+struct InterpolateReach {
+    rows: u32,
+    cols: u32,
+    needed_rows: u32,
+}
+
+fn interpolate_reach(
+    tile: &TileDescriptor,
+    grid: GridKind,
+    coarsest_res: u8,
+    method: Interpolation,
+    sampling: &SamplingPattern,
+    band_count: usize,
+) -> InterpolateReach {
+    let base = method.margin();
+    let uniform = |m: u32| InterpolateReach {
+        rows: m,
+        cols: m,
+        needed_rows: m,
+    };
+    if sampling.is_single_point() {
+        return uniform(base);
+    }
+    let meta = &tile.reader.metadata;
+    let (width, height) = (meta.width, meta.height);
+    if width == 0 || height == 0 {
+        return uniform(base);
+    }
+    let gt = &meta.geotransform;
+    let (col, row) = (f64::from(width / 2), f64::from(height / 2));
+    let step_sizes = || -> Option<(f64, f64)> {
+        let (x0, y0) = gt.pixel_to_coord(col, row);
+        let (x1, y1) = gt.pixel_to_coord(col + 1.0, row);
+        let (x2, y2) = gt.pixel_to_coord(col, row + 1.0);
+        let (lon0, lat0) = tile.crs_transformer.transform_point(x0, y0).ok()?;
+        let p1 = tile.crs_transformer.transform_point(x1, y1).ok()?;
+        let p2 = tile.crs_transformer.transform_point(x2, y2).ok()?;
+        let mean_lat = lat0.clamp(-89.9, 89.9);
+        let (sin, cos) = mean_lat.to_radians().sin_cos();
+        const WGS84_A: f64 = 6_378_137.0;
+        const WGS84_E2: f64 = 0.006_694_379_990_141_316;
+        let w = 1.0 - WGS84_E2 * sin * sin;
+        let meridian = WGS84_A * (1.0 - WGS84_E2) / (w * w.sqrt());
+        let parallel = WGS84_A / w.sqrt() * cos;
+        let step_m = |(lon, lat): (f64, f64)| -> f64 {
+            let dlon = (lon - lon0 + 540.0).rem_euclid(360.0) - 180.0;
+            let dx = dlon.to_radians() * parallel;
+            let dy = (lat - lat0).to_radians() * meridian;
+            dx.hypot(dy)
+        };
+        let mut col_step_m = step_m(p1);
+        let row_step_m = step_m(p2);
+        if matches!(
+            tile.crs_transformer,
+            CrsTransformer::Wgs84Identity | CrsTransformer::WebMercatorFast
+        ) {
+            let [_, south, _, north] = tile.bounds_wgs84;
+            let max_abs_lat = south.abs().max(north.abs()).clamp(0.0, 89.5);
+            let mid_cos = mean_lat.abs().min(89.5).to_radians().cos().max(1e-6);
+            let edge_cos = max_abs_lat.to_radians().cos();
+            col_step_m *= edge_cos / mid_cos;
+        }
+        (col_step_m.is_finite() && col_step_m > 0.0 && row_step_m.is_finite() && row_step_m > 0.0)
+            .then_some((col_step_m, row_step_m))
+    };
+    let (col_step_m, row_step_m) = match step_sizes() {
+        Some(steps) => steps,
+        None => {
+            let rows = base.saturating_add(16).min(height);
+            return InterpolateReach {
+                rows,
+                cols: base.saturating_add(16).min(width),
+                needed_rows: rows,
+            };
+        }
+    };
+    let cell_radius_m =
+        0.5 * grid.spec().max_cell_diameter_km(coarsest_res) * 1000.0 * sampling.max_radius();
+    let extra_cols = ((1.5 * cell_radius_m / col_step_m.max(1e-6)).ceil() as u32).min(width);
+    let max_extra_rows =
+        ((MAX_WINDOW_VALUES / band_count.max(1) / (width as usize)) / 4).max(16) as u32;
+    let needed_extra_rows =
+        ((1.5 * cell_radius_m / row_step_m.max(1e-6)).ceil() as u32).min(height);
+    let extra_rows = needed_extra_rows.min(max_extra_rows);
+    InterpolateReach {
+        rows: base.saturating_add(extra_rows),
+        cols: base.saturating_add(extra_cols),
+        needed_rows: base.saturating_add(needed_extra_rows),
+    }
+}
+
 /// Cut one tile into blocks for `mode` sized by `resolution`, with `any_coarse` controlling
 /// chunk-row expansion across all resolutions.
 #[allow(clippy::too_many_arguments)]
@@ -1949,6 +2118,8 @@ fn plan_tile(
     grid: GridKind,
     mode: TransferMode,
     resolution: u8,
+    coarsest_res: u8,
+    sampling: &SamplingPattern,
     any_coarse: bool,
     tile_idx: usize,
     tile: &TileDescriptor,
@@ -1967,7 +2138,9 @@ fn plan_tile(
         .max(1e-9);
     let block_pixels = (TARGET_BLOCK_CELLS / cells_per_pixel).max(1.0);
     let margin = match mode {
-        TransferMode::Interpolate(method) => 2 * method.margin(),
+        TransferMode::Interpolate(method) => {
+            2 * interpolate_margins(tile, grid, coarsest_res, method, sampling, band_count).0
+        }
         _ => 0,
     };
     let base_window_rows = ((MAX_WINDOW_VALUES / band_count / width as usize) as u32)
@@ -2033,6 +2206,9 @@ fn plan_run_chunk_misses(
     run_blocks: &[Block],
     bands: &[usize],
     mode: TransferMode,
+    grid: GridKind,
+    coarsest_res: u8,
+    sampling: &SamplingPattern,
 ) -> (Vec<u32>, usize) {
     let meta = &tile.reader.metadata;
     let (width, height) = (meta.width, meta.height);
@@ -2043,9 +2219,11 @@ fn plan_run_chunk_misses(
         .iter()
         .map(|&band| band.saturating_sub(1).min(spp - 1))
         .collect();
-    let margin = match mode {
-        TransferMode::Interpolate(method) => method.margin(),
-        _ => 0,
+    let (row_margin, col_margin) = match mode {
+        TransferMode::Interpolate(method) => {
+            interpolate_margins(tile, grid, coarsest_res, method, sampling, bands.len())
+        }
+        _ => (0, 0),
     };
 
     let mut misses = Vec::new();
@@ -2062,8 +2240,10 @@ fn plan_run_chunk_misses(
         }
         let (raw_rows, raw_cols) = match mode {
             TransferMode::Interpolate(_) => (
-                block.rows.start.saturating_sub(margin)..block.rows.end.saturating_add(margin),
-                block.cols.start.saturating_sub(margin)..block.cols.end.saturating_add(margin),
+                block.rows.start.saturating_sub(row_margin)
+                    ..block.rows.end.saturating_add(row_margin),
+                block.cols.start.saturating_sub(col_margin)
+                    ..block.cols.end.saturating_add(col_margin),
             ),
             TransferMode::Overlay { .. } => (block.rows.clone(), block.cols.clone()),
             TransferMode::AssignCenters | TransferMode::Auto => unreachable!(),
@@ -2438,24 +2618,25 @@ fn to_pixel_raw(tile: &TileDescriptor, lon: f64, lat: f64) -> Option<(f64, f64)>
     (col.is_finite() && row.is_finite()).then_some((col, row))
 }
 
-/// Pixel position of a WGS84 point in `tile`. A lon/lat raster may store longitudes a
-/// whole turn away (0 to 360), so those are tried when the point misses the columns.
-fn to_pixel(tile: &TileDescriptor, lon: f64, lat: f64) -> Option<(f64, f64)> {
+/// Pixel position and longitude shift (`0.0`, `360.0`, or `-360.0`) of a WGS84 point
+/// in `tile`. A lon/lat raster may store longitudes a whole turn away (`0..360`), so
+/// those turns are tried when the point misses the columns.
+fn to_pixel_with_turn(tile: &TileDescriptor, lon: f64, lat: f64) -> Option<((f64, f64), f64)> {
     let width = f64::from(tile.reader.metadata.width);
     let first = to_pixel_raw(tile, lon, lat)?;
     if (0.0..width).contains(&first.0)
         || !matches!(tile.crs_transformer, CrsTransformer::Wgs84Identity)
     {
-        return Some(first);
+        return Some((first, 0.0));
     }
     for turn in [360.0, -360.0] {
         if let Some(shifted) = to_pixel_raw(tile, lon + turn, lat) {
             if (0.0..width).contains(&shifted.0) {
-                return Some(shifted);
+                return Some((shifted, turn));
             }
         }
     }
-    Some(first)
+    Some((first, 0.0))
 }
 
 /// A contiguous horizontal run of pixels within one row sharing the same overlap area.
@@ -2530,6 +2711,8 @@ struct InterpBlockCtx<'a> {
     tile_idx: usize,
     window: &'a RowWindow,
     method: Interpolation,
+    sampling: &'a SamplingPattern,
+    periodic_lon: bool,
     rows: Range<u32>,
     cols: Range<u32>,
     track_quantiles: bool,
@@ -2538,6 +2721,49 @@ struct InterpBlockCtx<'a> {
     filters: Filters,
     histogram_bins: Option<&'a crate::histogram::HistogramBins>,
     remapper: Option<&'a CategoryRemapper>,
+}
+
+fn build_cell_sampler(
+    ctx: &InterpBlockCtx<'_>,
+    cell: u64,
+    center_lon: f64,
+    center_px: (f64, f64),
+    turn: f64,
+) -> Option<CellPolygonSampler> {
+    if ctx.periodic_lon && ctx.grid.interior_pole(cell).is_some() {
+        return None;
+    }
+    let mut ring_ll = [(0.0, 0.0); 10];
+    let n = ctx.grid.boundary_lng_lat(cell, &mut ring_ll);
+    if n < 3 {
+        return None;
+    }
+    let mut ring_px = [(0.0, 0.0); 10];
+    for (dst, &(v_lon, v_lat)) in ring_px[..n].iter_mut().zip(&ring_ll[..n]) {
+        let u_lon = center_lon + ((v_lon - center_lon + 540.0).rem_euclid(360.0) - 180.0);
+        *dst = to_pixel_raw(ctx.tile, u_lon + turn, v_lat)?;
+    }
+    CellPolygonSampler::new(center_px, &ring_px[..n])
+}
+
+/// Whether a sample of the cell's stencil lies outside the pixels of the tile holding the
+/// cell's centre, yet on raster data: the same tile one longitude period away (a 360°
+/// raster's seam) or another tile of the mosaic. Samples outside every tile are simply
+/// off the data, as on a single raster, and still lower the count.
+fn stencil_reaches_unread_data(ctx: &InterpBlockCtx<'_>, sampler: &CellPolygonSampler) -> bool {
+    let meta = &ctx.tile.reader.metadata;
+    let (width, height) = (f64::from(meta.width), f64::from(meta.height));
+    ctx.sampling.points.iter().any(|sp| {
+        let (sc, sr) = sampler.sample(sp.dx, sp.dy);
+        if sc >= 0.0 && sr >= 0.0 && sc < width && sr < height {
+            return false;
+        }
+        let (x, y) = meta.geotransform.pixel_to_coord(sc, sr);
+        let Ok((lon, lat)) = ctx.tile.crs_transformer.transform_point(x, y) else {
+            return false;
+        };
+        ctx.mosaic.tiles.iter().any(|tile| tile.contains(lon, lat))
+    })
 }
 
 fn interpolate_cell<A: TransferAccumulator>(
@@ -2550,7 +2776,7 @@ fn interpolate_cell<A: TransferAccumulator>(
     if !is_point_in_bbox(lng, lat, ctx.bbox) {
         return InterpOutcome::Skip;
     }
-    let Some((col, row)) = to_pixel(ctx.tile, lng, lat) else {
+    let Some(((col, row), turn)) = to_pixel_with_turn(ctx.tile, lng, lat) else {
         return InterpOutcome::Failed;
     };
     // A cell belongs to the block holding its centre, so it is emitted once.
@@ -2562,7 +2788,24 @@ fn interpolate_cell<A: TransferAccumulator>(
         return InterpOutcome::Skip;
     }
     let mut acc = A::empty(ctx.track_quantiles);
-    if let Some(value) = interpolate(ctx.window, ctx.method, col, row)
+    // Sub-cell samples come from the tile holding the cell's centre. A stencil reaching
+    // data this window cannot read (across a 360° raster's seam, or into another tile of
+    // the mosaic) falls back to the centre sample, as pole cells do, rather than dropping
+    // those samples and reporting a partial count.
+    let sampler = (!ctx.sampling.is_single_point())
+        .then(|| build_cell_sampler(ctx, cell, lng, (col, row), turn))
+        .flatten()
+        .filter(|sampler| !stencil_reaches_unread_data(ctx, sampler));
+    if let Some(sampler) = sampler {
+        for sp in &ctx.sampling.points {
+            let (sc, sr) = sampler.sample(sp.dx, sp.dy);
+            if let Some(value) = interpolate(ctx.window, ctx.method, sc, sr)
+                .and_then(|v| TransferStream::<A>::mapped(ctx.histogram_bins, ctx.remapper, v))
+            {
+                acc.add(value, sp.weight);
+            }
+        }
+    } else if let Some(value) = interpolate(ctx.window, ctx.method, col, row)
         .and_then(|v| TransferStream::<A>::mapped(ctx.histogram_bins, ctx.remapper, v))
     {
         acc.add(value, 1.0);
@@ -3582,7 +3825,15 @@ mod tests {
                 last_of_tile: true,
             },
         ];
-        let (misses, covered) = plan_run_chunk_misses(&tile, &blocks, &[1], TransferMode::OVERLAY);
+        let (misses, covered) = plan_run_chunk_misses(
+            &tile,
+            &blocks,
+            &[1],
+            TransferMode::OVERLAY,
+            GridKind::H3,
+            8,
+            &SamplingPattern::center(),
+        );
         assert_eq!(covered, 5);
         // Strip 0 missed once on block 0, hit on block 1; strip 1 sparse; strip 2 skipped (bbox None);
         // strips 3 and 4 missed on block 4, with strip 4 sparse -> [0, 3].

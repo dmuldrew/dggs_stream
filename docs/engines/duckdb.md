@@ -237,13 +237,24 @@ SELECT a5_lonlat_to_cell(-122.4, 37.8, 10) AS cell,
 
 ### Transfer modes, histograms, empty cells and profiling
 
-See [Scan Options](../scan-options.md) for what each option does.
+See [Transfer Modes](../transfer-modes.md) and [Scan Options](../scan-options.md) for what each option does.
 
 ```sql
+-- Let the engine pick cells about one pixel in size and the mode that suits them
+SELECT h3_index, mean
+FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto', transfer := 'auto');
+
 -- Cells finer than the pixels: a bicubic value at each cell centre
 SELECT h3_index, mean
 FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto+2',
                                     transfer := 'interpolate', interpolation := 'bicubic');
+
+-- Cells about the size of pixels: 16 bicubic samples across each cell polygon, so stddev,
+-- min and max describe the field inside the cell (see Super-Sampling)
+SELECT h3_index, mean, stddev
+FROM h3_raster_continuous_aggregate('elevation.tif', resolutions := 'auto',
+                                    transfer := 'interpolate', interpolation := 'bicubic',
+                                    sampling := '16point');
 
 -- Population: each pixel split across the cells it overlaps; sum adds up to the raster total
 SELECT h3_index, sum AS population
@@ -785,7 +796,8 @@ FROM raster_h3('population_per_km2.tif', resolution := 8,
                ground_area := true, transfer := 'overlay');
 ```
 
-Ground-area overlay uses one aggregation worker regardless of the SQL `workers` setting.
+Ground-area overlay clips each window's cells on the `workers` pool (the caller's pool when unset);
+results do not depend on the worker count.
 The overlay adaptively traces grid edges in raster pixel coordinates. It requires
 a resolution with a maximum cell diameter of at most 500 km and errors on
 pole-containing candidate cells. See the [core geometry and units](core.md#ground-area-weighted-overlay).

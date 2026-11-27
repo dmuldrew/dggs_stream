@@ -114,6 +114,8 @@ pub(crate) fn ground_area_overlay_tile(
             config.grid,
             config.transfer,
             finest_res,
+            finest_res,
+            &config.sampling,
             false,
             0,
             &tile,

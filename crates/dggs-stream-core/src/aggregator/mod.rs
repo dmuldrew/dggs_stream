@@ -15,7 +15,7 @@
 //! - [`nodata`](crate::aggregator::nodata): NoData detection, value casting, and dispatching.
 //! - [`quantiles`](crate::aggregator::quantiles): Streaming percentile sketches for approximate quantiles.
 //! - [`remap`](crate::aggregator::remap): Category remapping and value reclassification rules.
-//! - [`sampling`](crate::aggregator::sampling): Sub-pixel super-sampling patterns (center, 4-point, jittered).
+//! - [`sampling`](crate::aggregator::sampling): Quadrature sampling patterns (sub-pixel and sub-cell polygon).
 //! - [`simd`](crate::aggregator::simd): Vectorized span accumulation using SIMD operations.
 
 /// Online statistical accumulators using Welford's algorithm.
@@ -40,7 +40,7 @@ pub mod output_policy;
 pub mod quantiles;
 /// Category remapping rules and value reclassification.
 pub mod remap;
-/// Sub-pixel super-sampling point patterns and offsets.
+/// Quadrature offsets for sub-pixel and sub-cell polygon sampling.
 pub mod sampling;
 /// Vectorized contiguous span accumulation using SIMD.
 pub mod simd;
@@ -63,7 +63,7 @@ pub use output_policy::{NodataPolicy, OutputPolicy};
 pub use quantiles::QuantileSketch;
 /// Category remapping engine, rules, and unmapped value handling policies.
 pub use remap::{CategoryRemapper, RemapRule, UnmappedAction};
-/// Sub-pixel sample points and sampling pattern configurations.
-pub use sampling::{SamplePoint, SamplingPattern};
+/// Sub-pixel and sub-cell quadrature sample points and polygon samplers.
+pub use sampling::{CellPolygonSampler, SamplePoint, SamplingPattern};
 /// SIMD-accelerated horizontal span accumulator.
 pub use simd::SimdSpanAccumulate;

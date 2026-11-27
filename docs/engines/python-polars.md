@@ -72,7 +72,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `band` | `int` | `None` (1) | 1-indexed band to aggregate |
 | `bands` | sequence of integers | `None` | Ordered one-based bands from one interleaved or band-separated TIFF. Continuous center-assignment scans share the grid columns and return statistics per band. |
 | `ground_area` | `bool` | `None` (off) | Weight values by WGS84 ellipsoidal area. Center assignment uses the full pixel. Weighted overlay uses the clipped intersection with each cell and accepts `valid_coverage_threshold` in terms of valid area divided by selected overlap area. Needs one north-up, single-band EPSG:4326 raster, omitted NoData and the default center sampling; incompatible with `bands`, quantiles, formulas, partitions and mass normalization. Returns `pixel_count`, `retained_area_m2`, `area_weighted_sum` and `area_weighted_mean` in place of the usual statistics; `min_count` filters on the sum of valid pixel fractions. A `bbox` that misses the raster is an error, as in ordinary scans. |
-| `sampling` | `str` | `None` (`"center"`) | Sub-pixel sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point` |
+| `sampling` | `str` | `None` (`"center"`) | Sampling pattern: `center`, `5point`, `gaussian`, `rgss`, `hex`, `8rooks`, `9point`, `16point`. Sub-pixel points with `assign_centers`; sub-cell points inside each cell polygon with `transfer="interpolate"`; refused by `overlay` |
 | `overlap_rule` | `str` | `None` (`"cutline"`) | Mosaic overlaps: `cutline`, `first` or `average` |
 | `min_majority_fraction` | `float` | `None` | Categorical only: drop cells whose majority class covers less than this fraction |
 | `spectral_formula` | `str` | `None` | Continuous only: `ndvi`, `ndwi`, `nbr` or `evi`, from `nir_band` (4), `red_band` (3), `green_band` (2), `blue_band` (1), `swir_band` (6) |
@@ -82,11 +82,11 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | `nodata_policy` | `str` | `None` (`"omit"`) | `"emit"` keeps cells whose samples are all NoData (`count` 0, null statistics) |
 | `emit_nodata_value` | `float` | `None` | Under `"emit"`, the value of those statistics instead of null |
 | `decimals` | `int` | `None` | Round floating-point statistics to 0–15 decimals |
-| `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"`, `"overlay"` or `"auto"`, which picks one from the cell-to-pixel size ratio ([Scan Options](../scan-options.md#transfer-modes)) |
+| `transfer` | `str` | `None` (`"assign_centers"`) | `"interpolate"`, `"overlay"` or `"auto"`, which picks one from the cell-to-pixel size ratio ([Transfer Modes](../transfer-modes.md)) |
 | `interpolation` | `str` | `None` (`"bilinear"`) | With `"interpolate"`: `nearest`, `bilinear`, `bicubic`, `lanczos` |
 | `overlay_weighted`, `mass_preserve` | `bool` | `None` | With `"overlay"`: count touched pixels once / keep the raster's total in `sum` |
-| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. A spilled resolution may need to read the full input even with a small row limit. |
-| `decode_budget_mb` | `int` | `None` (256 MiB) | Center-assignment decoded buffer budget in MiB. A single oversized chunk can proceed alone. |
+| `aggregation_budget_mb` | `int` | `None` (64 MiB) | Center-assignment aggregation budget in MiB. Partial cell states spill to disk under memory pressure. A spilled resolution may need to read the full input even with a small row limit. Refused with any other transfer mode, including when `transfer="auto"` resolves to one. |
+| `decode_budget_mb` | `int` | `None` (256 MiB) | Decoded buffer budget in MiB, in every transfer mode. A single oversized chunk can proceed alone. |
 | `valid_coverage_threshold` | `float` | `None` | Minimum valid fraction (0–1) of selected raster overlap. Applies to overlay. Mass-preserving scans retain all contributions. |
 | `histogram` | `str \| Sequence[float]` | `None` | Categorical only: `"values"`, `"4:0:100"` or bin edges `[0, 10, 50]`; the `histogram` column becomes `List(Struct)` |
 | `histogram_weight`, `histogram_normalize` | `str` | `None` | `"count"` / `"area"`; `"none"` / `"fraction"` / `"density"` |
@@ -232,6 +232,9 @@ import dggs_stream
 s2 = dggs_stream.scan_raster("dem.tif", "auto", grid="s2").collect()      # s2_index, s2_hex, ...
 print(dggs_stream.auto_resolution("dem.tif", grid="healpix"))
 
+# The second resolution with cells at least a pixel, with the transfer mode chosen from the size ratio (overlay here)
+coarse = dggs_stream.scan_raster("dem.tif", "auto-2", transfer="auto")
+
 # Cells finer than the pixels, interpolated; or pixels split by overlap, keeping the total
 fine = dggs_stream.scan_raster("dem.tif", "auto+2", transfer="interpolate", interpolation="bicubic")
 pop = dggs_stream.scan_raster("population.tif", 7, transfer="overlay", mass_preserve=True)
@@ -339,6 +342,12 @@ ndvi = dggs_stream.scan_raster(
 # Anti-aliased cell edges: four rotated-grid samples per pixel
 lf = dggs_stream.scan_raster("dem.tif", 10, sampling="rgss")
 
+# Cells about the size of pixels: 16 bicubic samples across each cell, so stddev, min and
+# max describe the field inside the cell
+lf = dggs_stream.scan_raster(
+    "dem.tif", 10, transfer="interpolate", interpolation="bicubic", sampling="16point",
+)
+
 # Mosaic where earlier files win in overlaps; categorical cells with a clear majority
 lf = dggs_stream.scan_raster(
     "newest.tif,older.tif", 8, categorical=True,
@@ -346,12 +355,12 @@ lf = dggs_stream.scan_raster(
 )
 ```
 
-Ground-area overlay runs serially and adaptively traces grid edges in raster pixel coordinates.
+Ground-area overlay clips each window's cells in parallel on the ambient Rayon pool and adaptively traces grid edges in raster pixel coordinates.
 It requires a resolution with a maximum cell diameter of at most 500 km and rejects pole-containing candidate cells. [Geometry and units](core.md#ground-area-weighted-overlay)
 
 The names and defaults match the DuckDB parameters; see the
 [scan options](../polars-api-reference.md#keyword-parameters) and
-[sub-pixel sampling](../super-sampling.md).
+[sub-pixel and sub-cell sampling](../super-sampling.md).
 
 ### Partitioned scans (Spark and other distributed engines)
 

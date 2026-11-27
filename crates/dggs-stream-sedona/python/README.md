@@ -39,7 +39,9 @@ dggs_stream_sedona.write_pmtiles(sd.sql("SELECT h3_index, mean FROM dem WHERE co
 - `RasterTable.continuous(source, resolutions=8, *, crs=None, nodata=None, band=None, bbox=None, grid=None)`
 - `RasterTable.categorical(source, resolutions=8, *, crs=None, nodata=None, bbox=None, grid=None)`
 - `resolutions` is an int, a list of ints, or `"auto"` (`"auto+1"`, `"auto-2"`, ...): the
-  resolution whose cells are closest in area to the raster's ground pixels.
+  resolution whose cells are closest in area to the raster's ground pixels. `"auto+N"` is the
+  N-th resolution with cells smaller than a pixel, `"auto-N"` the N-th with cells at least
+  pixel-sized.
 - `grid` is `"h3"` (default), `"a5"`, `"s2"` or `"healpix"`. The cell columns are named for
   it (`s2_index`, `s2_hex`, ...) and the scalar functions exist per grid (`s2_to_wkb`,
   `a5_cell_to_parent`, `healpix_polygon_to_cells`, `h3_lonlat_to_cell`, ...).

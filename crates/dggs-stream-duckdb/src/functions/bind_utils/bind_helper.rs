@@ -254,7 +254,8 @@ impl BindHelper {
 
     /// [`Self::parse_resolutions_for`], also accepting `resolutions := 'auto'` (or
     /// `'auto+1'`, `'auto-2'`, ...): the resolution of `grid` whose cells are closest in
-    /// area to the pixels of the raster at `file_path`. Reports a malformed `auto` or an
+    /// area to the pixels of the raster at `file_path` (`auto+N`: the N-th resolution finer than
+    /// a pixel, `auto-N`: the N-th at least pixel-sized). Reports a malformed `auto` or an
     /// unreadable raster as a binding error and returns `None`.
     pub fn resolve_resolutions_for(
         &self,
