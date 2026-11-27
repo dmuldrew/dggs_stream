@@ -60,7 +60,7 @@ dggs_stream.raster_to_pmtiles("dem.tif", "dem.pmtiles", resolutions=[6, 7, 8])
 | :--- | :--- | :--- | :--- |
 | `path` | `str \| Path` | — | Raster path, glob, comma-separated list or VRT |
 | `grid` | `str` | `"h3"` | `"h3"`, `"a5"`, `"s2"` or `"healpix"`; the cell columns are `{grid}_index` / `{grid}_hex` ([Grids](../grids.md)) |
-| `resolutions` | `int \| str \| Sequence[int]` | `8` | `8`, `"7,8"` or `[7, 8]`, within the grid's range (`dggs_stream.GRIDS[grid]` is the finest); or `"auto"`, `"auto+1"`, `"auto-2"` for pixel-sized cells |
+| `resolutions` | `int \| str \| Sequence[int]` | `8` | `8`, `"7,8"` or `[7, 8]`, within the grid's range (`dggs_stream.GRIDS[grid]` is the finest); or `"auto"`, `"auto+1"`, `"auto-2"` for pixel-sized cells, `"auto-finer"` for the largest cells at most a pixel and `"auto-coarser"` for the smallest at least a pixel ([Grids](../grids.md#automatic-resolution)) |
 | `categorical` | `bool` | `False` | Categorical instead of continuous aggregation |
 | `format` | `str` | `"wide"` | Categorical layout: `"wide"` or `"long"` (case-insensitive) |
 | `crs` | `str` | `None` | Source CRS override, e.g. `"EPSG:32610"` |
