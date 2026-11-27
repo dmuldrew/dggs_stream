@@ -357,10 +357,6 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
     let mut assignments: Vec<(u64, f64)> = Vec::with_capacity(ctx.sampling.points.len());
     let mut position_cells: Vec<u64> = Vec::with_capacity(ctx.sampling.points.len() * num_res);
 
-    // Temporary A/B benchmark switch, evaluated once per chunk.
-    let experiment = ctx.grid == GridKind::H3
-        && ctx.bbox.is_none()
-        && std::env::var_os("DGGS_BENCH_H3_ROW").is_some();
     for r in 0..chunk.height as usize {
         let start = r * stride;
         if start >= slice.len() {
@@ -388,9 +384,11 @@ fn walk_grid<'a, T, Acc, E, N, R, B>(
             debug_assert_eq!(spp, 1);
             let sp = ctx.sampling.points[0];
             let col_offset = chunk.col_offset as usize;
-            if experiment {
+            // H3 requires direct indexing at each requested resolution. Only the
+            // coordinate transform is shared across this single-sample row.
+            if ctx.grid == GridKind::H3 && ctx.bbox.is_none() {
                 if let Some((lat, _, _)) = projector.constant_lat_affine_lon(ctx, col_offset, sp) {
-                    if lat.is_finite() && (-90.0..=90.0).contains(&lat) {
+                    if (-90.0..=90.0).contains(&lat) {
                         let exact = projector.exact_lon(col_offset, sp);
                         for c in cols.clone() {
                             if read(&row[c..c + 1]).is_none() {
@@ -1711,6 +1709,48 @@ mod tests {
                     got.sum,
                     exp.sum
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn h3_affine_centers_match_scalar_at_cell_vertices() {
+        for (lon, lat) in [(-122.0, 39.0), (179.99, -17.0)] {
+            let cell = GridKind::H3.cell_at(lat, lon, 11).unwrap();
+            let mut vertices = [(0.0, 0.0); 10];
+            let n = GridKind::H3.boundary_lng_lat(cell, &mut vertices);
+            for &(lon, lat) in &vertices[..n] {
+                for crs in [
+                    CrsTransformer::Wgs84Identity,
+                    CrsTransformer::WebMercatorFast,
+                ] {
+                    let (x, y) = match crs {
+                        CrsTransformer::WebMercatorFast => (
+                            WGS84_A * lon.to_radians(),
+                            WGS84_A * lat.to_radians().tan().asinh(),
+                        ),
+                        _ => (lon, lat),
+                    };
+                    // Straddle the vertex in steps of one representable coordinate.
+                    let a = x.next_up() - x;
+                    let e = y.next_down() - y;
+                    let gt = GeoTransform {
+                        c0: x - 80.5 * a,
+                        a,
+                        b: 0.0,
+                        f0: y - 12.5 * e,
+                        d: 0.0,
+                        e,
+                    };
+                    verify_walk_direct_against_oracle(
+                        GridKind::H3,
+                        &[7, 11],
+                        &crs,
+                        &gt,
+                        None,
+                        false,
+                    );
+                }
             }
         }
     }
