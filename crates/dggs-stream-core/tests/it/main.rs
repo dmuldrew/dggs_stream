@@ -29,6 +29,7 @@ mod multi_resolution;
 mod multiband_and_query_pushdown;
 mod mvt_geometry;
 mod nodata_policy;
+mod overview_masks;
 mod partitioned_scan;
 mod performance;
 mod pmtiles;
