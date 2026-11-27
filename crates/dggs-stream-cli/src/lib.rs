@@ -10,6 +10,7 @@
 //!   [`CliStreamOptions::partition`] scan, and [`merge_partition_files`]
 
 mod ground_area;
+pub mod polyfill;
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -45,6 +46,7 @@ use dggs_stream_core::resolution::ResolutionSpec;
 use dggs_stream_core::run_profile::RunProfile;
 use dggs_stream_core::scalar_ops::{parse_bbox_str, try_parse_resolutions_str_for};
 use dggs_stream_core::transfer::TransferMode;
+use parquet::basic::Compression;
 
 /// Output wire format for streaming CLI queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +63,8 @@ pub struct CliStreamOptions {
     /// Hive-partition the CLI GeoParquet dataset by this H3 parent resolution.
     pub partition_by_parent_res: Option<u8>,
     pub input_path: String,
+    /// Column codec for every Parquet export layout.
+    pub compression: Compression,
     pub bands: Option<String>,
     /// Weight continuous center assignments by ellipsoidal pixel area.
     pub ground_area: bool,
@@ -109,6 +113,7 @@ impl Default for CliStreamOptions {
     fn default() -> Self {
         Self {
             input_path: String::new(),
+            compression: ParquetExportConfig::default().compression,
             partition_by_parent_res: None,
             bands: None,
             ground_area: false,
@@ -267,12 +272,17 @@ pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
         }
     }
     let config = opts.scan_config();
+    let parquet = ParquetExportConfig {
+        geoparquet: true,
+        is_categorical: opts.categorical,
+        compression: opts.compression,
+        ..Default::default()
+    };
     let Some(selector) = &opts.bands else {
         return export_parquet_layout(
             &opts.input_path,
             path,
-            opts.categorical,
-            true,
+            parquet,
             config,
             opts.partition_by_parent_res,
         );
@@ -289,14 +299,15 @@ pub fn export_parquet(opts: &CliStreamOptions, path: &Path) -> Result<usize> {
     }
     let mut reader = open_multiband(&scan, selector, &paths, &config)?;
     let rows = if let Some(parent) = opts.partition_by_parent_res {
-        dggs_stream_core::parquet::write_parent_multiband(&mut reader, path, parent, hidden_index)
-    } else {
-        dggs_stream_core::parquet::write_multiband_parquet(
+        dggs_stream_core::parquet::write_parent_multiband_with_config(
             &mut reader,
             path,
-            true,
-            ParquetExportConfig::default().row_group_size,
+            parent,
+            hidden_index,
+            &parquet,
         )
+    } else {
+        dggs_stream_core::parquet::write_multiband_parquet_with_config(&mut reader, path, &parquet)
     }
     .map_err(|e| DggsStreamError::StreamFailed(e.to_string()))?;
     warn_transform_failures(reader.transform_failures());
@@ -1090,8 +1101,11 @@ pub fn export_raster_to_parquet_with_config(
     export_parquet_layout(
         input_path,
         output_path,
-        categorical,
-        geoparquet,
+        ParquetExportConfig {
+            geoparquet,
+            is_categorical: categorical,
+            ..Default::default()
+        },
         config,
         None,
     )
@@ -1100,8 +1114,7 @@ pub fn export_raster_to_parquet_with_config(
 fn export_parquet_layout(
     input_path: &str,
     output_path: &Path,
-    categorical: bool,
-    geoparquet: bool,
+    pq_cfg: ParquetExportConfig,
     mut config: MultiResolutionConfig,
     parent: Option<u8>,
 ) -> Result<usize> {
@@ -1122,13 +1135,7 @@ fn export_parquet_layout(
         config.remote_source_factory.as_ref(),
     )?);
 
-    let pq_cfg = ParquetExportConfig {
-        geoparquet,
-        is_categorical: categorical,
-        ..Default::default()
-    };
-
-    let rows = if !categorical {
+    let rows = if !pq_cfg.is_categorical {
         let streamer = MultiScanHorizonStreamer::new_mosaic(mosaic, &config)?;
         if let Some(parent) = parent {
             write_parent_records::<_, ContinuousRowGroupBuffer>(
@@ -1508,6 +1515,18 @@ fn parse_export_args(
             "--histogram" => histogram[0] = Some(value()?.to_string()),
             "--histogram-weight" => histogram[1] = Some(value()?.to_string()),
             "--histogram-normalize" => histogram[2] = Some(value()?.to_string()),
+            "--compression" if parquet => {
+                let v = value()?;
+                opts.compression = match v {
+                    "snappy" => Compression::SNAPPY,
+                    "zstd" => Compression::ZSTD(Default::default()),
+                    "lz4" => Compression::LZ4_RAW,
+                    "gzip" => Compression::GZIP(Default::default()),
+                    "brotli" => Compression::BROTLI(Default::default()),
+                    "none" => Compression::UNCOMPRESSED,
+                    _ => return Err(invalid(flag, v, "snappy, zstd, lz4, gzip, brotli or none")),
+                };
+            }
             "--partition-by-parent-res" if parquet => {
                 let v = value()?;
                 opts.partition_by_parent_res = Some(
@@ -1592,7 +1611,7 @@ fn parse_export_args(
     let mut auto = None;
     if let Some((flag, v)) = raw_resolutions {
         let expected = format!(
-            "'auto', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
+            "'auto', 'auto-finer', 'auto-coarser', 'auto+N', 'auto-N' or {} resolutions between 0 and {}, e.g. 7,8",
             opts.grid.label(),
             opts.grid.max_resolution()
         );
@@ -2654,7 +2673,7 @@ mod tests {
                 .unwrap();
             let near_res = (0..=grid.max_resolution())
                 .rev()
-                .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+                .find(|&r| grid.area_m2(r) >= pixel_m2)
                 .unwrap();
             let overlay_res = (0..=grid.max_resolution())
                 .rev()
@@ -2680,13 +2699,15 @@ mod tests {
                 parse(&["-r", &r_fine, "--transfer", "auto"]),
                 TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Bilinear)
             );
+            // Categorical scans overlay even below 1:1.
             assert_eq!(
                 parse(&["-r", &r_fine, "-c", "--transfer", "auto"]),
-                TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Nearest)
+                TransferMode::OVERLAY
             );
+            // From 1:1 up, continuous scans overlay too.
             assert_eq!(
                 parse(&["-r", &r_near, "--transfer", "auto"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
             assert_eq!(
                 parse(&["-r", &r_over, "--transfer", "auto"]),
@@ -2707,9 +2728,10 @@ mod tests {
                 parse(&["-r", &r_over, "--transfer", "auto", "--ground-area"]),
                 TransferMode::OVERLAY
             );
+            // Ground area cannot interpolate, so below 1:1 it overlays as well.
             assert_eq!(
                 parse(&["-r", &r_fine, "--transfer", "auto", "--ground-area"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
         }
     }
@@ -2717,7 +2739,7 @@ mod tests {
     #[test]
     fn test_cli_auto_resolution_on_every_grid() {
         use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-        use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+        use dggs_stream_core::resolution::auto_resolution;
         let tif = write_test_tif(32, 32, 5.0);
         let input = tif.path().to_str().unwrap();
         let mosaic = MosaicReader::open(
@@ -2729,7 +2751,14 @@ mod tests {
         .unwrap();
         for grid in GridKind::ALL {
             let matched = auto_resolution(grid, &mosaic, 0).unwrap();
-            for (arg, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2), ("auto+64", 64)] {
+            for (arg, offset) in [
+                ("auto", 0),
+                ("AUTO+1", 1),
+                ("AUTO-FINER", 1),
+                ("auto-coarser", -1),
+                ("auto-2", -2),
+                ("auto+64", 64),
+            ] {
                 let args: Vec<String> = [
                     input,
                     "--crs",
@@ -2745,7 +2774,7 @@ mod tests {
                 let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
                 assert_eq!(
                     opts.resolutions,
-                    vec![offset_resolution(grid, matched, offset)],
+                    vec![auto_resolution(grid, &mosaic, offset).unwrap()],
                     "{grid} {arg}"
                 );
             }

@@ -20,6 +20,7 @@ builds two binaries:
 ```text
 dggs-stream-cli ipc     <input> [options]        Stream RH3IPC01 batches to stdout or -o <file>
 dggs-stream-cli jsonl   <input> [options]        Stream JSONEachRow (NDJSON) to stdout or -o <file>
+dggs-stream-cli polyfill <input.geojson|-> [options]  Write feature-to-cell rows as JSON Lines
 dggs-stream-cli parquet <input> -o <out> [opts]  Write GeoParquet
 dggs-stream-cli pmtiles <input> -o <out> [opts]  Write a PMTiles v3 archive
 dggs-stream-cli parquet-to-pmtiles <in.parquet> -o <out> [--h3-column NAME]
@@ -28,13 +29,17 @@ dggs-stream-cli plan    <input> [options]        Print partition specs (JSON Lin
 dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outputs into final cells
 ```
 
-`<input>` can be a path, glob, comma-separated list or VRT (it may also be given with
+For raster commands, `<input>` can be a path, glob, comma-separated list or VRT (it may also be given with
 `-i/--input`). Mosaic overlaps use the `cutline` rule.
+
+`polyfill` reads GeoJSON, not rasters, and takes only `--grid`, `-r/--resolution` (a single
+resolution), `--containment` and `-o`; it rejects every other option. In the table below, "all"
+means the raster commands.
 
 | Option | Applies to | Meaning |
 | :--- | :--- | :--- |
 | `--grid <h3\|a5\|s2\|healpix>` | all | Grid to index onto (default `h3`); the index columns are `{grid}_index` / `{grid}_hex` |
-| `-r, --resolutions <LIST>` (alias `--resolution`) | all | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29. `auto`, `auto+N`, `auto-N`: the resolution whose cells match the pixel size ([Grids](../grids.md#automatic-resolution)) |
+| `-r, --resolutions <LIST>` (alias `--resolution`) | all; `polyfill` takes one resolution as `-r/--resolution` | Resolutions of the grid, e.g. `8` or `7,8,9` (default `8`); H3 0–15, A5 and S2 0–30, HEALPix 0–29. `auto`, `auto-finer`, `auto-coarser`, `auto+N`, `auto-N`: the resolution whose cells match the pixel size ([Grids](../grids.md#automatic-resolution)) |
 | `-c, --categorical` | all | Categorical aggregation |
 | `--format <wide\|long>` | `ipc`, `jsonl` | Categorical layout (default `wide`) |
 | `--crs <CRS>` (alias `--source-crs`) | all | Source CRS override, e.g. `EPSG:4326` |
@@ -42,7 +47,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--nodata-policy <omit\|emit>` | all (ground-area scans require `omit`) | `emit` outputs every cell a pixel falls in, with count 0 and null statistics where every sample is NoData |
 | `--emit-nodata-value <NUM>` | all | Under `emit`, the value of those statistics instead of null |
 | `--decimals <N>` | all | Round floating-point statistics to `N` decimals (0–15) |
-| `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Scan Options](../scan-options.md#transfer-modes)). `auto` picks `interpolate` for cells finer than pixels, weighted `overlay` for cells much coarser (or `assign_centers` if non-`'center'` `--sampling` is set), and `assign_centers` near 1:1; it is reported on stderr |
+| `--transfer <assign_centers\|interpolate\|overlay\|auto>` | all except partitioned `ipc` | How pixels map onto cells ([Transfer Modes](../transfer-modes.md)). `auto` picks bilinear `interpolate` for continuous scans with cells finer than the pixels and weighted `overlay` otherwise (categorical scans always overlay); with a non-`center` `--sampling` it picks `assign_centers` in place of `overlay`; it is reported on stderr |
 | `--overview <native\|auto>` | raster scans and exports | Select native pixels (default) or a reduced COG image for approximate center assignment or interpolation. |
 | `--interpolation <nearest\|bilinear\|bicubic\|lanczos>` | `--transfer interpolate` | Interpolation (default `bilinear`) |
 | `--sampling <center\|rgss\|5point\|gaussian\|hex\|8rooks\|9point\|16point>` | `assign_centers`, `--transfer interpolate`, `--transfer auto` | Quadrature sampling pattern ([Super-Sampling](../super-sampling.md)): sub-pixel for `assign_centers`, sub-cell polygon sampling for `interpolate` (`--transfer overlay` rejects non-`'center'`) |
@@ -58,6 +63,7 @@ dggs-stream-cli merge   <part>... [options]      Combine partitioned `ipc` outpu
 | `--raw-values` | all | Aggregate stored values without GDAL band scale/offset calibration |
 | `--bbox <min_lon,min_lat,max_lon,max_lat>` | all | WGS84 bounding box |
 | `--ground-area` | `ipc`, `jsonl` | Compute area-weighted continuous statistics for one single-band, north-up EPSG:4326 raster. With `--transfer overlay`, integrate over partial pixels. |
+| `--compression <codec>` | `parquet` | snappy (default), zstd, lz4 (raw), gzip, brotli or none. Applies to each file in a parent-partitioned dataset and to multiband output. |
 | `--bands <list or all>` | `ipc`, `jsonl`, `parquet` | Select one-based bands of an interleaved or band-separated raster with center assignment or `--transfer overlay`, e.g. `--bands 3,1 --columns h3_hex,wkb,band_3_mean,band_1_count`. |
 | `--columns <c1,c2,…>` | `ipc`, `jsonl`, multi-band `parquet` | Column projection, in the given order. Include `wkb` when projecting GeoParquet. |
 | `--limit <N>` | `ipc`, `jsonl`, multi-band `parquet` | Maximum rows |
@@ -105,6 +111,23 @@ pyramid, run the loopback benchmark with a release build:
 ```sh
 python3 scripts/benchmark_cog_overview.py target/release/dggs-stream-cli imagery.tif --resolution 8
 ```
+
+## Vector polygon fill
+
+```sh
+dggs-stream-cli polyfill parcels.geojson --grid s2 -r 12 --containment covers -o cells.jsonl
+```
+
+Supply WGS84 longitude/latitude GeoJSON polygons, multipolygons, Features or FeatureCollections.
+Use a single Feature per line and `-` for stdin to process large inputs one feature at a time.
+A FeatureCollection is read as one JSON document. The command writes one row per feature and
+cell with `feature_id`, `resolution`, and the grid's numeric and hexadecimal index columns.
+It preserves string and numeric feature IDs and uses the zero-based input feature position
+when the ID is missing. Null geometry yields zero rows. Cells are sorted and deduplicated
+within each feature. Overlapping features retain their separate rows.
+
+Select one integer resolution (default 8) and one of the four [containment modes](../grids.md#polygon-fill)
+with `--containment` (default `center`). The default grid is H3.
 
 ## Output Formats
 

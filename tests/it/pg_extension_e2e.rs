@@ -96,6 +96,21 @@ impl Server {
             .collect()
     }
 
+    /// Install `host` into the server's extension directory as `name`.
+    fn install_extension_file(&self, host: &Path, name: &str) {
+        let out = Command::new("docker")
+            .args(["exec", &self.container, "pg_config", "--sharedir"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "pg_config --sharedir failed");
+        let sharedir = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        run_ok(Command::new("docker").args([
+            "cp",
+            &host.to_string_lossy(),
+            &format!("{}:{sharedir}/extension/{name}", self.container),
+        ]));
+    }
+
     fn logs(&self) -> String {
         let out = Command::new("docker")
             .args(["logs", &self.container])
@@ -384,6 +399,107 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
         legacy,
         ["0.7.0", "$libdir/raster_h3_pg", cell_hex.as_str()],
         "raster_h3 under its former name"
+    );
+
+    // A true upgrade: install raster_h3 0.4.0 from its historical install script (no
+    // longer shipped), then run every shipped upgrade script with ALTER EXTENSION UPDATE.
+    // Upgraded functions keep the library path 0.4.0 recorded, `$libdir/raster_h3_pg`.
+    let sql_dir = repo_root().join("crates/dggs-stream-pg/sql");
+    server.install_extension_file(
+        &repo_root().join("tests/fixtures/pg/raster_h3--0.4.0.sql"),
+        "raster_h3--0.4.0.sql",
+    );
+    for entry in std::fs::read_dir(&sql_dir).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if name.starts_with("raster_h3--") && name.matches("--").count() == 2 {
+            server.install_extension_file(&sql_dir.join(&name), &name);
+        }
+    }
+    let control =
+        std::fs::read_to_string(repo_root().join("crates/dggs-stream-pg/raster_h3.control"))
+            .unwrap();
+    let default_version = control
+        .lines()
+        .find_map(|l| l.strip_prefix("default_version = "))
+        .expect("default_version in raster_h3.control")
+        .trim_matches('\'')
+        .to_string();
+
+    // Every function of the extension: signature, result type, volatility, strictness,
+    // parallel safety and C symbol.
+    const FUNCTIONS: &str =
+        "SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') -> '
+                || pg_get_function_result(p.oid) || ' ' || p.provolatile::text
+                || p.proisstrict::text || p.proparallel::text || ' ' || p.prosrc
+         FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
+         JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'raster_h3'
+         ORDER BY 1;";
+    let original = server.query(&format!(
+        "CREATE DATABASE upgrade_original;
+         \\c upgrade_original
+         CREATE EXTENSION raster_h3 VERSION '0.4.0';
+         {FUNCTIONS}"
+    ));
+    let fresh = server.query(&format!(
+        "CREATE DATABASE upgrade_fresh;
+         \\c upgrade_fresh
+         CREATE EXTENSION raster_h3;
+         {FUNCTIONS}"
+    ));
+    let upgraded = server.query(&format!(
+        "CREATE DATABASE upgrade_from_040;
+         \\c upgrade_from_040
+         CREATE EXTENSION raster_h3 VERSION '0.4.0';
+         ALTER EXTENSION raster_h3 UPDATE;
+         {FUNCTIONS}"
+    ));
+    assert!(
+        fresh.len() > original.len(),
+        "PG {major}: fresh raster_h3 functions: {fresh:?}"
+    );
+    if default_version == "0.7.0" {
+        // The released 0.7.0 SQL matches 0.4.0. The unreleased definitions (A5, S2,
+        // HEALPix, auto resolution, eight-argument SRFs) are only in the install script;
+        // existing databases get them from the upgrade script of the next version. Until
+        // then the library must keep serving the definitions they have.
+        assert_eq!(
+            upgraded, original,
+            "PG {major}: no-op 0.4.0 -> 0.7.0 upgrade changed functions"
+        );
+    } else {
+        // Once the version is bumped, its upgrade script must bring upgraded databases to
+        // exactly what a fresh install defines.
+        assert_eq!(
+            upgraded, fresh,
+            "PG {major}: raster_h3 upgraded from 0.4.0 differs from a fresh {default_version} install"
+        );
+    }
+    let upgraded_state = server.query(&format!(
+        "\\c upgrade_from_040
+         SELECT extversion FROM pg_extension WHERE extname = 'raster_h3';
+         SELECT DISTINCT probin FROM pg_proc WHERE proname = 'h3_to_string';
+         SELECT h3_to_string({cell});"
+    ));
+    assert_eq!(
+        upgraded_state,
+        [
+            default_version.as_str(),
+            "$libdir/raster_h3_pg",
+            cell_hex.as_str()
+        ],
+        "PG {major}: raster_h3 upgraded from 0.4.0"
+    );
+    // The upgraded SRFs (five arguments while the version is 0.7.0) still return the rows
+    // the in-process iterator produces.
+    let lines = server.query(&format!(
+        "\\c upgrade_from_040
+         SELECT {cols} FROM h3_raster_continuous_aggregate({cont}, 7, '{CRS}', 5.0, {bbox_sql})
+         ORDER BY 1;"
+    ));
+    check_continuous(
+        &lines,
+        &continuous_rows(cont_tif, 7, Some(5.0), Some(bbox)),
+        "continuous after upgrade from 0.4.0",
     );
 
     // No backend crashed along the way.

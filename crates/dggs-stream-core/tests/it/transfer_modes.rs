@@ -1225,6 +1225,99 @@ fn ground_area_small_wrapped_bbox_selects_whole_pixels_on_a_wide_raster() {
     assert!((pixels - 2.0).abs() < 1e-8, "{pixels}");
 }
 
+/// The single-run counterpart of the wrapped case above: a bbox inside one
+/// pixel of a 36,000-column raster lists only the cells near that pixel and
+/// counts exactly that whole pixel.
+#[test]
+fn ground_area_small_bbox_selects_one_whole_pixel_on_a_wide_raster() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(36000, 2)
+        .origin(-180.0, 0.01)
+        .pixel_size(0.01)
+        .create_f32_tempfile(|_, r| if r == 0 { 3.0 } else { 8.0 });
+    let mut cfg = config(GridKind::S2, 18, TransferMode::OVERLAY);
+    cfg.bbox = Some([10.004, 0.004, 10.006, 0.006]);
+    let rows = dggs_stream_core::transfer::scan_ground_area_overlay(
+        GeoTiffStreamReader::open(path).unwrap(),
+        &cfg,
+    )
+    .unwrap();
+    let mut pixels = 0.0;
+    for row in rows {
+        let (_, _, a) = row.unwrap();
+        pixels += a.pixel_count();
+        assert!((a.area_stats().mean() - 3.0).abs() < 1e-12);
+    }
+    assert!((pixels - 1.0).abs() < 1e-8, "{pixels}");
+}
+
+/// Ground-area overlay's chunk cache holds at most `decode_budget_bytes` of
+/// decoded chunks (or one chunk, when a chunk alone exceeds the budget), and the
+/// budget does not change results. Both bounded budgets are smaller than a
+/// window, so no prefetcher runs and the cache holds every decoded chunk; the
+/// window's own copy of its rows is bounded by the window size instead.
+#[test]
+fn ground_area_overlay_stays_within_the_decode_budget() {
+    use crate::helpers::{write_tiled, Crs};
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    // 512 x 64 pixels in 16 x 16 tiles: one chunk row is 32 tiles of 1 KiB
+    // native f32, which the default budget holds whole.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled.tif");
+    let crs = Crs::Geographic {
+        lon: 10.0,
+        lat: 0.32,
+        pixel_deg: 0.01,
+    };
+    write_tiled(&path, (512, 64), (16, 16), crs, "-9999", |c, r| {
+        (1 + (c * 7 + r * 3) % 13) as f32
+    });
+    const DENSE_CHUNK_BYTES: u64 = 16 * 16 * 8;
+
+    let run = |budget: Option<usize>| {
+        let mut cfg = config(GridKind::S2, 12, TransferMode::OVERLAY);
+        if let Some(budget) = budget {
+            cfg.decode_budget_bytes = budget;
+        }
+        let profile = RunProfile::new();
+        cfg.profile = Some(Arc::clone(&profile));
+        let mut cells = BTreeMap::new();
+        for row in
+            scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).unwrap()
+        {
+            let (res, cell, a) = row.unwrap();
+            cells.insert(
+                (res, cell),
+                (a.pixel_count(), a.retained_area_m2(), a.area_stats().sum),
+            );
+        }
+        (cells, profile.report().peak_decoded_bytes)
+    };
+
+    let (reference, default_peak) = run(None);
+    assert!(reference.len() > 50, "{} cells", reference.len());
+    assert!(
+        default_peak > 4 * DENSE_CHUNK_BYTES,
+        "the default budget should hold several chunks: {default_peak}"
+    );
+    for budget in [4 * DENSE_CHUNK_BYTES as usize, 1] {
+        let (bounded, peak) = run(Some(budget));
+        assert!(
+            peak <= (budget as u64).max(DENSE_CHUNK_BYTES),
+            "budget {budget}: peak {peak} bytes"
+        );
+        assert_eq!(bounded.len(), reference.len(), "budget {budget}");
+        for (key, (count, area, sum)) in &reference {
+            let (c, a, s) = bounded[key];
+            assert!((c - count).abs() <= 1e-9 * count.max(1.0), "{key:?}");
+            assert!((a - area).abs() <= 1e-9 * area.max(1.0), "{key:?}");
+            assert!((s - sum).abs() <= 1e-9 * sum.abs().max(1.0), "{key:?}");
+        }
+    }
+}
+
 #[test]
 fn auto_transfer_resolves_across_scales_and_constraints() {
     let (_tmp, cont_path) = TestGeoTiffBuilder::new(W, H)
@@ -1252,16 +1345,17 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         let fine_res = (0..=grid.max_resolution())
             .find(|&r| grid.area_m2(r) < pixel_m2)
             .unwrap();
+        // The finest resolution at or above 1:1, and the finest at or above 16:1.
         let near_res = (0..=grid.max_resolution())
             .rev()
-            .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+            .find(|&r| grid.area_m2(r) >= pixel_m2)
             .unwrap();
         let overlay_res = (0..=grid.max_resolution())
             .rev()
             .find(|&r| grid.area_m2(r) >= 16.0 * pixel_m2)
             .unwrap();
 
-        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> Interpolate(Nearest).
+        // Fine cells (< 1:1): continuous -> Interpolate(Bilinear), categorical -> OVERLAY.
         let auto_cont_fine = scan(&cont_path, &config(grid, fine_res, TransferMode::Auto));
         let exp_cont_fine = scan(
             &cont_path,
@@ -1282,12 +1376,9 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             &config(grid, fine_res, TransferMode::Auto),
         )
         .unwrap();
-        assert_eq!(
-            auto_cat.transfer_mode(),
-            TransferMode::Interpolate(Interpolation::Nearest)
-        );
+        assert_eq!(auto_cat.transfer_mode(), TransferMode::OVERLAY, "{grid}");
 
-        // Near 1:1 -> AssignCenters.
+        // At or just above 1:1 -> OVERLAY, with the same rows as an explicit overlay.
         let s_near = MultiScanHorizonStreamer::new(
             GeoTiffStreamReader::open(&cont_path).unwrap(),
             &config(grid, near_res, TransferMode::Auto),
@@ -1295,7 +1386,12 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
         .unwrap();
         assert_eq!(
             s_near.transfer_mode(),
-            TransferMode::AssignCenters,
+            TransferMode::OVERLAY,
+            "{grid} near_res={near_res}"
+        );
+        assert_eq!(
+            scan(&cont_path, &config(grid, near_res, TransferMode::Auto)),
+            scan(&cont_path, &config(grid, near_res, TransferMode::OVERLAY)),
             "{grid} near_res={near_res}"
         );
 
@@ -1311,15 +1407,16 @@ fn auto_transfer_resolves_across_scales_and_constraints() {
             "{grid} overlay_res={overlay_res}"
         );
 
-        // valid_coverage_threshold forces OVERLAY even near 1:1.
-        let mut cov_cfg = config(grid, near_res, TransferMode::Auto);
+        // valid_coverage_threshold forces OVERLAY even below 1:1, where a continuous scan
+        // would otherwise interpolate.
+        let mut cov_cfg = config(grid, fine_res, TransferMode::Auto);
         cov_cfg.valid_coverage_threshold = Some(0.5);
         let s_cov =
             MultiScanHorizonStreamer::new(GeoTiffStreamReader::open(&cont_path).unwrap(), &cov_cfg)
                 .unwrap();
         assert_eq!(s_cov.transfer_mode(), TransferMode::OVERLAY);
 
-        // Compaction forces AssignCenters even at coarse resolution.
+        // Compaction forces AssignCenters at any ratio.
         if grid == GridKind::H3 {
             let mut cmp_cfg = config(grid, overlay_res, TransferMode::Auto);
             cmp_cfg.compact_h3_children = true;
@@ -1659,7 +1756,11 @@ fn overlay_slice_accumulation_matches_per_pixel_accumulation_on_all_grids() {
                     mass_preserve,
                 },
             );
+            // Spans with four workers (the parallel direct / prepared paths,
+            // including `mass_preserve`) against serial per-pixel accumulation.
+            cfg.aggregation_workers = Some(4);
             let spans = scan(&path, &cfg);
+            cfg.aggregation_workers = Some(1);
             cfg.min_mean = Some(-1.0e300);
             let per_pixel = scan(&path, &cfg);
             let label = format!("{grid} weighted={weighted} mass_preserve={mass_preserve}");
@@ -1798,6 +1899,99 @@ fn multi_resolution_overlay_and_interpolate_decode_single_pass() {
             m_rep.windows, s_rep.windows,
             "mode={mode:?}: expected single-pass window count"
         );
+    }
+}
+
+/// Multi-resolution overlay over many planned windows: coarse cells, each
+/// taller than a window, stay pending across windows planned for the finest
+/// resolution and must still match per-resolution scans, for both ordinary
+/// and ground-area overlay.
+#[test]
+fn multi_resolution_overlay_matches_single_scans_across_many_windows() {
+    use dggs_stream_core::run_profile::RunProfile;
+    use dggs_stream_core::transfer::scan_ground_area_overlay;
+    use std::sync::Arc;
+
+    // Windows hold about 150,000 finest-resolution cells. With 0.01 degree
+    // pixels (about 9 H3 resolution-9 cells each) and 256 columns, that is
+    // one 32-row tile row per window: 4 windows over 128 rows. Resolution-3
+    // cells (about 1.2 degrees across) span every window.
+    const PX: f64 = 0.01;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiled_windows.tif");
+    crate::helpers::write_tiled(
+        &path,
+        (256, 128),
+        (32, 32),
+        crate::helpers::Crs::Geographic {
+            lon: ORIGIN.0,
+            lat: ORIGIN.1,
+            pixel_deg: PX,
+        },
+        "-9999",
+        |x, y| -> f32 {
+            if (x * 7 + y * 5).is_multiple_of(97) {
+                -9999.0
+            } else {
+                plane(
+                    ORIGIN.0 + (f64::from(x) + 0.5) * PX,
+                    ORIGIN.1 - (f64::from(y) + 0.5) * PX,
+                ) as f32
+            }
+        },
+    );
+    let resolutions = vec![3u8, 6, 9];
+
+    let mode = TransferMode::OVERLAY;
+    let mut multi_cfg = MultiResolutionConfig::new(resolutions.clone());
+    multi_cfg.transfer = mode;
+    let profile = RunProfile::new();
+    multi_cfg.profile = Some(Arc::clone(&profile));
+    let multi = collect_multi_scan(&path, &multi_cfg);
+    let windows = profile.report().windows;
+    assert!(windows >= 4, "expected several windows, got {windows}");
+
+    let mut expected = BTreeMap::new();
+    for &res in &resolutions {
+        expected.extend(collect_multi_scan(&path, &config(GridKind::H3, res, mode)));
+    }
+    assert_eq!(
+        multi.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, a) in &multi {
+        assert_continuous_close(a, &expected[key], &format!("{key:?}"));
+    }
+    assert!(multi.keys().any(|&(res, _)| res == 3));
+
+    // Ground-area overlay: one pass over all resolutions.
+    let ground = |resolutions: Vec<u8>| {
+        let mut cfg = MultiResolutionConfig::new(resolutions);
+        cfg.transfer = TransferMode::OVERLAY;
+        let mut cells = BTreeMap::new();
+        for row in
+            scan_ground_area_overlay(GeoTiffStreamReader::open(&path).unwrap(), &cfg).unwrap()
+        {
+            let (res, cell, a) = row.unwrap();
+            let summary = (a.pixel_count(), a.retained_area_m2(), a.area_stats().sum);
+            assert!(cells.insert((res, cell), summary).is_none());
+        }
+        cells
+    };
+    let multi = ground(resolutions.clone());
+    let mut expected = BTreeMap::new();
+    for &res in &resolutions {
+        expected.extend(ground(vec![res]));
+    }
+    assert_eq!(
+        multi.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, (c, a, s)) in &multi {
+        let (ec, ea, es) = expected[key];
+        assert!((c - ec).abs() <= 1e-9 * ec.max(1.0), "{key:?}");
+        assert!((a - ea).abs() <= 1e-9 * ea.max(1.0), "{key:?}");
+        assert!((s - es).abs() <= 1e-9 * es.abs().max(1.0), "{key:?}");
     }
 }
 
@@ -2777,27 +2971,84 @@ fn interpolate_subcell_sampling_categorical_projected_and_auto() {
         assert_eq!(streamer.transform_failures(), 0, "{grid}");
     }
 
-    // 3. TransferMode::Auto with non-default sampling resolves to Interpolate below 1:1
-    // and falls back to AssignCenters above 16:1 (never Overlay).
-    let mosaic = Arc::new(MosaicReader::open(&[cat_path], None, None, OverlapRule::First).unwrap());
+    // 3. TransferMode::Auto with non-default sampling never resolves to Overlay, which
+    // refuses sampling: cells finer than the pixels interpolate with sub-cell samples
+    // (nearest for classes), and from 1:1 up it assigns centres with sub-pixel samples.
+    let mosaic = Arc::new(
+        MosaicReader::open(
+            std::slice::from_ref(&cat_path),
+            None,
+            None,
+            OverlapRule::First,
+        )
+        .unwrap(),
+    );
     for grid in GridKind::ALL {
-        let fine = matched(grid, 2);
-        let mut fine_cfg = config(grid, fine, TransferMode::Auto);
+        let mut fine_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
         fine_cfg.sampling = SamplingPattern::rgss();
         assert_eq!(
             TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, false),
             TransferMode::Interpolate(Interpolation::Bilinear),
             "{grid} fine Auto+sampling"
         );
-
-        let coarse = matched(grid, -3);
-        let mut coarse_cfg = config(grid, coarse, TransferMode::Auto);
-        coarse_cfg.sampling = SamplingPattern::rgss();
         assert_eq!(
-            TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, false),
-            TransferMode::AssignCenters,
-            "{grid} coarse Auto+sampling"
+            TransferMode::Auto.resolve_for_mosaic(&mosaic, &fine_cfg, true),
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid} fine categorical Auto+sampling"
         );
+
+        for offset in [0, -3] {
+            let mut coarse_cfg = config(grid, matched(grid, offset), TransferMode::Auto);
+            coarse_cfg.sampling = SamplingPattern::rgss();
+            for categorical in [false, true] {
+                let resolved =
+                    TransferMode::Auto.resolve_for_mosaic(&mosaic, &coarse_cfg, categorical);
+                // `matched(grid, 0)` can land just under 1:1, where interpolation is right.
+                let expected = if offset == 0 && matches!(resolved, TransferMode::Interpolate(_)) {
+                    resolved
+                } else {
+                    TransferMode::AssignCenters
+                };
+                assert_eq!(
+                    resolved, expected,
+                    "{grid} offset {offset} categorical={categorical} Auto+sampling"
+                );
+            }
+        }
+
+        // A categorical scan resolves the same way end to end, and gives the same cells as
+        // asking for nearest-neighbour interpolation with the preset explicitly.
+        let scan_classes = |cfg: &MultiResolutionConfig| {
+            let reader = GeoTiffStreamReader::open(&cat_path).unwrap();
+            let mut streamer = MultiCategoricalHorizonStreamer::new(reader, cfg).unwrap();
+            let mode = streamer.transfer_mode();
+            let mut out = BTreeMap::new();
+            while streamer
+                .drain_completed_into(256, |_, rec| {
+                    out.insert(rec.cell_id, rec.accumulator.histogram_json());
+                })
+                .unwrap()
+                > 0
+            {}
+            (mode, out)
+        };
+        let mut auto_cfg = config(grid, matched(grid, 2), TransferMode::Auto);
+        auto_cfg.sampling = SamplingPattern::sixteen_point();
+        let mut explicit_cfg = config(
+            grid,
+            matched(grid, 2),
+            TransferMode::Interpolate(Interpolation::Nearest),
+        );
+        explicit_cfg.sampling = SamplingPattern::sixteen_point();
+        let (auto_mode, auto_cells) = scan_classes(&auto_cfg);
+        let (_, explicit_cells) = scan_classes(&explicit_cfg);
+        assert_eq!(
+            auto_mode,
+            TransferMode::Interpolate(Interpolation::Nearest),
+            "{grid}"
+        );
+        assert!(!auto_cells.is_empty(), "{grid}");
+        assert_eq!(auto_cells, explicit_cells, "{grid}");
     }
 }
 

@@ -186,7 +186,8 @@ width of the map (millions of tiles per cell). Tiling skips a cell at any zoom w
 cover more than 65,536 tiles (`pyramid::MAX_TILE_OPS_PER_CELL_ZOOM`); it stays present at
 coarser zooms. `pyramid::for_each_cell_tile_mercator` returns the number of tiles it emitted,
 `0` for a skipped cell. Raster and table exporters record skipped `(cell, zoom)` pairs as
-`cells_over_tile_cap` in the archive metadata when the count is greater than zero. A wide
+`cells_over_tile_cap` in the archive metadata when the count is greater than zero; the Rust
+feature and Parquet exporters also return it as `PmtilesExportSummary::capped_cells`. A wide
 gap between resolutions can also trigger the cap for nonpolar cells and leave a zoom empty.
 
 ## PMTiles v3 Leaf Directory Architecture

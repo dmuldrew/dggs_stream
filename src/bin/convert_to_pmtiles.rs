@@ -187,6 +187,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             println!("  Invalid Dropped:    {}", summary.invalid_features_dropped);
         }
         println!("  Total Tiles:        {}", summary.total_tiles);
+        if summary.capped_cells > 0 {
+            println!("  Over Tile Cap:      {}", summary.capped_cells);
+        }
         println!(
             "  Zoom Range:         {} to {}",
             summary.min_zoom, summary.max_zoom

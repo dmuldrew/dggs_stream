@@ -9,9 +9,10 @@ use dggs_stream_core::aggregator::multi_horizon::{
 use dggs_stream_core::raster::ground_area::wgs84_rectangle_area;
 use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
 use dggs_stream_core::resolution::{
-    area_matched_resolution, auto_resolution, mosaic_pixel_ground_area_m2, offset_resolution,
+    area_matched_resolution, auto_resolution, directional_resolution, mosaic_pixel_ground_area_m2,
     ResolutionSpec,
 };
+use dggs_stream_core::transfer::{resolve_auto_transfer, Interpolation, TransferMode};
 use dggs_stream_core::GridKind;
 
 use crate::helpers::TestGeoTiffBuilder;
@@ -102,11 +103,40 @@ fn auto_picks_the_area_matched_resolution_on_every_grid() {
         );
         for offset in [-3, -1, 1, 2, 64, -64] {
             let spec = ResolutionSpec::parse(grid, &format!("auto{offset:+}")).unwrap();
-            let expected = offset_resolution(grid, matched, offset);
+            let expected = directional_resolution(grid, area, offset).unwrap();
+            assert_eq!(auto_resolution(grid, &mosaic, offset).unwrap(), expected);
             assert_eq!(spec.resolve(grid, &mosaic).unwrap(), vec![expected]);
             assert_eq!(
                 spec.resolve_paths(grid, &paths, None).unwrap(),
                 vec![expected]
+            );
+        }
+        // `auto+1` is the coarsest resolution finer than the pixel and `auto-1` the finest
+        // at least a pixel: adjacent, with `auto` one of the two, and each on its side.
+        let (fine, coarse) = (
+            auto_resolution(grid, &mosaic, 1).unwrap(),
+            auto_resolution(grid, &mosaic, -1).unwrap(),
+        );
+        assert_eq!(fine, coarse + 1, "{grid}");
+        assert!(matched == fine || matched == coarse, "{grid}");
+        assert!(grid.area_m2(fine) < area, "{grid}");
+        assert!(grid.area_m2(coarse) >= area, "{grid}");
+        assert_eq!(auto_resolution(grid, &mosaic, 2).unwrap(), fine + 1);
+        assert_eq!(auto_resolution(grid, &mosaic, -2).unwrap(), coarse - 1);
+        // Measured the same way, `transfer = "auto"` interpolates `auto+N` cells and
+        // overlays `auto-N` cells.
+        for n in 1..=3 {
+            let fine = auto_resolution(grid, &mosaic, n).unwrap();
+            let coarse = auto_resolution(grid, &mosaic, -n).unwrap();
+            assert_eq!(
+                resolve_auto_transfer(grid, &[fine], area, false, true),
+                TransferMode::Interpolate(Interpolation::Bilinear),
+                "{grid} auto+{n}"
+            );
+            assert_eq!(
+                resolve_auto_transfer(grid, &[coarse], area, false, true),
+                TransferMode::OVERLAY,
+                "{grid} auto-{n}"
             );
         }
         let fixed = ResolutionSpec::parse(grid, "2,5").unwrap();
@@ -171,4 +201,75 @@ fn auto_needs_a_raster_it_can_locate() {
         None,
     );
     assert!(missing.is_err());
+}
+
+/// `auto-finer` / `auto-coarser` resolve through the parsed spec, an open mosaic and
+/// `resolve_paths` (the Python and SedonaDB route) to the closest resolution on each
+/// side of the pixel area, and report a grid that cannot satisfy the bound.
+#[test]
+fn named_selectors_resolve_from_paths_on_every_grid() {
+    let (_tmp, path) = TestGeoTiffBuilder::new(64, 48)
+        .pixel_size(0.001)
+        .create_f32_tempfile(|c, r| (c + r) as f32);
+    let paths = [path];
+    let mosaic = open(&paths);
+    let area = mosaic_pixel_ground_area_m2(&mosaic).unwrap();
+    for grid in GridKind::ALL {
+        let resolve = |selector: &str| {
+            let spec = ResolutionSpec::parse(grid, selector).unwrap();
+            assert!(spec.is_auto(), "{grid} {selector}");
+            assert_eq!(spec.to_string(), selector);
+            let opened = spec.resolve(grid, &mosaic).unwrap();
+            assert_eq!(spec.resolve_paths(grid, &paths, None).unwrap(), opened);
+            assert_eq!(opened.len(), 1);
+            opened[0]
+        };
+        // Finer: the coarsest resolution whose cells are at most a pixel.
+        let finer = resolve("auto-finer");
+        assert!(grid.area_m2(finer) <= area, "{grid}: res {finer}");
+        assert!(
+            finer == 0 || grid.area_m2(finer - 1) > area,
+            "{grid}: res {finer}"
+        );
+        // Coarser: the finest resolution whose cells are at least a pixel.
+        let coarser = resolve("auto-coarser");
+        assert!(grid.area_m2(coarser) >= area, "{grid}: res {coarser}");
+        assert!(
+            coarser == grid.max_resolution() || grid.area_m2(coarser + 1) < area,
+            "{grid}: res {coarser}"
+        );
+        // They bracket the pixel, and `auto` is one of them.
+        assert_eq!(finer, coarser + 1, "{grid}");
+        let matched = area_matched_resolution(grid, area);
+        assert!(matched == finer || matched == coarser, "{grid}");
+        assert_eq!(
+            ResolutionSpec::parse(grid, " AUTO-Finer ")
+                .unwrap()
+                .to_string(),
+            "auto-finer"
+        );
+    }
+
+    // Centimetre pixels are finer than H3's finest cells (about 0.9 m²): nothing is at
+    // most a pixel, while `auto-coarser` still resolves to the finest resolution.
+    let (_tmp, tiny) = TestGeoTiffBuilder::new(8, 8)
+        .pixel_size(1e-7)
+        .create_f32_tempfile(|_, _| 1.0);
+    let tiny = [tiny];
+    let err = ResolutionSpec::parse(GridKind::H3, "auto-finer")
+        .unwrap()
+        .resolve_paths(GridKind::H3, &tiny, None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("auto-finer") && err.contains("pixel area"),
+        "{err}"
+    );
+    assert_eq!(
+        ResolutionSpec::parse(GridKind::H3, "auto-coarser")
+            .unwrap()
+            .resolve_paths(GridKind::H3, &tiny, None)
+            .unwrap(),
+        vec![15]
+    );
 }

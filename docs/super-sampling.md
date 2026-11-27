@@ -4,12 +4,22 @@
 
 `sampling` defines a `[0, 1]^2` quadrature pattern (`SamplePoint` offsets and weights summing to `1.0`). Depending on [`transfer`](transfer-modes.md), those offsets are applied either **inside each pixel** or **inside each DGGS cell**:
 
+> In the [mode comparison](transfer-modes.md#comparing-the-modes), sub-pixel sampling with
+> `assign_centers` rarely came out ahead. From about 4 pixels per cell up, `rgss` cost 1.2–5.7× and `16point` 2.7–18.5× as much
+> as centre assignment, while overlay is exact for 1–4 µs per cell and, on H3 and A5, faster than
+> centre assignment from about 12 pixels per cell. Sampling's niche is cells a quarter to half a
+> pixel across, where `16point` ran in 40–85% of overlay's time and stayed closer to it than
+> interpolation did. Otherwise reach for it only where a transfer mode can't run. Sub-cell sampling with
+> `interpolate` (below) is a different tool: it adds intra-cell spread to interpolated cells, gives
+> class shares to cells finer than the pixels (`nearest`), and with `bicubic` comes closest to a
+> smooth field's true cell means ([sub-cell sampling](transfer-modes.md#sub-cell-sampling-and-the-two-references)).
+
 | Mode | Where `sampling` runs | Supported? | Notes |
 | :--- | :--- | :---: | :--- |
 | **`assign_centers`** *(default)* | **Sub-pixel** (inside each pixel's `[0, 1]^2` square) | Yes | Splits each pixel across the cells holding its sub-pixel sample offsets. |
 | **`interpolate`** | **Sub-cell** (inside each cell's projected polygon) | Yes | Maps `[0, 1]^2` offsets via an area-preserving star-polygon map (`CellPolygonSampler`), then interpolates each point from surrounding pixels. |
 | **`overlay`** | Analytical polygon–pixel intersection | `center` only | Non-default `sampling` is rejected: `overlay` already computes the exact pixel overlap integral. |
-| **`auto`** | Resolves per scale (`< 1:1` vs `>= 1:1`) | Yes | Keeps non-default `sampling` when resolving to `interpolate`, and falls back to `assign_centers` (not `overlay`) when cells are larger than pixels. |
+| **`auto`** | Resolves per scale (`< 1:1` vs `>= 1:1`) | Yes | With cells finer than the pixels, runs `interpolate` with sub-cell samples (`nearest` for categorical scans, `bilinear` otherwise); otherwise `assign_centers` with sub-pixel samples, since `overlay` refuses sampling. |
 
 ![Sub-Pixel Super-Sampling Patterns](../assets/sampling_patterns.svg)
 
@@ -18,13 +28,13 @@
 ### 1. Sub-Pixel Sampling (`transfer = 'assign_centers'`)
 When a raster pixel straddles two or more cells, single-point `'center'` sampling sends 100% of the pixel to whichever cell contains `(0.5, 0.5)`. With sub-pixel sampling, multiple offsets `(dx_i, dy_i)` inside each pixel box are projected and indexed so edge pixels split their weight across cells.
 
-> **When to prefer `overlay` instead:** For ordinary continuous or categorical area-weighted averages when cells are comparable to or larger than pixels (`>= 1:1`), [`transfer = 'overlay'`](transfer-modes.md#overlay-area-weighted-aggregation) computes exact analytical pixel–cell intersections and is usually preferred over sub-pixel supersampling. Sub-pixel sampling remains essential in `assign_centers` when using features that `overlay` does not support (`spectral_formula`, H3 `compact`, partitioned scans, or ultra-coarse `> 500 km` cells) or when running `assign_centers` for maximum speed with light edge anti-aliasing.
+> **When to prefer `overlay` instead:** For ordinary continuous or categorical area-weighted averages when cells are comparable to or larger than pixels (`>= 1:1`), [`transfer = 'overlay'`](transfer-modes.md#the-overlay-modes) computes exact analytical pixel–cell intersections and is usually preferred over sub-pixel supersampling. Sub-pixel sampling remains essential in `assign_centers` when using features that `overlay` does not support (`spectral_formula`, H3 `compact`, partitioned scans, or ultra-coarse `> 500 km` cells) or when running `assign_centers` for maximum speed with light edge anti-aliasing.
 
 ### 2. Sub-Cell Quadrature (`transfer = 'interpolate'`)
 With `transfer = 'interpolate'` and `sampling != 'center'`, each cell whose center falls on the raster projects its boundary corners (`4..10` vertices across H3, A5, S2, and HEALPix) into pixel space once and maps the `[0, 1]^2` pattern algebraically via `CellPolygonSampler` (constant-Jacobian star-triangle fan mapping):
 
 - **All sample points stay strictly inside the cell polygon**, avoiding extra per-sample CRS/PROJ transforms.
-- **Smooth continuous crossover (`~1×–4×` px/cell):** Pairing `interpolation = 'bicubic'` with `'rgss'` (4-pt) or `'16point'` (16-pt) integrates the smooth interpolated surface across the cell instead of piecewise-constant pixel squares, beating both 1-point `'center'` interpolation and `overlay` on smooth curved fields.
+- **Smooth fields sampled at points:** Pairing `interpolation = 'bicubic'` with `'rgss'` (4-pt) or `'16point'` (16-pt) integrates the smooth interpolated surface across the cell instead of piecewise-constant pixel squares. Against the field's true cell means it was 2–13× closer than `overlay` from 1 to 8 pixels per cell in the [benchmark](transfer-modes.md#sub-cell-sampling-and-the-two-references). It does not beat `overlay` when pixels are area averages or the field has sharp edges, and `bilinear` gains from sub-cell samples only from about 4 pixels per cell.
 - **Intra-cell spread (`stddev`, `min`, `max`, `quantiles`):** Single-point `'center'` `interpolate` produces only 1 observation per cell (`stddev = 0`, `min == max == mean`). Sub-cell quadrature recovers intra-cell variation across `rgss` / `8rooks` / `16point` while keeping cell `count <= 1.0`.
 - **Categorical sub-cell fractions:** With categorical data and `interpolation = 'nearest'`, dense sub-cell sampling (e.g., `'16point'`) estimates each class's fraction within the cell (converging toward `overlay` as sample count increases).
 - **Cells containing a pole** on geographic (EPSG:4326) and Web Mercator rasters fall back to a single sample at the cell centre, so they report one observation (`stddev = 0`) rather than a sub-cell spread.
@@ -47,7 +57,7 @@ With `transfer = 'interpolate'` and `sampling != 'center'`, each cell whose cent
 
 ## What Sampling Does and Does Not Compute
 
-- **In `assign_centers` (sub-pixel):** Counts and means are **sample-weighted** across each pixel's sub-pixel points. Supersampling approximates how a pixel splits across cell boundaries; it is not an exact pixel–cell area intersection (`overlay`), and does not weight by ground area. `stddev` treats each pixel as **one observation** per cell weighted by the sum of its sample weights in that cell (`w_i`); the reliability-weighted sample variance `M2 / (W - sum(w_i^2) / W)` is invariant to scaling all weights, so a pixel wholly inside a cell still has weight `1.0`.
+- **In `assign_centers` (sub-pixel):** Counts and means are **sample-weighted** across each pixel's sub-pixel points. Supersampling approximates how a pixel splits across cell boundaries; it is not an exact pixel–cell area intersection (`overlay`), and does not weight by ground area; for exact area-weighted means use `transfer = 'overlay'`, for conserved totals add `mass_preserve`, and for true ground areas on lon/lat rasters add `ground_area` ([Transfer Modes](transfer-modes.md#choosing-an-overlay-mode)). `stddev` treats each pixel as **one observation** per cell weighted by the sum of its sample weights in that cell (`w_i`); the reliability-weighted sample variance `M2 / (W - sum(w_i^2) / W)` is invariant to scaling all weights, so a pixel wholly inside a cell still has weight `1.0`.
 - **In `interpolate` (sub-cell):** Normalized point weights inside a cell sum to `1.0`, so a cell whose entire stencil lies inside valid raster data has `count = 1.0` (edge or partial-NoData cells receive the sum of valid tap weights in `(0, 1]`). `stddev`, `min`, `max`, and `quantiles` summarize the interpolated values across the cell's interior sample points, using the same reliability-weighted sample variance across taps.
 
 ## Performance & Precision Trade-Off Guide
@@ -59,7 +69,7 @@ With `transfer = 'interpolate'` and `sampling != 'center'`, each cell whose cent
 | **`hex`** | 7 | **$\sim 0.60\times$** | Hexagonally symmetric sample layout | When a symmetric sub-pixel pattern is preferred (still sample-weighted, not area-weighted) |
 | **`gaussian`** | 5 | **$\sim 0.68\times$** | Optical PSF Emulation | Remote sensing satellite imagery where pixel centers dominate sensor response |
 | **`8rooks`** | 8 | **$\sim 0.55\times$** | Full Stratified Anti-Aliasing | Highly complex boundary contours with diagonal edges |
-| **`16point`** | 16 | **$\sim 0.35\times$** | Sub-Grid Reconstruction | Coarse rasters (e.g. 1km climate grids) aggregated into fine H3 cells (Res 9–11) |
+| **`16point`** | 16 | **$\sim 0.35\times$** | Sub-Grid Reconstruction | Densest preset; for coarse rasters into fine cells prefer `transfer = 'interpolate'` or `'overlay'` |
 
 ## The Recommended Compromise: Why RGSS is the Optimal Default
 
@@ -100,7 +110,9 @@ Do you need exact pixel-cell area overlap or conserved totals (>= 1:1 px/cell, o
       │    └── Need highest crossover accuracy / tightest cell range or quantiles? ──> sampling='16point' (or '8rooks') + interpolation='bicubic'
       └── Using transfer='assign_centers' (e.g. spectral_formula, compact, partitions, or coarse > 500 km)?
            ├── Pixels much smaller than cells (many pixels/cell)? ──> sampling='center'
-           └── Mixed / edge-sensitive or cells <= pixels? ──> sampling='rgss' (4-pt) or '16point' (coarse -> fine)
+           ├── Mixed / edge-sensitive? ──> sampling='rgss' (4-pt)
+           └── Cells <= pixels? ──> prefer transfer='interpolate' (with sub-cell sampling) or 'overlay';
+                '16point' only where a transfer mode can't run
 ```
 
 ## Performance Tuning Tips

@@ -7,7 +7,9 @@ mod parent;
 pub use multiband::{
     write_multiband_parquet, write_multiband_parquet_with_config, MULTIBAND_ROW_GROUP_BUDGET_BYTES,
 };
-pub use parent::{write_parent_multiband, write_parent_records};
+pub use parent::{
+    write_parent_multiband, write_parent_multiband_with_config, write_parent_records,
+};
 pub mod pipeline;
 pub mod writer;
 

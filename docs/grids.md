@@ -85,9 +85,23 @@ passed the cell's southernmost possible point. That bound comes from the edge mo
 ## Automatic resolution
 
 `auto` picks the resolution whose mean cell area is closest, in ratio, to the raster's ground
-pixel area, measured at the raster's centre through its geotransform and CRS. `auto+N` and
-`auto-N` move N resolution steps finer or coarser, clamped to the grid's range. Because it
+pixel area, measured at the raster's centre through its geotransform and CRS. Because it
 targets a size rather than an index, `auto` gives comparable cells on every grid.
+
+Use `auto-finer` for the largest mean cell area at or below the ground pixel area, or
+`auto-coarser` for the smallest at or above it. Both select an exact match. If the grid
+cannot satisfy the requested bound, the error reports the pixel area and the grid’s mean
+cell area range. For mosaics, the finest native tile sets the pixel area. These selectors
+work with any transfer mode and with any interface that accepts a resolution string.
+
+`auto+N` and `auto-N` pick a side of the pixel first. `auto+1` is the closest resolution whose
+cells are smaller than a pixel (cell area / pixel area below 1), `auto-1` the closest whose cells
+are at least pixel-sized (ratio 1 or more; a cell exactly a pixel in size counts as coarse), and
+`auto+2`, `auto-2`, ... go one step further on the same side. So `auto+1` never overshoots: if
+`auto` already landed on a cell just under a pixel, `auto+1` is that same resolution, not the
+next one down. Past the grid's finest or coarsest resolution the choice clamps to it, which
+stays on the requested side; if no resolution is on that side at all (cells at the finest
+resolution still at least a pixel, or at the coarsest still under one) it is an error.
 
 | Engine | Syntax |
 | :--- | :--- |
@@ -99,6 +113,14 @@ targets a size rather than an index, `auto` gives comparable cells on every grid
 | Rust | `dggs_stream_core::resolution` (`ResolutionSpec::parse`, `area_matched_resolution`) |
 
 Apache Spark's `resolutions` option takes integers only.
+
+Pair `auto` with `transfer = "auto"` to have the mode follow the resolution: continuous scans
+interpolate at every `auto+N` (cells under a pixel) and overlay at every `auto-N` (cells at
+least a pixel); at `auto` it depends on which side the cells landed. Categorical scans overlay
+at every offset. Both use the same ratio, but `transfer = "auto"` measures the pixel inside a
+`bbox` when there is one, so with a `bbox` far from the raster's centre the two can disagree. See
+[Transfer Modes](transfer-modes.md#let-the-engine-choose-auto). The CLI reports the chosen
+resolution and mode on stderr.
 
 ## Poles and the antimeridian
 

@@ -1097,7 +1097,19 @@ pub unsafe extern "C" fn duckdb_result_error(_result: *mut duckdb_result) -> *co
 }
 
 /// Points the extension's DuckDB C API table at the mocks above.
+/// Serializes installs of the process-wide API table, so a test that swaps slots can
+/// read back what it installed before a concurrent test reinstalls the mocks.
+static API_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(super) fn install_mock_api() {
+    let _guard = API_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    install_mock_api_locked();
+}
+
+/// [`install_mock_api`] for a caller already holding `API_INSTALL_LOCK`.
+fn install_mock_api_locked() {
     static TABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let table = *TABLE.get_or_init(|| {
         let mut table = vec![ptr::null::<c_void>(); API_TABLE_LEN];
@@ -1196,4 +1208,49 @@ pub(super) fn install_mock_api() {
     // SAFETY: `table` is a leaked (never freed) array of `API_TABLE_LEN` pointers whose
     // filled slots hold mocks with exactly the signatures of those slots.
     unsafe { install_api_table(table as *const c_void) };
+}
+
+/// Repeated extension loads overwrite the process-wide API table in place:
+/// the latest table wins in every slot, and a table that DuckDB frees right
+/// after init is not referenced afterwards.
+#[test]
+fn repeated_api_table_installs_copy_the_latest_table() {
+    // Hold the install lock throughout: a concurrent `install_mock_api` would
+    // otherwise reset the spare slot between an install and its read-back.
+    let _guard = API_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    install_mock_api_locked();
+    let mock = |index: usize| {
+        // SAFETY: an index within `API_TABLE_LEN`; nothing is called.
+        unsafe { lookup_api_fn(index, "unused\0") }
+    };
+    let vector_size = api_index::duckdb_vector_size;
+    let expected = mock(vector_size);
+    assert!(!expected.is_null());
+
+    // The last slot is not one the extension wraps, so swapping it does not
+    // disturb tests running concurrently against the mock table.
+    let spare = API_TABLE_LEN - 1;
+    let original_spare = mock(spare);
+    let mut table: Vec<*mut c_void> = (0..API_TABLE_LEN).map(mock).collect();
+    for round in 0..1000usize {
+        let sentinel = (0x1000 + round * 8) as *mut c_void;
+        table[spare] = sentinel;
+        // SAFETY: `table` holds `API_TABLE_LEN` slots; every slot the extension
+        // calls keeps its mock, and the spare slot is never called.
+        unsafe { install_api_table(table.as_ptr() as *const c_void) };
+        assert_eq!(mock(spare), sentinel, "round {round}");
+        assert_eq!(mock(vector_size), expected, "round {round}");
+    }
+    // Scribbling over the caller's copy after install (DuckDB frees it)
+    // leaves the installed table untouched.
+    table[spare] = ptr::null_mut();
+    table[vector_size] = ptr::null_mut();
+    assert_eq!(mock(vector_size), expected);
+    assert!(!mock(spare).is_null());
+    drop(table);
+
+    install_mock_api_locked();
+    assert_eq!(mock(spare), original_spare);
 }

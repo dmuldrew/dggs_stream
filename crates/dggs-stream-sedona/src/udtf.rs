@@ -3,7 +3,8 @@
 //!
 //! `source` is a path, glob or URL accepted by `dggs-stream-core`. Every further integer
 //! argument is a resolution (default 8; `'auto'`, `'auto+1'`, `'auto-2'`, ... instead picks
-//! the resolution whose cells match the raster's pixel size), and one optional string
+//! the resolution whose cells match the raster's pixel size; `auto+N` the N-th finer than a
+//! pixel, `auto-N` the N-th at least pixel-sized), and one optional string
 //! argument overrides
 //! the raster's CRS (e.g. `'EPSG:4326'`). A grid name (`'h3'`, `'a5'`, `'s2'`, `'healpix'`)
 //! selects the grid, as DuckDB's `grid :=` does; `a5_raster_continuous_aggregate`,
