@@ -402,32 +402,44 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
     );
 
     // A true upgrade: install raster_h3 0.4.0 from its historical install script (no
-    // longer shipped), run every upgrade script with ALTER EXTENSION UPDATE, and compare
-    // the result with a fresh 0.7.0 install. Upgraded functions keep the library path
-    // 0.4.0 recorded, `$libdir/raster_h3_pg`.
+    // longer shipped), then run every shipped upgrade script with ALTER EXTENSION UPDATE.
+    // Upgraded functions keep the library path 0.4.0 recorded, `$libdir/raster_h3_pg`.
+    let sql_dir = repo_root().join("crates/dggs-stream-pg/sql");
     server.install_extension_file(
         &repo_root().join("tests/fixtures/pg/raster_h3--0.4.0.sql"),
         "raster_h3--0.4.0.sql",
     );
-    for script in [
-        "raster_h3--0.4.0--0.5.0.sql",
-        "raster_h3--0.5.0--0.6.0.sql",
-        "raster_h3--0.6.0--0.7.0.sql",
-    ] {
-        server.install_extension_file(
-            &repo_root().join("crates/dggs-stream-pg/sql").join(script),
-            script,
-        );
+    for entry in std::fs::read_dir(&sql_dir).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if name.starts_with("raster_h3--") && name.matches("--").count() == 2 {
+            server.install_extension_file(&sql_dir.join(&name), &name);
+        }
     }
+    let control =
+        std::fs::read_to_string(repo_root().join("crates/dggs-stream-pg/raster_h3.control"))
+            .unwrap();
+    let default_version = control
+        .lines()
+        .find_map(|l| l.strip_prefix("default_version = "))
+        .expect("default_version in raster_h3.control")
+        .trim_matches('\'')
+        .to_string();
+
     // Every function of the extension: signature, result type, volatility, strictness,
     // parallel safety and C symbol.
     const FUNCTIONS: &str =
         "SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') -> '
-                || pg_get_function_result(p.oid) || ' ' || p.provolatile || p.proisstrict::text
-                || p.proparallel || ' ' || p.prosrc
+                || pg_get_function_result(p.oid) || ' ' || p.provolatile::text
+                || p.proisstrict::text || p.proparallel::text || ' ' || p.prosrc
          FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
          JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'raster_h3'
          ORDER BY 1;";
+    let original = server.query(&format!(
+        "CREATE DATABASE upgrade_original;
+         \\c upgrade_original
+         CREATE EXTENSION raster_h3 VERSION '0.4.0';
+         {FUNCTIONS}"
+    ));
     let fresh = server.query(&format!(
         "CREATE DATABASE upgrade_fresh;
          \\c upgrade_fresh
@@ -442,13 +454,26 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
          {FUNCTIONS}"
     ));
     assert!(
-        fresh.len() > 10,
+        fresh.len() > original.len(),
         "PG {major}: fresh raster_h3 functions: {fresh:?}"
     );
-    assert_eq!(
-        upgraded, fresh,
-        "PG {major}: raster_h3 upgraded from 0.4.0 differs from a fresh 0.7.0 install"
-    );
+    if default_version == "0.7.0" {
+        // The released 0.7.0 SQL matches 0.4.0. The unreleased definitions (A5, S2,
+        // HEALPix, auto resolution, eight-argument SRFs) are only in the install script;
+        // existing databases get them from the upgrade script of the next version. Until
+        // then the library must keep serving the definitions they have.
+        assert_eq!(
+            upgraded, original,
+            "PG {major}: no-op 0.4.0 -> 0.7.0 upgrade changed functions"
+        );
+    } else {
+        // Once the version is bumped, its upgrade script must bring upgraded databases to
+        // exactly what a fresh install defines.
+        assert_eq!(
+            upgraded, fresh,
+            "PG {major}: raster_h3 upgraded from 0.4.0 differs from a fresh {default_version} install"
+        );
+    }
     let upgraded_state = server.query(&format!(
         "\\c upgrade_from_040
          SELECT extversion FROM pg_extension WHERE extname = 'raster_h3';
@@ -457,8 +482,24 @@ fn check_server(major: &str, cont_tif: &Path, cat_tif: &Path) {
     ));
     assert_eq!(
         upgraded_state,
-        ["0.7.0", "$libdir/raster_h3_pg", cell_hex.as_str()],
+        [
+            default_version.as_str(),
+            "$libdir/raster_h3_pg",
+            cell_hex.as_str()
+        ],
         "PG {major}: raster_h3 upgraded from 0.4.0"
+    );
+    // The upgraded SRFs (five arguments while the version is 0.7.0) still return the rows
+    // the in-process iterator produces.
+    let lines = server.query(&format!(
+        "\\c upgrade_from_040
+         SELECT {cols} FROM h3_raster_continuous_aggregate({cont}, 7, '{CRS}', 5.0, {bbox_sql})
+         ORDER BY 1;"
+    ));
+    check_continuous(
+        &lines,
+        &continuous_rows(cont_tif, 7, Some(5.0), Some(bbox)),
+        "continuous after upgrade from 0.4.0",
     );
 
     // No backend crashed along the way.
