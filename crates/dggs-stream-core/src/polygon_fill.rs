@@ -966,6 +966,122 @@ mod tests {
         }
     }
 
+    /// Little-endian WKB for `multi`: a `POLYGON` when it has one member and
+    /// `as_polygon` is set, otherwise a `MULTIPOLYGON`.
+    fn to_wkb(multi: &MultiPolygon<f64>, as_polygon: bool) -> Vec<u8> {
+        fn polygon(out: &mut Vec<u8>, p: &Polygon<f64>) {
+            out.push(1);
+            out.extend(3u32.to_le_bytes());
+            let rings: Vec<&LineString<f64>> =
+                std::iter::once(p.exterior()).chain(p.interiors()).collect();
+            out.extend((rings.len() as u32).to_le_bytes());
+            for ring in rings {
+                out.extend((ring.0.len() as u32).to_le_bytes());
+                for c in &ring.0 {
+                    out.extend(c.x.to_le_bytes());
+                    out.extend(c.y.to_le_bytes());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if as_polygon && multi.0.len() == 1 {
+            polygon(&mut out, &multi.0[0]);
+        } else {
+            out.push(1);
+            out.extend(6u32.to_le_bytes());
+            out.extend((multi.0.len() as u32).to_le_bytes());
+            for p in &multi.0 {
+                polygon(&mut out, p);
+            }
+        }
+        out
+    }
+
+    /// The public WKB entry point (`grid_polygon_to_cells_wkb_into`) must give
+    /// the same cells as the naive descent for the hard geometries above.
+    #[test]
+    fn public_wkb_fill_matches_naive_across_grids_modes_and_hard_geometries() {
+        use crate::scalar_ops::grid_polygon_to_cells_wkb_into;
+
+        let modes = [
+            ContainmentMode::ContainsCentroid,
+            ContainmentMode::ContainsBoundary,
+            ContainmentMode::IntersectsBoundary,
+            ContainmentMode::Covers,
+        ];
+        let two_parts = MultiPolygon::new(
+            c_shaped_polygon()
+                .0
+                .into_iter()
+                .chain(rect_polygon(177.0, 10.0, 183.0, 15.0).0)
+                .collect(),
+        );
+        let cases: &[(&str, MultiPolygon<f64>, u8)] = &[
+            ("wavy_256_holes", wavy_multi_polygon_with_holes(), 6),
+            ("c_shaped", c_shaped_polygon(), 5),
+            (
+                "antimeridian_pos",
+                rect_polygon(177.0, 10.0, 183.0, 15.0),
+                5,
+            ),
+            (
+                "antimeridian_neg",
+                rect_polygon(-183.0, -15.0, -177.0, -10.0),
+                5,
+            ),
+            ("polar_cap", rect_polygon(-180.0, 84.0, 180.0, 90.0), 4),
+            ("two_parts", two_parts, 5),
+        ];
+
+        for grid in [GridKind::S2, GridKind::Healpix] {
+            for (name, poly, res) in cases {
+                for mode in modes {
+                    let expected = fill_nested_grid_naive(grid, poly, *res, mode).unwrap();
+                    for as_polygon in [true, false] {
+                        let wkb = to_wkb(poly, as_polygon);
+                        let mut actual = vec![u64::MAX];
+                        grid_polygon_to_cells_wkb_into(
+                            grid,
+                            &wkb,
+                            i64::from(*res),
+                            mode,
+                            &mut actual,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            actual, expected,
+                            "{grid:?} case={name} res={res} mode={mode:?} polygon={as_polygon}"
+                        );
+                    }
+                }
+            }
+            // Out-of-range levels and malformed WKB are errors that leave `out` empty.
+            let wkb = to_wkb(&c_shaped_polygon(), true);
+            let mut out = vec![1];
+            assert!(matches!(
+                grid_polygon_to_cells_wkb_into(
+                    grid,
+                    &wkb,
+                    i64::from(grid.max_resolution()) + 1,
+                    ContainmentMode::ContainsCentroid,
+                    &mut out,
+                ),
+                Err(PolygonToCellsError::InvalidResolution(_))
+            ));
+            assert!(out.is_empty());
+            out.push(1);
+            assert!(grid_polygon_to_cells_wkb_into(
+                grid,
+                &wkb[..wkb.len() - 3],
+                5,
+                ContainmentMode::ContainsCentroid,
+                &mut out,
+            )
+            .is_err());
+            assert!(out.is_empty());
+        }
+    }
+
     #[test]
     fn interior_short_circuit_triggers_and_rect_matches_polygon_fill() {
         let rect = [-6.0, -6.0, 6.0, 6.0];

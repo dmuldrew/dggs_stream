@@ -7,6 +7,8 @@
 //! # Architecture & Responsibilities
 //! - [`HttpTransport`]: Handles HTTP client creation, authentication headers, transient retries
 //!   with exponential backoff and jitter, and HTTP status/header/range length validation.
+//!   Transient statuses, transport errors and truncated bodies share one retry budget per
+//!   read, so a probe or range fetch sends at most five requests (plus redirect hops).
 //! - [`ByteCache`]: Manages in-memory caching of remote bytes, explicitly distinguishing
 //!   between full file downloads (complete responses) and paged block caching.
 //! - [`RemoteHttpSource`]: High-level orchestrator coordinating transport and caching.
@@ -504,6 +506,34 @@ pub trait RemoteTransport: Send + Sync {
 
 type PinnedEtag = Arc<OnceLock<Option<String>>>;
 
+/// Retries left for one logical read (a probe or a range fetch), shared by
+/// the request-level and body-level retry loops so their limits do not
+/// multiply.
+struct RetryBudget {
+    max: usize,
+    used: std::cell::Cell<usize>,
+}
+
+impl RetryBudget {
+    fn new(max: usize) -> Self {
+        Self {
+            max,
+            used: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Consume one retry, returning its zero-based index (for backoff), or
+    /// `None` when the budget is spent.
+    fn take(&self) -> Option<usize> {
+        let used = self.used.get();
+        if used >= self.max {
+            return None;
+        }
+        self.used.set(used + 1);
+        Some(used)
+    }
+}
+
 /// Outcome of a single response attempt: `Done` carries the validated result;
 /// `Retry` carries the error to return if retries are exhausted.
 enum BodyAttempt<T> {
@@ -620,18 +650,26 @@ impl HttpTransport {
     /// Retry a response attempt whose body read failed transiently: an io
     /// error mid-body or a body shorter than announced. `once` returns
     /// `Err` for fatal failures and `Ok(Retry(e))` for retryable ones.
-    fn retry_body<T>(&self, mut once: impl FnMut() -> Result<BodyAttempt<T>>) -> Result<T> {
-        let mut attempt = 0;
+    ///
+    /// `once` receives the read's [`RetryBudget`], which it passes on to
+    /// [`Self::execute_request`]: request-level retries (transient statuses,
+    /// transport errors) and body retries draw from the same `max_retries`,
+    /// so one read sends at most `1 + max_retries` requests, not counting
+    /// redirect hops.
+    fn retry_body<T>(
+        &self,
+        mut once: impl FnMut(&RetryBudget) -> Result<BodyAttempt<T>>,
+    ) -> Result<T> {
+        let budget = RetryBudget::new(self.max_retries);
         loop {
-            match once()? {
+            match once(&budget)? {
                 BodyAttempt::Done(v) => return Ok(v),
-                BodyAttempt::Retry(e) => {
-                    if attempt >= self.max_retries {
-                        return Err(e);
+                BodyAttempt::Retry(e) => match budget.take() {
+                    Some(attempt) => {
+                        std::thread::sleep(retry_delay(attempt, retry_entropy(), None))
                     }
-                    std::thread::sleep(retry_delay(attempt, retry_entropy(), None));
-                    attempt += 1;
-                }
+                    None => return Err(e),
+                },
             }
         }
     }
@@ -720,12 +758,18 @@ impl HttpTransport {
     /// Each hop gets the credential headers its own URL is entitled to, so a
     /// token never follows a redirect to a host (or a plain-http URL) it is
     /// not scoped to; `Range`, `Accept-Encoding` and `If-Match` carry over.
-    fn send_range(&self, range: &str, etag: &OnceLock<Option<String>>) -> Result<HttpResponse> {
+    fn send_range(
+        &self,
+        range: &str,
+        etag: &OnceLock<Option<String>>,
+        budget: &RetryBudget,
+    ) -> Result<HttpResponse> {
         let mut url = self.url.clone();
         for _ in 0..=MAX_REDIRECTS {
             let request = Self::prepare_range_request(&url, range, etag);
             Self::check_request_head(&request)?;
-            let resp = self.execute_request(&request, || self.range_request(&request).call())?;
+            let resp =
+                self.execute_request(&request, budget, || self.range_request(&request).call())?;
             match redirect_target(&url, &resp)? {
                 Some(next) => url = next,
                 None => return Ok(resp),
@@ -836,17 +880,17 @@ impl HttpTransport {
         Ok(BodyAttempt::Done(buf))
     }
 
-    /// Execute a request with automatic exponential backoff retry on transient errors
+    /// Execute a request with automatic exponential backoff retry on transient
+    /// errors, drawing retries from the read's shared `budget`.
     fn execute_request<F>(
         &self,
         request: &PreparedRequest,
+        budget: &RetryBudget,
         mut make_request: F,
     ) -> Result<HttpResponse>
     where
         F: FnMut() -> std::result::Result<HttpResponse, ureq::Error>,
     {
-        let mut attempt = 0;
-
         loop {
             let failure = match make_request() {
                 Ok(resp) if resp.status().as_u16() < 400 => return Ok(resp),
@@ -857,7 +901,12 @@ impl HttpTransport {
                 RequestFailure::Status(resp) => header_str(resp, "Retry-After").map(str::to_owned),
                 RequestFailure::Transport(_) => None,
             };
-            if attempt >= self.max_retries || !failure.is_transient() {
+            let attempt = if failure.is_transient() {
+                budget.take()
+            } else {
+                None
+            };
+            let Some(attempt) = attempt else {
                 return Err(match failure {
                     RequestFailure::Status(resp) => match resp.status().as_u16() {
                         412 => DggsStreamError::InvalidParameter(
@@ -891,7 +940,7 @@ impl HttpTransport {
                         self.url, t
                     )),
                 });
-            }
+            };
 
             // Jittered exponential backoff, honouring Retry-After
             std::thread::sleep(retry_delay(
@@ -899,7 +948,6 @@ impl HttpTransport {
                 retry_entropy(),
                 retry_after.as_deref(),
             ));
-            attempt += 1;
         }
     }
 
@@ -907,7 +955,7 @@ impl HttpTransport {
     #[allow(clippy::result_large_err)]
     pub fn probe(&self, initial_fetch_len: usize) -> Result<ProbeResult> {
         let etag = self.pinned_etag()?;
-        self.retry_body(|| self.probe_once(initial_fetch_len, &etag))
+        self.retry_body(|budget| self.probe_once(initial_fetch_len, &etag, budget))
     }
 
     #[allow(clippy::result_large_err)]
@@ -915,9 +963,10 @@ impl HttpTransport {
         &self,
         initial_fetch_len: usize,
         etag: &OnceLock<Option<String>>,
+        budget: &RetryBudget,
     ) -> Result<BodyAttempt<ProbeResult>> {
         let range_header = format!("bytes=0-{}", initial_fetch_len.saturating_sub(1));
-        let resp = self.send_range(&range_header, etag)?;
+        let resp = self.send_range(&range_header, etag, budget)?;
 
         let status = resp.status().as_u16();
         if status == 206 {
@@ -1000,7 +1049,7 @@ impl HttpTransport {
             )));
         }
         let etag = self.pinned_etag()?;
-        self.retry_body(|| self.fetch_range_once(start, end, expected_total, &etag))
+        self.retry_body(|budget| self.fetch_range_once(start, end, expected_total, &etag, budget))
     }
 
     #[allow(clippy::result_large_err)]
@@ -1010,9 +1059,10 @@ impl HttpTransport {
         end: u64,
         expected_total: Option<u64>,
         etag: &OnceLock<Option<String>>,
+        budget: &RetryBudget,
     ) -> Result<BodyAttempt<Vec<u8>>> {
         let range_header = format!("bytes={}-{}", start, end);
-        let resp = self.send_range(&range_header, etag)?;
+        let resp = self.send_range(&range_header, etag, budget)?;
 
         let status = resp.status().as_u16();
         let content_range = header_str(&resp, "Content-Range").map(str::to_owned);

@@ -192,6 +192,10 @@ pub struct PmtilesExportSummary {
     pub total_tiles: usize,
     pub min_zoom: u8,
     pub max_zoom: u8,
+    /// `(cell, zoom)` pairs skipped because the cell would span more tiles
+    /// than the per-cell cap (pole cells at fine zooms). The same count is
+    /// written to the archive metadata as `cells_over_tile_cap` when nonzero.
+    pub capped_cells: usize,
 }
 
 /// Priority queue entry for tile eviction ordered by southernmost latitude
