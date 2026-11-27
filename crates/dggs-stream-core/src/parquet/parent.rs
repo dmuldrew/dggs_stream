@@ -148,11 +148,27 @@ pub fn write_parent_multiband(
     resolution: u8,
     hidden_index: bool,
 ) -> Result<usize> {
+    let config = ParquetExportConfig {
+        geoparquet: true,
+        ..Default::default()
+    };
+    write_parent_multiband_with_config(source, destination, resolution, hidden_index, &config)
+}
+
+/// Write a parent-partitioned wide dataset with the selected Parquet writer settings.
+pub fn write_parent_multiband_with_config(
+    source: &mut MultiBandBatchReader,
+    destination: &Path,
+    resolution: u8,
+    hidden_index: bool,
+    config: &ParquetExportConfig,
+) -> Result<usize> {
     write_parent_multiband_within(
         source,
         destination,
         resolution,
         hidden_index,
+        config,
         super::multiband::MULTIBAND_ROW_GROUP_BUDGET_BYTES,
     )
     .map(|(rows, _)| rows)
@@ -173,6 +189,7 @@ fn write_parent_multiband_within(
     destination: &Path,
     resolution: u8,
     hidden_index: bool,
+    config: &ParquetExportConfig,
     budget: usize,
 ) -> Result<(usize, usize)> {
     let mut dataset = Dataset::new(destination, resolution)?;
@@ -184,10 +201,6 @@ fn write_parent_multiband_within(
         .filter(|&i| !(hidden_index && i == key))
         .collect();
     let schema = Arc::new(input.project(&fields)?);
-    let config = ParquetExportConfig {
-        geoparquet: true,
-        ..Default::default()
-    };
     super::multiband::check_unique_names(&schema)?;
     let limit = super::multiband::group_rows(&input, config.row_group_size);
     let row_bytes = super::multiband::row_bytes(&input);
@@ -204,7 +217,7 @@ fn write_parent_multiband_within(
                     schema.clone(),
                     batches.into_iter().map(Ok),
                     &dataset.next_file(parent)?,
-                    &config,
+                    config,
                 )?;
             }
             Ok(n)
@@ -330,7 +343,18 @@ mod tests {
         .unwrap();
         // Cells are resolution 12 and arrive in latitude order, so every 64-row batch
         // touches most of the few resolution-8 parents: many small groups per window.
-        write_parent_multiband_within(&mut reader, destination, 8, false, budget).unwrap()
+        write_parent_multiband_within(
+            &mut reader,
+            destination,
+            8,
+            false,
+            &ParquetExportConfig {
+                geoparquet: true,
+                ..Default::default()
+            },
+            budget,
+        )
+        .unwrap()
     }
 
     #[test]
