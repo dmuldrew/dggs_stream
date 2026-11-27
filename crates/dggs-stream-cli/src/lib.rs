@@ -2644,7 +2644,7 @@ mod tests {
                 .unwrap();
             let near_res = (0..=grid.max_resolution())
                 .rev()
-                .find(|&r| grid.area_m2(r) >= pixel_m2 && grid.area_m2(r) < 16.0 * pixel_m2)
+                .find(|&r| grid.area_m2(r) >= pixel_m2)
                 .unwrap();
             let overlay_res = (0..=grid.max_resolution())
                 .rev()
@@ -2670,13 +2670,15 @@ mod tests {
                 parse(&["-r", &r_fine, "--transfer", "auto"]),
                 TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Bilinear)
             );
+            // Categorical scans overlay even below 1:1.
             assert_eq!(
                 parse(&["-r", &r_fine, "-c", "--transfer", "auto"]),
-                TransferMode::Interpolate(dggs_stream_core::transfer::Interpolation::Nearest)
+                TransferMode::OVERLAY
             );
+            // From 1:1 up, continuous scans overlay too.
             assert_eq!(
                 parse(&["-r", &r_near, "--transfer", "auto"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
             assert_eq!(
                 parse(&["-r", &r_over, "--transfer", "auto"]),
@@ -2697,9 +2699,10 @@ mod tests {
                 parse(&["-r", &r_over, "--transfer", "auto", "--ground-area"]),
                 TransferMode::OVERLAY
             );
+            // Ground area cannot interpolate, so below 1:1 it overlays as well.
             assert_eq!(
                 parse(&["-r", &r_fine, "--transfer", "auto", "--ground-area"]),
-                TransferMode::AssignCenters
+                TransferMode::OVERLAY
             );
         }
     }
@@ -2707,7 +2710,7 @@ mod tests {
     #[test]
     fn test_cli_auto_resolution_on_every_grid() {
         use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-        use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+        use dggs_stream_core::resolution::auto_resolution;
         let tif = write_test_tif(32, 32, 5.0);
         let input = tif.path().to_str().unwrap();
         let mosaic = MosaicReader::open(
@@ -2735,7 +2738,7 @@ mod tests {
                 let (opts, _) = parse_stream_args(&args, StreamOutputFormat::Jsonl).unwrap();
                 assert_eq!(
                     opts.resolutions,
-                    vec![offset_resolution(grid, matched, offset)],
+                    vec![auto_resolution(grid, &mosaic, offset).unwrap()],
                     "{grid} {arg}"
                 );
             }

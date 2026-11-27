@@ -530,8 +530,8 @@ engine, with ids that survive each engine's integer types.
 
 | Suite | What it checks |
 | :--- | :--- |
-| [`core/auto_resolution.rs`](../crates/dggs-stream-core/tests/it/auto_resolution.rs) (5) | The ground pixel area of geographic rasters is the ellipsoidal footprint and of projected rasters is measured on the ground; `auto` picks the area-matched resolution on every grid; a mosaic takes its finest tile; a raster that cannot be located is an error. |
-| Unit: `dggs-stream-core` [`resolution.rs`](../crates/dggs-stream-core/src/resolution.rs) (3) | `auto`, `auto+N`, `auto-N` and list parsing; the area match is the nearest resolution in ratio; the area of a lon/lat quad matches the ellipsoidal rectangle. |
+| [`core/auto_resolution.rs`](../crates/dggs-stream-core/tests/it/auto_resolution.rs) (5) | The ground pixel area of geographic rasters is the ellipsoidal footprint and of projected rasters is measured on the ground; `auto` picks the area-matched resolution and `auto±N` the requested side, with `transfer = auto` interpolating at `auto+N` and overlaying at `auto-N`, on every grid; a mosaic takes its finest tile; a raster that cannot be located is an error. |
+| Unit: `dggs-stream-core` [`resolution.rs`](../crates/dggs-stream-core/src/resolution.rs) (4) | `auto`, `auto+N`, `auto-N` and list parsing; the area match is the nearest resolution in ratio; `auto+N` / `auto-N` pick the requested side of the pixel (equality is coarse), clamp past the grid's range and reject an empty side; the area of a lon/lat quad matches the ellipsoidal rectangle. |
 | Engines | `test_auto_resolution_on_every_grid` (DuckDB), `test_cli_auto_resolution_on_every_grid` (CLI), `auto_resolution_matches_core_on_every_grid` and `auto_resolution_entry_points` (PostgreSQL), `auto_resolution_matches_cells_to_pixels_on_every_grid` (SedonaDB), `test_auto_resolution` and `test_auto_resolution_is_comparable_across_grids` (pytest). |
 
 ## 29. Transfer modes

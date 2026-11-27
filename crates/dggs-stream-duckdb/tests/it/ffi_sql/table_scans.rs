@@ -740,7 +740,7 @@ fn scan_resolutions(
 #[test]
 fn test_auto_resolution_on_every_grid() {
     use dggs_stream_core::raster::mosaic::{MosaicReader, OverlapRule};
-    use dggs_stream_core::resolution::{auto_resolution, offset_resolution};
+    use dggs_stream_core::resolution::auto_resolution;
     use dggs_stream_duckdb::grid::GridKind;
     install_mock_api();
     let (_tmp, path) = TestGeoTiffBuilder::new(32, 32)
@@ -755,11 +755,10 @@ fn test_auto_resolution_on_every_grid() {
     )
     .unwrap();
     for grid in GridKind::ALL {
-        let matched = auto_resolution(grid, &mosaic, 0).unwrap();
         for (text, offset) in [("auto", 0), ("AUTO+1", 1), ("auto-2", -2)] {
             assert_eq!(
                 scan_resolutions(&path, grid, text).unwrap(),
-                vec![offset_resolution(grid, matched, offset)],
+                vec![auto_resolution(grid, &mosaic, offset).unwrap()],
                 "{grid} {text}"
             );
         }

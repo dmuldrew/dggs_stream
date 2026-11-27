@@ -62,7 +62,8 @@ keep working. `cargo build --release` at the root still produces
 | Parquet → PMTiles transcoding | ✅ | — | ✅ (`parquet_to_pmtiles`) | — | ✅ (`parquet-to-pmtiles`) |
 | Grids (`h3`, `a5`, `s2`, `healpix`) ([Grids](../grids.md)) | ✅ | ✅ | ✅ | ✅ | ✅ (`--grid`) |
 | `auto` resolution | ✅ | ✅ | ✅ | ✅ (`{grid}_auto_resolution`) | ✅ (`-r auto`) |
-| Transfer modes (`interpolate`, `overlay`) ([Scan Options](../scan-options.md)) | ✅ | ✅ | ✅ | — | ✅ |
+| Transfer modes (`interpolate`, `overlay`, `auto`) ([Transfer Modes](../transfer-modes.md)) | ✅ | ✅ | ✅ | — | ✅ |
+| Ground-area overlay on EPSG:4326 rasters ([`ground_area`](../transfer-modes.md#ground-area-overlay-ground_area)) | ✅ | — (Rust core only) | ✅ | — | ✅ (`ipc`, `jsonl`) |
 | Structured histograms | ✅ (JSON text) | ✅ (`List<Struct>`) | ✅ (`List(Struct)`) | — | ✅ (`ipc`, `jsonl`) |
 | NoData policy (`emit`) and `decimals` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Runtime profile | ✅ (`profile := true`) | ✅ (`with_profile`) | ✅ (`profile_raster`) | — | ✅ (`--profile`) |
@@ -82,6 +83,8 @@ Each deep dive has a recipes section covering the same tasks. The core calls, si
 | Another grid | `s2_raster_continuous_aggregate(...)` or `grid := 's2'` | `grid="s2"` | `s2_raster_continuous_aggregate(...)` | `--grid s2` | `.with_grid(GridKind::S2)` or `s2_raster_continuous_aggregate(...)` in SQL |
 | Pixel-sized cells | `resolutions := 'auto'` | `"auto"` | `s2_auto_resolution('/data/dem.tif')` | `-r auto` | `'auto'` argument in SQL |
 | Area-weighted cells | `transfer := 'overlay'` | `transfer="overlay"` | — | `--transfer overlay` | `.with_transfer(TransferMode::OVERLAY)` |
+| Mode chosen for you | `transfer := 'auto'` | `transfer="auto"` | — | `--transfer auto` | `.with_transfer(TransferMode::Auto)` |
+| True ground area (lon/lat) | `ground_area := true, transfer := 'overlay'` | `ground_area=True, transfer="overlay"` | — | `--ground-area --transfer overlay` | — (core `scan_ground_area_overlay`) |
 | CRS / NoData / bbox | `source_crs :=`, `nodata :=`, `bbox :=` | `crs=`, `nodata=`, `bbox=` | `source_crs =>`, `nodata =>`, `bbox =>` | `--crs`, `--nodata`, `--bbox` | `with_crs`, `with_nodata`, `with_bbox` |
 | Band scale/offset | `scale_offset := false` opts out | always applied | always applied | `--raw-values` opts out | `with_scale_offset(false)` opts out |
 | Fail on dropped samples | `strict_transforms := true` | `strict_transforms=True` | — (`WARNING` only) | — (stderr warning only) | `with_strict_transforms(true)` |

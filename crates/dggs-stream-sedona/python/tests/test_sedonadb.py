@@ -389,8 +389,13 @@ def test_auto_resolution(raster, grid):
     [res] = set(auto.column("resolution").to_pylist())
     # About one 0.001 degree pixel per cell.
     assert 0.3 < 200 * 200 / auto.num_rows < 4.0
+    # `auto-1` is the finest resolution with cells at least a pixel and `auto+1` the
+    # coarsest with cells smaller: adjacent, with `auto` one of the two.
     sd.create_data_frame(RasterTable.continuous(raster, "auto-1", grid=grid)).to_view("coarse")
-    coarse = sd.sql("SELECT resolution FROM coarse").to_arrow_table()
-    assert set(coarse.column("resolution").to_pylist()) == {res - 1}
+    sd.create_data_frame(RasterTable.continuous(raster, "auto+1", grid=grid)).to_view("fine")
+    [coarse] = set(sd.sql("SELECT resolution FROM coarse").to_arrow_table().column("resolution").to_pylist())
+    [fine] = set(sd.sql("SELECT resolution FROM fine").to_arrow_table().column("resolution").to_pylist())
+    assert fine == coarse + 1
+    assert res in (fine, coarse)
     with pytest.raises(ValueError, match="auto"):
         RasterTable.continuous(raster, "auto+x", grid=grid)
