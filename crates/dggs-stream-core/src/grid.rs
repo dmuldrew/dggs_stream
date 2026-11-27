@@ -1080,6 +1080,13 @@ impl ExactLon {
 /// per-row coordinate hoisting (such as S2 and HEALPix) and coarser requested
 /// resolutions can be derived purely by bit masking/shifting (`parents_from_finest`).
 pub(crate) trait RowBatchBackend: GridBackend {
+    /// Whether preparing the point conversion once per latitude saves work.
+    const HOIST_POINT_LATITUDE: bool = false;
+
+    fn point_at_latitude(lat: f64) -> impl Fn(f64) -> Option<Self::Point> {
+        move |lon| Self::make_point(lon, lat)
+    }
+
     /// Per-row hoisted constants shared across every pixel in a constant-latitude row.
     type RowState: Copy;
 
@@ -1201,6 +1208,33 @@ impl GridBackend for A5Backend {
 
 impl RowBatchBackend for A5Backend {
     type RowState = ();
+    const HOIST_POINT_LATITUDE: bool = true;
+
+    fn point_at_latitude(lat: f64) -> impl Fn(f64) -> Option<Self::Point> {
+        use a5::coordinate_systems::Degrees;
+        use a5::core::coordinate_transforms::{deg_to_rad, from_lon_lat};
+        // Mirrors `LONGITUDE_OFFSET` in a5's `coordinate_transforms` (private
+        // there). The row/scalar parity test fails if it ever diverges.
+        const A5_LONGITUDE_OFFSET: f64 = 93.0;
+        // A5's polar angle depends only on latitude and its azimuth only on
+        // longitude. Compute phi once per row via the library; per pixel only
+        // the azimuth is needed, so avoid the library call that would also
+        // recompute an unused authalic latitude for every pixel.
+        let phi = from_lon_lat(a5::LonLat::new(0.0, lat)).phi;
+        let near_pole = a5_near_pole(lat);
+        move |lon| {
+            if !lon.is_finite() {
+                return None;
+            }
+            let theta = deg_to_rad(Degrees::new_unchecked(
+                wrap_lon_180(lon) + A5_LONGITUDE_OFFSET,
+            ));
+            Some((
+                a5::coordinate_systems::Spherical::new(theta, phi),
+                near_pole,
+            ))
+        }
+    }
 }
 
 /// 4-bit S2 Hilbert lookup table mapping `(i_nib << 6) | (j_nib << 2) | orientation`
@@ -2238,6 +2272,35 @@ mod tests {
                 .count()
                 == 1
         );
+    }
+
+    #[test]
+    fn a5_row_points_match_scalar_at_cell_vertices_and_poles() {
+        for (lon, lat) in [(0.0, 0.0), (179.9999, 24.0), (-122.0, 39.0), (42.0, 89.99)] {
+            for res in [0, 11, 16, 30] {
+                let cell = GridKind::A5.cell_at(lat, lon, res).unwrap();
+                let mut ring = [(0.0, 0.0); 10];
+                let n = GridKind::A5.boundary_lng_lat(cell, &mut ring);
+                assert!(n >= 3);
+                for &(x, y) in &ring[..n] {
+                    for y in [y.next_down(), y, y.next_up()] {
+                        if !(-90.0..=90.0).contains(&y) {
+                            continue;
+                        }
+                        let point = A5Backend::point_at_latitude(y);
+                        for x in [x.next_down(), x, x.next_up()] {
+                            assert_eq!(point(x), A5Backend::make_point(x, y));
+                        }
+                    }
+                }
+            }
+        }
+        for lat in [-90.0, 90.0] {
+            assert_eq!(
+                A5Backend::point_at_latitude(lat)(180.0),
+                A5Backend::make_point(180.0, lat)
+            );
+        }
     }
 
     #[test]
