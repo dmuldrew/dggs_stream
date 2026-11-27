@@ -3210,7 +3210,7 @@ fn mass_preserving_overlay_conserves_selected_pixels_across_workers() {
     const NODATA: f32 = -9999.0;
     let empty_rows = |r: u32| (12..16).contains(&r) || (44..48).contains(&r);
     let value = |c: u32, r: u32| {
-        if empty_rows(r) || (r + c) % 19 == 0 {
+        if empty_rows(r) || (r + c).is_multiple_of(19) {
             NODATA
         } else {
             ((r * 3 + c) % 17 + 1) as f32
