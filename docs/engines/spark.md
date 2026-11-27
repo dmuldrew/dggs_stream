@@ -149,6 +149,14 @@ SELECT * FROM dggs_stream_merge(TABLE(dem_parts), 'quantiles=p50, min_count=20')
   scan: only matching resolutions are indexed, and only final or only partial rows are
   produced. Both are exact for every row, so Spark drops them from its plan. Spark 4.1
   refuses a reader that implements pushdown while that setting is false, so it is opt-in.
+  Spark 4.1.4 and 4.3.0 can apply a pushed filter to another query that reuses the same
+  source DataFrame. For example, counting partial rows before merging the original
+  DataFrame can silently drop its final rows. Use `register(spark, pushdown=False)`
+  before loading a DataFrame you plan to reuse, or load a fresh DataFrame for each
+  query when pushdown is enabled. The `dggs_stream.spark.read` helper follows the
+  session setting, so set `spark.sql.python.filterPushdown.enabled` to `false` when
+  using that helper to avoid pushdown. A scan-isolation fix is part of
+  [Apache Spark's SPARK-58551](https://issues.apache.org/jira/browse/SPARK-58551).
 - **What is not pushed.** Filters on statistics (`count`, `mean`, `majority_fraction`, ...)
   stay in Spark: before the merge they would see one partition's share of an edge cell, and
   Spark cannot push a filter written after the merge through it. Filter after the merge, and
