@@ -3,8 +3,11 @@
 //! Provides seamless streaming aggregation across collections of GeoTIFF tiles
 //! with deterministic scanline horizon interleaving and configurable overlap resolution.
 
+use crate::aggregator::multi_horizon::MultiResolutionConfig;
+use crate::transfer::TransferMode;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::aggregator::horizon_streamer::bounds_intersect_bbox;
 use crate::aggregator::multi_horizon::coordinates::{is_point_in_bbox, rect_intersects_bbox};
@@ -325,6 +328,27 @@ impl TileDescriptor {
         &self.crs_identity
     }
 
+    pub(crate) fn select_overview(&mut self, config: &MultiResolutionConfig) -> Result<bool> {
+        let native_area = crate::resolution::tile_pixel_ground_area_m2_in_bbox(self, config.bbox)?;
+        let target = config
+            .resolutions
+            .iter()
+            .map(|&r| config.grid.area_m2(r))
+            .reduce(f64::min)
+            .ok_or_else(|| {
+                DggsStreamError::InvalidParameter(
+                    "overview selection needs a target resolution".into(),
+                )
+            })?;
+        let index = self.reader.select_overview(target / native_area)?;
+        let md = &self.reader.metadata;
+        eprintln!(
+            "dggs-stream: --overview auto tile {} selected IFD {index} ({}x{}, IFD 0 is native)",
+            self.tile_idx, md.width, md.height
+        );
+        Ok(index != 0)
+    }
+
     /// Whether WGS84 `(lon, lat)` lies inside this raster's pixel grid,
     /// tested exactly by inverse-projecting into pixel space. A bounding
     /// rectangle is only a candidate filter: rotated and projected rasters do
@@ -556,6 +580,22 @@ impl MosaicReader {
             ));
         }
 
+        Ok(Self::from_tiles(
+            tiles,
+            [m_min_lon, m_min_lat, m_max_lon, m_max_lat],
+            overlap_rule,
+            max_spp,
+            bbox,
+        ))
+    }
+
+    fn from_tiles(
+        tiles: Vec<TileDescriptor>,
+        bounds: [f64; 4],
+        overlap_rule: OverlapRule,
+        max_spp: u16,
+        bbox: Option<[f64; 4]>,
+    ) -> Self {
         // Build globally latitude-sorted chunk list across all tiles
         let tile_rejection_bounds: Vec<[f64; 4]> = tiles
             .iter()
@@ -624,14 +664,45 @@ impl MosaicReader {
                 .then_with(|| a.chunk_idx.cmp(&b.chunk_idx))
         });
 
-        Ok(Self {
+        Self {
             tiles,
-            mosaic_bounds_wgs84: [m_min_lon, m_min_lat, m_max_lon, m_max_lat],
+            mosaic_bounds_wgs84: bounds,
             overlap_rule,
             chunk_refs,
             max_samples_per_pixel: max_spp,
             bbox,
-        })
+        }
+    }
+
+    /// Select preview images after resolving auto transfer against the native raster.
+    pub(crate) fn for_overview_scan(
+        self: Arc<Self>,
+        config: &MultiResolutionConfig,
+        transfer: TransferMode,
+    ) -> Result<Arc<Self>> {
+        if !config.auto_overview {
+            return Ok(self);
+        }
+        config.validate()?;
+        if matches!(transfer, TransferMode::Overlay { .. }) {
+            eprintln!("dggs-stream: --overview auto selected native images for overlay");
+            return Ok(self);
+        }
+        let mut tiles = self.tiles.clone();
+        let mut changed = false;
+        for tile in &mut tiles {
+            changed |= tile.select_overview(config)?;
+        }
+        if !changed {
+            return Ok(self);
+        }
+        Ok(Arc::new(Self::from_tiles(
+            tiles,
+            self.mosaic_bounds_wgs84,
+            self.overlap_rule,
+            self.max_samples_per_pixel,
+            self.bbox,
+        )))
     }
 
     /// Check if point is owned by tile_idx under current overlap rule

@@ -1003,3 +1003,90 @@ fn hive_parent_revisited_across_windows_and_empty_scan() {
         }
     }
 }
+
+#[test]
+fn overview_matches_independent_gdal_extraction() {
+    // GDAL average pyramid of a 129x65 image with an internal mask.
+    // The reference is gdal_translate -ovr 1 of that COG.
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dggs-stream-core/tests/fixtures");
+    let source = fixtures.join("overview-mask.tif");
+    let reference = fixtures.join("overview-mask-level2.tif");
+    let scan = |file: &Path, res: &str, mode: &str, flags: &[&str]| {
+        let mut args = vec![
+            "jsonl",
+            s(file),
+            "-r",
+            res,
+            "--transfer",
+            mode,
+            "--columns",
+            "h3_index,resolution,count,sum",
+        ];
+        args.extend_from_slice(flags);
+        let result = run_ok(&args);
+        let mut rows: Vec<String> = String::from_utf8(result.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        rows.sort();
+        assert!(!rows.is_empty());
+        (rows, String::from_utf8(result.stderr).unwrap())
+    };
+    for mode in ["assign_centers", "interpolate"] {
+        let (preview, message) = scan(&source, "7", mode, &["--overview", "auto"]);
+        assert!(message.contains("32x16"), "{message}");
+        assert_eq!(preview, scan(&reference, "7", mode, &[]).0);
+        let native = scan(&source, "7", mode, &[]).0;
+        assert_eq!(
+            native,
+            scan(&source, "7", mode, &["--overview", "native"]).0
+        );
+        assert_ne!(native, preview);
+    }
+    for extra in [
+        vec![
+            "-c",
+            "--format",
+            "long",
+            "--columns",
+            "h3_index,category,count",
+        ],
+        vec![
+            "--bands",
+            "1",
+            "--columns",
+            "h3_index,band_1_mean,band_1_count",
+        ],
+        vec![
+            "--bbox",
+            "-121.95,38.95,-121.90,38.98",
+            "--columns",
+            "h3_index,count,sum",
+        ],
+    ] {
+        let compare = |path, policy| {
+            let mut args = vec!["jsonl", path, "-r", "7", "--overview", policy];
+            args.extend(&extra);
+            let mut rows = String::from_utf8(run_ok(&args).stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            rows.sort();
+            assert!(!rows.is_empty());
+            rows
+        };
+        assert_eq!(
+            compare(s(&source), "auto"),
+            compare(s(&reference), "native")
+        );
+    }
+    let (fine, message) = scan(&source, "7,11", "assign_centers", &["--overview", "auto"]);
+    assert!(message.contains("selected IFD 0"));
+    assert_eq!(fine, scan(&source, "7,11", "assign_centers", &[]).0);
+    assert_eq!(
+        scan(&source, "7", "overlay", &["--overview", "auto"]).0,
+        scan(&source, "7", "overlay", &[]).0
+    );
+}

@@ -87,6 +87,7 @@ pub struct CliStreamOptions {
     /// pixels map onto cells (default: each pixel into the cell holding its centre;
     /// `auto` chooses from the cell-to-pixel area ratio and scan options).
     pub transfer: TransferMode,
+    pub auto_overview: bool,
     /// `--sampling`: quadrature pattern for `assign_centers` (sub-pixel) and `interpolate`
     /// (sub-cell polygon quadrature), defaulting to single-center sampling.
     pub sampling: SamplingPattern,
@@ -126,6 +127,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            auto_overview: false,
             sampling: SamplingPattern::default(),
             valid_coverage_threshold: None,
             histogram: None,
@@ -195,6 +197,7 @@ impl CliStreamOptions {
         config.overlap_rule = OverlapRule::Cutline;
         apply_output_policy(&mut config, &self.output);
         config.transfer = self.transfer;
+        config.auto_overview = self.auto_overview;
         config.sampling = self.sampling.clone();
         config.profile = self.profile.clone();
         config.valid_coverage_threshold = self.valid_coverage_threshold;
@@ -1430,6 +1433,13 @@ fn parse_export_args(
             "-o" | "--output" => {
                 let v = value()?;
                 output_file = (v != "-").then(|| v.to_string());
+            }
+            "--overview" => {
+                opts.auto_overview = match value()? {
+                    "native" => false,
+                    "auto" => true,
+                    other => return Err(invalid(flag, other, "native or auto")),
+                };
             }
             "--grid" => {
                 let v = value()?;

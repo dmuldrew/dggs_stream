@@ -6,6 +6,7 @@
 
 mod jpeg;
 mod mask;
+mod overview;
 mod planar;
 use mask::InternalMask;
 pub(crate) use mask::MaskChunkCache;
@@ -305,6 +306,7 @@ pub struct GeoTiffStreamReader {
     /// so a mosaic holds descriptors per active decoder rather than per tile.
     #[cfg_attr(not(unix), allow(dead_code))]
     local_identity: Option<LocalIdentity>,
+    image_index: usize,
     /// Parsed GeoTIFF metadata including spatial reference, extent, and NoData value.
     pub metadata: GeoTiffMetadata,
     /// Grid layout partitioning the raster into discrete strips or tiles.
@@ -1262,11 +1264,32 @@ impl GeoTiffStreamReader {
     /// Extract common GeoTIFF metadata and chunk layout from an initialized Decoder
     fn parse_metadata_and_layout<R: std::io::Read + Seek>(
         decoder: &mut Decoder<R>,
+        base: Option<&GeoTiffMetadata>,
     ) -> Result<(GeoTiffMetadata, ChunkLayout, Option<Arc<TiffChunkInfo>>)> {
         let (width, height) = decoder.dimensions()?;
-        let geotransform = extract_geotransform(decoder)?;
-        let nodata = extract_nodata(decoder);
-        let (epsg, proj_string) = extract_crs(decoder);
+        let (geotransform, nodata, epsg, proj_string) = if let Some(base) = base {
+            let mut gt = base.geotransform;
+            let sx = f64::from(base.width) / f64::from(width);
+            let sy = f64::from(base.height) / f64::from(height);
+            gt.a *= sx;
+            gt.d *= sx;
+            gt.b *= sy;
+            gt.e *= sy;
+            (
+                gt,
+                extract_nodata(decoder).or(base.nodata),
+                base.epsg,
+                base.proj_string.clone(),
+            )
+        } else {
+            let (epsg, proj_string) = extract_crs(decoder);
+            (
+                extract_geotransform(decoder)?,
+                extract_nodata(decoder),
+                epsg,
+                proj_string,
+            )
+        };
         let samples_per_pixel = decoder
             .get_tag_u32(Tag::SamplesPerPixel)
             .or_else(|_| decoder.get_tag_u32(Tag::Unknown(277)))
@@ -1281,7 +1304,10 @@ impl GeoTiffStreamReader {
                 )))
             }
         };
-        let band_scaling = extract_band_scaling(decoder, samples_per_pixel)?;
+        let mut band_scaling = extract_band_scaling(decoder, samples_per_pixel)?;
+        if let Some(base) = base.filter(|_| band_scaling.is_empty()) {
+            band_scaling.clone_from(&base.band_scaling);
+        }
         let alpha_sample = extract_alpha_sample(decoder, samples_per_pixel);
 
         let (chunk_w, chunk_h) = decoder.chunk_dimensions();
@@ -1317,7 +1343,11 @@ impl GeoTiffStreamReader {
             band_scaling,
             alpha_sample,
             planes,
-            internal_mask: InternalMask::find(decoder, width, height)?,
+            internal_mask: if base.is_none() {
+                InternalMask::find(decoder, width, height)?
+            } else {
+                None
+            },
         };
 
         let compression = match decoder.get_tag_u32(Tag::Compression) {
@@ -1481,12 +1511,13 @@ impl GeoTiffStreamReader {
             let reader = HttpRangeReader::new(Arc::clone(&remote));
             let mut decoder = Decoder::new(reader)?;
             let (metadata, chunk_layout, chunk_info) =
-                Self::parse_metadata_and_layout(&mut decoder)?;
+                Self::parse_metadata_and_layout(&mut decoder, None)?;
 
             return Ok(Self {
                 file_path: path_buf,
                 source: RasterSource::Remote(remote),
                 local_identity: None,
+                image_index: 0,
                 metadata,
                 chunk_layout,
                 chunk_info,
@@ -1498,12 +1529,13 @@ impl GeoTiffStreamReader {
             let reader = HttpRangeReader::new(Arc::clone(&remote));
             let mut decoder = Decoder::new(reader)?;
             let (metadata, chunk_layout, chunk_info) =
-                Self::parse_metadata_and_layout(&mut decoder)?;
+                Self::parse_metadata_and_layout(&mut decoder, None)?;
 
             return Ok(Self {
                 file_path: path_buf,
                 source: RasterSource::Remote(remote),
                 local_identity: None,
+                image_index: 0,
                 metadata,
                 chunk_layout,
                 chunk_info,
@@ -1524,12 +1556,14 @@ impl GeoTiffStreamReader {
 
         let cursor = Cursor::new(&mmap_arc[..]);
         let mut decoder = Decoder::new(cursor)?;
-        let (metadata, chunk_layout, chunk_info) = Self::parse_metadata_and_layout(&mut decoder)?;
+        let (metadata, chunk_layout, chunk_info) =
+            Self::parse_metadata_and_layout(&mut decoder, None)?;
 
         Ok(Self {
             file_path: path_buf,
             source: RasterSource::Local(mmap_arc),
             local_identity,
+            image_index: 0,
             metadata,
             chunk_layout,
             chunk_info,
@@ -1545,13 +1579,19 @@ impl GeoTiffStreamReader {
         let inner = match &self.source {
             RasterSource::Local(mmap) => {
                 let cursor = Cursor::new(&mmap[..]);
-                let decoder = Decoder::new(cursor)?;
+                let mut decoder = Decoder::new(cursor)?;
+                if self.image_index != 0 {
+                    decoder.seek_to_image(self.image_index)?;
+                }
                 InnerDecoder::Local(decoder)
             }
             RasterSource::Remote(remote) => {
                 let reader =
                     HttpRangeReader::with_overlay(Arc::clone(remote), Arc::clone(&remote_overlay));
-                let decoder = Decoder::new(reader)?;
+                let mut decoder = Decoder::new(reader)?;
+                if self.image_index != 0 {
+                    decoder.seek_to_image(self.image_index)?;
+                }
                 InnerDecoder::Remote(decoder)
             }
         };

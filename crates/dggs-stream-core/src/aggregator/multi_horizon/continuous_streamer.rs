@@ -176,6 +176,7 @@ impl MultiScanHorizonStreamer {
         let resolved = config
             .transfer
             .resolve_for_mosaic(mosaic.as_ref(), config, false);
+        let mosaic = mosaic.for_overview_scan(config, resolved)?;
         let (inner, transfer) = if resolved.is_assign_centers() {
             (
                 MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?,

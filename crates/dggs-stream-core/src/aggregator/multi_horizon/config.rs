@@ -343,6 +343,8 @@ pub struct MultiResolutionConfig {
     /// single-pass horizon kernel), interpolation at cell centres, or an area-weighted
     /// overlay. See [`crate::transfer`].
     pub transfer: crate::transfer::TransferMode,
+    /// Use a compatible reduced COG image for approximate center scans.
+    pub auto_overview: bool,
     /// Minimum fraction of selected overlap with valid band data. Overlay only.
     pub valid_coverage_threshold: Option<f64>,
     /// A per-cell histogram of a categorical scan: its classes (pixel values or bins),
@@ -403,6 +405,7 @@ impl MultiResolutionConfig {
             decimals: None,
             profile: None,
             transfer: crate::transfer::TransferMode::AssignCenters,
+            auto_overview: false,
             valid_coverage_threshold: None,
             histogram: None,
             partition: None,
@@ -492,6 +495,11 @@ impl MultiResolutionConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.validate_coverage_threshold()?;
+        if self.auto_overview && self.partition.is_some() {
+            return Err(DggsStreamError::InvalidParameter(
+                "overview scans cannot use native chunk partitions".into(),
+            ));
+        }
         if let Some(spec) = &self.histogram {
             spec.validate()?;
             if spec.transfer_mode(self.transfer)? != self.transfer {
