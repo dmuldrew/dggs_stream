@@ -806,8 +806,8 @@ Topic guides that apply to every engine. Engine-specific documentation is listed
 | [PMTiles & Multi-Resolution](docs/pmtiles.md) | Multi-resolution pyramids, zoom mapping, zero-server web maps |
 | [Optimal Raster Formats](docs/optimal-raster-format.md) | Why tiled WGS84 COGs are 4.5–6× faster, GDAL recipes |
 | [Worked Examples](docs/worked-examples.md) | One question per engine and grid: A5 wetland totals, H3 flood exposure, S2 snowpack roll-ups, HEALPix latitude bands |
-| [Transfer Modes](docs/transfer-modes.md) | Centre assignment, interpolation at cell centres (nearest, bilinear, bicubic, Lanczos), area-weighted and mass-preserving overlay |
-| [Super-Sampling](docs/super-sampling.md) | RGSS, Hex, Gaussian boundary anti-aliasing presets |
+| [Transfer Modes](docs/transfer-modes.md) | Centre assignment, interpolation (cell-centre or sub-cell quadrature: nearest, bilinear, bicubic, Lanczos), area-weighted and mass-preserving overlay |
+| [Super-Sampling](docs/super-sampling.md) | Sub-pixel (`assign_centers`) and sub-cell (`interpolate`) quadrature presets (`rgss`, `8rooks`, `16point`, …) and where each applies |
 | [CRS & Projections](docs/crs-and-projection.md) | Supported projections, detection, 3-tier transform hierarchy |
 | [Architecture Comparison](docs/architecture-comparison.md) | Benchmarks vs Python/PostGIS/GDAL, environment trade-offs |
 | [Test Coverage](docs/testing.md) | Every test suite grouped by category (geodetic, threading, eviction, codecs, engines…), gated tests, CI coverage |

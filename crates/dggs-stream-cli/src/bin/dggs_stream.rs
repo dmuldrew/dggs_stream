@@ -117,6 +117,9 @@ fn print_help() {
                                      overlaps, weighted by overlap area), or auto\n                                     \
                                      (pick from cell-to-pixel area ratio and options)\n  \
           --interpolation <M>        nearest, bilinear (default), bicubic or lanczos\n  \
+          --sampling <PRESET>        Quadrature preset for assign_centers (sub-pixel) or\n                                     \
+                                     interpolate (sub-cell): center (default), rgss,\n                                     \
+                                     5point, gaussian, hex, 8rooks, 9point or 16point\n  \
           --valid-coverage-threshold <F>  Overlay: minimum valid overlap fraction (0..1)\n  \
           --overlay-weighted <BOOL>  false counts every touched pixel once (default true)\n  \
           --mass-preserve            Overlay: normalise each pixel's weights so `sum` is\n                                     \

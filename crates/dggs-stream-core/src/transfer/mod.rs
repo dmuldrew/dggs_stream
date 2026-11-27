@@ -5,8 +5,9 @@
 //!   single-pass horizon kernel in [`crate::aggregator::multi_horizon`]; nothing in
 //!   this module runs for it.
 //! - [`TransferMode::Interpolate`](crate::transfer::TransferMode::Interpolate): each cell whose centre lies on the raster takes the raster
-//!   value interpolated at that centre. For cells finer than the pixels, where centre
-//!   assignment leaves most cells empty.
+//!   value interpolated at its centre, or across a sub-cell quadrature [`SamplingPattern`](crate::aggregator::SamplingPattern)
+//!   inside its projected cell polygon. For cells finer than or comparable to the pixels,
+//!   where centre assignment leaves empty cells or misses intra-cell spread.
 //! - [`TransferMode::Overlay`](crate::transfer::TransferMode::Overlay): each cell aggregates the pixels it overlaps, weighted by
 //!   the overlapped fraction of each pixel, computed exactly from the cell's polygon in
 //!   pixel space. With `mass_preserve`, every pixel's weights are normalised to sum to
@@ -122,13 +123,13 @@ impl TransferMode {
                 weighted: overlay_weighted.unwrap_or(true),
                 mass_preserve: mass_preserve.unwrap_or(false),
             },
-            // Not a name: `sampling` is the sub-pixel option of the default mode, and
-            // the cell-centre mode is `interpolate`.
+            // Not a name: `sampling` is an option on `'assign_centers'` and `'interpolate'`,
+            // while the interpolation transfer mode itself is `'interpolate'`.
             Some("sample" | "sampling") => {
                 return Err(invalid(format!(
-                    "Invalid transfer '{}': use 'interpolate' to give each cell the value \
-                     interpolated at its centre (the sub-pixel `sampling` option is separate \
-                     and works with 'assign_centers'); expected {}",
+                    "Invalid transfer '{}': use 'interpolate' to interpolate at each cell \
+                     (`sampling` is a separate option that works with 'assign_centers' and \
+                     'interpolate'); expected {}",
                     name.as_deref().unwrap_or_default(),
                     Self::EXPECTED
                 )))
@@ -216,10 +217,7 @@ impl TransferMode {
         if !self.is_auto() {
             return *self;
         }
-        if config.should_compact_h3_children()
-            || config.spectral_formula.is_some()
-            || !config.sampling.is_single_point()
-        {
+        if config.should_compact_h3_children() || config.spectral_formula.is_some() {
             return Self::AssignCenters;
         }
         if config.valid_coverage_threshold.is_some()
@@ -238,13 +236,14 @@ impl TransferMode {
         else {
             return Self::AssignCenters;
         };
-        resolve_auto_transfer(
+        let resolved = resolve_auto_transfer(
             config.grid,
             &config.resolutions,
             pixel_area_m2,
             categorical,
             allow_interpolate,
-        )
+        );
+        finish_auto_resolution(resolved, &config.sampling)
     }
 
     /// `"assign_centers"`, `"interpolate"`, `"overlay"` or `"auto"`.
@@ -273,6 +272,18 @@ pub fn nested_overlay_rollup(grid: GridKind, mode: TransferMode, categorical: bo
                 mass_preserve: false
             }
         )
+}
+
+/// Non-default `sampling` works with `AssignCenters` and `Interpolate`, but not `Overlay`.
+fn finish_auto_resolution(
+    resolved: TransferMode,
+    sampling: &crate::aggregator::sampling::SamplingPattern,
+) -> TransferMode {
+    if !sampling.is_single_point() && !matches!(resolved, TransferMode::Interpolate(_)) {
+        TransferMode::AssignCenters
+    } else {
+        resolved
+    }
 }
 
 /// Choose a concrete [`TransferMode`] for `grid` at `resolutions` given `pixel_area_m2`.
@@ -480,6 +491,28 @@ mod tests {
         assert_eq!(
             resolve_auto_transfer(GridKind::H3, &[8], f64::NAN, false, true),
             TransferMode::AssignCenters
+        );
+    }
+
+    #[test]
+    fn finish_auto_resolution_keeps_sampling_with_interpolate_only() {
+        use crate::aggregator::sampling::SamplingPattern;
+        let rgss = SamplingPattern::rgss();
+        let center = SamplingPattern::center();
+        let interp = TransferMode::Interpolate(Interpolation::Bilinear);
+
+        assert_eq!(finish_auto_resolution(interp, &rgss), interp);
+        assert_eq!(
+            finish_auto_resolution(TransferMode::OVERLAY, &rgss),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            finish_auto_resolution(TransferMode::AssignCenters, &rgss),
+            TransferMode::AssignCenters
+        );
+        assert_eq!(
+            finish_auto_resolution(TransferMode::OVERLAY, &center),
+            TransferMode::OVERLAY
         );
     }
 }

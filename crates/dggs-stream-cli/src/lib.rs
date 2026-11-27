@@ -23,6 +23,7 @@ use dggs_stream_core::aggregator::multi_horizon::{
     MultiScanHorizonStreamer, ScanPartition,
 };
 use dggs_stream_core::aggregator::output_policy::{NodataPolicy, OutputPolicy, MAX_DECIMALS};
+use dggs_stream_core::aggregator::sampling::SamplingPattern;
 use dggs_stream_core::columnar::ipc::{write_ipc_stream, write_jsonl_stream, IpcStreamReader};
 use dggs_stream_core::columnar::partitioned::{
     merge_partial_batches, PartitionedBatchReader, PARTIAL_STATE_COLUMN,
@@ -86,6 +87,9 @@ pub struct CliStreamOptions {
     /// pixels map onto cells (default: each pixel into the cell holding its centre;
     /// `auto` chooses from the cell-to-pixel area ratio and scan options).
     pub transfer: TransferMode,
+    /// `--sampling`: quadrature pattern for `assign_centers` (sub-pixel) and `interpolate`
+    /// (sub-cell polygon quadrature), defaulting to single-center sampling.
+    pub sampling: SamplingPattern,
     /// Minimum valid fraction of selected raster overlap.
     pub valid_coverage_threshold: Option<f64>,
     /// `--histogram`, `--histogram-weight` and `--histogram-normalize`: a structured
@@ -122,6 +126,7 @@ impl Default for CliStreamOptions {
             partition: None,
             output: OutputPolicy::default(),
             transfer: TransferMode::AssignCenters,
+            sampling: SamplingPattern::default(),
             valid_coverage_threshold: None,
             histogram: None,
             profile: None,
@@ -190,6 +195,7 @@ impl CliStreamOptions {
         config.overlap_rule = OverlapRule::Cutline;
         apply_output_policy(&mut config, &self.output);
         config.transfer = self.transfer;
+        config.sampling = self.sampling.clone();
         config.profile = self.profile.clone();
         config.valid_coverage_threshold = self.valid_coverage_threshold;
         if let Some(n) = self.decode_workers {
@@ -1472,6 +1478,7 @@ fn parse_export_args(
             }
             "--transfer" => transfer = Some(value()?.to_string()),
             "--interpolation" => interpolation = Some(value()?.to_string()),
+            "--sampling" => opts.sampling = SamplingPattern::parse(value()?)?,
             "--overlay-weighted" => {
                 let v = value()?;
                 overlay_weighted = Some(match v.to_ascii_lowercase().as_str() {
@@ -2592,9 +2599,30 @@ mod tests {
             &["--mass-preserve"],
             &["--transfer", "overlay", "--overlay-weighted", "maybe"],
             &["--transfer", "interpolate", "--interpolation", "cubic9"],
+            &["--sampling", "unknown_preset"],
+            &["--transfer", "overlay", "--sampling", "rgss"],
         ] {
             assert!(run(bad).is_err(), "{bad:?}");
         }
+        assert!(run(&["--sampling", "rgss"]).is_ok());
+        let interp_rgss = run(&[
+            "-r",
+            "auto+2",
+            "--transfer",
+            "interpolate",
+            "--sampling",
+            "rgss",
+        ])
+        .unwrap();
+        assert!(!interp_rgss.is_empty());
+        assert!(interp_rgss.iter().all(|row| {
+            let c = row["count"].as_f64().unwrap();
+            c > 0.0 && c <= 1.0 + 1e-12 && (row["mean"].as_f64().unwrap() - 2.5).abs() < 1e-9
+        }));
+        assert!(interp_rgss
+            .iter()
+            .any(|row| (row["count"].as_f64().unwrap() - 1.0).abs() < 1e-12));
+        assert!(run(&["-r", "auto+2", "--transfer", "auto", "--sampling", "rgss"]).is_ok());
     }
 
     #[test]
