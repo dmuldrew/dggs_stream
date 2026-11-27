@@ -3200,3 +3200,35 @@ fn interpolate_subcell_sampling_matches_a_single_raster_across_mosaic_tiles() {
         );
     }
 }
+
+#[test]
+fn a5_center_assignment_on_affine_rows_matches_scalar_cell_lookup() {
+    // Every pixel holds a distinct value, so each cell's sum identifies the
+    // pixels assigned to it. Cells must match the per-pixel scalar lookup at
+    // every requested resolution even though rows share latitude work.
+    let (_tmp, path) = TestGeoTiffBuilder::new(W, H)
+        .origin(ORIGIN.0, ORIGIN.1)
+        .pixel_size(PIXEL)
+        .create_f32_tempfile(|c, r| (r * W + c + 1) as f32);
+    for res in [matched(GridKind::A5, 0), matched(GridKind::A5, 2)] {
+        let mut expected: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
+        for r in 0..H {
+            for c in 0..W {
+                let (lon, lat) = pixel_centre(c, r);
+                let cell = GridKind::A5.cell_at(lat, lon, res).unwrap();
+                let entry = expected.entry(cell).or_default();
+                entry.0 += f64::from(r * W + c + 1);
+                entry.1 += 1.0;
+            }
+        }
+        let got = scan(
+            &path,
+            &config(GridKind::A5, res, TransferMode::AssignCenters),
+        );
+        let got: BTreeMap<u64, (f64, f64)> = got
+            .into_iter()
+            .map(|(cell, acc)| (cell, (acc.sum, acc.count)))
+            .collect();
+        assert_eq!(got, expected, "A5 resolution {res}");
+    }
+}

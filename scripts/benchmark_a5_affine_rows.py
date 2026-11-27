@@ -5,11 +5,11 @@ Each pixel holds a distinct positive integer so categorical output identifies it
 """
 import argparse
 import math
-from pathlib import Path
 import statistics
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 
 def fixture(directory, size):

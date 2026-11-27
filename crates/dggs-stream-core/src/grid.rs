@@ -1211,17 +1211,24 @@ impl RowBatchBackend for A5Backend {
     const HOIST_POINT_LATITUDE: bool = true;
 
     fn point_at_latitude(lat: f64) -> impl Fn(f64) -> Option<Self::Point> {
-        use a5::core::coordinate_transforms::from_lon_lat;
+        use a5::coordinate_systems::Degrees;
+        use a5::core::coordinate_transforms::{deg_to_rad, from_lon_lat};
+        // Mirrors `LONGITUDE_OFFSET` in a5's `coordinate_transforms` (private
+        // there). The row/scalar parity test fails if it ever diverges.
+        const A5_LONGITUDE_OFFSET: f64 = 93.0;
         // A5's polar angle depends only on latitude and its azimuth only on
-        // longitude. Use the library's conversions for both so the scalar and
-        // row paths round identically, including at pentagon boundaries.
+        // longitude. Compute phi once per row via the library; per pixel only
+        // the azimuth is needed, so avoid the library call that would also
+        // recompute an unused authalic latitude for every pixel.
         let phi = from_lon_lat(a5::LonLat::new(0.0, lat)).phi;
         let near_pole = a5_near_pole(lat);
         move |lon| {
             if !lon.is_finite() {
                 return None;
             }
-            let theta = from_lon_lat(a5::LonLat::new(wrap_lon_180(lon), 0.0)).theta;
+            let theta = deg_to_rad(Degrees::new_unchecked(
+                wrap_lon_180(lon) + A5_LONGITUDE_OFFSET,
+            ));
             Some((
                 a5::coordinate_systems::Spherical::new(theta, phi),
                 near_pole,
