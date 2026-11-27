@@ -206,3 +206,20 @@ fn strict_mode_accepts_rasters_without_failures() {
     cfg.strict_transforms = true;
     assert_eq!(continuous(&path, &cfg), (0, 200.0));
 }
+
+#[test]
+fn overview_preview_keeps_native_image_when_the_tile_centre_is_outside_the_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("laea-wide.tif");
+    // Spherical Lambert azimuthal equal-area has no inverse beyond ~12.76 Mm
+    // from the centre. These 4 Mm pixels put the raster's centre at x = 16 Mm
+    // while the leftmost columns remain valid.
+    create_constant_f32_geotiff(&path, 8, 4, 0.0, 4_000_000.0, 4_000_000.0, 3.0);
+    let mut cfg = config(SamplingPattern::center(), None);
+    cfg.custom_crs = Some("+proj=laea +lat_0=0 +lon_0=0 +R=6378137 +units=m".into());
+    let (_, native_weight) = continuous(&path, &cfg);
+    assert!(native_weight > 0.0);
+    cfg.auto_overview = true;
+    let (_, preview_weight) = continuous(&path, &cfg);
+    assert_eq!(preview_weight, native_weight);
+}

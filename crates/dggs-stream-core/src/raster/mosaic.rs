@@ -329,7 +329,18 @@ impl TileDescriptor {
     }
 
     pub(crate) fn select_overview(&mut self, config: &MultiResolutionConfig) -> Result<bool> {
-        let native_area = crate::resolution::tile_pixel_ground_area_m2_in_bbox(self, config.bbox)?;
+        // The probe projects the tile's centre pixel, which can lie outside the
+        // projection's domain while other pixels are valid. Keep the native image
+        // for such a tile, as a native scan would still assign its in-domain pixels.
+        let Ok(native_area) =
+            crate::resolution::tile_pixel_ground_area_m2_in_bbox(self, config.bbox)
+        else {
+            eprintln!(
+                "dggs-stream: --overview auto tile {} kept native image (pixel area unavailable)",
+                self.tile_idx
+            );
+            return Ok(false);
+        };
         let target = config
             .resolutions
             .iter()
