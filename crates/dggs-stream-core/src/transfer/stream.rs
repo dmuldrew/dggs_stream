@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::aggregator::accumulator::ContinuousAccumulator;
@@ -571,6 +571,9 @@ pub struct TransferStream<A: TransferAccumulator> {
     /// reducer, so tests can tell the parallel path from the serial one.
     #[cfg(test)]
     overlap_batches: usize,
+    /// Batches of cells accumulated in parallel by the mass-preserving second pass.
+    #[cfg(test)]
+    accumulate_batches: usize,
     #[cfg(test)]
     overlap_retries: usize,
     /// Overlay clipping passes (one per block and clipped resolution).
@@ -833,6 +836,8 @@ impl<A: TransferAccumulator> TransferStream<A> {
             profile: config.profile.clone(),
             #[cfg(test)]
             overlap_batches: 0,
+            #[cfg(test)]
+            accumulate_batches: 0,
             #[cfg(test)]
             overlap_retries: 0,
             #[cfg(test)]
@@ -1239,18 +1244,22 @@ impl<A: TransferAccumulator> TransferStream<A> {
         let histogram_bins = histogram_bins_arc.as_deref();
         let remapper = remapper_arc.as_deref();
         let emit_nodata = self.emit_nodata;
-        let mut selected = (!(!mass_preserve && !coarse && A::SUPPORTS_MERGE)
+        let selected = (!(!mass_preserve && !coarse && A::SUPPORTS_MERGE)
             && (bbox_filter.is_some() || several_tiles))
-            .then(|| vec![None; band_width * block.rows.len()]);
+            .then(|| {
+                (0..band_width * block.rows.len())
+                    .map(|_| AtomicU8::new(0))
+                    .collect::<Vec<_>>()
+            });
         // `min_mean` and `max_mean` compare the rounded mean with an inclusive bound.
         // Slice accumulation sums in a different order than per-pixel updates, so a
         // mean that is exactly on the bound could land one ulp outside it. Keep the
         // per-pixel order whenever such a filter is set.
         let mean_filtered = self.filters.min_mean.is_some() || self.filters.max_mean.is_some();
-        let mut contribute_run = |pending: &mut Pending<A>,
-                                  mut coverage: Option<&mut BandCoverage>,
-                                  run: OverlapRun,
-                                  weight: f64| {
+        let contribute_run = |pending: &mut Pending<A>,
+                              mut coverage: Option<&mut BandCoverage>,
+                              run: OverlapRun,
+                              weight: f64| {
             let start_pixel = run.pixel as usize;
             let row_off = start_pixel / band_width;
             let col0 = start_pixel % band_width;
@@ -1284,8 +1293,20 @@ impl<A: TransferAccumulator> TransferStream<A> {
             // The direct parallel path keeps no cache (its polygon spans select pixels
             // themselves), but this centre-assignment fallback must still filter.
             let filtered = bbox_filter.is_some() || several_tiles;
-            let mut is_selected = |offset: usize| match selected.as_mut() {
-                Some(cache) => *cache[start + offset].get_or_insert_with(|| pixel_selected(offset)),
+            let is_selected = |offset: usize| match selected.as_ref() {
+                Some(cache) => {
+                    // Each byte caches only this predicate. Concurrent misses compute the
+                    // same value, so no other memory needs synchronizing.
+                    let entry = &cache[start + offset];
+                    match entry.load(Ordering::Relaxed) {
+                        0 => {
+                            let keep = pixel_selected(offset);
+                            entry.store(if keep { 2 } else { 1 }, Ordering::Relaxed);
+                            keep
+                        }
+                        value => value == 2,
+                    }
+                }
                 None => !filtered || pixel_selected(offset),
             };
             let mut offset = 0;
@@ -1638,12 +1659,10 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
             }
         }
-        let mut start = 0;
-        for (cell, end) in cell_ends {
-            let pending = pending_map
-                .get_mut(&cell)
-                .expect("cell remains pending until block completion");
-            for &run in &overlaps[start..end] {
+        // Denominators are complete. Cells can now consume their normalized weights
+        // independently, preserving the order of observations in each accumulator.
+        let accumulate = |pending: &mut Pending<A>, runs: &[OverlapRun]| {
+            for &run in runs {
                 let run_start = run.pixel as usize;
                 let run_len = run.len as usize;
                 if run_len >= MIN_SIMD_RUN
@@ -1670,7 +1689,35 @@ impl<A: TransferAccumulator> TransferStream<A> {
                     }
                 }
             }
-            start = end;
+        };
+        let mut start = 0;
+        if self
+            .overlap_parallelism
+            .should_run_parallel(cell_ends.len(), MIN_PARALLEL_DIRECT_CELLS)
+        {
+            let mut work = Vec::new();
+            for batch in cell_ends.chunks(DIRECT_BATCH_CELLS) {
+                #[cfg(test)]
+                {
+                    self.accumulate_batches += 1;
+                }
+                for &(cell, end) in batch {
+                    let pending = pending_map.remove(&cell).expect("cell remains pending");
+                    work.push((cell, pending, &overlaps[start..end]));
+                    start = end;
+                }
+                self.overlap_parallelism.install(|| {
+                    work.par_iter_mut()
+                        .for_each(|(_, pending, runs)| accumulate(pending, runs));
+                });
+                pending_map.extend(work.drain(..).map(|(cell, pending, _)| (cell, pending)));
+            }
+        } else {
+            for (cell, end) in cell_ends {
+                let pending = pending_map.get_mut(&cell).expect("cell remains pending");
+                accumulate(pending, &overlaps[start..end]);
+                start = end;
+            }
         }
         self.record_failures(failures)
     }
@@ -3518,6 +3565,22 @@ mod tests {
         bbox: Option<[f64; 4]>,
         mass_preserve: bool,
     ) -> (BTreeMap<u64, ContinuousAccumulator>, usize, usize) {
+        let (cells, stream) =
+            overlay_scan_stream(file, grid, resolution, workers, bbox, mass_preserve);
+        (cells, stream.overlap_batches, stream.overlap_retries)
+    }
+
+    fn overlay_scan_stream(
+        file: &tempfile::NamedTempFile,
+        grid: GridKind,
+        resolution: u8,
+        workers: Option<usize>,
+        bbox: Option<[f64; 4]>,
+        mass_preserve: bool,
+    ) -> (
+        BTreeMap<u64, ContinuousAccumulator>,
+        TransferStream<ContinuousAccumulator>,
+    ) {
         let mosaic = Arc::new(
             MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap(),
         );
@@ -3537,7 +3600,7 @@ mod tests {
             .unwrap()
             > 0
         {}
-        (cells, stream.overlap_batches, stream.overlap_retries)
+        (cells, stream)
     }
 
     #[test]
@@ -3765,6 +3828,27 @@ mod tests {
             .collect();
         image.write_data(&pixels).unwrap();
         file
+    }
+
+    #[test]
+    fn mass_preserve_accumulation_runs_in_parallel_batches() {
+        // Conservation across workers is covered by the transfer_modes integration
+        // suite; this only checks that the second pass really used worker batches.
+        let empty_strips = [3, 11];
+        let raster = geographic_multi_strip_raster(128, 96, 4, -9999.0, &empty_strips);
+        let bbox = Some([-122.468, 37.674, -122.276, 37.834]);
+        for (grid, res) in [
+            (GridKind::H3, 8),
+            (GridKind::S2, 12),
+            (GridKind::Healpix, 12),
+        ] {
+            let (serial, serial_stream) =
+                overlay_scan_stream(&raster, grid, res, Some(1), bbox, true);
+            let (parallel, stream) = overlay_scan_stream(&raster, grid, res, Some(4), bbox, true);
+            assert_eq!(serial_stream.accumulate_batches, 0, "{grid}");
+            assert!(stream.accumulate_batches > 0, "{grid}");
+            assert_eq!(parallel, serial, "{grid}");
+        }
     }
 
     #[test]
