@@ -86,6 +86,7 @@ fn print_help() {
         Usage:\n  \
           dggs-stream-cli ipc <input.tif> [options]        Stream binary Columnar IPC to stdout or -o <file>\n  \
           dggs-stream-cli jsonl <input.tif> [options]      Stream JSONEachRow (NDJSON) to stdout or -o <file>\n  \
+          dggs-stream-cli polyfill <input.geojson|-> [--grid GRID] [-r R] [--containment MODE] [-o cells.jsonl]\n  \
           dggs-stream-cli parquet <input.tif> -o <out>     Export directly to Parquet / GeoParquet\n  \
           dggs-stream-cli pmtiles <input.tif> -o <out>     Export directly to PMTiles v3 archive\n  \
           dggs-stream-cli parquet-to-pmtiles <in.parquet> -o <out>  Transcode H3-indexed Parquet to PMTiles v3\n  \
@@ -141,6 +142,7 @@ fn print_help() {
           --columns <col1,col2,...>  Column projection pushdown\n  \
           --limit <N>                Maximum number of rows to emit\n  \
           -o, --output <PATH|->      Output file path (default: '-' for stdout on ipc/jsonl/plan/merge)\n  \
+          --compression <CODEC>      parquet: snappy (default), zstd, lz4, gzip, brotli or none\n  \
           --partition-by-parent-res <R>  parquet: write a new Hive dataset by H3 parent at resolution R\n  \
           --h3-column <NAME>         parquet-to-pmtiles: H3 column, integer or hex (default: h3_index,\n  \
           \x20                          h3_hex, h3, cell or hex, whichever comes first)\n\n\
@@ -208,6 +210,7 @@ fn main() {
         "jsonl" => parse_stream_args(rest, StreamOutputFormat::Jsonl).and_then(|(opts, out)| {
             with_output(out, |mut w| stream_raster_to_writer(&opts, &mut w))
         }),
+        "polyfill" => dggs_stream_cli::polyfill::parse_args(rest).and_then(|(opts, out)| with_output(out, |w| dggs_stream_cli::polyfill::run(&opts, w))),
         "plan" => parse_plan_args(rest).and_then(|args| {
             let plan = plan_raster_partitions(
                 &args.input_path,

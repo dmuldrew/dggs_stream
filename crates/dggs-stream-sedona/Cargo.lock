@@ -1499,7 +1499,10 @@ version = "0.7.0"
 dependencies = [
  "dggs-stream-core",
  "flate2",
+ "geo-types",
+ "geojson",
  "h3o",
+ "parquet 60.1.0",
  "serde",
  "serde_json",
  "tempfile",

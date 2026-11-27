@@ -1003,3 +1003,128 @@ fn hive_parent_revisited_across_windows_and_empty_scan() {
         }
     }
 }
+
+#[test]
+fn compression_is_written_to_every_export_layout() {
+    use parquet::basic::Compression;
+    let dir = tempfile::tempdir().unwrap();
+    let (_temp, raster) = classes_tif();
+    for (i, (codec, expected, bands, partitioned, categorical)) in [
+        ("snappy", Compression::SNAPPY, false, false, false),
+        (
+            "zstd",
+            Compression::ZSTD(Default::default()),
+            false,
+            true,
+            true,
+        ),
+        ("lz4", Compression::LZ4_RAW, true, false, false),
+        ("none", Compression::UNCOMPRESSED, true, true, false),
+        (
+            "gzip",
+            Compression::GZIP(Default::default()),
+            false,
+            false,
+            true,
+        ),
+        (
+            "brotli",
+            Compression::BROTLI(Default::default()),
+            false,
+            true,
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dest = dir.path().join(i.to_string());
+        let mut args = vec![
+            "parquet",
+            s(&raster),
+            "-r",
+            "8",
+            "--compression",
+            codec,
+            "-o",
+            s(&dest),
+        ];
+        if bands {
+            args.extend(["--bands", "1"]);
+        }
+        if partitioned {
+            args.extend(["--partition-by-parent-res", "6"]);
+        }
+        if categorical {
+            args.push("-c");
+        }
+        run_ok(&args);
+        let parts = if partitioned {
+            parent_parts(&dest)
+        } else {
+            vec![dest]
+        };
+        assert!(!parts.is_empty());
+        for part in parts {
+            let reader = SerializedFileReader::new(File::open(part).unwrap()).unwrap();
+            assert!(reader.num_row_groups() > 0);
+            for group in reader.metadata().row_groups() {
+                for column in group.columns() {
+                    assert_eq!(column.compression(), expected);
+                }
+            }
+        }
+    }
+    run_err(
+        &["parquet", s(&raster), "--compression", "unknown"],
+        "--compression",
+    );
+}
+
+#[test]
+fn polyfill_preserves_feature_ids_and_calls_each_grid() {
+    use dggs_stream_core::grid::GridKind;
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("polygons.geojson");
+    let ring = serde_json::json!([[
+        [1.234, 2.345],
+        [1.234001, 2.345],
+        [1.234, 2.345001],
+        [1.234, 2.345]
+    ]]);
+    let collection = serde_json::json!({"type":"FeatureCollection","features":[
+        {"type":"Feature","id":"parcel","geometry":{"type":"Polygon","coordinates":ring},"properties":{}},
+        {"type":"Feature","geometry":null,"properties":{}},
+        {"type":"Feature","geometry":{"type":"MultiPolygon","coordinates":[ring]},"properties":{}}
+    ]});
+    std::fs::write(&input, collection.to_string()).unwrap();
+    for grid in [GridKind::H3, GridKind::S2, GridKind::Healpix, GridKind::A5] {
+        let out = run_ok(&[
+            "polyfill",
+            s(&input),
+            "--grid",
+            grid.as_str(),
+            "-r",
+            "8",
+            "--containment",
+            "covers",
+        ]);
+        let rows: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&out.stdout)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let cell = grid.cell_at(2.345, 1.234, 8).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["feature_id"], "parcel");
+        assert_eq!(rows[1]["feature_id"], 2);
+        for row in rows {
+            assert_eq!(row[grid.index_column_name()], cell);
+            assert_eq!(row[grid.hex_column_name()], format!("{cell:x}"));
+        }
+    }
+    let dest = dir.path().join("cells.jsonl");
+    std::fs::write(&dest, "previous output").unwrap();
+    std::fs::write(&input, r#"{"type":"Point","coordinates":[0,0]}"#).unwrap();
+    run_err(&["polyfill", s(&input), "-o", s(&dest)], "Polygon");
+    assert_eq!(std::fs::read_to_string(dest).unwrap(), "previous output");
+}
