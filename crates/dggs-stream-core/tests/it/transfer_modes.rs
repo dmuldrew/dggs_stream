@@ -1250,9 +1250,11 @@ fn ground_area_small_bbox_selects_one_whole_pixel_on_a_wide_raster() {
     assert!((pixels - 1.0).abs() < 1e-8, "{pixels}");
 }
 
-/// Ground-area overlay keeps at most `decode_budget_bytes` of decoded chunks
-/// (or one chunk, when a chunk alone exceeds the budget), and the budget does
-/// not change results.
+/// Ground-area overlay's chunk cache holds at most `decode_budget_bytes` of
+/// decoded chunks (or one chunk, when a chunk alone exceeds the budget), and the
+/// budget does not change results. Both bounded budgets are smaller than a
+/// window, so no prefetcher runs and the cache holds every decoded chunk; the
+/// window's own copy of its rows is bounded by the window size instead.
 #[test]
 fn ground_area_overlay_stays_within_the_decode_budget() {
     use crate::helpers::{write_tiled, Crs};

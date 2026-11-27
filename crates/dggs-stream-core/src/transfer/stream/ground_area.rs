@@ -229,8 +229,10 @@ pub(crate) fn ground_area_overlay_tile(
                         block.rows.len() as u64 * block.cols.len() as u64,
                     );
                     let result = profile.time(Phase::Kernel, run);
-                    // Decoded chunks held by the window cache. A prefetcher
-                    // runs only when the whole window fits the budget.
+                    // Decoded chunks held by the window cache only. A prefetcher
+                    // runs only when the whole window fits the budget, and its
+                    // queue (capped in chunks) is not counted; the window's own
+                    // copy of its rows is bounded by the window size instead.
                     profile.peak(Counter::PeakDecodedBytes, cache.peak_bytes() as u64);
                     result
                 }

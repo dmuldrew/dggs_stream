@@ -1097,7 +1097,19 @@ pub unsafe extern "C" fn duckdb_result_error(_result: *mut duckdb_result) -> *co
 }
 
 /// Points the extension's DuckDB C API table at the mocks above.
+/// Serializes installs of the process-wide API table, so a test that swaps slots can
+/// read back what it installed before a concurrent test reinstalls the mocks.
+static API_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(super) fn install_mock_api() {
+    let _guard = API_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    install_mock_api_locked();
+}
+
+/// [`install_mock_api`] for a caller already holding `API_INSTALL_LOCK`.
+fn install_mock_api_locked() {
     static TABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let table = *TABLE.get_or_init(|| {
         let mut table = vec![ptr::null::<c_void>(); API_TABLE_LEN];
@@ -1203,7 +1215,12 @@ pub(super) fn install_mock_api() {
 /// after init is not referenced afterwards.
 #[test]
 fn repeated_api_table_installs_copy_the_latest_table() {
-    install_mock_api();
+    // Hold the install lock throughout: a concurrent `install_mock_api` would
+    // otherwise reset the spare slot between an install and its read-back.
+    let _guard = API_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    install_mock_api_locked();
     let mock = |index: usize| {
         // SAFETY: an index within `API_TABLE_LEN`; nothing is called.
         unsafe { lookup_api_fn(index, "unused\0") }
@@ -1234,6 +1251,6 @@ fn repeated_api_table_installs_copy_the_latest_table() {
     assert!(!mock(spare).is_null());
     drop(table);
 
-    install_mock_api();
+    install_mock_api_locked();
     assert_eq!(mock(spare), original_spare);
 }
