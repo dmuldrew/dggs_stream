@@ -5,13 +5,10 @@ use std::path::PathBuf;
 
 pub use h3o::geom::ContainmentMode;
 use h3o::geom::TilerBuilder;
-use h3o::{CellIndex, LatLng, Resolution};
+use h3o::Resolution;
 
-use crate::encoding::{
-    a5_index_to_wkb, fast_hex_u64, h3_index_to_wkb, parse_hex_u64, wkb_to_multipolygon, WkbBuf,
-    WKB_BUF_LEN,
-};
-use crate::grid::{a5_is_valid_cell, GridKind, PolygonFill};
+use crate::encoding::{fast_hex_u64, parse_hex_u64, wkb_to_multipolygon, WkbBuf, WKB_BUF_LEN};
+use crate::grid::{GridKind, PolygonFill};
 use crate::raster::geotiff::GeoTiffStreamReader;
 
 /// Approximate H3 cell areas in m^2 by resolution (0 to 15) for query planner cardinality estimation.
@@ -145,52 +142,38 @@ pub fn string_to_h3(hex: &str) -> u64 {
 /// Returns `f64::NAN` if `cell` is not a valid H3 index.
 #[inline]
 pub fn h3_to_lat(cell: u64) -> f64 {
-    match CellIndex::try_from(cell) {
-        Ok(idx) => LatLng::from(idx).lat(),
-        Err(_) => f64::NAN,
-    }
+    grid_to_lat(GridKind::H3, cell)
 }
 
 /// Extract the centroid longitude (in degrees, WGS84) of an H3 cell index.
 /// Returns `f64::NAN` if `cell` is not a valid H3 index.
 #[inline]
 pub fn h3_to_lng(cell: u64) -> f64 {
-    match CellIndex::try_from(cell) {
-        Ok(idx) => LatLng::from(idx).lng(),
-        Err(_) => f64::NAN,
-    }
+    grid_to_lng(GridKind::H3, cell)
 }
 
 /// Extract the H3 resolution (`0..=15`) of a 64-bit H3 cell index, or `-1` if invalid.
 #[inline]
 pub fn h3_get_resolution(cell: u64) -> i64 {
-    match CellIndex::try_from(cell) {
-        Ok(idx) => u8::from(idx.resolution()) as i64,
-        Err(_) => -1,
-    }
+    grid_get_resolution(GridKind::H3, cell)
 }
 
 /// Return `true` if `cell` is a valid 64-bit H3 cell index.
 #[inline]
 pub fn h3_is_valid_u64(cell: u64) -> bool {
-    CellIndex::try_from(cell).is_ok()
+    GridKind::H3.is_valid(cell)
 }
 
 /// Return `true` if `hex` is a valid hexadecimal H3 cell index string.
 #[inline]
 pub fn h3_is_valid_str(hex: &str) -> bool {
-    match parse_hex_u64(hex) {
-        Some(val) => CellIndex::try_from(val).is_ok(),
-        None => false,
-    }
+    grid_is_valid_str(GridKind::H3, hex)
 }
 
 /// Serialize a 64-bit H3 cell index to an OGC Well-Known Binary (WKB) 2D Polygon.
 #[inline]
 pub fn h3_to_wkb_u64(cell: u64) -> Option<Vec<u8>> {
-    let mut buf: WkbBuf = [0u8; WKB_BUF_LEN];
-    let len = h3_index_to_wkb(cell, &mut buf)?;
-    Some(buf[..len].to_vec())
+    grid_to_wkb_u64(GridKind::H3, cell)
 }
 
 /// Serialize a hexadecimal H3 cell index string to an OGC Well-Known Binary (WKB) 2D Polygon.
@@ -203,12 +186,7 @@ pub fn h3_to_wkb_str(hex: &str) -> Option<Vec<u8>> {
 /// Compute the parent H3 cell index at `parent_res` (`0..=15`) for a 64-bit H3 cell index.
 #[inline]
 pub fn h3_cell_to_parent_u64(cell: u64, parent_res: i64) -> Option<u64> {
-    if !(0..=15).contains(&parent_res) {
-        return None;
-    }
-    let idx = CellIndex::try_from(cell).ok()?;
-    let target_res = Resolution::try_from(parent_res as u8).ok()?;
-    idx.parent(target_res).map(u64::from)
+    grid_cell_to_parent_u64(GridKind::H3, cell, parent_res)
 }
 
 /// Compute the parent H3 cell hex string at `parent_res` (`0..=15`) for a hexadecimal H3 cell string.
@@ -441,58 +419,45 @@ pub fn string_to_a5(hex: &str) -> u64 {
 /// Index a WGS84 `(lon, lat)` coordinate (in degrees) to an A5 cell at `res` (`0..=30`).
 #[inline]
 pub fn a5_lonlat_to_cell(lon: f64, lat: f64, res: i64) -> Option<u64> {
-    if !lon.is_finite() || !(-90.0..=90.0).contains(&lat) || !(0..=30).contains(&res) {
-        return None;
-    }
-    a5::lonlat_to_cell(
-        a5::LonLat::new(crate::grid::wrap_lon_180(lon), lat),
-        res as i32,
-    )
-    .ok()
+    grid_lonlat_to_cell(GridKind::A5, lon, lat, res)
 }
 
 /// Extract the centroid latitude (in degrees, WGS84) of an A5 cell index.
 /// Returns `f64::NAN` if `cell` is not a valid A5 index.
 #[inline]
 pub fn a5_to_lat(cell: u64) -> f64 {
-    GridKind::A5
-        .center_lat_lng(cell)
-        .map_or(f64::NAN, |(lat, _)| lat)
+    grid_to_lat(GridKind::A5, cell)
 }
 
 /// Extract the centroid longitude (in degrees, WGS84) of an A5 cell index.
 /// Returns `f64::NAN` if `cell` is not a valid A5 index.
 #[inline]
 pub fn a5_to_lng(cell: u64) -> f64 {
-    GridKind::A5
-        .center_lat_lng(cell)
-        .map_or(f64::NAN, |(_, lng)| lng)
+    grid_to_lng(GridKind::A5, cell)
 }
 
 /// Extract the A5 resolution (`0..=30`) of a 64-bit A5 cell index, or `-1` if invalid.
 #[inline]
 pub fn a5_get_resolution(cell: u64) -> i64 {
-    GridKind::A5.resolution(cell).map_or(-1, i64::from)
+    grid_get_resolution(GridKind::A5, cell)
 }
 
 /// Return `true` if `cell` is a valid 64-bit A5 cell index.
 #[inline]
 pub fn a5_is_valid_u64(cell: u64) -> bool {
-    a5_is_valid_cell(cell)
+    GridKind::A5.is_valid(cell)
 }
 
 /// Return `true` if `hex` is a valid hexadecimal A5 cell index string.
 #[inline]
 pub fn a5_is_valid_str(hex: &str) -> bool {
-    parse_hex_u64(hex).is_some_and(a5_is_valid_cell)
+    grid_is_valid_str(GridKind::A5, hex)
 }
 
 /// Serialize a 64-bit A5 cell index to an OGC Well-Known Binary (WKB) 2D Polygon.
 #[inline]
 pub fn a5_to_wkb_u64(cell: u64) -> Option<Vec<u8>> {
-    let mut buf: WkbBuf = [0u8; WKB_BUF_LEN];
-    let len = a5_index_to_wkb(cell, &mut buf)?;
-    Some(buf[..len].to_vec())
+    grid_to_wkb_u64(GridKind::A5, cell)
 }
 
 /// Serialize a hexadecimal A5 cell index string to an OGC Well-Known Binary (WKB) 2D Polygon.
@@ -505,10 +470,7 @@ pub fn a5_to_wkb_str(hex: &str) -> Option<Vec<u8>> {
 /// Compute the parent A5 cell index at `parent_res` (`0..=30`) for a 64-bit A5 cell index.
 #[inline]
 pub fn a5_cell_to_parent_u64(cell: u64, parent_res: i64) -> Option<u64> {
-    if !(0..=30).contains(&parent_res) {
-        return None;
-    }
-    GridKind::A5.parent(cell, parent_res as u8)
+    grid_cell_to_parent_u64(GridKind::A5, cell, parent_res)
 }
 
 /// Compute the parent A5 cell hex string at `parent_res` (`0..=30`) for a hexadecimal A5 cell string.
@@ -791,6 +753,7 @@ fn spherical_arcs_cross(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use h3o::LatLng;
 
     #[test]
     fn test_scalar_ops_roundtrip_and_validity() {

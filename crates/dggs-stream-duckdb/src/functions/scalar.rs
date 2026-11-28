@@ -1,11 +1,8 @@
-use h3o::{CellIndex, Resolution};
 use std::ffi::c_char;
 
 #[cfg(test)]
 use crate::encoding::WKB_BUF_LEN;
-use crate::encoding::{
-    a5_index_to_wkb, cell_index_to_wkb, fast_hex_u64, h3_index_to_wkb, parse_hex_u64, WkbBuf,
-};
+use crate::encoding::{cell_index_to_wkb, fast_hex_u64, parse_hex_u64, WkbBuf};
 use crate::ffi::*;
 use crate::grid::GridKind;
 use crate::scalar_ops;
@@ -380,541 +377,6 @@ pub unsafe extern "C" fn scalar_string_to_h3(
     }
 }
 
-/// Scalar function: h3_to_lat(UBIGINT) -> DOUBLE
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_to_lat(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_to_lat(UBIGINT) -> DOUBLE`, so input
-    // is `u64` and output `f64`, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::h3_to_lat);
-        });
-    }
-}
-
-/// Scalar function: h3_to_lng(UBIGINT) -> DOUBLE
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_to_lng(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_to_lng(UBIGINT) -> DOUBLE`, so input
-    // is `u64` and output `f64`, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::h3_to_lng);
-        });
-    }
-}
-
-/// Scalar function: h3_get_resolution(UBIGINT) -> BIGINT (1-cycle bitshift)
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_get_resolution(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_get_resolution(UBIGINT) -> BIGINT`, so
-    // input is `u64` and output `i64`, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, |cell_u64: u64| {
-                let res = (cell_u64 >> 52) & 0x0F;
-                if res <= 15 && cell_u64 != 0 {
-                    res as i64
-                } else {
-                    -1
-                }
-            });
-        });
-    }
-}
-
-/// Scalar function: h3_is_valid(UBIGINT) -> BOOLEAN
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_is_valid_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_is_valid(UBIGINT) -> BOOLEAN`, so
-    // input is `u64` and output is DuckDB's 1-byte bool, written as Rust `bool` (0/1),
-    // which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::h3_is_valid_u64);
-        });
-    }
-}
-
-/// Scalar function: h3_is_valid(VARCHAR) -> BOOLEAN
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_is_valid_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_is_valid(VARCHAR) -> BOOLEAN`, so
-    // input is `duckdb_string_t` and output is a 1-byte bool, which is what the kernel
-    // requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_str_to_scalar_kernel(input, output, scalar_ops::h3_is_valid_str);
-        });
-    }
-}
-
-/// Scalar function: h3_to_wkb(UBIGINT) -> BLOB (Zero-allocation WKB polygon encoder)
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_to_wkb_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `(UBIGINT) -> BLOB/GEOMETRY` (directly or
-    // via `scalar_h3_to_geometry_u64`), so input is `u64` and output is a string-like
-    // vector, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_to_str_kernel(input, output, |cell_u64: u64, buf: &mut WkbBuf| {
-                h3_index_to_wkb(cell_u64, buf).map(|len| &buf[..len])
-            });
-        });
-    }
-}
-
-/// Scalar function: h3_to_wkb(VARCHAR) -> BLOB (Zero-allocation WKB polygon encoder)
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_to_wkb_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `(VARCHAR) -> BLOB/GEOMETRY` (directly or
-    // via `scalar_h3_to_geometry_str`), so input is `duckdb_string_t` and output is a
-    // string-like vector, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_str_to_str_kernel(input, output, |s, buf: &mut WkbBuf| {
-                parse_hex_u64(s)
-                    .and_then(|u| h3_index_to_wkb(u, buf))
-                    .map(|len| &buf[..len])
-            });
-        });
-    }
-}
-
-/// Scalar function: h3_to_geometry(UBIGINT) -> GEOMETRY (Zero-allocation WKB polygon encoder)
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_to_geometry_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: forwards DuckDB's live handles unchanged to `scalar_h3_to_wkb_u64`, whose
-    // contract (`(UBIGINT) -> GEOMETRY`, a BLOB-backed type) is identical.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            scalar_h3_to_wkb_u64(info, input, output);
-        });
-    }
-}
-
-/// Scalar function: h3_to_geometry(VARCHAR) -> GEOMETRY (Zero-allocation WKB polygon encoder)
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_to_geometry_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: forwards DuckDB's live handles unchanged to `scalar_h3_to_wkb_str`, whose
-    // contract (`(VARCHAR) -> GEOMETRY`, a BLOB-backed type) is identical.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            scalar_h3_to_wkb_str(info, input, output);
-        });
-    }
-}
-
-/// Scalar function: h3_cell_to_parent(UBIGINT, BIGINT) -> UBIGINT
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_cell_to_parent_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_cell_to_parent(UBIGINT, BIGINT) ->
-    // UBIGINT`, so the columns hold `u64`/`i64` and the output `u64`, which is what the
-    // kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            binary_scalar_kernel(input, output, |cell_u64: u64, parent_res_i64: i64| {
-                scalar_ops::h3_cell_to_parent_u64(cell_u64, parent_res_i64).unwrap_or(0)
-            });
-        });
-    }
-}
-
-/// Scalar function: h3_cell_to_parent(VARCHAR, BIGINT) -> VARCHAR
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_cell_to_parent_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_cell_to_parent(VARCHAR, BIGINT) ->
-    // VARCHAR`, so the columns hold `duckdb_string_t`/`i64`, which is what the kernel
-    // requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            binary_str_scalar_to_str_kernel(
-                input,
-                output,
-                |s, parent_res_i64: i64, buf: &mut [u8; 16]| {
-                    let cell_opt = parse_hex_u64(s).and_then(|u| CellIndex::try_from(u).ok());
-                    let res_opt = if (0..=15).contains(&parent_res_i64) {
-                        Resolution::try_from(parent_res_i64 as u8).ok()
-                    } else {
-                        None
-                    };
-                    if let (Some(cell), Some(target_res)) = (cell_opt, res_opt) {
-                        if let Some(parent) = cell.parent(target_res) {
-                            return Some(fast_hex_u64(parent.into(), buf));
-                        }
-                    }
-                    None
-                },
-            );
-        });
-    }
-}
-
-/// Scalar function: a5_to_string(UBIGINT) -> VARCHAR
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_string(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: forwarded to `scalar_h3_to_string` (`(UBIGINT) -> VARCHAR` hex formatting).
-    unsafe {
-        scalar_h3_to_string(info, input, output);
-    }
-}
-
-/// Scalar function: string_to_a5(VARCHAR) -> UBIGINT
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_string_to_a5(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: forwarded to `scalar_string_to_h3` (`(VARCHAR) -> UBIGINT` hex parsing).
-    unsafe {
-        scalar_string_to_h3(info, input, output);
-    }
-}
-
-/// Scalar function: a5_to_lat(UBIGINT) -> DOUBLE
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_lat(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_to_lat(UBIGINT) -> DOUBLE`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::a5_to_lat);
-        });
-    }
-}
-
-/// Scalar function: a5_to_lng(UBIGINT) -> DOUBLE
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_lng(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_to_lng(UBIGINT) -> DOUBLE`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::a5_to_lng);
-        });
-    }
-}
-
-/// Scalar function: a5_get_resolution(UBIGINT) -> BIGINT
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_get_resolution(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_get_resolution(UBIGINT) -> BIGINT`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::a5_get_resolution);
-        });
-    }
-}
-
-/// Scalar function: a5_is_valid(UBIGINT) -> BOOLEAN
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_is_valid_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_is_valid(UBIGINT) -> BOOLEAN`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_scalar_kernel(input, output, scalar_ops::a5_is_valid_u64);
-        });
-    }
-}
-
-/// Scalar function: a5_is_valid(VARCHAR) -> BOOLEAN
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_is_valid_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_is_valid(VARCHAR) -> BOOLEAN`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_str_to_scalar_kernel(input, output, scalar_ops::a5_is_valid_str);
-        });
-    }
-}
-
-/// Scalar function: a5_to_wkb(UBIGINT) -> BLOB
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_wkb_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `(UBIGINT) -> BLOB/GEOMETRY`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_to_str_kernel(input, output, |cell_u64: u64, buf: &mut WkbBuf| {
-                a5_index_to_wkb(cell_u64, buf).map(|len| &buf[..len])
-            });
-        });
-    }
-}
-
-/// Scalar function: a5_to_wkb(VARCHAR) -> BLOB
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_wkb_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `(VARCHAR) -> BLOB/GEOMETRY`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            unary_str_to_str_kernel(input, output, |s, buf: &mut WkbBuf| {
-                parse_hex_u64(s)
-                    .and_then(|u| a5_index_to_wkb(u, buf))
-                    .map(|len| &buf[..len])
-            });
-        });
-    }
-}
-
-/// Scalar function: a5_to_geometry(UBIGINT) -> GEOMETRY
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_geometry_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: forwards DuckDB's live handles unchanged to `scalar_a5_to_wkb_u64`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            scalar_a5_to_wkb_u64(info, input, output);
-        });
-    }
-}
-
-/// Scalar function: a5_to_geometry(VARCHAR) -> GEOMETRY
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_to_geometry_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: forwards DuckDB's live handles unchanged to `scalar_a5_to_wkb_str`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            scalar_a5_to_wkb_str(info, input, output);
-        });
-    }
-}
-
-/// Scalar function: a5_cell_to_parent(UBIGINT, BIGINT) -> UBIGINT
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_cell_to_parent_u64(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_cell_to_parent(UBIGINT, BIGINT) -> UBIGINT`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            binary_scalar_kernel(input, output, |cell_u64: u64, parent_res_i64: i64| {
-                scalar_ops::a5_cell_to_parent_u64(cell_u64, parent_res_i64).unwrap_or(0)
-            });
-        });
-    }
-}
-
-/// Scalar function: a5_cell_to_parent(VARCHAR, BIGINT) -> VARCHAR
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_cell_to_parent_str(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_cell_to_parent(VARCHAR, BIGINT) -> VARCHAR`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            binary_str_scalar_to_str_kernel(
-                input,
-                output,
-                |s, parent_res_i64: i64, buf: &mut [u8; 16]| {
-                    let cell = parse_hex_u64(s)?;
-                    let parent = scalar_ops::a5_cell_to_parent_u64(cell, parent_res_i64)?;
-                    Some(fast_hex_u64(parent, buf))
-                },
-            );
-        });
-    }
-}
-
 /// Shared body of `<grid>_lonlat_to_cell(DOUBLE, DOUBLE, BIGINT) -> UBIGINT`; rows with
 /// a NULL argument or that `index` rejects yield NULL.
 ///
@@ -971,33 +433,6 @@ unsafe fn lonlat_to_cell_kernel(
         }
     }
 }
-
-/// Scalar function: a5_lonlat_to_cell(DOUBLE, DOUBLE, BIGINT) -> UBIGINT
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding `(DOUBLE, DOUBLE, BIGINT)` and
-/// `output` holding `UBIGINT`.
-pub unsafe extern "C" fn scalar_a5_lonlat_to_cell(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). Registered only as `a5_lonlat_to_cell(DOUBLE, DOUBLE, BIGINT) -> UBIGINT`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            lonlat_to_cell_kernel(input, output, scalar_ops::a5_lonlat_to_cell);
-        });
-    }
-}
-
-// =========================================================================
-// Grid-generic scalar functions (S2, HEALPix)
-//
-// `GRID` is the grid's discriminant (`GridKind as u8`), so each grid gets its own
-// monomorphized C callback.
-// =========================================================================
 
 /// Scalar function: `<grid>_to_lat(UBIGINT) -> DOUBLE`
 ///
@@ -1334,7 +769,7 @@ unsafe fn fold_constant_argument(
     }
 }
 
-/// Shared bind callback for `h3_polygon_to_cells` / `a5_polygon_to_cells`.
+/// Shared bind callback for `<grid>_polygon_to_cells`.
 #[cfg(feature = "duckdb-api-v1_5_6")]
 unsafe fn polygon_cells_bind_for(info: duckdb_bind_info, grid: GridKind) {
     let fn_name = format!("{grid}_polygon_to_cells");
@@ -1388,23 +823,7 @@ unsafe fn polygon_cells_bind_for(info: duckdb_bind_info, grid: GridKind) {
     }
 }
 
-/// Bind callback for `h3_polygon_to_cells`: folds constant `resolution` and
-/// `containment` arguments and rejects invalid values at plan time instead of
-/// failing per row.
-#[cfg(feature = "duckdb-api-v1_5_6")]
-unsafe extern "C" fn polygon_cells_bind(info: duckdb_bind_info) {
-    // SAFETY: `info` is the live scalar-bind handle.
-    unsafe { polygon_cells_bind_for(info, GridKind::H3) };
-}
-
-/// Bind callback for `a5_polygon_to_cells`.
-#[cfg(feature = "duckdb-api-v1_5_6")]
-unsafe extern "C" fn a5_polygon_cells_bind(info: duckdb_bind_info) {
-    // SAFETY: `info` is the live scalar-bind handle.
-    unsafe { polygon_cells_bind_for(info, GridKind::A5) };
-}
-
-/// Shared body of `{h3,a5}_polygon_to_cells(geom, res[, containment])` -> `UBIGINT[]`.
+/// Shared body of `<grid>_polygon_to_cells(geom, res[, containment])` -> `UBIGINT[]`.
 ///
 /// Rows with a NULL argument, invalid WKB or an out-of-range resolution yield NULL. An
 /// unknown containment mode or a polygon over the cell limit fails the query, since retrying
@@ -1542,89 +961,6 @@ unsafe fn polygon_to_cells_kernel_for(
     }
 }
 
-/// Scalar function: h3_polygon_to_cells(BLOB | GEOMETRY, BIGINT) -> UBIGINT[]
-/// (containment mode `contains_centroid`)
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_polygon_to_cells(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_polygon_to_cells(BLOB|GEOMETRY,
-    // BIGINT) -> UBIGINT[]`, so the layout matches `polygon_to_cells_kernel_for` with `has_mode
-    // = false`, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            polygon_to_cells_kernel_for(GridKind::H3, info, input, output, false);
-        });
-    }
-}
-
-/// Scalar function: h3_polygon_to_cells(BLOB | GEOMETRY, BIGINT, VARCHAR) -> UBIGINT[]
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_h3_polygon_to_cells_mode(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: DuckDB invokes this callback with live `info`/`input`/`output` handles
-    // (contract above). It is registered only as `h3_polygon_to_cells(BLOB|GEOMETRY,
-    // BIGINT, VARCHAR) -> UBIGINT[]`, so the layout matches `polygon_to_cells_kernel_for` with
-    // `has_mode = true`, which is what the kernel requires.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            polygon_to_cells_kernel_for(GridKind::H3, info, input, output, true);
-        });
-    }
-}
-
-/// Scalar function: a5_polygon_to_cells(BLOB | GEOMETRY, BIGINT) -> UBIGINT[]
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_polygon_to_cells(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: registered only as `a5_polygon_to_cells(BLOB|GEOMETRY, BIGINT) -> UBIGINT[]`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            polygon_to_cells_kernel_for(GridKind::A5, info, input, output, false);
-        });
-    }
-}
-
-/// Scalar function: a5_polygon_to_cells(BLOB | GEOMETRY, BIGINT, VARCHAR) -> UBIGINT[]
-///
-/// # Safety
-/// `info`, `input`, and `output` must be the handles DuckDB passes to this
-/// scalar callback, with `input` holding the declared argument types and
-/// `output` the declared return type.
-pub unsafe extern "C" fn scalar_a5_polygon_to_cells_mode(
-    info: duckdb_function_info,
-    input: duckdb_data_chunk,
-    output: duckdb_vector,
-) {
-    // SAFETY: registered only as `a5_polygon_to_cells(BLOB|GEOMETRY, BIGINT, VARCHAR) -> UBIGINT[]`.
-    unsafe {
-        ffi_scalar_guard(info, || {
-            polygon_to_cells_kernel_for(GridKind::A5, info, input, output, true);
-        });
-    }
-}
-
 /// One overload of a scalar function: parameter types, return type and callback.
 type ScalarOverload<'a> = (
     &'a [duckdb_logical_type],
@@ -1649,7 +985,7 @@ unsafe fn register_scalar_fn_set(
 }
 
 /// Register a scalar overload set, optionally attaching the v1.5.6 bind
-/// callback used by `{h3,a5}_polygon_to_cells` (ignored on the v1.2.0 build).
+/// callback used by `<grid>_polygon_to_cells` (ignored on the v1.2.0 build).
 ///
 /// # Safety
 /// Same contract as [`register_scalar_fn_set`].
@@ -1678,8 +1014,8 @@ unsafe fn register_scalar_fn_set_ex(
             #[cfg(feature = "duckdb-api-v1_5_6")]
             if let Some(grid) = bind_grid {
                 let bind_cb: duckdb_scalar_function_bind_t = match grid {
-                    GridKind::H3 => polygon_cells_bind,
-                    GridKind::A5 => a5_polygon_cells_bind,
+                    GridKind::H3 => grid_polygon_cells_bind::<{ GridKind::H3 as u8 }>,
+                    GridKind::A5 => grid_polygon_cells_bind::<{ GridKind::A5 as u8 }>,
                     GridKind::S2 => grid_polygon_cells_bind::<{ GridKind::S2 as u8 }>,
                     GridKind::Healpix => grid_polygon_cells_bind::<{ GridKind::Healpix as u8 }>,
                 };
@@ -1742,105 +1078,10 @@ pub unsafe fn register_scalar_functions(con: duckdb_connection) -> Result<(), St
         let type_blob = duckdb_create_logical_type(DuckDBType::Blob);
         let type_geom = create_geometry_logical_type();
 
-        // 1. h3_to_string(UBIGINT) -> VARCHAR
-        register_unary_scalar_fn(
-            con,
-            "h3_to_string",
-            type_ubigint,
-            type_varchar,
-            scalar_h3_to_string,
-        );
-
-        // 2. string_to_h3(VARCHAR) -> UBIGINT
-        register_unary_scalar_fn(
-            con,
-            "string_to_h3",
-            type_varchar,
-            type_ubigint,
-            scalar_string_to_h3,
-        );
-
-        // 3. h3_to_lat(UBIGINT) -> DOUBLE
-        register_unary_scalar_fn(
-            con,
-            "h3_to_lat",
-            type_ubigint,
-            type_double,
-            scalar_h3_to_lat,
-        );
-
-        // 4. h3_to_lng(UBIGINT) -> DOUBLE
-        register_unary_scalar_fn(
-            con,
-            "h3_to_lng",
-            type_ubigint,
-            type_double,
-            scalar_h3_to_lng,
-        );
-
-        // 5. h3_get_resolution(UBIGINT) -> BIGINT
-        register_unary_scalar_fn(
-            con,
-            "h3_get_resolution",
-            type_ubigint,
-            type_bigint,
-            scalar_h3_get_resolution,
-        );
-
         let mut results = Vec::new();
 
-        // 6-7. h3_is_valid(UBIGINT | VARCHAR) -> BOOLEAN
-        results.push(register_scalar_fn_set(
-            con,
-            "h3_is_valid",
-            &[
-                (&[type_ubigint], type_bool, scalar_h3_is_valid_u64),
-                (&[type_varchar], type_bool, scalar_h3_is_valid_str),
-            ],
-        ));
-
-        // 8-9. h3_to_wkb(UBIGINT | VARCHAR) -> BLOB
-        results.push(register_scalar_fn_set(
-            con,
-            "h3_to_wkb",
-            &[
-                (&[type_ubigint], type_blob, scalar_h3_to_wkb_u64),
-                (&[type_varchar], type_blob, scalar_h3_to_wkb_str),
-            ],
-        ));
-
-        // 10-11. h3_cell_to_parent(UBIGINT, BIGINT) -> UBIGINT, (VARCHAR, BIGINT) -> VARCHAR
-        results.push(register_scalar_fn_set(
-            con,
-            "h3_cell_to_parent",
-            &[
-                (
-                    &[type_ubigint, type_bigint],
-                    type_ubigint,
-                    scalar_h3_cell_to_parent_u64,
-                ),
-                (
-                    &[type_varchar, type_bigint],
-                    type_varchar,
-                    scalar_h3_cell_to_parent_str,
-                ),
-            ],
-        ));
-
-        // 12-15. h3_to_geometry / h3_cell_to_geometry (standard alias) (UBIGINT | VARCHAR) -> GEOMETRY
-        for name in ["h3_to_geometry", "h3_cell_to_geometry"] {
-            results.push(register_scalar_fn_set(
-                con,
-                name,
-                &[
-                    (&[type_ubigint], type_geom, scalar_h3_to_geometry_u64),
-                    (&[type_varchar], type_geom, scalar_h3_to_geometry_str),
-                ],
-            ));
-        }
-
-        // 16-19. h3_polygon_to_cells(BLOB | GEOMETRY, BIGINT[, VARCHAR]) -> UBIGINT[].
-        // GEOMETRY overloads only on DuckDB >= 1.5, whose native GEOMETRY vectors hold WKB.
+        // Cells are hexadecimal strings for every grid; only cell interpretation is grid-specific.
+        // `polygon_to_cells` accepts GEOMETRY only on DuckDB >= 1.5, whose native GEOMETRY vectors hold WKB.
         let type_cell_list = duckdb_create_list_type(type_ubigint);
         let mut geom_inputs = vec![type_blob];
         if is_duckdb_version_at_least(1, 5) {
@@ -1850,151 +1091,8 @@ pub unsafe fn register_scalar_functions(con: duckdb_connection) -> Result<(), St
             .iter()
             .map(|&geom_input| [geom_input, type_bigint, type_varchar])
             .collect();
-        let polygon_overloads: Vec<ScalarOverload<'_>> = polygon_params
-            .iter()
-            .flat_map(|params| {
-                [
-                    (
-                        &params[..2],
-                        type_cell_list,
-                        scalar_h3_polygon_to_cells as duckdb_scalar_function_t,
-                    ),
-                    (
-                        &params[..],
-                        type_cell_list,
-                        scalar_h3_polygon_to_cells_mode as duckdb_scalar_function_t,
-                    ),
-                ]
-            })
-            .collect();
-        results.push(register_scalar_fn_set_ex(
-            con,
-            "h3_polygon_to_cells",
-            &polygon_overloads,
-            if cfg!(feature = "duckdb-api-v1_5_6") {
-                Some(GridKind::H3)
-            } else {
-                None
-            },
-        ));
 
-        // 20-35. A5 scalar functions
-        register_unary_scalar_fn(
-            con,
-            "a5_to_string",
-            type_ubigint,
-            type_varchar,
-            scalar_a5_to_string,
-        );
-        register_unary_scalar_fn(
-            con,
-            "string_to_a5",
-            type_varchar,
-            type_ubigint,
-            scalar_string_to_a5,
-        );
-        register_unary_scalar_fn(
-            con,
-            "a5_to_lat",
-            type_ubigint,
-            type_double,
-            scalar_a5_to_lat,
-        );
-        register_unary_scalar_fn(
-            con,
-            "a5_to_lng",
-            type_ubigint,
-            type_double,
-            scalar_a5_to_lng,
-        );
-        register_unary_scalar_fn(
-            con,
-            "a5_get_resolution",
-            type_ubigint,
-            type_bigint,
-            scalar_a5_get_resolution,
-        );
-        for name in ["a5_is_valid", "a5_is_valid_cell"] {
-            results.push(register_scalar_fn_set(
-                con,
-                name,
-                &[
-                    (&[type_ubigint], type_bool, scalar_a5_is_valid_u64),
-                    (&[type_varchar], type_bool, scalar_a5_is_valid_str),
-                ],
-            ));
-        }
-        results.push(register_scalar_fn_set(
-            con,
-            "a5_to_wkb",
-            &[
-                (&[type_ubigint], type_blob, scalar_a5_to_wkb_u64),
-                (&[type_varchar], type_blob, scalar_a5_to_wkb_str),
-            ],
-        ));
-        results.push(register_scalar_fn_set(
-            con,
-            "a5_cell_to_parent",
-            &[
-                (
-                    &[type_ubigint, type_bigint],
-                    type_ubigint,
-                    scalar_a5_cell_to_parent_u64,
-                ),
-                (
-                    &[type_varchar, type_bigint],
-                    type_varchar,
-                    scalar_a5_cell_to_parent_str,
-                ),
-            ],
-        ));
-        for name in ["a5_to_geometry", "a5_cell_to_geometry"] {
-            results.push(register_scalar_fn_set(
-                con,
-                name,
-                &[
-                    (&[type_ubigint], type_geom, scalar_a5_to_geometry_u64),
-                    (&[type_varchar], type_geom, scalar_a5_to_geometry_str),
-                ],
-            ));
-        }
-        results.push(register_scalar_fn_set(
-            con,
-            "a5_lonlat_to_cell",
-            &[(
-                &[type_double, type_double, type_bigint],
-                type_ubigint,
-                scalar_a5_lonlat_to_cell,
-            )],
-        ));
-        let a5_polygon_overloads: Vec<ScalarOverload<'_>> = polygon_params
-            .iter()
-            .flat_map(|params| {
-                [
-                    (
-                        &params[..2],
-                        type_cell_list,
-                        scalar_a5_polygon_to_cells as duckdb_scalar_function_t,
-                    ),
-                    (
-                        &params[..],
-                        type_cell_list,
-                        scalar_a5_polygon_to_cells_mode as duckdb_scalar_function_t,
-                    ),
-                ]
-            })
-            .collect();
-        results.push(register_scalar_fn_set_ex(
-            con,
-            "a5_polygon_to_cells",
-            &a5_polygon_overloads,
-            if cfg!(feature = "duckdb-api-v1_5_6") {
-                Some(GridKind::A5)
-            } else {
-                None
-            },
-        ));
-        // S2 and HEALPix scalar functions, the same set as A5's.
+        // All grids expose the same scalar set; const-generic kernels interpret each cell encoding.
         macro_rules! register_grid_scalars {
             ($grid:expr) => {{
                 const G: u8 = $grid as u8;
@@ -2109,6 +1207,8 @@ pub unsafe fn register_scalar_functions(con: duckdb_connection) -> Result<(), St
                 ));
             }};
         }
+        register_grid_scalars!(GridKind::H3);
+        register_grid_scalars!(GridKind::A5);
         register_grid_scalars!(GridKind::S2);
         register_grid_scalars!(GridKind::Healpix);
         let mut type_cell_list_mut = type_cell_list;
@@ -2137,6 +1237,7 @@ pub unsafe fn register_scalar_functions(con: duckdb_connection) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use h3o::{CellIndex, Resolution};
 
     #[test]
     fn test_h3_is_valid_logic() {
@@ -2167,12 +1268,12 @@ mod tests {
     fn test_h3_to_wkb_logic() {
         let valid_u64 = 0x8828308281fffffu64;
         let mut buf: WkbBuf = [0u8; WKB_BUF_LEN];
-        let len = h3_index_to_wkb(valid_u64, &mut buf).expect("valid wkb");
+        let len = cell_index_to_wkb(GridKind::H3, valid_u64, &mut buf).expect("valid wkb");
         assert_eq!(len, 125);
         assert_eq!(buf[0], 1); // little endian
         assert_eq!(u32::from_le_bytes(buf[1..5].try_into().unwrap()), 3); // polygon
 
-        assert!(h3_index_to_wkb(0, &mut buf).is_none());
+        assert!(cell_index_to_wkb(GridKind::H3, 0, &mut buf).is_none());
     }
 
     #[test]
