@@ -59,6 +59,11 @@ pub trait HorizonStreamKernel: Send + Sync + 'static {
     /// Construct an output record from cell index, resolution, and accumulator
     fn make_record(&self, resolution: u8, cell_u64: u64, acc: Self::Accumulator) -> Self::Record;
 
+    /// Samples represented by a completed accumulator, for runtime scan profiles.
+    fn sample_count(_acc: &Self::Accumulator) -> f64 {
+        0.0
+    }
+
     /// Construct and account for an output record's owned accumulator state.
     fn buffer_record(
         &self,
@@ -275,6 +280,11 @@ impl<K: HorizonStreamKernel> MultiHorizonStreamer<K> {
     /// The tiles and latitude-ordered chunk list being streamed
     pub fn mosaic(&self) -> &MosaicReader {
         &self.mosaic
+    }
+
+    /// The typed aggregation kernel of this stream.
+    pub(crate) fn kernel(&self) -> &K {
+        &self.kernel
     }
 
     /// Whether some chunk suffix has a certified northern bound, permitting
