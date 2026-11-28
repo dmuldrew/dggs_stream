@@ -92,6 +92,7 @@ fn parallel_overlay_matches_serial_on_all_grids() {
             if !mass_preserve {
                 cfg.valid_coverage_threshold = Some(0.8);
             }
+            cfg.aggregation_workers = Some(1);
             let expected = scan(&path, &cfg);
             assert!(expected.len() > 128);
             cfg.aggregation_workers = Some(4);
