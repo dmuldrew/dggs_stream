@@ -70,6 +70,51 @@ fn native_indices(ring: &[Point]) -> ([usize; 10], usize) {
     (index, native)
 }
 
+/// Memoize exact face-space samples shared by adjacent A5 sides within one
+/// serial overlay block. Keep distinct faces and floating
+/// point coordinates separate even where edges nearly coincide.
+pub(super) type EdgeSamples = rustc_hash::FxHashMap<(u8, u64, u64), Point>;
+
+const MAX_CACHED_EDGE_SAMPLES: usize = 4096;
+
+/// Select the A5 inverse projection at compile time so uncached scans keep
+/// their direct call in the edge tracing loop.
+pub(super) trait A5EdgeSampler {
+    fn sample(&mut self, origin: u8, face: a5::coordinate_systems::Face) -> Option<Point>;
+}
+
+impl A5EdgeSampler for () {
+    #[inline]
+    fn sample(&mut self, origin: u8, face: a5::coordinate_systems::Face) -> Option<Point> {
+        use a5::{
+            core::coordinate_transforms::to_lon_lat,
+            projections::dodecahedron::DodecahedronProjection,
+        };
+        let p = to_lon_lat(
+            DodecahedronProjection::get_thread_local()
+                .inverse(face, origin)
+                .ok()?,
+        );
+        Some((p.longitude(), p.latitude()))
+    }
+}
+
+impl A5EdgeSampler for EdgeSamples {
+    #[inline]
+    fn sample(&mut self, origin: u8, face: a5::coordinate_systems::Face) -> Option<Point> {
+        let key = (origin, face.x().to_bits(), face.y().to_bits());
+        if let Some(&point) = self.get(&key) {
+            return Some(point);
+        }
+        let point = ().sample(origin, face)?;
+        if self.len() == MAX_CACHED_EDGE_SAMPLES {
+            self.clear();
+        }
+        self.insert(key, point);
+        Some(point)
+    }
+}
+
 /// Emit unclosed longitude/latitude vertices. Periodic rasters measure error
 /// on the continuous longitude branch nearest the tile, before seam splitting.
 ///
@@ -84,6 +129,7 @@ pub(super) fn trace(
     corners: &[Point],
     tile: &TileDescriptor,
     longitude_bounds: Option<(f64, f64)>,
+    edge_samples: &mut impl A5EdgeSampler,
 ) -> Option<Traced> {
     let anchor = corners[0].0;
     let shift = longitude_bounds.map(|(w, e)| (((w + e) * 0.5 - anchor) / 360.0).round() * 360.0);
@@ -171,11 +217,7 @@ pub(super) fn trace(
         GridKind::A5 => {
             use a5::{
                 coordinate_systems::Face,
-                core::{
-                    cell::get_pentagon, coordinate_transforms::to_lon_lat,
-                    serialization::deserialize,
-                },
-                projections::dodecahedron::DodecahedronProjection,
+                core::{cell::get_pentagon, serialization::deserialize},
             };
             let id = deserialize(cell).ok()?;
             let pentagon = get_pentagon(&id).ok()?;
@@ -190,12 +232,7 @@ pub(super) fn trace(
                 let b = vertices[m - 1 - native_of[(i + 1) % n]];
                 side(i, &mut |t| {
                     let face = Face::new(a.x() + t * (b.x() - a.x()), a.y() + t * (b.y() - a.y()));
-                    let p = to_lon_lat(
-                        DodecahedronProjection::get_thread_local()
-                            .inverse(face, id.origin_id)
-                            .ok()?,
-                    );
-                    Some((p.longitude(), p.latitude()))
+                    edge_samples.sample(id.origin_id, face)
                 })?;
             }
         }

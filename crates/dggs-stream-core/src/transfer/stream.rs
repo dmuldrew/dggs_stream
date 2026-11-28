@@ -1475,7 +1475,7 @@ impl<A: TransferAccumulator> TransferStream<A> {
                         outcomes.par_iter_mut().zip(batch).for_each_init(
                             CellWorkerScratch::default,
                             |scratch, (out, &cell)| {
-                                *out = clip_and_accumulate_cell(cell, &ctx, scratch);
+                                *out = clip_and_accumulate_cell(cell, &ctx, scratch, &mut ());
                             },
                         );
                     };
@@ -1490,8 +1490,15 @@ impl<A: TransferAccumulator> TransferStream<A> {
                 }
             } else {
                 let mut direct_scratch = CellWorkerScratch::default();
+                let mut edge_samples =
+                    (grid == GridKind::A5 && weighted).then(edges::EdgeSamples::default);
                 for &cell in &cells {
-                    let outcome = clip_and_accumulate_cell(cell, &ctx, &mut direct_scratch);
+                    let outcome = match &mut edge_samples {
+                        Some(cache) => {
+                            clip_and_accumulate_cell(cell, &ctx, &mut direct_scratch, cache)
+                        }
+                        None => clip_and_accumulate_cell(cell, &ctx, &mut direct_scratch, &mut ()),
+                    };
                     apply_outcome(cell, outcome);
                 }
             }
@@ -2941,14 +2948,21 @@ fn clip_and_accumulate_cell<A: TransferAccumulator>(
     cell: u64,
     ctx: &OverlayBlockCtx<'_>,
     scratch: &mut CellWorkerScratch,
+    edge_samples: &mut impl edges::A5EdgeSampler,
 ) -> CellOutcome<A> {
     let mut rings = ProjectedRings::default();
-    let copies =
-        match project_cell_polygons(ctx.grid, cell, ctx.tile, ctx.longitude_bounds, &mut rings) {
-            ProjectedCell::Polygons { count } => count,
-            ProjectedCell::Pole => return CellOutcome::Pole,
-            ProjectedCell::Failed => return CellOutcome::Failed,
-        };
+    let copies = match project_cell_polygons_cached(
+        ctx.grid,
+        cell,
+        ctx.tile,
+        ctx.longitude_bounds,
+        &mut rings,
+        edge_samples,
+    ) {
+        ProjectedCell::Polygons { count } => count,
+        ProjectedCell::Pole => return CellOutcome::Pole,
+        ProjectedCell::Failed => return CellOutcome::Failed,
+    };
     if copies == 0 {
         return CellOutcome::NoDataOnly { end_row: i64::MIN };
     }
@@ -3196,6 +3210,17 @@ pub(super) fn project_cell_polygons(
     longitude_bounds: Option<(f64, f64)>,
     rings: &mut ProjectedRings,
 ) -> ProjectedCell {
+    project_cell_polygons_cached(grid, cell, tile, longitude_bounds, rings, &mut ())
+}
+
+fn project_cell_polygons_cached(
+    grid: GridKind,
+    cell: u64,
+    tile: &TileDescriptor,
+    longitude_bounds: Option<(f64, f64)>,
+    rings: &mut ProjectedRings,
+    edge_samples: &mut impl edges::A5EdgeSampler,
+) -> ProjectedCell {
     let mut ring = [(0.0, 0.0); 10];
     let n = grid.boundary_lng_lat(cell, &mut ring);
     if n < 3 || (longitude_bounds.is_some() && grid.interior_pole(cell).is_some()) {
@@ -3212,7 +3237,7 @@ pub(super) fn project_cell_polygons(
     let ring = if edges::corners_suffice(grid, &ring[..n], tile) {
         &mut ring[..n]
     } else {
-        match edges::trace(grid, cell, &ring[..n], tile, longitude_bounds) {
+        match edges::trace(grid, cell, &ring[..n], tile, longitude_bounds, edge_samples) {
             None => {
                 return if grid.interior_pole(cell).is_some() {
                     ProjectedCell::Pole
@@ -3497,6 +3522,48 @@ mod tests {
             .collect();
         image.write_data(&pixels).unwrap();
         file
+    }
+
+    #[test]
+    fn cached_a5_edge_samples_preserve_projected_rings_across_the_seam() {
+        let file = geographic_raster(128, 128, (179.936, 76.0), (0.001, 0.001), |_, _| 1.0);
+        let mosaic =
+            MosaicReader::open(&[file.path().to_owned()], None, None, OverlapRule::First).unwrap();
+        let tile = &mosaic.tiles[0];
+        let bounds = periodic_longitude_bounds(tile);
+        let cells = cells_in_bbox(
+            GridKind::A5,
+            [179.96, 75.94, -179.96, 75.98],
+            14,
+            ContainmentMode::Covers,
+        )
+        .unwrap();
+        assert!(cells.len() > 1);
+        let mut cache = edges::EdgeSamples::default();
+        for cell in cells {
+            let mut reference = ProjectedRings::default();
+            let mut cached = ProjectedRings::default();
+            let ProjectedCell::Polygons { count } =
+                project_cell_polygons(GridKind::A5, cell, tile, bounds, &mut reference)
+            else {
+                panic!("missing A5 polygon")
+            };
+            let ProjectedCell::Polygons { count: copies } = project_cell_polygons_cached(
+                GridKind::A5,
+                cell,
+                tile,
+                bounds,
+                &mut cached,
+                &mut cache,
+            ) else {
+                panic!("missing cached A5 polygon")
+            };
+            assert_eq!(count, copies);
+            for copy in 0..count {
+                assert_eq!(reference.ring(copy), cached.ring(copy));
+            }
+        }
+        assert!(!cache.is_empty());
     }
 
     /// Cells, plus the worker batches run and cells retried serially.
