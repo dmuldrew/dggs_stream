@@ -1133,7 +1133,13 @@ pub unsafe fn register_scalar_functions(con: duckdb_connection) -> Result<(), St
                     type_bigint,
                     scalar_grid_get_resolution::<G>,
                 );
-                for suffix in ["is_valid", "is_valid_cell"] {
+                let validity_names: &[&str] = if grid == GridKind::H3 {
+                    // Preserve H3's existing SQL surface; the other grids already expose both names.
+                    &["is_valid"]
+                } else {
+                    &["is_valid", "is_valid_cell"]
+                };
+                for &suffix in validity_names {
                     results.push(register_scalar_fn_set(
                         con,
                         &name(suffix),
@@ -1173,15 +1179,17 @@ pub unsafe fn register_scalar_functions(con: duckdb_connection) -> Result<(), St
                         ),
                     ],
                 ));
-                results.push(register_scalar_fn_set(
-                    con,
-                    &name("lonlat_to_cell"),
-                    &[(
-                        &[type_double, type_double, type_bigint],
-                        type_ubigint,
-                        scalar_grid_lonlat_to_cell::<G>,
-                    )],
-                ));
+                if grid != GridKind::H3 {
+                    results.push(register_scalar_fn_set(
+                        con,
+                        &name("lonlat_to_cell"),
+                        &[(
+                            &[type_double, type_double, type_bigint],
+                            type_ubigint,
+                            scalar_grid_lonlat_to_cell::<G>,
+                        )],
+                    ));
+                }
                 let overloads: Vec<ScalarOverload<'_>> = polygon_params
                     .iter()
                     .flat_map(|params| {
