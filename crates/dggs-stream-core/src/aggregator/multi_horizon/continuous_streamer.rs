@@ -4,22 +4,16 @@
 //! for continuous/floating-point raster bands and spectral indices.
 
 use crate::aggregator::cell_hash::CellIdBuildHasher;
-use h3o::Resolution;
 use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use tiff::decoder::DecodingResult;
 
 use crate::aggregator::accumulator::ContinuousAccumulator;
-use crate::error::Result;
-use crate::raster::geotiff::GeoTiffStreamReader;
-use crate::raster::mosaic::MosaicReader;
 
 use super::config::{MultiResolutionConfig, SpectralFormula};
 use super::continuous::{
     process_continuous_chunk_payload_into, ContinuousOptions, MultiContinuousRecord,
 };
-use super::controller::{HorizonStreamKernel, MultiHorizonStreamer, RecordStreamer};
+use super::controller::{HorizonStreamKernel, MultiHorizonStreamer};
 use super::walker::WalkContext;
 
 /// Kernel implementation for continuous (floating point / spectral) raster aggregation
@@ -109,6 +103,11 @@ impl HorizonStreamKernel for ContinuousKernel {
     }
 
     #[inline(always)]
+    fn sample_count(acc: &Self::Accumulator) -> f64 {
+        acc.count
+    }
+
+    #[inline(always)]
     fn process_chunk(
         &self,
         window: &WalkContext<'_>,
@@ -146,7 +145,6 @@ impl HorizonStreamKernel for ContinuousKernel {
 /// Single-pass streaming aggregator across multiple H3 resolutions (Continuous Data)
 pub struct MultiScanHorizonStreamer {
     inner: MultiHorizonStreamer<ContinuousKernel>,
-    track_quantiles: bool,
     /// The `interpolate` / `overlay` stream, when `config.transfer` is not the default; the
     /// horizon kernel in `inner` is then idle.
     transfer: Option<Box<crate::transfer::TransferStream<ContinuousAccumulator>>>,
@@ -156,310 +154,14 @@ pub struct MultiScanHorizonStreamer {
 impl MultiScanHorizonStreamer {
     /// Whether records carry streaming quantile sketches
     pub fn track_quantiles(&self) -> bool {
-        self.track_quantiles
-    }
-
-    /// Initialize a new MultiScanHorizonStreamer from a single GeoTIFF reader
-    pub fn new(reader: GeoTiffStreamReader, config: &MultiResolutionConfig) -> Result<Self> {
-        let mosaic = Arc::new(MosaicReader::from_single_reader(
-            reader,
-            config.bbox,
-            config.custom_crs.as_deref(),
-        )?);
-        Self::new_mosaic(mosaic, config)
-    }
-
-    /// Initialize a new MultiScanHorizonStreamer from a multi-file MosaicReader
-    pub fn new_mosaic(mosaic: Arc<MosaicReader>, config: &MultiResolutionConfig) -> Result<Self> {
-        let kernel = ContinuousKernel::from_config(config);
-        let track_quantiles = kernel.track_quantiles;
-        let resolved = config
-            .transfer
-            .resolve_for_mosaic(mosaic.as_ref(), config, false);
-        let (inner, transfer) = if resolved.is_assign_centers() {
-            (
-                MultiHorizonStreamer::new_mosaic(mosaic, config, kernel)?,
-                None,
-            )
-        } else {
-            let inner = MultiHorizonStreamer::new_mosaic_without_prefetch(mosaic, config, kernel)?;
-            let stream = open_transfer_stream(inner.mosaic_arc(), config, resolved)?;
-            (inner, Some(Box::new(stream)))
-        };
-        Ok(Self {
-            inner,
-            track_quantiles,
-            transfer,
-            transfer_mode: resolved,
-        })
-    }
-
-    /// Pull up to `max_rows` completed multi-resolution records using multi-core chunk-row parallelism
-    #[inline(always)]
-    pub fn fetch_next_batch(&mut self, max_rows: usize) -> Result<Vec<MultiContinuousRecord>> {
-        if self.transfer.is_some() {
-            let mut records = Vec::new();
-            self.drain_completed_into(max_rows, |_, record| records.push(record))?;
-            return Ok(records);
-        }
-        self.inner.fetch_next_batch(max_rows)
-    }
-
-    /// Drain a partitioned scan (`config.partition`): completed records into `on_record`
-    /// and partial cells into `on_partial`, up to `max_rows` in total. 0 means end of
-    /// stream. See [`super::partition`].
-    #[inline(always)]
-    pub fn drain_partitioned_into<F, G>(
-        &mut self,
-        max_rows: usize,
-        on_record: F,
-        on_partial: G,
-    ) -> Result<usize>
-    where
-        F: FnMut(usize, MultiContinuousRecord),
-        G: FnMut(super::partition::PartialCell<ContinuousAccumulator>),
-    {
-        self.inner
-            .drain_partitioned_into(max_rows, on_record, on_partial)
-    }
-
-    /// For a partitioned scan, `(interior, boundary)` cells classified so far.
-    pub fn partition_cell_counts(&self) -> Option<(u64, u64)> {
-        self.inner.partition_cell_counts()
-    }
-
-    /// A merger turning all partitions' partial cells into final records with the
-    /// filters of `config`.
-    pub fn partial_merger(
-        config: &MultiResolutionConfig,
-    ) -> super::partial::PartialMerger<ContinuousKernel> {
-        super::partial::PartialMerger::new(ContinuousKernel::from_config(config))
-    }
-
-    /// Drain up to `max_rows` completed records directly into a closure with zero heap allocation
-    #[inline(always)]
-    pub fn drain_completed_into<F>(&mut self, max_rows: usize, consumer: F) -> Result<usize>
-    where
-        F: FnMut(usize, MultiContinuousRecord),
-    {
-        let mut consumer = consumer;
-        // With a runtime profile, count the cells handed out and the samples behind
-        // those of the first resolution. One check per drain call otherwise.
-        let profile = self.inner.run_profile().cloned();
-        let first_resolution = self.inner.resolution_u8s().first().copied();
-        let (mut cells, mut samples) = (0u64, 0.0f64);
-        let mut consumer = |i: usize, record: MultiContinuousRecord| {
-            if profile.is_some() {
-                cells += 1;
-                if Some(record.resolution) == first_resolution {
-                    samples += record.accumulator.count;
-                }
-            }
-            consumer(i, record)
-        };
-        let drained = match &mut self.transfer {
-            Some(transfer) => {
-                transfer.drain_into(max_rows, |i, resolution, cell_id, accumulator| {
-                    consumer(
-                        i,
-                        MultiContinuousRecord {
-                            resolution,
-                            cell_id,
-                            accumulator,
-                        },
-                    )
-                })
-            }
-            None => self.inner.drain_completed_into(max_rows, &mut consumer),
-        };
-        if let Some(profile) = &profile {
-            use crate::run_profile::Counter;
-            profile.count(Counter::Cells, cells);
-            profile.count(Counter::SamplesIndexed, samples.round() as u64);
-        }
-        drained
-    }
-
-    /// Advance scanline horizon until at least `min_rows` completed records are available or finished
-    #[inline(always)]
-    pub fn advance_until_completed(&mut self, min_rows: usize) -> Result<()> {
-        match &mut self.transfer {
-            Some(transfer) => transfer.advance_until_completed(min_rows),
-            None => self.inner.advance_until_completed(min_rows),
-        }
-    }
-
-    /// Return current southernmost latitude reached by scanline horizon
-    #[inline(always)]
-    pub fn current_lat_horizon(&self) -> f64 {
-        match &self.transfer {
-            Some(transfer) => transfer.current_lat_horizon(),
-            None => self.inner.current_lat_horizon(),
-        }
-    }
-
-    /// Target H3 resolutions
-    #[inline(always)]
-    pub fn resolutions(&self) -> &[Resolution] {
-        self.inner.resolutions()
-    }
-
-    /// Target H3 resolution integer levels
-    #[inline(always)]
-    pub fn resolution_u8s(&self) -> &[u8] {
-        self.inner.resolution_u8s()
-    }
-
-    /// Stage timings and counters, including observed kernel concurrency.
-    pub fn metrics(&self) -> &super::profile::StreamProfile {
-        self.inner.metrics()
-    }
-
-    /// Number of partial aggregation runs persisted under memory pressure.
-    pub fn spill_run_count(&self) -> u64 {
-        self.inner.spill_run_count()
-    }
-
-    /// Spill runs for each configured resolution, in order.
-    pub fn spill_run_counts(&self) -> Vec<u64> {
-        self.inner.spill_run_counts()
-    }
-
-    /// Valid sample points dropped by failed or out-of-domain coordinate
-    /// transforms. Non-zero means some valid pixels are missing from the output.
-    pub fn transform_failures(&self) -> u64 {
-        match &self.transfer {
-            Some(transfer) => transfer.transform_failures(),
-            None => self.inner.transform_failures(),
-        }
-    }
-
-    /// How serializers turn this stream's cells into output values: the NoData policy
-    /// and value, and the decimal rounding.
-    pub fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
-        self.inner.output_policy()
-    }
-
-    /// Peak active-map allocation estimate (not whole-process memory).
-    pub fn peak_active_bytes(&self) -> usize {
-        self.inner.peak_active_bytes()
-    }
-
-    /// Return total active in-flight cells across all resolutions
-    #[inline(always)]
-    pub fn active_cell_count(&self) -> usize {
-        self.inner.active_cell_count()
-    }
-
-    /// Check if stream is fully drained and finished
-    #[inline(always)]
-    pub fn is_finished(&self) -> bool {
-        match &self.transfer {
-            Some(transfer) => transfer.is_finished(),
-            None => self.inner.is_finished(),
-        }
-    }
-
-    /// The transfer mode this stream runs (`AssignCenters` for the default scan).
-    pub fn transfer_mode(&self) -> crate::transfer::TransferMode {
-        if self.transfer.is_some() {
-            self.transfer_mode
-        } else {
-            crate::transfer::TransferMode::AssignCenters
-        }
+        self.inner.kernel().track_quantiles
     }
 }
 
-impl Deref for MultiScanHorizonStreamer {
-    type Target = MultiHorizonStreamer<ContinuousKernel>;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl DerefMut for MultiScanHorizonStreamer {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl RecordStreamer for MultiScanHorizonStreamer {
-    type Record = MultiContinuousRecord;
-
-    #[inline(always)]
-    fn drain_completed_into<F>(&mut self, max_rows: usize, consumer: F) -> Result<usize>
-    where
-        F: FnMut(usize, Self::Record),
-    {
-        MultiScanHorizonStreamer::drain_completed_into(self, max_rows, consumer)
-    }
-
-    #[inline(always)]
-    fn current_lat_horizon(&self) -> f64 {
-        MultiScanHorizonStreamer::current_lat_horizon(self)
-    }
-
-    #[inline(always)]
-    fn is_finished(&self) -> bool {
-        MultiScanHorizonStreamer::is_finished(self)
-    }
-
-    #[inline(always)]
-    fn bounds_wgs84(&self) -> Option<[f64; 4]> {
-        Some(self.inner.mosaic().mosaic_bounds_wgs84)
-    }
-
-    #[inline(always)]
-    fn compacts_children(&self) -> bool {
-        self.inner.compacts_children()
-    }
-
-    #[inline(always)]
-    fn resolution_u8s(&self) -> &[u8] {
-        self.inner.resolution_u8s()
-    }
-
-    #[inline(always)]
-    fn grid(&self) -> crate::grid::GridKind {
-        self.inner.grid()
-    }
-
-    #[inline(always)]
-    fn output_policy(&self) -> crate::aggregator::output_policy::OutputPolicy {
-        self.inner.output_policy()
-    }
-
-    fn run_profile(&self) -> Option<Arc<crate::run_profile::RunProfile>> {
-        self.inner.run_profile().cloned()
-    }
-}
-
-impl Drop for MultiScanHorizonStreamer {
-    fn drop(&mut self) {
-        // A scan abandoned early (a LIMIT) still reports what it did.
-        self.inner.publish_profile();
-        if let Some(profile) = self.inner.run_profile() {
-            profile.stream_finished();
-        }
-    }
-}
-
-/// Build a `TransferStream` using `resolved` when `config.transfer` differs (e.g. `Auto`).
-pub(super) fn open_transfer_stream<A: crate::transfer::TransferAccumulator>(
-    mosaic: Arc<MosaicReader>,
-    config: &MultiResolutionConfig,
-    resolved: crate::transfer::TransferMode,
-) -> Result<crate::transfer::TransferStream<A>> {
-    let mut resolved_cfg;
-    let cfg = if resolved == config.transfer {
-        config
-    } else {
-        resolved_cfg = config.clone();
-        resolved_cfg.transfer = resolved;
-        &resolved_cfg
-    };
-    crate::transfer::TransferStream::new(mosaic, cfg)
-}
+super::streamer_facade::impl_horizon_streamer_facade!(
+    MultiScanHorizonStreamer,
+    ContinuousKernel,
+    ContinuousAccumulator,
+    MultiContinuousRecord,
+    false
+);

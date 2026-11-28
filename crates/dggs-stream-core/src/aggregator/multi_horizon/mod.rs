@@ -21,6 +21,7 @@ pub mod profile;
 pub mod sharded_map;
 pub mod spectral;
 pub mod spill;
+pub(crate) mod streamer_facade;
 pub mod walker;
 
 pub use categorical::{
