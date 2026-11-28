@@ -5,7 +5,7 @@ use std::str::FromStr;
 use dggs_stream_core::columnar::{ArrowDataType, ColumnArray};
 use dggs_stream_core::error::{DggsStreamError, Result};
 use dggs_stream_core::scalar_ops;
-use dggs_stream_sedona::scan::{find_scalar_udf, CellScalarFn, StringToH3Udf};
+use dggs_stream_sedona::scan::find_scalar_udf;
 use h3o::{CellIndex, LatLng, Resolution};
 
 fn invoke_scalar(name: &str, args: &[ColumnArray]) -> Result<ColumnArray> {
@@ -77,7 +77,7 @@ fn string_to_h3_parses_like_h3o_and_keeps_validity() {
     assert_eq!(values[n - 2], 0);
     assert_eq!(out_validity, Some(validity));
 
-    let udf = StringToH3Udf;
+    let udf = find_scalar_udf("string_to_h3").unwrap();
     assert_eq!(
         udf.return_type(&[ArrowDataType::Utf8]).unwrap(),
         ArrowDataType::UInt64

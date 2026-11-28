@@ -4,6 +4,7 @@
 
 use std::ptr;
 
+use dggs_stream_core::grid::GridKind;
 use dggs_stream_duckdb::ffi::duckdb_c::*;
 use dggs_stream_duckdb::functions::scalar::*;
 
@@ -63,37 +64,37 @@ fn test_all_scalar_functions_and_null_propagation() {
     // each callback is registered for, and the mock accepts a null `info`.
     unsafe {
         let in_ptr = &mut chunk_u64 as *mut MockDataChunk as duckdb_data_chunk;
-        scalar_h3_to_lat(
+        scalar_grid_to_lat::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_lat as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_lng(
+        scalar_grid_to_lng::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_lng as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_get_resolution(
+        scalar_grid_get_resolution::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_res as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_is_valid_u64(
+        scalar_grid_is_valid_u64::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_valid as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_wkb_u64(
+        scalar_grid_to_wkb_u64::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_wkb as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_geometry_u64(
+        scalar_grid_to_wkb_u64::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_geom as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_geometry_u64(
+        scalar_grid_to_wkb_u64::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_cell_geom as *mut MockVector as duckdb_vector,
@@ -144,22 +145,22 @@ fn test_all_scalar_functions_and_null_propagation() {
             in_ptr,
             &mut out_u64 as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_is_valid_str(
+        scalar_grid_is_valid_str::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_valid_s as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_wkb_str(
+        scalar_grid_to_wkb_str::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_wkb_s as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_geometry_str(
+        scalar_grid_to_wkb_str::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_geom_s as *mut MockVector as duckdb_vector,
         );
-        scalar_h3_to_geometry_str(
+        scalar_grid_to_wkb_str::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_cell_geom_s as *mut MockVector as duckdb_vector,
@@ -193,7 +194,7 @@ fn test_all_scalar_functions_and_null_propagation() {
     // SAFETY: the handles point to live mock chunks/vectors whose columns have the types
     // each callback is registered for, and the mock accepts a null `info`.
     unsafe {
-        scalar_h3_cell_to_parent_u64(
+        scalar_grid_cell_to_parent_u64::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             &mut chunk_bin_u64 as *mut MockDataChunk as duckdb_data_chunk,
             &mut out_parent_u64 as *mut MockVector as duckdb_vector,
@@ -223,7 +224,7 @@ fn test_all_scalar_functions_and_null_propagation() {
     // SAFETY: the handles point to live mock chunks/vectors whose columns have the types
     // each callback is registered for, and the mock accepts a null `info`.
     unsafe {
-        scalar_h3_cell_to_parent_str(
+        scalar_grid_cell_to_parent_str::<{ GridKind::H3 as u8 }>(
             ptr::null_mut(),
             &mut chunk_bin_str as *mut MockDataChunk as duckdb_data_chunk,
             &mut out_parent_str as *mut MockVector as duckdb_vector,
@@ -255,7 +256,7 @@ fn test_all_scalar_functions_and_null_propagation() {
     let mut out_a5_cell = MockVector::new(4);
     // SAFETY: live mock chunk/vector matching `scalar_a5_lonlat_to_cell` layout.
     let valid_a5_cell = unsafe {
-        scalar_a5_lonlat_to_cell(
+        scalar_grid_lonlat_to_cell::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             &mut chunk_a5_lonlat as *mut MockDataChunk as duckdb_data_chunk,
             &mut out_a5_cell as *mut MockVector as duckdb_vector,
@@ -284,37 +285,37 @@ fn test_all_scalar_functions_and_null_propagation() {
     // SAFETY: live mock chunks/vectors matching registered A5 scalar types.
     unsafe {
         let in_ptr = &mut chunk_a5_u64 as *mut MockDataChunk as duckdb_data_chunk;
-        scalar_a5_to_string(
+        scalar_h3_to_string(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_str as *mut MockVector as duckdb_vector,
         );
-        scalar_a5_to_lat(
+        scalar_grid_to_lat::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_lat as *mut MockVector as duckdb_vector,
         );
-        scalar_a5_to_lng(
+        scalar_grid_to_lng::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_lng as *mut MockVector as duckdb_vector,
         );
-        scalar_a5_get_resolution(
+        scalar_grid_get_resolution::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_res as *mut MockVector as duckdb_vector,
         );
-        scalar_a5_is_valid_u64(
+        scalar_grid_is_valid_u64::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_valid as *mut MockVector as duckdb_vector,
         );
-        scalar_a5_to_wkb_u64(
+        scalar_grid_to_wkb_u64::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_wkb as *mut MockVector as duckdb_vector,
         );
-        scalar_a5_to_geometry_u64(
+        scalar_grid_to_wkb_u64::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             in_ptr,
             &mut out_a5_geom as *mut MockVector as duckdb_vector,
@@ -351,7 +352,7 @@ fn test_all_scalar_functions_and_null_propagation() {
     let mut out_a5_parent_str = MockVector::new(4);
     // SAFETY: live mock chunk/vector matching `scalar_a5_cell_to_parent_str` layout.
     unsafe {
-        scalar_a5_cell_to_parent_str(
+        scalar_grid_cell_to_parent_str::<{ GridKind::A5 as u8 }>(
             ptr::null_mut(),
             &mut chunk_a5_parent as *mut MockDataChunk as duckdb_data_chunk,
             &mut out_a5_parent_str as *mut MockVector as duckdb_vector,

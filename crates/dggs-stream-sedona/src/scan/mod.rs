@@ -30,24 +30,12 @@ pub use provider::{
     ContinuousRasterTableProvider, FilterPredicate, FilterPushdownStatus, PartitionedRasterExec,
     RasterScan, RasterScanExec, TableStatistics,
 };
-pub use scalar::{
-    CellScalarFn, GridScalarFn, GridScalarOp, H3CellToParentUdf, H3GetResolutionUdf, H3IsValidUdf,
-    H3ToLatUdf, H3ToLngUdf, H3ToStringUdf, H3ToWkbUdf, StringToH3Udf,
-};
+pub use scalar::{CellScalarFn, GridScalarFn, GridScalarOp};
 
-/// Return all standard `dggs_stream` vectorized scalar UDFs: the H3 functions, then the
-/// same set for A5, S2 and HEALPix (`a5_to_string`, `string_to_s2`, `healpix_to_wkb`, ...).
+/// Return all standard `dggs_stream` vectorized scalar UDFs for H3, A5, S2 and HEALPix
+/// (`h3_to_string`, `a5_to_string`, `string_to_s2`, `healpix_to_wkb`, ...).
 pub fn default_scalar_udfs() -> Vec<Arc<dyn CellScalarFn>> {
-    let mut udfs: Vec<Arc<dyn CellScalarFn>> = vec![
-        Arc::new(H3ToStringUdf),
-        Arc::new(StringToH3Udf),
-        Arc::new(H3ToLatUdf),
-        Arc::new(H3ToLngUdf),
-        Arc::new(H3GetResolutionUdf),
-        Arc::new(H3IsValidUdf),
-        Arc::new(H3ToWkbUdf),
-        Arc::new(H3CellToParentUdf),
-    ];
+    let mut udfs: Vec<Arc<dyn CellScalarFn>> = Vec::new();
     for grid in GridKind::ALL {
         for udf in GridScalarFn::all_for(grid) {
             udfs.push(Arc::new(udf));
